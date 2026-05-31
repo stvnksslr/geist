@@ -528,13 +528,22 @@ impl Atlas {
     }
 
     /// Reserve a `w`×`h` slot in the color atlas, advancing its shelf allocator.
+    /// When the atlas fills vertically, flush it (reset the allocator and drop
+    /// the color cache) and start over, so glyphs are never lost — they simply
+    /// re-rasterize on next use. Without this, the allocator walked off the
+    /// bottom edge and new emoji rendered as garbage or vanished permanently.
     fn alloc_color(&mut self, w: u32, h: u32) -> (u32, u32) {
         if self.cpen_x + w + 1 > ATLAS_SIZE {
             self.cpen_x = 0;
             self.cpen_y += self.cshelf_h + 1;
             self.cshelf_h = 0;
         }
-        debug_assert!(self.cpen_y + h <= ATLAS_SIZE, "color atlas overflow");
+        if self.cpen_y + h + 1 > ATLAS_SIZE {
+            self.cpen_x = 0;
+            self.cpen_y = 0;
+            self.cshelf_h = 0;
+            self.color_cache.clear();
+        }
         let pos = (self.cpen_x, self.cpen_y);
         self.cpen_x += w + 1;
         self.cshelf_h = self.cshelf_h.max(h);
@@ -582,14 +591,25 @@ impl Atlas {
         }
     }
 
-    /// Reserve a `w`x`h` slot, advancing the shelf allocator.
+    /// Reserve a `w`x`h` slot, advancing the shelf allocator. When the atlas
+    /// fills vertically, flush it (reset the allocator and drop the coverage
+    /// caches) and start over, so glyphs are never lost — they re-rasterize on
+    /// next use. Without this, the allocator walked off the bottom edge once the
+    /// atlas filled, so new glyphs rendered as garbage or vanished permanently
+    /// (the failed lookup was cached as `None` forever).
     fn alloc(&mut self, w: u32, h: u32) -> (u32, u32) {
         if self.pen_x + w + 1 > ATLAS_SIZE {
             self.pen_x = 0;
             self.pen_y += self.shelf_h + 1;
             self.shelf_h = 0;
         }
-        debug_assert!(self.pen_y + h <= ATLAS_SIZE, "glyph atlas overflow");
+        if self.pen_y + h + 1 > ATLAS_SIZE {
+            self.pen_x = 0;
+            self.pen_y = 0;
+            self.shelf_h = 0;
+            self.cache.clear();
+            self.fallback_cache.clear();
+        }
         let pos = (self.pen_x, self.pen_y);
         self.pen_x += w + 1;
         self.shelf_h = self.shelf_h.max(h);

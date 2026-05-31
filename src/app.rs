@@ -12,30 +12,194 @@ use crate::profiles::{self, Profile};
 use crate::render::{self, PaneFrame, TermFrame};
 use crate::session::Session;
 
-/// A tab: one or more panes split along a single axis, with one focused.
+/// A tab: a binary tree of panes (`Node`) with one focused leaf (by id). Each
+/// split divides only the focused pane, so splits nest (like Ghostty) instead of
+/// re-flowing every pane onto a single shared axis.
 struct Tab {
-    panes: Vec<Session>,
-    focus: usize,
-    /// true = side-by-side columns, false = stacked rows.
-    vertical: bool,
+    root: Node,
+    /// Id of the focused leaf.
+    focus: u64,
 }
 
 impl Tab {
-    fn single(session: Session) -> Self {
+    fn leaf(id: u64, session: Session) -> Self {
         Self {
-            panes: vec![session],
-            focus: 0,
-            vertical: true,
+            root: Node::Leaf { id, session },
+            focus: id,
         }
     }
-    fn focused(&self) -> &Session {
-        &self.panes[self.focus]
+    fn focused_session(&self) -> &Session {
+        self.root
+            .session(self.focus)
+            .unwrap_or_else(|| self.root.first_session())
     }
+    fn leaf_count(&self) -> usize {
+        self.root.leaf_count()
+    }
+}
+
+/// A node in a tab's split tree: a single pane (`Leaf`) or a binary split of two
+/// subtrees along one axis. `Empty` is a transient placeholder used only while
+/// restructuring the tree (never laid out or rendered).
+enum Node {
+    Leaf { id: u64, session: Session },
+    Split { vertical: bool, first: Box<Node>, second: Box<Node> },
+    Empty,
+}
+
+impl Node {
+    fn leaf_count(&self) -> usize {
+        match self {
+            Node::Leaf { .. } => 1,
+            Node::Split { first, second, .. } => first.leaf_count() + second.leaf_count(),
+            Node::Empty => 0,
+        }
+    }
+
+    /// Whether the subtree contains a leaf with `target` id.
+    fn contains(&self, target: u64) -> bool {
+        match self {
+            Node::Leaf { id, .. } => *id == target,
+            Node::Split { first, second, .. } => {
+                first.contains(target) || second.contains(target)
+            }
+            Node::Empty => false,
+        }
+    }
+
+    /// The session for leaf `target`, if present.
+    fn session(&self, target: u64) -> Option<&Session> {
+        match self {
+            Node::Leaf { id, session } if *id == target => Some(session),
+            Node::Leaf { .. } | Node::Empty => None,
+            Node::Split { first, second, .. } => {
+                first.session(target).or_else(|| second.session(target))
+            }
+        }
+    }
+
+    /// Any leaf's session (the tree always has at least one outside restructuring).
+    fn first_session(&self) -> &Session {
+        match self {
+            Node::Leaf { session, .. } => session,
+            Node::Split { first, .. } => first.first_session(),
+            Node::Empty => unreachable!("empty split tree"),
+        }
+    }
+
+    /// Any leaf's id (0 if the tree is empty).
+    fn first_leaf_id(&self) -> u64 {
+        match self {
+            Node::Leaf { id, .. } => *id,
+            Node::Split { first, .. } => first.first_leaf_id(),
+            Node::Empty => 0,
+        }
+    }
+
+    fn for_each_session_mut(&mut self, f: &mut impl FnMut(&mut Session)) {
+        match self {
+            Node::Leaf { session, .. } => f(session),
+            Node::Split { first, second, .. } => {
+                first.for_each_session_mut(f);
+                second.for_each_session_mut(f);
+            }
+            Node::Empty => {}
+        }
+    }
+
+    /// Replace leaf `target` with a `Split` of the existing pane and a new leaf
+    /// (`new_id`/`new_session`) along `vertical`. Only the focused leaf changes;
+    /// the rest of the tree keeps its shape. Returns false if `target` is absent.
+    fn split_leaf(&mut self, target: u64, vertical: bool, new_id: u64, new_session: Session) -> bool {
+        match self {
+            Node::Leaf { id, .. } if *id == target => {
+                let old = std::mem::replace(self, Node::Empty);
+                *self = Node::Split {
+                    vertical,
+                    first: Box::new(old),
+                    second: Box::new(Node::Leaf { id: new_id, session: new_session }),
+                };
+                true
+            }
+            Node::Split { first, second, .. } => {
+                if first.contains(target) {
+                    first.split_leaf(target, vertical, new_id, new_session)
+                } else {
+                    second.split_leaf(target, vertical, new_id, new_session)
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// Remove leaf `target`, collapsing a split that loses a child into its
+    /// surviving child. Returns the new subtree (`None` if it became empty).
+    fn remove_leaf(self, target: u64) -> Option<Node> {
+        match self {
+            Node::Leaf { id, .. } if id == target => None,
+            Node::Split { vertical, first, second } => {
+                match (first.remove_leaf(target), second.remove_leaf(target)) {
+                    (Some(a), Some(b)) => Some(Node::Split {
+                        vertical,
+                        first: Box::new(a),
+                        second: Box::new(b),
+                    }),
+                    (Some(n), None) | (None, Some(n)) => Some(n),
+                    (None, None) => None,
+                }
+            }
+            other => Some(other),
+        }
+    }
+
+    /// Drop leaves whose shell has exited, collapsing splits. `None` if the whole
+    /// subtree is gone.
+    fn prune_dead(self) -> Option<Node> {
+        match self {
+            Node::Leaf { session, .. } if !session.is_alive() => None,
+            Node::Split { vertical, first, second } => {
+                match (first.prune_dead(), second.prune_dead()) {
+                    (Some(a), Some(b)) => Some(Node::Split {
+                        vertical,
+                        first: Box::new(a),
+                        second: Box::new(b),
+                    }),
+                    (Some(n), None) | (None, Some(n)) => Some(n),
+                    (None, None) => None,
+                }
+            }
+            other => Some(other),
+        }
+    }
+
+    /// Append each leaf's (id, session, rect) to `out`, dividing `area` by each
+    /// split's axis (with a gutter between children).
+    fn collect<'a>(&'a mut self, area: egui::Rect, out: &mut Vec<Leaf<'a>>) {
+        match self {
+            Node::Leaf { id, session } => out.push(Leaf { id: *id, session, rect: area }),
+            Node::Split { vertical, first, second } => {
+                let (a, b) = split_rect(area, *vertical);
+                first.collect(a, out);
+                second.collect(b, out);
+            }
+            Node::Empty => {}
+        }
+    }
+}
+
+/// One laid-out pane: a focusable leaf with its session and screen rect.
+struct Leaf<'a> {
+    id: u64,
+    session: &'a mut Session,
+    rect: egui::Rect,
 }
 
 pub struct App {
     tabs: Vec<Tab>,
     active_tab: usize,
+    /// Monotonic source of unique pane (leaf) ids, used to track focus across
+    /// splits/closes that reshape the tree.
+    next_id: u64,
     /// Cell size in physical pixels (from the glyph atlas), shared by all panes.
     cell_w: f32,
     cell_h: f32,
@@ -69,8 +233,9 @@ impl App {
         let first = Session::new(&cc.egui_ctx, &config, &profiles[default_profile])?;
 
         Ok(Self {
-            tabs: vec![Tab::single(first)],
+            tabs: vec![Tab::leaf(1, first)],
             active_tab: 0,
+            next_id: 2,
             cell_w,
             cell_h,
             font_points: config.font_points,
@@ -129,6 +294,13 @@ impl App {
         }
     }
 
+    /// Allocate a fresh unique pane id.
+    fn alloc_id(&mut self) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
+    }
+
     /// Spawn a session for profile `idx` (clamped to the default if invalid).
     fn spawn_session(&self, idx: usize) -> Option<Session> {
         let profile = self.profiles.get(idx).unwrap_or(&self.profiles[self.default_profile]);
@@ -140,18 +312,21 @@ impl App {
     /// Open a new tab running profile `idx`.
     fn new_tab(&mut self, idx: usize) {
         if let Some(s) = self.spawn_session(idx) {
-            self.tabs.push(Tab::single(s));
+            let id = self.alloc_id();
+            self.tabs.push(Tab::leaf(id, s));
             self.active_tab = self.tabs.len() - 1;
         }
     }
 
-    /// Split the focused pane along `vertical` axis, focusing the new pane.
+    /// Split only the focused pane along `vertical` axis, focusing the new pane.
+    /// The rest of the tab's split layout is untouched (splits nest).
     fn split(&mut self, vertical: bool) {
         if let Some(s) = self.spawn_session(self.default_profile) {
+            let id = self.alloc_id();
             let tab = &mut self.tabs[self.active_tab];
-            tab.vertical = vertical;
-            tab.panes.push(s);
-            tab.focus = tab.panes.len() - 1;
+            let focus = tab.focus;
+            tab.root.split_leaf(focus, vertical, id, s);
+            tab.focus = id;
         }
     }
 
@@ -159,9 +334,11 @@ impl App {
     /// last tab closes the window.
     fn close_focused(&mut self, ctx: &egui::Context) {
         let tab = &mut self.tabs[self.active_tab];
-        if tab.panes.len() > 1 {
-            tab.panes.remove(tab.focus);
-            tab.focus = tab.focus.min(tab.panes.len() - 1);
+        if tab.leaf_count() > 1 {
+            let focus = tab.focus;
+            let root = std::mem::replace(&mut tab.root, Node::Empty);
+            tab.root = root.remove_leaf(focus).unwrap_or(Node::Empty);
+            tab.focus = tab.root.first_leaf_id();
         } else if self.tabs.len() > 1 {
             self.tabs.remove(self.active_tab);
             self.active_tab = self.active_tab.min(self.tabs.len() - 1);
@@ -197,25 +374,31 @@ impl App {
     /// close the window when the last tab is gone. Returns `false` if the
     /// window is closing (caller should skip rendering this frame).
     fn reap_dead(&mut self, ctx: &egui::Context) -> bool {
-        let mut i = 0;
-        while i < self.tabs.len() {
-            self.tabs[i].panes.retain(|p| p.is_alive());
-            if self.tabs[i].panes.is_empty() {
-                self.tabs.remove(i);
-                if self.active_tab > i {
-                    self.active_tab -= 1;
+        let active = self.active_tab;
+        let mut new_tabs: Vec<Tab> = Vec::with_capacity(self.tabs.len());
+        let mut new_active = 0;
+        for (i, tab) in self.tabs.drain(..).enumerate() {
+            let Tab { root, focus } = tab;
+            if let Some(root) = root.prune_dead() {
+                // Keep the active tab selected; if it died, fall back to the
+                // nearest surviving tab before it.
+                if i <= active {
+                    new_active = new_tabs.len();
                 }
-                continue;
+                let focus = if root.contains(focus) {
+                    focus
+                } else {
+                    root.first_leaf_id()
+                };
+                new_tabs.push(Tab { root, focus });
             }
-            let focus = self.tabs[i].focus.min(self.tabs[i].panes.len() - 1);
-            self.tabs[i].focus = focus;
-            i += 1;
         }
+        self.tabs = new_tabs;
         if self.tabs.is_empty() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return false;
         }
-        self.active_tab = self.active_tab.min(self.tabs.len() - 1);
+        self.active_tab = new_active.min(self.tabs.len() - 1);
         true
     }
 
@@ -272,12 +455,13 @@ impl App {
         ui.horizontal(|ui| {
             for (i, tab) in self.tabs.iter().enumerate() {
                 let raw = tab
-                    .focused()
+                    .focused_session()
                     .title()
                     .unwrap_or_else(|| format!("shell {}", i + 1));
                 let mut label = ellipsize(&raw, 24);
-                if tab.panes.len() > 1 {
-                    label = format!("{label} [{}]", tab.panes.len());
+                let count = tab.leaf_count();
+                if count > 1 {
+                    label = format!("{label} [{count}]");
                 }
                 let resp = ui.selectable_label(i == self.active_tab, label);
                 if resp.clicked() {
@@ -336,9 +520,19 @@ impl App {
         let area = full_area.shrink2(egui::vec2(self.config.padding_x, self.config.padding_y));
         let window_focused = ctx.input(|i| i.focused);
         let copy_on_select = self.config.copy_on_select;
+        let sel_bg = self.config.selection_bg;
+        let sel_fg = self.config.selection_fg;
         let active_tab = self.active_tab;
+
         let tab = &mut self.tabs[active_tab];
-        let rects = pane_rects(tab.panes.len(), tab.vertical, area);
+        let mut focus_id = tab.focus;
+
+        // Lay the split tree out across the grid area; each leaf gets its rect.
+        let mut leaves: Vec<Leaf> = Vec::new();
+        tab.root.collect(area, &mut leaves);
+        if leaves.is_empty() {
+            return;
+        }
 
         // Focus-follows-click: a press inside a pane focuses it.
         let press_pos = ctx.input(|i| {
@@ -350,34 +544,39 @@ impl App {
             })
         });
         if let Some(pos) = press_pos {
-            if let Some(i) = rects.iter().position(|r| r.contains(pos)) {
-                tab.focus = i;
+            if let Some(l) = leaves.iter().find(|l| l.rect.contains(pos)) {
+                focus_id = l.id;
             }
         }
-        let focus = tab.focus.min(tab.panes.len() - 1);
-        tab.focus = focus;
+        if !leaves.iter().any(|l| l.id == focus_id) {
+            focus_id = leaves[0].id;
+        }
+        let focus_idx = leaves.iter().position(|l| l.id == focus_id).unwrap();
 
         // Keyboard goes to the focused pane.
-        let tracking = tab.panes[focus].is_mouse_tracking();
-        tab.panes[focus].handle_input(ctx, tracking, ch);
+        let tracking = leaves[focus_idx].session.is_mouse_tracking();
+        leaves[focus_idx].session.handle_input(ctx, tracking, ch);
 
-        let mut frames: Vec<PaneFrame> = Vec::with_capacity(tab.panes.len());
-        for (i, &prect) in rects.iter().enumerate() {
-            let session = &mut tab.panes[i];
+        let mut frames: Vec<PaneFrame> = Vec::with_capacity(leaves.len());
+        for leaf in leaves.iter_mut() {
+            let prect = leaf.rect;
+            let leaf_id = leaf.id;
+            let is_focus = leaf_id == focus_id;
+            let session = &mut *leaf.session;
             session.fit_grid(prect, ppp, cw, ch);
             if !session.update_snapshot() {
                 continue;
             }
 
             // Mouse / selection interaction only for the focused pane.
-            if i == focus {
+            if is_focus {
                 if tracking {
                     session.handle_mouse(ctx, prect, ppp, cw, ch);
                     session.clear_selection();
                 } else {
                     let resp = ui.interact(
                         prect,
-                        egui::Id::new(("giest-pane", active_tab, i)),
+                        egui::Id::new(("giest-pane", active_tab, leaf_id)),
                         egui::Sense::click_and_drag(),
                     );
                     let cell_at = |p: egui::Pos2, s: &Session| s.pos_to_cell(p, prect, ppp, cw, ch);
@@ -438,7 +637,7 @@ impl App {
             let mut snapshot = session.snapshot.clone();
             // Only the focused pane of a focused window gets a live (solid,
             // blinking) cursor; every other visible cursor is drawn hollow.
-            let pane_active = i == focus && window_focused;
+            let pane_active = is_focus && window_focused;
             if pane_active && snapshot.cursor_blinking {
                 if ctx.input(|i| i.time) % 1.0 >= 0.5 {
                     snapshot.cursor_visible = false;
@@ -447,7 +646,12 @@ impl App {
             }
             frames.push(PaneFrame {
                 snapshot,
-                origin_px: [prect.min.x * ppp, prect.min.y * ppp],
+                // Snap the grid origin to the physical pixel grid. The cell size
+                // is integer (ceil'd in the atlas), so an integer origin makes
+                // every cell boundary land on a pixel — no anti-aliased seams
+                // between rows/cells, and glyphs (rasterized on the integer grid)
+                // stay crisp. Matches Ghostty / Windows Terminal pixel snapping.
+                origin_px: [(prect.min.x * ppp).round(), (prect.min.y * ppp).round()],
                 selection: session.selection_range(),
                 cursor_hollow: !pane_active,
             });
@@ -455,7 +659,7 @@ impl App {
 
         // Fill the whole area (including the padding band) with the focused
         // pane's background first.
-        let bg = tab.panes[focus].default_bg();
+        let bg = leaves[focus_idx].session.default_bg();
         ui.painter()
             .rect_filled(full_area, 0.0, egui::Color32::from_rgb(bg.r, bg.g, bg.b));
 
@@ -464,20 +668,24 @@ impl App {
             full_area,
             TermFrame {
                 panes: frames,
-                selection_bg: self.config.selection_bg,
-                selection_fg: self.config.selection_fg,
+                selection_bg: sel_bg,
+                selection_fg: sel_fg,
             },
         ));
 
-        // Highlight the focused pane when split.
-        if rects.len() > 1 {
+        // Outline the focused pane when the tab is split.
+        if leaves.len() > 1 {
             ui.painter().rect_stroke(
-                rects[focus],
+                leaves[focus_idx].rect,
                 0.0,
                 egui::Stroke::new(2.0, egui::Color32::from_rgb(90, 130, 200)),
                 egui::StrokeKind::Inside,
             );
         }
+
+        // Commit the (possibly click-updated) focus back to the tab. Done last,
+        // after the final use of `leaves` (which borrows `tab.root`).
+        self.tabs[active_tab].focus = focus_id;
     }
 }
 
@@ -491,9 +699,7 @@ impl eframe::App for App {
 
         // Pump every pane in every tab so background sessions keep flowing.
         for tab in &mut self.tabs {
-            for pane in &mut tab.panes {
-                pane.pump_pty();
-            }
+            tab.root.for_each_session_mut(&mut |pane| pane.pump_pty());
         }
         // Close panes/tabs whose shell exited; bail if that closed the window.
         if !self.reap_dead(&ctx) {
@@ -506,7 +712,10 @@ impl eframe::App for App {
         }
 
         // Window title from the active tab's focused pane.
-        let title = self.tabs.get(self.active_tab).and_then(|t| t.focused().title());
+        let title = self
+            .tabs
+            .get(self.active_tab)
+            .and_then(|t| t.focused_session().title());
         if title != self.last_window_title {
             let shown = title.clone().unwrap_or_else(|| "giest".to_string());
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(shown));
@@ -517,7 +726,7 @@ impl eframe::App for App {
         // cmd / WSL / …) is reachable even with a single tab.
         egui::Panel::top("giest-tabs").show_inside(ui, |ui| self.tab_bar(ui));
 
-        let bg = self.tabs[self.active_tab].focused().default_bg();
+        let bg = self.tabs[self.active_tab].focused_session().default_bg();
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(egui::Color32::from_rgb(bg.r, bg.g, bg.b)))
             .show_inside(ui, |ui| self.render_active(ui, &ctx));
@@ -530,28 +739,30 @@ fn open_url(url: &str) {
     let _ = std::process::Command::new("explorer").arg(url).spawn();
 }
 
-/// Divide `area` into `n` equal panes along the split axis (with a 1px gutter).
-fn pane_rects(n: usize, vertical: bool, area: egui::Rect) -> Vec<egui::Rect> {
-    let n = n.max(1);
+/// Split `area` into two halves along one axis with a 1px gutter between them.
+/// `vertical` = a vertical divider, i.e. side-by-side columns (Ctrl+Shift+D);
+/// otherwise stacked rows (Ctrl+Shift+E).
+fn split_rect(area: egui::Rect, vertical: bool) -> (egui::Rect, egui::Rect) {
     let gap = 1.0;
-    (0..n)
-        .map(|i| {
-            let f = i as f32;
-            if vertical {
-                let w = area.width() / n as f32;
-                egui::Rect::from_min_size(
-                    egui::pos2(area.min.x + f * w, area.min.y),
-                    egui::vec2((w - gap).max(1.0), area.height()),
-                )
-            } else {
-                let h = area.height() / n as f32;
-                egui::Rect::from_min_size(
-                    egui::pos2(area.min.x, area.min.y + f * h),
-                    egui::vec2(area.width(), (h - gap).max(1.0)),
-                )
-            }
-        })
-        .collect()
+    if vertical {
+        let w = ((area.width() - gap) / 2.0).max(1.0);
+        (
+            egui::Rect::from_min_size(area.min, egui::vec2(w, area.height())),
+            egui::Rect::from_min_size(
+                egui::pos2(area.min.x + w + gap, area.min.y),
+                egui::vec2(w, area.height()),
+            ),
+        )
+    } else {
+        let h = ((area.height() - gap) / 2.0).max(1.0);
+        (
+            egui::Rect::from_min_size(area.min, egui::vec2(area.width(), h)),
+            egui::Rect::from_min_size(
+                egui::pos2(area.min.x, area.min.y + h + gap),
+                egui::vec2(area.width(), h),
+            ),
+        )
+    }
 }
 
 /// Truncate a tab label to `max` chars with an ellipsis.

@@ -368,11 +368,11 @@ impl GpuResources {
                     out.push(Instance::solid([cell_left, cell_top, cw, ch], self.color(bg, 1.0)));
 
                     if cell.underline {
-                        let y = cell_top + ascent + line_h;
+                        let y = (cell_top + ascent + line_h).round();
                         glyphs.push(Instance::solid([cell_left, y, cw, line_h], self.color(fg, 1.0)));
                     }
                     if cell.strikethrough {
-                        let y = cell_top + ch * 0.5;
+                        let y = (cell_top + ch * 0.5).round();
                         glyphs.push(Instance::solid([cell_left, y, cw, line_h], self.color(fg, 1.0)));
                     }
                 }
@@ -456,10 +456,14 @@ impl GpuResources {
                         };
                         let cell_x = r.byte_cell.get(sg.cluster as usize).copied().unwrap_or(0);
                         let cell_left = ox + cell_x as f32 * cw;
+                        // Snap the glyph quad to whole physical pixels. The atlas
+                        // bitmap is rasterized on the integer grid, so a whole-pixel
+                        // destination keeps it 1:1 (crisp) instead of being resampled
+                        // across pixel boundaries (blurry / shimmering on scroll).
                         glyphs.push(Instance {
                             rect: [
-                                cell_left + g.offset[0],
-                                cell_top + g.offset[1],
+                                (cell_left + g.offset[0]).round(),
+                                (cell_top + g.offset[1]).round(),
                                 g.size[0],
                                 g.size[1],
                             ],
