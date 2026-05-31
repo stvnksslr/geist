@@ -75,7 +75,7 @@ impl Default for Config {
             fg: Rgb::new(0xc5, 0xc8, 0xc6),
             bg: Rgb::new(0x10, 0x12, 0x18),
             palette: xterm_palette(GIEST_ANSI16),
-            padding_x: 2.0,
+            padding_x: 20.0,
             padding_y: 2.0,
             cursor: None,
             scrollback_limit: 10_000,

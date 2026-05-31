@@ -426,9 +426,20 @@ impl TerminalEngine for GhosttyVtEngine {
             out.cursor_y = cur.y;
         }
 
+        // Resize to the grid and blank every cell up front (reusing each cell's
+        // inline-string buffer via `clear()` rather than reallocating). Cells the
+        // iterators don't yield therefore read back blank, matching a fresh grid.
         let total = cols as usize * rows as usize;
-        out.cells.clear();
         out.cells.resize(total, Cell::default());
+        for cell in out.cells.iter_mut() {
+            cell.text.clear();
+            cell.fg = Rgb::default();
+            cell.bg = Rgb::default();
+            cell.bold = false;
+            cell.italic = false;
+            cell.underline = false;
+            cell.strikethrough = false;
+        }
 
         let mut y: usize = 0;
         let mut rows_iter = self.rows_buf.update(&snapshot)?;
@@ -449,20 +460,17 @@ impl TerminalEngine for GhosttyVtEngine {
                     std::mem::swap(&mut fg, &mut bg);
                 }
 
-                let mut text = String::new();
+                // Fill in place, reusing the blanked cell's string buffer.
+                let dst = &mut out.cells[y * cols as usize + x];
                 for ch in cell.graphemes()? {
-                    text.push(ch);
+                    dst.text.push(ch);
                 }
-
-                out.cells[y * cols as usize + x] = Cell {
-                    text,
-                    fg,
-                    bg,
-                    bold: style.bold,
-                    italic: style.italic,
-                    underline: !matches!(style.underline, Underline::None),
-                    strikethrough: style.strikethrough,
-                };
+                dst.fg = fg;
+                dst.bg = bg;
+                dst.bold = style.bold;
+                dst.italic = style.italic;
+                dst.underline = !matches!(style.underline, Underline::None);
+                dst.strikethrough = style.strikethrough;
                 x += 1;
             }
             y += 1;

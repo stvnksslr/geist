@@ -1,2 +1,10 @@
 [tools]
 zig = "0.15.2"
+
+[tasks.dev]
+description = "Local dev: debug build + run"
+run = "cargo run"
+
+[tasks.release]
+description = "Optimized release build"
+run = "cargo build --release"

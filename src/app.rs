@@ -513,11 +513,13 @@ impl App {
     fn render_active(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let (cw, ch) = (self.cell_w, self.cell_h);
         let ppp = ctx.pixels_per_point().max(1.0);
-        // Inset the grid by the configured padding; the padding band keeps the
-        // background color (filled below). The window's own focus state drives
-        // whether the active cursor is solid or hollow.
+        // Inset *each* pane by the configured padding (applied per-leaf below, not
+        // once on the outer area) so the padding band wraps every split, not just
+        // the window edges. The band keeps the background color (filled below) so
+        // text never butts against the window edge or a split divider. The window's
+        // own focus state drives whether the active cursor is solid or hollow.
         let full_area = ui.max_rect();
-        let area = full_area.shrink2(egui::vec2(self.config.padding_x, self.config.padding_y));
+        let pad = egui::vec2(self.config.padding_x, self.config.padding_y);
         let window_focused = ctx.input(|i| i.focused);
         let copy_on_select = self.config.copy_on_select;
         let sel_bg = self.config.selection_bg;
@@ -527,9 +529,10 @@ impl App {
         let tab = &mut self.tabs[active_tab];
         let mut focus_id = tab.focus;
 
-        // Lay the split tree out across the grid area; each leaf gets its rect.
+        // Lay the split tree out across the full area; each leaf gets its rect
+        // (padding is applied per-leaf below).
         let mut leaves: Vec<Leaf> = Vec::new();
-        tab.root.collect(area, &mut leaves);
+        tab.root.collect(full_area, &mut leaves);
         if leaves.is_empty() {
             return;
         }
@@ -559,7 +562,9 @@ impl App {
 
         let mut frames: Vec<PaneFrame> = Vec::with_capacity(leaves.len());
         for leaf in leaves.iter_mut() {
-            let prect = leaf.rect;
+            // The pane occupies `leaf.rect`; the grid is inset by the padding so
+            // text clears the pane's edges (window border or split divider alike).
+            let prect = leaf.rect.shrink2(pad);
             let leaf_id = leaf.id;
             let is_focus = leaf_id == focus_id;
             let session = &mut *leaf.session;
@@ -570,15 +575,33 @@ impl App {
 
             // Mouse / selection interaction only for the focused pane.
             if is_focus {
+                // Hold keyboard focus on the terminal and lock the navigation keys
+                // to it. Otherwise egui's built-in focus traversal swallows Tab
+                // (which the shell wants for completion) to cycle focus through the
+                // tab-strip buttons, and a following Enter/Space fires whichever
+                // button got focus — switching/closing tabs unexpectedly.
+                let resp = ui.interact(
+                    prect,
+                    egui::Id::new(("giest-pane", active_tab, leaf_id)),
+                    egui::Sense::click_and_drag(),
+                );
+                resp.request_focus();
+                ctx.memory_mut(|m| {
+                    m.set_focus_lock_filter(
+                        resp.id,
+                        egui::EventFilter {
+                            tab: true,
+                            horizontal_arrows: true,
+                            vertical_arrows: true,
+                            escape: false,
+                        },
+                    )
+                });
+
                 if tracking {
                     session.handle_mouse(ctx, prect, ppp, cw, ch);
                     session.clear_selection();
                 } else {
-                    let resp = ui.interact(
-                        prect,
-                        egui::Id::new(("giest-pane", active_tab, leaf_id)),
-                        egui::Sense::click_and_drag(),
-                    );
                     let cell_at = |p: egui::Pos2, s: &Session| s.pos_to_cell(p, prect, ppp, cw, ch);
                     if resp.triple_clicked() {
                         if let Some(p) = resp.interact_pointer_pos() {
@@ -673,7 +696,9 @@ impl App {
             },
         ));
 
-        // Outline the focused pane when the tab is split.
+        // Outline the focused pane when the tab is split. Frame the *full* pane
+        // rect (not the padded grid) so the padding band shows as a visible gap
+        // between the border and the text, rather than the text hugging the line.
         if leaves.len() > 1 {
             ui.painter().rect_stroke(
                 leaves[focus_idx].rect,

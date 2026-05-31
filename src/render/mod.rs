@@ -50,6 +50,15 @@ pub struct GpuResources {
     atlas: Atlas,
     is_srgb: bool,
     num_instances: u32,
+    /// Reusable per-frame scratch buffers. Retained across frames (cleared, not
+    /// reallocated) so building the instance list does no per-frame growth
+    /// allocation. `scratch_out` also holds the assembled instance list that
+    /// `prepare` uploads after `build_instances` returns.
+    scratch_out: Vec<Instance>,
+    scratch_glyphs: Vec<Instance>,
+    scratch_cursors: Vec<Instance>,
+    scratch_runs: Vec<GlyphRun>,
+    scratch_shaped: Vec<ShapedGlyph>,
 }
 
 /// One pane (terminal grid) within a frame, positioned at `origin_px`.
@@ -264,6 +273,11 @@ pub fn init(render_state: &egui_wgpu::RenderState, px: f32) -> (f32, f32) {
         atlas,
         is_srgb: format.is_srgb(),
         num_instances: 0,
+        scratch_out: Vec::new(),
+        scratch_glyphs: Vec::new(),
+        scratch_cursors: Vec::new(),
+        scratch_runs: Vec::new(),
+        scratch_shaped: Vec::new(),
     };
     render_state
         .renderer
@@ -315,21 +329,27 @@ impl GpuResources {
         }
     }
 
-    /// Build the instance list for one frame.
-    fn build_instances(&mut self, frame: &TermFrame, queue: &wgpu::Queue) -> Vec<Instance> {
+    /// Build the instance list for one frame into `self.scratch_out`.
+    fn build_instances(&mut self, frame: &TermFrame, queue: &wgpu::Queue) {
         let cw = self.atlas.cell_w;
         let ch = self.atlas.cell_h;
         let ascent = self.atlas.ascent;
         let line_h = (ch * 0.07).max(1.0);
 
         // Three passes (across all panes): backgrounds, then glyphs +
-        // decorations, then non-block cursors on top.
-        let mut out: Vec<Instance> = Vec::new();
-        let mut glyphs: Vec<Instance> = Vec::new();
-        let mut cursors: Vec<Instance> = Vec::new();
-        // Reused per-row shaping scratch.
-        let mut runs: Vec<GlyphRun> = Vec::new();
-        let mut shaped: Vec<ShapedGlyph> = Vec::new();
+        // decorations, then non-block cursors on top. Move the reusable scratch
+        // out of `self` (so the atlas can be borrowed alongside) and clear it;
+        // its capacity carries over from previous frames. `runs` keeps its
+        // `GlyphRun` slots (and their string/Vec buffers) across frames too — we
+        // track how many are live per row with `run_count` instead of clearing.
+        let mut out = std::mem::take(&mut self.scratch_out);
+        let mut glyphs = std::mem::take(&mut self.scratch_glyphs);
+        let mut cursors = std::mem::take(&mut self.scratch_cursors);
+        let mut runs = std::mem::take(&mut self.scratch_runs);
+        let mut shaped = std::mem::take(&mut self.scratch_shaped);
+        out.clear();
+        glyphs.clear();
+        cursors.clear();
 
         for pane in &frame.panes {
             let snap = &pane.snapshot;
@@ -382,14 +402,16 @@ impl GpuResources {
             // font's ligatures apply, then place the shaped glyphs back on the
             // grid at the cell their cluster came from.
             for y in 0..snap.rows {
-                runs.clear();
-                let mut cur: Option<GlyphRun> = None;
+                // Live runs for this row occupy runs[0..run_count]; slots beyond
+                // are reused (their buffers retained) on the next row/frame.
+                let mut run_count = 0usize;
+                // Whether runs[run_count - 1] is still open for appending (a blank
+                // cell breaks the run so the next non-blank starts a fresh one).
+                let mut cur_open = false;
                 for x in 0..snap.cols {
                     let Some(cell) = snap.cell(x, y) else { continue };
                     if cell.text.is_empty() {
-                        if let Some(r) = cur.take() {
-                            runs.push(r);
-                        }
+                        cur_open = false;
                         continue;
                     }
                     let is_cursor_cell =
@@ -404,33 +426,37 @@ impl GpuResources {
                         cell.fg
                     };
                     let style = Atlas::style_index(cell.bold, cell.italic);
-                    match cur {
-                        Some(ref mut r) if r.fg == fg && r.style == style => {
+                    if cur_open {
+                        let r = &mut runs[run_count - 1];
+                        if r.fg == fg && r.style == style {
                             r.text.push_str(&cell.text);
                             r.byte_cell.resize(r.text.len(), x);
-                        }
-                        _ => {
-                            if let Some(r) = cur.take() {
-                                runs.push(r);
-                            }
-                            let mut r = GlyphRun {
-                                text: String::new(),
-                                byte_cell: Vec::new(),
-                                fg,
-                                style,
-                            };
-                            r.text.push_str(&cell.text);
-                            r.byte_cell.resize(r.text.len(), x);
-                            cur = Some(r);
+                            continue;
                         }
                     }
-                }
-                if let Some(r) = cur.take() {
-                    runs.push(r);
+                    // Start a new run, reusing an existing slot's buffers if one is
+                    // free, otherwise growing the pool.
+                    if run_count == runs.len() {
+                        runs.push(GlyphRun {
+                            text: String::new(),
+                            byte_cell: Vec::new(),
+                            fg,
+                            style,
+                        });
+                    }
+                    let r = &mut runs[run_count];
+                    r.text.clear();
+                    r.byte_cell.clear();
+                    r.fg = fg;
+                    r.style = style;
+                    r.text.push_str(&cell.text);
+                    r.byte_cell.resize(r.text.len(), x);
+                    run_count += 1;
+                    cur_open = true;
                 }
 
                 let cell_top = oy + y as f32 * ch;
-                for r in &runs {
+                for r in &runs[..run_count] {
                     shaped.clear();
                     self.atlas.shape_run(&r.text, r.style, &mut shaped);
                     let color = self.color(r.fg, 1.0);
@@ -497,7 +523,14 @@ impl GpuResources {
 
         out.append(&mut glyphs);
         out.append(&mut cursors);
-        out
+
+        // Return the scratch (now reusable, with retained capacity) to `self`.
+        // `out` holds the assembled instance list for `prepare` to upload.
+        self.scratch_out = out;
+        self.scratch_glyphs = glyphs;
+        self.scratch_cursors = cursors;
+        self.scratch_runs = runs;
+        self.scratch_shaped = shaped;
     }
 }
 
@@ -519,10 +552,10 @@ impl CallbackTrait for TermFrame {
             bytemuck::cast_slice(&[sw as f32, sh as f32, 0.0, 0.0]),
         );
 
-        let instances = res.build_instances(self, queue);
-        res.num_instances = instances.len() as u32;
+        res.build_instances(self, queue);
+        let needed = res.scratch_out.len() as u64;
+        res.num_instances = needed as u32;
 
-        let needed = instances.len() as u64;
         if needed > res.capacity {
             let new_cap = needed.next_power_of_two();
             res.instances = device.create_buffer(&wgpu::BufferDescriptor {
@@ -533,8 +566,8 @@ impl CallbackTrait for TermFrame {
             });
             res.capacity = new_cap;
         }
-        if !instances.is_empty() {
-            queue.write_buffer(&res.instances, 0, bytemuck::cast_slice(&instances));
+        if !res.scratch_out.is_empty() {
+            queue.write_buffer(&res.instances, 0, bytemuck::cast_slice(&res.scratch_out));
         }
 
         Vec::new()

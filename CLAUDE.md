@@ -12,16 +12,18 @@ trait; the shell runs over **ConPTY**. North-star goal: feature parity with the 
 ## Build & test
 
 ```powershell
-cargo build              # debug
-cargo run --release      # release
+mise dev                 # debug build + run (recommended; injects Zig 0.15.2)
+mise release             # optimized release build (recommended)
 cargo test               # ~31 unit tests (engine, input, selection, paste, mouse, theming, ligatures, OSC 52, URL detection)
 cargo test <name>        # single test by name substring
 ```
 
 - **Requires Zig 0.15.2 on PATH** — the vendored `libghostty-vt-sys/build.rs` runs `zig build`
   to compile Ghostty's VT library. **0.16.x will NOT build it** (the pinned ghostty commit
-  declares `minimum_zig_version = 0.15.2`). `mise.toml` pins `zig = "0.15.2"`; run `mise trust`
-  once and cargo picks it up automatically. Alternatively `mise exec zig@0.15.2 -- cargo build`.
+  declares `minimum_zig_version = 0.15.2`). `mise.toml` pins `zig = "0.15.2"` and defines the
+  `dev`/`release` tasks above, which run cargo from the project root with the pinned Zig on
+  PATH — prefer them. Run `mise trust` once. Fallbacks: `mise exec zig@0.15.2 -- cargo build`,
+  or plain `cargo build`/`cargo run --release` if Zig 0.15.2 is already on PATH.
 - **Always run cargo from the project root.** Running it from inside `vendor/libghostty-rs/...`
   builds the *vendored crate* instead of giest (cargo walks up to the nearest Cargo.toml). A
   "Finished" that only mentions `libghostty-vt` compiling means you're in the wrong directory.

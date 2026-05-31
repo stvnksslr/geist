@@ -6,6 +6,7 @@
 //! (see the project plan) without touching the rest of the app.
 
 use anyhow::Result;
+use compact_str::CompactString;
 
 pub mod ghostty_vt;
 
@@ -31,8 +32,10 @@ impl Rgb {
 #[derive(Clone, Debug, Default)]
 pub struct Cell {
     /// Grapheme cluster for this cell. Empty means a blank cell (or the tail
-    /// half of a wide character).
-    pub text: String,
+    /// half of a wide character). An inline string: clusters of ≤24 bytes (the
+    /// overwhelming majority) live on the stack, so building and cloning the
+    /// per-frame snapshot does not allocate per cell.
+    pub text: CompactString,
     pub fg: Rgb,
     pub bg: Rgb,
     pub bold: bool,

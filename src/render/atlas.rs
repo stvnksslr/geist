@@ -16,6 +16,10 @@ use rustybuzz::{Direction, Face as ShapeFace, UnicodeBuffer};
 
 const ATLAS_SIZE: u32 = 2048;
 
+/// Max number of distinct shaped runs cached across all styles before the shape
+/// cache is dropped wholesale (a coarse bound, matching the atlas's own reset).
+const SHAPE_CACHE_CAP: usize = 8192;
+
 /// Ordered system fallback fonts (path, collection index). Tried in order for
 /// characters the primary font lacks (CJK, symbols). Color emoji are handled
 /// separately via the COLR/CPAL path (see [`COLOR_FONT`]).
@@ -275,6 +279,10 @@ pub struct Atlas {
     fallback_cache: HashMap<char, Option<GlyphInfo>>,
     /// Color emoji glyphs cached by character.
     color_cache: HashMap<char, Option<GlyphInfo>>,
+    /// Shaped-run cache, one map per style index, keyed by the run's text. Lets
+    /// repeated frames skip rustybuzz for unchanged rows. Cleared on font resize
+    /// (glyph ids change) and when it grows past `SHAPE_CACHE_CAP`.
+    shape_cache: Vec<HashMap<Box<str>, Vec<ShapedGlyph>>>,
     // Coverage-atlas shelf allocator state.
     pen_x: u32,
     pen_y: u32,
@@ -367,6 +375,7 @@ impl Atlas {
             cache: HashMap::new(),
             fallback_cache: HashMap::new(),
             color_cache: HashMap::new(),
+            shape_cache: (0..4).map(|_| HashMap::new()).collect(),
             pen_x: 0,
             pen_y: 0,
             shelf_h: 0,
@@ -389,6 +398,11 @@ impl Atlas {
         self.cache.clear();
         self.fallback_cache.clear();
         self.color_cache.clear();
+        // Shaped runs (glyph ids) are size-independent, so this isn't required for
+        // correctness, but a font resize is a natural point to bound cache memory.
+        for m in &mut self.shape_cache {
+            m.clear();
+        }
         self.pen_x = 0;
         self.pen_y = 0;
         self.shelf_h = 0;
@@ -402,10 +416,18 @@ impl Atlas {
     /// alternates in the font are applied here. Direction is forced LTR to match
     /// the terminal grid.
     pub fn shape_run(&mut self, text: &str, style: usize, out: &mut Vec<ShapedGlyph>) {
+        // Identical (text, style) runs recur every frame for static content; skip
+        // rustybuzz when we've already shaped this one.
+        if let Some(cached) = self.shape_cache[style].get(text) {
+            out.extend_from_slice(cached);
+            return;
+        }
+
         let mut buf = self.shape_buf.take().unwrap_or_else(UnicodeBuffer::new);
         buf.push_str(text);
         buf.set_direction(Direction::LeftToRight);
         let glyphs = rustybuzz::shape(&self.shapers[style], &[], buf);
+        let start = out.len();
         for info in glyphs.glyph_infos() {
             out.push(ShapedGlyph {
                 glyph_id: info.glyph_id as u16,
@@ -413,6 +435,16 @@ impl Atlas {
             });
         }
         self.shape_buf = Some(glyphs.clear());
+
+        // Cache the freshly shaped glyphs, dropping the whole cache first if it
+        // has grown too large (coarse bound; runs are re-shaped on the next miss).
+        let total: usize = self.shape_cache.iter().map(HashMap::len).sum();
+        if total >= SHAPE_CACHE_CAP {
+            for m in &mut self.shape_cache {
+                m.clear();
+            }
+        }
+        self.shape_cache[style].insert(text.into(), out[start..].to_vec());
     }
 
     /// Style index (bit 0 = bold, bit 1 = italic) for the given attributes.

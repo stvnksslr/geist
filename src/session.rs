@@ -566,7 +566,7 @@ mod tests {
             for ch in chars {
                 let mut c = Cell::default();
                 if ch != ' ' {
-                    c.text = ch.to_string();
+                    c.text = ch.to_string().into();
                 }
                 s.cells.push(c);
             }
