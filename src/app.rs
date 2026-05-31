@@ -8,6 +8,7 @@ use eframe::egui;
 use eframe::egui_wgpu;
 
 use crate::config::Config;
+use crate::profiles::{self, Profile};
 use crate::render::{self, PaneFrame, TermFrame};
 use crate::session::Session;
 
@@ -38,10 +39,19 @@ pub struct App {
     /// Cell size in physical pixels (from the glyph atlas), shared by all panes.
     cell_w: f32,
     cell_h: f32,
+    /// Current logical font size in points (adjusted at runtime with Ctrl +/-/0).
+    font_points: f32,
     config: Config,
+    /// Available shell profiles and the default index, detected at startup.
+    profiles: Vec<Profile>,
+    default_profile: usize,
     egui_ctx: egui::Context,
     last_window_title: Option<String>,
 }
+
+/// Runtime font-size bounds in logical points.
+const MIN_FONT_POINTS: f32 = 6.0;
+const MAX_FONT_POINTS: f32 = 48.0;
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Result<Self> {
@@ -55,27 +65,81 @@ impl App {
         let px = (config.font_points * ppp).round();
         let (cell_w, cell_h) = render::init(render_state, px);
 
-        let first = Session::new(&cc.egui_ctx, &config)?;
+        let (profiles, default_profile) = profiles::detect(config.shell.as_deref());
+        let first = Session::new(&cc.egui_ctx, &config, &profiles[default_profile])?;
 
         Ok(Self {
             tabs: vec![Tab::single(first)],
             active_tab: 0,
             cell_w,
             cell_h,
+            font_points: config.font_points,
             config,
+            profiles,
+            default_profile,
             egui_ctx: cc.egui_ctx.clone(),
             last_window_title: None,
         })
     }
 
-    fn spawn_session(&self) -> Option<Session> {
-        Session::new(&self.egui_ctx, &self.config)
+    /// Apply a new logical font size: re-rasterize the atlas and update the
+    /// shared cell metrics (panes re-fit their grids on the next frame).
+    fn set_font_points(&mut self, render_state: &egui_wgpu::RenderState, points: f32, ppp: f32) {
+        let points = points.clamp(MIN_FONT_POINTS, MAX_FONT_POINTS);
+        if (points - self.font_points).abs() < 0.01 {
+            return;
+        }
+        self.font_points = points;
+        let px = (points * ppp).round();
+        let (cw, ch) = render::resize_font(render_state, px);
+        self.cell_w = cw;
+        self.cell_h = ch;
+        self.egui_ctx.request_repaint();
+    }
+
+    /// Handle Ctrl +/-/0 font-size shortcuts (needs the render state to rebuild
+    /// the atlas, so this runs from `ui` where the frame is available).
+    fn handle_font_zoom(&mut self, ctx: &egui::Context, render_state: &egui_wgpu::RenderState) {
+        let mut target = None;
+        ctx.input(|i| {
+            for event in &i.events {
+                if let egui::Event::Key {
+                    key,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } = event
+                {
+                    if modifiers.ctrl && !modifiers.shift {
+                        match key {
+                            egui::Key::Equals | egui::Key::Plus => {
+                                target = Some(self.font_points + 1.0)
+                            }
+                            egui::Key::Minus => target = Some(self.font_points - 1.0),
+                            egui::Key::Num0 => target = Some(self.config.font_points),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        });
+        if let Some(points) = target {
+            let ppp = ctx.pixels_per_point().max(1.0);
+            self.set_font_points(render_state, points, ppp);
+        }
+    }
+
+    /// Spawn a session for profile `idx` (clamped to the default if invalid).
+    fn spawn_session(&self, idx: usize) -> Option<Session> {
+        let profile = self.profiles.get(idx).unwrap_or(&self.profiles[self.default_profile]);
+        Session::new(&self.egui_ctx, &self.config, profile)
             .map_err(|e| eprintln!("giest: failed to open session: {e}"))
             .ok()
     }
 
-    fn new_tab(&mut self) {
-        if let Some(s) = self.spawn_session() {
+    /// Open a new tab running profile `idx`.
+    fn new_tab(&mut self, idx: usize) {
+        if let Some(s) = self.spawn_session(idx) {
             self.tabs.push(Tab::single(s));
             self.active_tab = self.tabs.len() - 1;
         }
@@ -83,7 +147,7 @@ impl App {
 
     /// Split the focused pane along `vertical` axis, focusing the new pane.
     fn split(&mut self, vertical: bool) {
-        if let Some(s) = self.spawn_session() {
+        if let Some(s) = self.spawn_session(self.default_profile) {
             let tab = &mut self.tabs[self.active_tab];
             tab.vertical = vertical;
             tab.panes.push(s);
@@ -106,6 +170,55 @@ impl App {
         }
     }
 
+    /// Switch to tab `idx` if it exists (Ctrl+Shift+number).
+    fn goto_tab(&mut self, idx: usize) {
+        if idx < self.tabs.len() {
+            self.active_tab = idx;
+        }
+    }
+
+    /// Close tab `idx`; closing the last tab closes the window.
+    fn close_tab(&mut self, idx: usize, ctx: &egui::Context) {
+        if idx >= self.tabs.len() {
+            return;
+        }
+        self.tabs.remove(idx);
+        if self.active_tab > idx {
+            self.active_tab -= 1;
+        }
+        if self.tabs.is_empty() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        } else {
+            self.active_tab = self.active_tab.min(self.tabs.len() - 1);
+        }
+    }
+
+    /// Remove panes whose shell has exited; drop tabs that become empty and
+    /// close the window when the last tab is gone. Returns `false` if the
+    /// window is closing (caller should skip rendering this frame).
+    fn reap_dead(&mut self, ctx: &egui::Context) -> bool {
+        let mut i = 0;
+        while i < self.tabs.len() {
+            self.tabs[i].panes.retain(|p| p.is_alive());
+            if self.tabs[i].panes.is_empty() {
+                self.tabs.remove(i);
+                if self.active_tab > i {
+                    self.active_tab -= 1;
+                }
+                continue;
+            }
+            let focus = self.tabs[i].focus.min(self.tabs[i].panes.len() - 1);
+            self.tabs[i].focus = focus;
+            i += 1;
+        }
+        if self.tabs.is_empty() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return false;
+        }
+        self.active_tab = self.active_tab.min(self.tabs.len() - 1);
+        true
+    }
+
     /// App-level shortcuts (reserved by `Session::handle_input`, never sent to
     /// the shell): tabs, splits, focus switching.
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
@@ -122,10 +235,20 @@ impl App {
             };
             if modifiers.ctrl && modifiers.shift {
                 match key {
-                    egui::Key::T => self.new_tab(),
+                    egui::Key::T => self.new_tab(self.default_profile),
                     egui::Key::W => self.close_focused(ctx),
                     egui::Key::D => self.split(true),  // vertical (columns)
                     egui::Key::E => self.split(false), // horizontal (rows)
+                    // Ctrl+Shift+1..8 jump to that tab; Ctrl+Shift+9 → last tab.
+                    egui::Key::Num1 => self.goto_tab(0),
+                    egui::Key::Num2 => self.goto_tab(1),
+                    egui::Key::Num3 => self.goto_tab(2),
+                    egui::Key::Num4 => self.goto_tab(3),
+                    egui::Key::Num5 => self.goto_tab(4),
+                    egui::Key::Num6 => self.goto_tab(5),
+                    egui::Key::Num7 => self.goto_tab(6),
+                    egui::Key::Num8 => self.goto_tab(7),
+                    egui::Key::Num9 => self.goto_tab(self.tabs.len().saturating_sub(1)),
                     _ => {}
                 }
             } else if modifiers.ctrl && *key == egui::Key::Tab {
@@ -143,7 +266,9 @@ impl App {
 
     fn tab_bar(&mut self, ui: &mut egui::Ui) {
         let mut switch_to = None;
-        let mut want_new = false;
+        let mut want_close = None;
+        // Profile index to open a new tab with (default unless the menu picks one).
+        let mut want_new: Option<usize> = None;
         ui.horizontal(|ui| {
             for (i, tab) in self.tabs.iter().enumerate() {
                 let raw = tab
@@ -154,19 +279,49 @@ impl App {
                 if tab.panes.len() > 1 {
                     label = format!("{label} [{}]", tab.panes.len());
                 }
-                if ui.selectable_label(i == self.active_tab, label).clicked() {
+                let resp = ui.selectable_label(i == self.active_tab, label);
+                if resp.clicked() {
                     switch_to = Some(i);
                 }
+                // Middle-click closes the tab, like a browser.
+                if resp.clicked_by(egui::PointerButton::Middle) {
+                    want_close = Some(i);
+                }
+                if ui
+                    .small_button("×")
+                    .on_hover_text("Close tab (Ctrl+Shift+W)")
+                    .clicked()
+                {
+                    want_close = Some(i);
+                }
             }
-            if ui.button("+").on_hover_text("New tab (Ctrl+Shift+T)").clicked() {
-                want_new = true;
+            if ui
+                .button("+")
+                .on_hover_text("New tab (Ctrl+Shift+T)")
+                .clicked()
+            {
+                want_new = Some(self.default_profile);
             }
+            // Profile picker: open a tab running a chosen shell.
+            ui.menu_button("▾", |ui| {
+                for (i, profile) in self.profiles.iter().enumerate() {
+                    if ui.button(&profile.name).clicked() {
+                        want_new = Some(i);
+                        ui.close();
+                    }
+                }
+            })
+            .response
+            .on_hover_text("New tab with a specific shell");
         });
         if let Some(i) = switch_to {
             self.active_tab = i;
         }
-        if want_new {
-            self.new_tab();
+        if let Some(idx) = want_new {
+            self.new_tab(idx);
+        }
+        if let Some(i) = want_close {
+            self.close_tab(i, &ui.ctx().clone());
         }
     }
 
@@ -174,7 +329,13 @@ impl App {
     fn render_active(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let (cw, ch) = (self.cell_w, self.cell_h);
         let ppp = ctx.pixels_per_point().max(1.0);
-        let area = ui.max_rect();
+        // Inset the grid by the configured padding; the padding band keeps the
+        // background color (filled below). The window's own focus state drives
+        // whether the active cursor is solid or hollow.
+        let full_area = ui.max_rect();
+        let area = full_area.shrink2(egui::vec2(self.config.padding_x, self.config.padding_y));
+        let window_focused = ctx.input(|i| i.focused);
+        let copy_on_select = self.config.copy_on_select;
         let active_tab = self.active_tab;
         let tab = &mut self.tabs[active_tab];
         let rects = pane_rects(tab.panes.len(), tab.vertical, area);
@@ -219,27 +380,66 @@ impl App {
                         egui::Id::new(("giest-pane", active_tab, i)),
                         egui::Sense::click_and_drag(),
                     );
-                    if resp.drag_started() {
+                    let cell_at = |p: egui::Pos2, s: &Session| s.pos_to_cell(p, prect, ppp, cw, ch);
+                    if resp.triple_clicked() {
                         if let Some(p) = resp.interact_pointer_pos() {
-                            let c = session.pos_to_cell(p, prect, ppp, cw, ch);
+                            let c = cell_at(p, session);
+                            session.select_line(c);
+                        }
+                    } else if resp.double_clicked() {
+                        if let Some(p) = resp.interact_pointer_pos() {
+                            let c = cell_at(p, session);
+                            session.select_word(c);
+                        }
+                    } else if resp.drag_started() {
+                        if let Some(p) = resp.interact_pointer_pos() {
+                            let c = cell_at(p, session);
                             session.begin_selection(c);
                         }
                     } else if resp.dragged() {
                         if let Some(p) = resp.interact_pointer_pos() {
-                            let c = session.pos_to_cell(p, prect, ppp, cw, ch);
+                            let c = cell_at(p, session);
                             session.update_selection(c);
                         }
+                    } else if resp.clicked() {
+                        let mods = ctx.input(|i| i.modifiers);
+                        if mods.shift {
+                            // Shift+click extends the current selection.
+                            if let Some(p) = resp.interact_pointer_pos() {
+                                let c = cell_at(p, session);
+                                session.extend_selection(c);
+                            }
+                        } else {
+                            // Ctrl+click opens a URL under the cursor; a plain
+                            // click clears the selection.
+                            let opened = (mods.ctrl || mods.command)
+                                && resp
+                                    .interact_pointer_pos()
+                                    .map(|p| cell_at(p, session))
+                                    .and_then(|c| session.url_at(c))
+                                    .map(|url| open_url(&url))
+                                    .is_some();
+                            if !opened {
+                                session.clear_selection();
+                            }
+                        }
                     }
-                    if resp.clicked() {
-                        session.clear_selection();
+                    // Copy as soon as a selection is completed, if enabled.
+                    if copy_on_select
+                        && (resp.double_clicked() || resp.triple_clicked() || resp.drag_stopped())
+                    {
+                        if let Some(text) = session.selection_text() {
+                            ctx.copy_text(text);
+                        }
                     }
                 }
             }
 
             let mut snapshot = session.snapshot.clone();
-            if i != focus {
-                snapshot.cursor_visible = false; // only the focused pane shows a cursor
-            } else if snapshot.cursor_blinking {
+            // Only the focused pane of a focused window gets a live (solid,
+            // blinking) cursor; every other visible cursor is drawn hollow.
+            let pane_active = i == focus && window_focused;
+            if pane_active && snapshot.cursor_blinking {
                 if ctx.input(|i| i.time) % 1.0 >= 0.5 {
                     snapshot.cursor_visible = false;
                 }
@@ -249,17 +449,25 @@ impl App {
                 snapshot,
                 origin_px: [prect.min.x * ppp, prect.min.y * ppp],
                 selection: session.selection_range(),
+                cursor_hollow: !pane_active,
             });
         }
 
-        // Fill the whole area with the focused pane's background first.
+        // Fill the whole area (including the padding band) with the focused
+        // pane's background first.
         let bg = tab.panes[focus].default_bg();
         ui.painter()
-            .rect_filled(area, 0.0, egui::Color32::from_rgb(bg.r, bg.g, bg.b));
+            .rect_filled(full_area, 0.0, egui::Color32::from_rgb(bg.r, bg.g, bg.b));
 
         // One callback paints every pane (shared instance buffer).
-        ui.painter()
-            .add(egui_wgpu::Callback::new_paint_callback(area, TermFrame { panes: frames }));
+        ui.painter().add(egui_wgpu::Callback::new_paint_callback(
+            full_area,
+            TermFrame {
+                panes: frames,
+                selection_bg: self.config.selection_bg,
+                selection_fg: self.config.selection_fg,
+            },
+        ));
 
         // Highlight the focused pane when split.
         if rects.len() > 1 {
@@ -274,8 +482,12 @@ impl App {
 }
 
 impl eframe::App for App {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+
+        // Poll for shell exit even when idle (a shell that exits produces no
+        // output, so nothing else would wake us to reap it).
+        ctx.request_repaint_after(Duration::from_millis(500));
 
         // Pump every pane in every tab so background sessions keep flowing.
         for tab in &mut self.tabs {
@@ -283,7 +495,15 @@ impl eframe::App for App {
                 pane.pump_pty();
             }
         }
+        // Close panes/tabs whose shell exited; bail if that closed the window.
+        if !self.reap_dead(&ctx) {
+            return;
+        }
         self.handle_shortcuts(&ctx);
+        if let Some(render_state) = frame.wgpu_render_state() {
+            let render_state = render_state.clone();
+            self.handle_font_zoom(&ctx, &render_state);
+        }
 
         // Window title from the active tab's focused pane.
         let title = self.tabs.get(self.active_tab).and_then(|t| t.focused().title());
@@ -293,15 +513,21 @@ impl eframe::App for App {
             self.last_window_title = title;
         }
 
-        if self.tabs.len() > 1 {
-            egui::Panel::top("giest-tabs").show_inside(ui, |ui| self.tab_bar(ui));
-        }
+        // Always show the tab strip so the new-tab profile picker (PowerShell /
+        // cmd / WSL / …) is reachable even with a single tab.
+        egui::Panel::top("giest-tabs").show_inside(ui, |ui| self.tab_bar(ui));
 
         let bg = self.tabs[self.active_tab].focused().default_bg();
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(egui::Color32::from_rgb(bg.r, bg.g, bg.b)))
             .show_inside(ui, |ui| self.render_active(ui, &ctx));
     }
+}
+
+/// Open a URL in the user's default handler (Windows). `explorer` routes
+/// http/https/etc. to the default browser without flashing a console window.
+fn open_url(url: &str) {
+    let _ = std::process::Command::new("explorer").arg(url).spawn();
 }
 
 /// Divide `area` into `n` equal panes along the split axis (with a 1px gutter).

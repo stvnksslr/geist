@@ -158,9 +158,21 @@ pub trait TerminalEngine {
     /// up toward older output).
     fn scroll(&mut self, delta: isize);
 
+    /// Jump the viewport to the bottom (newest output). Called when the user
+    /// types, matching Ghostty's "scroll to bottom on input".
+    fn scroll_to_bottom(&mut self);
+
+    /// Jump the viewport to the top (oldest scrollback).
+    fn scroll_to_top(&mut self);
+
     /// Apply a color theme: default foreground/background and the 256-color
     /// palette. Snapshots taken afterward resolve colors against these.
     fn apply_theme(&mut self, fg: Rgb, bg: Rgb, palette: &[Rgb; 256]) -> Result<()>;
+
+    /// Set the default cursor color, or clear it (`None`) so the running
+    /// program / engine default applies. Snapshots resolve the cursor color
+    /// against this.
+    fn set_cursor_color(&mut self, color: Option<Rgb>) -> Result<()>;
 
     /// Whether the running app has enabled mouse reporting (any tracking mode).
     fn is_mouse_tracking(&self) -> bool;

@@ -298,6 +298,14 @@ impl TerminalEngine for GhosttyVtEngine {
         self.term.scroll_viewport(ScrollViewport::Delta(delta));
     }
 
+    fn scroll_to_bottom(&mut self) {
+        self.term.scroll_viewport(ScrollViewport::Bottom);
+    }
+
+    fn scroll_to_top(&mut self) {
+        self.term.scroll_viewport(ScrollViewport::Top);
+    }
+
     fn apply_theme(&mut self, fg: Rgb, bg: Rgb, palette: &[Rgb; 256]) -> Result<()> {
         let to_c = |c: Rgb| libghostty_vt::style::RgbColor {
             r: c.r,
@@ -311,6 +319,16 @@ impl TerminalEngine for GhosttyVtEngine {
         self.term.set_default_fg_color(Some(to_c(fg)))?;
         self.term.set_default_bg_color(Some(to_c(bg)))?;
         self.term.set_default_color_palette(Some(pal))?;
+        Ok(())
+    }
+
+    fn set_cursor_color(&mut self, color: Option<Rgb>) -> Result<()> {
+        let c = color.map(|c| libghostty_vt::style::RgbColor {
+            r: c.r,
+            g: c.g,
+            b: c.b,
+        });
+        self.term.set_default_cursor_color(c)?;
         Ok(())
     }
 

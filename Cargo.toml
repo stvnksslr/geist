@@ -15,5 +15,14 @@ portable-pty = "0.9.0"
 eframe = { version = "0.34.3", default-features = false, features = ["wgpu", "default_fonts"] }
 bytemuck = { version = "1.25.0", features = ["derive"] }
 ab_glyph = "0.2.32"
+# HarfBuzz-equivalent text shaper (pure Rust) for ligature/contextual-alternate
+# substitution. We shape per-style cell runs and snap the resulting glyphs back
+# onto the terminal grid by cluster.
+rustybuzz = "0.20"
 toml = "1.1.2"
 serde = { version = "1.0.228", features = ["derive"] }
+# Clipboard read for Ctrl+Shift+V paste (egui only emits a paste event for
+# Ctrl+V; this lets us read the clipboard for the Ctrl+Shift+V binding too).
+arboard = "3"
+# Base64 decode for OSC 52 clipboard-set sequences.
+base64 = "0.22"

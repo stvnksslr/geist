@@ -13,8 +13,7 @@ use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system}
 pub struct Pty {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
-    /// Kept alive for the session's lifetime so the shell process isn't reaped.
-    #[allow(dead_code)]
+    /// The shell process; polled via [`Pty::is_running`] to detect exit.
     child: Box<dyn Child + Send + Sync>,
     /// Bytes read from the shell. The sender lives on the reader thread, which
     /// exits (closing this channel) when the shell closes its output.
@@ -22,11 +21,12 @@ pub struct Pty {
 }
 
 impl Pty {
-    /// Open a PTY of `cols`x`rows` and spawn `program` (e.g. `powershell.exe`).
-    /// `wake` is invoked on the reader thread whenever new output arrives, so
-    /// the UI can schedule a repaint.
+    /// Open a PTY of `cols`x`rows` and spawn `program` with `args` (e.g.
+    /// `pwsh.exe`, `wsl.exe`). `wake` is invoked on the reader thread whenever
+    /// new output arrives, so the UI can schedule a repaint.
     pub fn spawn<W: Fn() + Send + 'static>(
         program: &str,
+        args: &[String],
         cols: u16,
         rows: u16,
         wake: W,
@@ -41,7 +41,10 @@ impl Pty {
             })
             .context("openpty failed")?;
 
-        let cmd = CommandBuilder::new(program);
+        let mut cmd = CommandBuilder::new(program);
+        for arg in args {
+            cmd.arg(arg);
+        }
         let child = pair
             .slave
             .spawn_command(cmd)
@@ -70,6 +73,10 @@ impl Pty {
                         Err(_) => break,
                     }
                 }
+                // The shell closed its output (exited). Dropping `tx` here
+                // disconnects the channel; wake the UI so it reaps this pane.
+                drop(tx);
+                wake();
             })
             .context("spawn pty reader thread")?;
 
@@ -79,6 +86,13 @@ impl Pty {
             child,
             output: rx,
         })
+    }
+
+    /// Whether the shell process is still running. On Windows ConPTY the output
+    /// pipe often doesn't reach EOF when the child exits, so we poll the child
+    /// directly rather than relying on the reader thread seeing EOF.
+    pub fn is_running(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
     }
 
     /// Write bytes to the shell's input.

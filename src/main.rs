@@ -9,6 +9,8 @@
 mod app;
 mod config;
 mod engine;
+mod osc52;
+mod profiles;
 mod pty;
 mod render;
 mod session;

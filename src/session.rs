@@ -10,11 +10,12 @@ use crate::engine::{
     GhosttyVtEngine, GridSnapshot, KeyCode, KeyInput, KeyMods, MouseAction, MouseButton,
     MouseInput, TerminalEngine,
 };
+use crate::osc52::Osc52Scanner;
+use crate::profiles::Profile;
 use crate::pty::Pty;
 
 const DEFAULT_COLS: u16 = 80;
 const DEFAULT_ROWS: u16 = 24;
-const SCROLLBACK: usize = 10_000;
 
 pub struct Session {
     pty: Pty,
@@ -25,18 +26,27 @@ pub struct Session {
     sel_anchor: Option<(u16, u16)>,
     sel_head: Option<(u16, u16)>,
     mouse_down: Option<MouseButton>,
+    /// False once the shell has exited (PTY output channel disconnected).
+    alive: bool,
+    /// Side parser for OSC 52 clipboard-set sequences in the PTY output.
+    osc52: Osc52Scanner,
 }
 
 impl Session {
-    /// Spawn a shell and build its engine. `ctx` is cloned so the PTY reader
-    /// thread can wake the UI when output arrives.
-    pub fn new(ctx: &egui::Context, config: &Config) -> Result<Self> {
+    /// Spawn `profile`'s shell and build its engine. `ctx` is cloned so the PTY
+    /// reader thread can wake the UI when output arrives.
+    pub fn new(ctx: &egui::Context, config: &Config, profile: &Profile) -> Result<Self> {
         let wake_ctx = ctx.clone();
-        let pty = Pty::spawn("powershell.exe", DEFAULT_COLS, DEFAULT_ROWS, move || {
-            wake_ctx.request_repaint()
-        })?;
-        let mut engine = GhosttyVtEngine::new(DEFAULT_COLS, DEFAULT_ROWS, SCROLLBACK)?;
+        let pty = Pty::spawn(
+            &profile.program,
+            &profile.args,
+            DEFAULT_COLS,
+            DEFAULT_ROWS,
+            move || wake_ctx.request_repaint(),
+        )?;
+        let mut engine = GhosttyVtEngine::new(DEFAULT_COLS, DEFAULT_ROWS, config.scrollback_limit)?;
         engine.apply_theme(config.fg, config.bg, &config.palette)?;
+        engine.set_cursor_color(config.cursor)?;
 
         Ok(Self {
             pty,
@@ -47,18 +57,46 @@ impl Session {
             sel_anchor: None,
             sel_head: None,
             mouse_down: None,
+            alive: true,
+            osc52: Osc52Scanner::new(),
         })
     }
 
     /// Drain pending PTY output into the engine and flush responses back.
+    /// Marks the session dead when the shell has exited (channel disconnected).
     pub fn pump_pty(&mut self) {
-        while let Ok(chunk) = self.pty.output.try_recv() {
-            self.engine.write(&chunk);
+        use std::sync::mpsc::TryRecvError;
+        let mut clipboard_sets: Vec<String> = Vec::new();
+        loop {
+            match self.pty.output.try_recv() {
+                Ok(chunk) => {
+                    self.engine.write(&chunk);
+                    self.osc52.feed(&chunk, &mut clipboard_sets);
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.alive = false;
+                    break;
+                }
+            }
+        }
+        // A program copied to the clipboard via OSC 52 (last write wins).
+        if let Some(text) = clipboard_sets.pop() {
+            write_clipboard(&text);
+        }
+        // Primary exit signal on Windows: poll the shell process itself.
+        if self.alive && !self.pty.is_running() {
+            self.alive = false;
         }
         let responses = self.engine.take_responses();
         if !responses.is_empty() {
             let _ = self.pty.write(&responses);
         }
+    }
+
+    /// Whether the shell backing this session is still running.
+    pub fn is_alive(&self) -> bool {
+        self.alive
     }
 
     pub fn is_mouse_tracking(&self) -> bool {
@@ -104,9 +142,37 @@ impl Session {
     pub fn update_selection(&mut self, cell: (u16, u16)) {
         self.sel_head = Some(cell);
     }
+
+    /// Extend an existing selection to `cell` (Shift+click); starts a new one
+    /// if nothing is selected yet.
+    pub fn extend_selection(&mut self, cell: (u16, u16)) {
+        if self.sel_anchor.is_some() {
+            self.sel_head = Some(cell);
+        } else {
+            self.begin_selection(cell);
+        }
+    }
     pub fn clear_selection(&mut self) {
         self.sel_anchor = None;
         self.sel_head = None;
+    }
+
+    /// Select the whole word under `cell` (double-click).
+    pub fn select_word(&mut self, cell: (u16, u16)) {
+        let (l, r) = word_bounds(&self.snapshot, cell.0, cell.1);
+        self.sel_anchor = Some((l, cell.1));
+        self.sel_head = Some((r, cell.1));
+    }
+
+    /// Select the entire visual row under `cell` (triple-click).
+    pub fn select_line(&mut self, cell: (u16, u16)) {
+        self.sel_anchor = Some((0, cell.1));
+        self.sel_head = Some((self.cols.saturating_sub(1), cell.1));
+    }
+
+    /// The URL under `cell`, if any (for Ctrl+click to open).
+    pub fn url_at(&self, cell: (u16, u16)) -> Option<String> {
+        find_url_at(&self.snapshot, cell.0, cell.1)
     }
 
     /// Current selection as an inclusive linear (row-major) cell range.
@@ -115,15 +181,17 @@ impl Session {
         let cols = self.cols as usize;
         let la = a.1 as usize * cols + a.0 as usize;
         let lh = h.1 as usize * cols + h.0 as usize;
-        if la == lh {
-            return None;
-        }
         Some((la.min(lh), la.max(lh)))
     }
 
     fn selected_text(&self) -> Option<String> {
         let range = self.selection_range()?;
         Some(extract_selection(&self.snapshot, range))
+    }
+
+    /// The current selection's text, if any (for copy-on-select).
+    pub fn selection_text(&self) -> Option<String> {
+        self.selected_text()
     }
 
     /// Translate keyboard/text/paste events into PTY bytes. `Ctrl+Shift` combos
@@ -154,7 +222,18 @@ impl Session {
                     let encoded = self.engine.encode_paste(text);
                     bytes.extend_from_slice(&encoded);
                 }
-                egui::Event::Copy => bytes.push(0x03),
+                // egui delivers Ctrl+C, Ctrl+Shift+C and Ctrl+Insert (and Cut)
+                // as these events — `command+C` matches whether or not Shift is
+                // held. Windows-Terminal semantics: with a selection, copy it
+                // (and clear); with none, Ctrl+C is an interrupt.
+                egui::Event::Copy | egui::Event::Cut => {
+                    if let Some(text) = self.selected_text() {
+                        ctx.copy_text(text);
+                        self.clear_selection();
+                    } else {
+                        bytes.push(0x03);
+                    }
+                }
                 egui::Event::Key {
                     key,
                     pressed: true,
@@ -164,17 +243,40 @@ impl Session {
                     let Some(code) = map_egui_key(*key) else {
                         continue;
                     };
-                    // Ctrl+Shift is the app's namespace (copy, tab control); the
-                    // shell never sees it. Ctrl+Tab is reserved for tab switching.
+                    // Ctrl+Shift is the app's namespace; the shell never sees it.
+                    // The clipboard combos (Ctrl+Shift+C/V/X) arrive as
+                    // Copy/Paste/Cut events handled above, so here we just
+                    // swallow every other Ctrl+Shift combo (tab/split shortcuts).
                     if modifiers.ctrl && modifiers.shift {
-                        if code == KeyCode::C {
-                            if let Some(text) = self.selected_text() {
-                                ctx.copy_text(text);
-                            }
-                        }
                         continue;
                     }
                     if modifiers.ctrl && code == KeyCode::Tab {
+                        continue;
+                    }
+                    // Shift+PageUp/Down scroll by a page; Shift+Home/End jump to
+                    // the top/bottom of scrollback. These drive the viewport
+                    // instead of being sent to the shell (matches Ghostty).
+                    if modifiers.shift
+                        && matches!(
+                            code,
+                            KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End
+                        )
+                    {
+                        let page = self.rows.saturating_sub(1).max(1) as isize;
+                        match code {
+                            KeyCode::PageUp => self.engine.scroll(-page),
+                            KeyCode::PageDown => self.engine.scroll(page),
+                            KeyCode::Home => self.engine.scroll_to_top(),
+                            KeyCode::End => self.engine.scroll_to_bottom(),
+                            _ => {}
+                        }
+                        continue;
+                    }
+                    // Ctrl +/-/0 are reserved by the app for font zoom.
+                    if modifiers.ctrl
+                        && !modifiers.shift
+                        && matches!(code, KeyCode::Equal | KeyCode::Minus | KeyCode::Digit0)
+                    {
                         continue;
                     }
                     let mods = key_mods(modifiers);
@@ -193,6 +295,8 @@ impl Session {
             }
         }
         if !bytes.is_empty() {
+            // Typing returns the viewport to the bottom (Ghostty behavior).
+            self.engine.scroll_to_bottom();
             let _ = self.pty.write(&bytes);
         }
     }
@@ -284,6 +388,13 @@ impl Session {
     }
 }
 
+/// Write text to the system clipboard (best-effort; ignores failures).
+fn write_clipboard(text: &str) {
+    if let Ok(mut cb) = arboard::Clipboard::new() {
+        let _ = cb.set_text(text.to_owned());
+    }
+}
+
 /// Translate egui modifiers to backend-neutral key modifiers.
 fn key_mods(m: &egui::Modifiers) -> KeyMods {
     KeyMods {
@@ -291,6 +402,80 @@ fn key_mods(m: &egui::Modifiers) -> KeyMods {
         ctrl: m.ctrl || m.command,
         alt: m.alt,
         sup: false,
+    }
+}
+
+/// Whether `ch` counts as part of a word for double-click selection. Word
+/// boundaries are whitespace and a small set of shell/bracket punctuation;
+/// path/URL characters (`/ . - _ : @ ~`) stay part of the word so a whole path
+/// or flag selects in one double-click.
+fn is_word_char(ch: char) -> bool {
+    !ch.is_whitespace()
+        && !matches!(
+            ch,
+            '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' | '|' | '&' | ';' | ',' | '"' | '\'' | '`'
+        )
+}
+
+/// Expand from cell `(x, y)` to the inclusive `[left, right]` column span of the
+/// word it sits in. A non-word cell yields just itself.
+fn word_bounds(snap: &GridSnapshot, x: u16, y: u16) -> (u16, u16) {
+    let is_word = |cx: u16| {
+        snap.cell(cx, y)
+            .and_then(|c| c.text.chars().next())
+            .is_some_and(is_word_char)
+    };
+    if !is_word(x) {
+        return (x, x);
+    }
+    let mut l = x;
+    while l > 0 && is_word(l - 1) {
+        l -= 1;
+    }
+    let mut r = x;
+    while r + 1 < snap.cols && is_word(r + 1) {
+        r += 1;
+    }
+    (l, r)
+}
+
+/// Find a URL spanning column `x` on row `y`: expand over the contiguous
+/// non-whitespace token under the cursor, strip trailing punctuation, and
+/// accept it only if it has a known scheme (or a leading `www.`, which gets an
+/// `https://` prefix). Returns the openable URL, else `None`.
+fn find_url_at(snap: &GridSnapshot, x: u16, y: u16) -> Option<String> {
+    let cols = snap.cols;
+    if cols == 0 || x >= cols {
+        return None;
+    }
+    let char_at = |cx: u16| {
+        snap.cell(cx, y)
+            .and_then(|c| c.text.chars().next())
+            .filter(|c| !c.is_whitespace())
+    };
+    char_at(x)?;
+    let mut l = x;
+    while l > 0 && char_at(l - 1).is_some() {
+        l -= 1;
+    }
+    let mut r = x;
+    while r + 1 < cols && char_at(r + 1).is_some() {
+        r += 1;
+    }
+    let token: String = (l..=r).filter_map(char_at).collect();
+    let trimmed = token.trim_end_matches(|c| {
+        matches!(c, '.' | ',' | ')' | ']' | '}' | '>' | '"' | '\'' | ';' | ':')
+    });
+    if trimmed.starts_with("http://")
+        || trimmed.starts_with("https://")
+        || trimmed.starts_with("ftp://")
+        || trimmed.starts_with("file://")
+    {
+        Some(trimmed.to_string())
+    } else if trimmed.starts_with("www.") {
+        Some(format!("https://{trimmed}"))
+    } else {
+        None
     }
 }
 
@@ -366,7 +551,7 @@ fn is_text_producing(code: KeyCode) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::extract_selection;
+    use super::{extract_selection, find_url_at, word_bounds};
     use crate::engine::{Cell, GridSnapshot};
 
     fn grid(rows: &[&str], cols: u16) -> GridSnapshot {
@@ -396,5 +581,49 @@ mod tests {
         assert_eq!(extract_selection(&s, (0, 4)), "hello");
         let s2 = grid(&["hi   ", "bye  "], 5);
         assert_eq!(extract_selection(&s2, (0, 9)), "hi\nbye");
+    }
+
+    #[test]
+    fn word_bounds_expands_over_word_chars() {
+        // "ls /usr/bin foo" on a 16-wide row.
+        let s = grid(&["ls /usr/bin foo "], 16);
+        // Click inside "ls" (col 0..1).
+        assert_eq!(word_bounds(&s, 1, 0), (0, 1));
+        // Click inside the path "/usr/bin" (cols 3..10) — slashes stay in-word.
+        assert_eq!(word_bounds(&s, 6, 0), (3, 10));
+        // Click on a space is its own (empty) selection.
+        assert_eq!(word_bounds(&s, 2, 0), (2, 2));
+        // Click inside "foo" (cols 12..14).
+        assert_eq!(word_bounds(&s, 13, 0), (12, 14));
+    }
+
+    #[test]
+    fn word_bounds_stops_at_bracket_punctuation() {
+        let s = grid(&["a(bc)d", "     "], 6);
+        // '(' and ')' are separators, so "bc" is bounded by them.
+        assert_eq!(word_bounds(&s, 3, 0), (2, 3));
+        // 'a' alone before '('.
+        assert_eq!(word_bounds(&s, 0, 0), (0, 0));
+    }
+
+    #[test]
+    fn detects_url_under_cursor() {
+        let s = grid(&["see https://aka.ms/x now"], 24);
+        // Click inside the URL (cols 4..21).
+        assert_eq!(
+            find_url_at(&s, 10, 0).as_deref(),
+            Some("https://aka.ms/x")
+        );
+        // Click on a plain word → no URL.
+        assert_eq!(find_url_at(&s, 1, 0), None); // "see"
+        // Trailing period is stripped.
+        let s2 = grid(&["go http://x.io.        "], 23);
+        assert_eq!(find_url_at(&s2, 5, 0).as_deref(), Some("http://x.io"));
+        // Bare www. gets an https prefix.
+        let s3 = grid(&["www.example.com        "], 23);
+        assert_eq!(
+            find_url_at(&s3, 2, 0).as_deref(),
+            Some("https://www.example.com")
+        );
     }
 }
