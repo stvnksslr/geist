@@ -42,8 +42,15 @@ impl Tab {
 /// subtrees along one axis. `Empty` is a transient placeholder used only while
 /// restructuring the tree (never laid out or rendered).
 enum Node {
-    Leaf { id: u64, session: Session },
-    Split { vertical: bool, first: Box<Node>, second: Box<Node> },
+    Leaf {
+        id: u64,
+        session: Session,
+    },
+    Split {
+        vertical: bool,
+        first: Box<Node>,
+        second: Box<Node>,
+    },
     Empty,
 }
 
@@ -60,9 +67,7 @@ impl Node {
     fn contains(&self, target: u64) -> bool {
         match self {
             Node::Leaf { id, .. } => *id == target,
-            Node::Split { first, second, .. } => {
-                first.contains(target) || second.contains(target)
-            }
+            Node::Split { first, second, .. } => first.contains(target) || second.contains(target),
             Node::Empty => false,
         }
     }
@@ -110,14 +115,23 @@ impl Node {
     /// Replace leaf `target` with a `Split` of the existing pane and a new leaf
     /// (`new_id`/`new_session`) along `vertical`. Only the focused leaf changes;
     /// the rest of the tree keeps its shape. Returns false if `target` is absent.
-    fn split_leaf(&mut self, target: u64, vertical: bool, new_id: u64, new_session: Session) -> bool {
+    fn split_leaf(
+        &mut self,
+        target: u64,
+        vertical: bool,
+        new_id: u64,
+        new_session: Session,
+    ) -> bool {
         match self {
             Node::Leaf { id, .. } if *id == target => {
                 let old = std::mem::replace(self, Node::Empty);
                 *self = Node::Split {
                     vertical,
                     first: Box::new(old),
-                    second: Box::new(Node::Leaf { id: new_id, session: new_session }),
+                    second: Box::new(Node::Leaf {
+                        id: new_id,
+                        session: new_session,
+                    }),
                 };
                 true
             }
@@ -137,17 +151,19 @@ impl Node {
     fn remove_leaf(self, target: u64) -> Option<Node> {
         match self {
             Node::Leaf { id, .. } if id == target => None,
-            Node::Split { vertical, first, second } => {
-                match (first.remove_leaf(target), second.remove_leaf(target)) {
-                    (Some(a), Some(b)) => Some(Node::Split {
-                        vertical,
-                        first: Box::new(a),
-                        second: Box::new(b),
-                    }),
-                    (Some(n), None) | (None, Some(n)) => Some(n),
-                    (None, None) => None,
-                }
-            }
+            Node::Split {
+                vertical,
+                first,
+                second,
+            } => match (first.remove_leaf(target), second.remove_leaf(target)) {
+                (Some(a), Some(b)) => Some(Node::Split {
+                    vertical,
+                    first: Box::new(a),
+                    second: Box::new(b),
+                }),
+                (Some(n), None) | (None, Some(n)) => Some(n),
+                (None, None) => None,
+            },
             other => Some(other),
         }
     }
@@ -157,17 +173,19 @@ impl Node {
     fn prune_dead(self) -> Option<Node> {
         match self {
             Node::Leaf { session, .. } if !session.is_alive() => None,
-            Node::Split { vertical, first, second } => {
-                match (first.prune_dead(), second.prune_dead()) {
-                    (Some(a), Some(b)) => Some(Node::Split {
-                        vertical,
-                        first: Box::new(a),
-                        second: Box::new(b),
-                    }),
-                    (Some(n), None) | (None, Some(n)) => Some(n),
-                    (None, None) => None,
-                }
-            }
+            Node::Split {
+                vertical,
+                first,
+                second,
+            } => match (first.prune_dead(), second.prune_dead()) {
+                (Some(a), Some(b)) => Some(Node::Split {
+                    vertical,
+                    first: Box::new(a),
+                    second: Box::new(b),
+                }),
+                (Some(n), None) | (None, Some(n)) => Some(n),
+                (None, None) => None,
+            },
             other => Some(other),
         }
     }
@@ -176,8 +194,16 @@ impl Node {
     /// split's axis (with a gutter between children).
     fn collect<'a>(&'a mut self, area: egui::Rect, out: &mut Vec<Leaf<'a>>) {
         match self {
-            Node::Leaf { id, session } => out.push(Leaf { id: *id, session, rect: area }),
-            Node::Split { vertical, first, second } => {
+            Node::Leaf { id, session } => out.push(Leaf {
+                id: *id,
+                session,
+                rect: area,
+            }),
+            Node::Split {
+                vertical,
+                first,
+                second,
+            } => {
                 let (a, b) = split_rect(area, *vertical);
                 first.collect(a, out);
                 second.collect(b, out);
@@ -303,7 +329,10 @@ impl App {
 
     /// Spawn a session for profile `idx` (clamped to the default if invalid).
     fn spawn_session(&self, idx: usize) -> Option<Session> {
-        let profile = self.profiles.get(idx).unwrap_or(&self.profiles[self.default_profile]);
+        let profile = self
+            .profiles
+            .get(idx)
+            .unwrap_or(&self.profiles[self.default_profile]);
         Session::new(&self.egui_ctx, &self.config, profile)
             .map_err(|e| eprintln!("giest: failed to open session: {e}"))
             .ok()
@@ -420,7 +449,7 @@ impl App {
                 match key {
                     egui::Key::T => self.new_tab(self.default_profile),
                     egui::Key::W => self.close_focused(ctx),
-                    egui::Key::D => self.split(true),  // vertical (columns)
+                    egui::Key::D => self.split(true), // vertical (columns)
                     egui::Key::E => self.split(false), // horizontal (rows)
                     // Ctrl+Shift+1..8 jump to that tab; Ctrl+Shift+9 → last tab.
                     egui::Key::Num1 => self.goto_tab(0),

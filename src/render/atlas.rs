@@ -553,7 +553,12 @@ impl Atlas {
         );
         let inv = 1.0 / ATLAS_SIZE as f32;
         GlyphInfo {
-            uv: [ax as f32 * inv, ay as f32 * inv, w as f32 * inv, h as f32 * inv],
+            uv: [
+                ax as f32 * inv,
+                ay as f32 * inv,
+                w as f32 * inv,
+                h as f32 * inv,
+            ],
             offset: [min.0, self.ascent + min.1],
             size: [w as f32, h as f32],
         }
@@ -617,7 +622,12 @@ impl Atlas {
 
         let inv = 1.0 / ATLAS_SIZE as f32;
         GlyphInfo {
-            uv: [ax as f32 * inv, ay as f32 * inv, w as f32 * inv, h as f32 * inv],
+            uv: [
+                ax as f32 * inv,
+                ay as f32 * inv,
+                w as f32 * inv,
+                h as f32 * inv,
+            ],
             offset: [min.0, self.ascent + min.1],
             size: [w as f32, h as f32],
         }
@@ -667,14 +677,20 @@ mod tests {
         };
         // U+1F600 GRINNING FACE is a COLR/CPAL color glyph.
         let gid = cf.face.glyph_index('😀').expect("emoji glyph index");
-        assert!(cf.face.is_color_glyph(gid), "grinning face should be a color glyph");
+        assert!(
+            cf.face.is_color_glyph(gid),
+            "grinning face should be a color glyph"
+        );
 
         let mut collector = LayerCollector::default();
         let fg = ttf_parser::RgbaColor::new(255, 255, 255, 255);
         cf.face
             .paint_color_glyph(gid, 0, fg, &mut collector)
             .expect("paint color glyph");
-        assert!(!collector.layers.is_empty(), "expected at least one color layer");
+        assert!(
+            !collector.layers.is_empty(),
+            "expected at least one color layer"
+        );
 
         let (rgba, w, h, _) =
             composite_color_layers(&cf.raster, &collector.layers, 32.0, false).expect("composite");
@@ -683,7 +699,10 @@ mod tests {
         let colored = rgba
             .chunks_exact(4)
             .any(|p| p[3] > 0 && (p[0] > 0 || p[1] > 0 || p[2] > 0));
-        assert!(colored, "composited emoji should have colored opaque pixels");
+        assert!(
+            colored,
+            "composited emoji should have colored opaque pixels"
+        );
     }
 
     #[test]
@@ -691,12 +710,18 @@ mod tests {
         // The primary JetBrains Mono face has no CJK; the system fallback chain
         // must cover it so e.g. '中' renders instead of a blank cell.
         let primary = FontRef::try_from_slice(FONT_REGULAR).unwrap();
-        assert_eq!(primary.glyph_id('中').0, 0, "primary unexpectedly covers CJK");
+        assert_eq!(
+            primary.glyph_id('中').0,
+            0,
+            "primary unexpectedly covers CJK"
+        );
 
         let mut covered = false;
         let mut any_present = false;
         for (path, idx) in FALLBACK_FONTS {
-            let Ok(bytes) = std::fs::read(path) else { continue };
+            let Ok(bytes) = std::fs::read(path) else {
+                continue;
+            };
             any_present = true;
             if let Ok(f) = FontVec::try_from_vec_and_index(bytes, *idx) {
                 if f.glyph_id('中').0 != 0 {
@@ -706,7 +731,10 @@ mod tests {
             }
         }
         if any_present {
-            assert!(covered, "a fallback font is present but none covered CJK '中'");
+            assert!(
+                covered,
+                "a fallback font is present but none covered CJK '中'"
+            );
         }
     }
 

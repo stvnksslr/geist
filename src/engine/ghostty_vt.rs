@@ -65,28 +65,80 @@ impl GhosttyVtEngine {
 fn map_key(code: KeyCode) -> Key {
     use KeyCode::*;
     match code {
-        A => Key::A, B => Key::B, C => Key::C, D => Key::D, E => Key::E,
-        F => Key::F, G => Key::G, H => Key::H, I => Key::I, J => Key::J,
-        K => Key::K, L => Key::L, M => Key::M, N => Key::N, O => Key::O,
-        P => Key::P, Q => Key::Q, R => Key::R, S => Key::S, T => Key::T,
-        U => Key::U, V => Key::V, W => Key::W, X => Key::X, Y => Key::Y, Z => Key::Z,
-        Digit0 => Key::Digit0, Digit1 => Key::Digit1, Digit2 => Key::Digit2,
-        Digit3 => Key::Digit3, Digit4 => Key::Digit4, Digit5 => Key::Digit5,
-        Digit6 => Key::Digit6, Digit7 => Key::Digit7, Digit8 => Key::Digit8,
+        A => Key::A,
+        B => Key::B,
+        C => Key::C,
+        D => Key::D,
+        E => Key::E,
+        F => Key::F,
+        G => Key::G,
+        H => Key::H,
+        I => Key::I,
+        J => Key::J,
+        K => Key::K,
+        L => Key::L,
+        M => Key::M,
+        N => Key::N,
+        O => Key::O,
+        P => Key::P,
+        Q => Key::Q,
+        R => Key::R,
+        S => Key::S,
+        T => Key::T,
+        U => Key::U,
+        V => Key::V,
+        W => Key::W,
+        X => Key::X,
+        Y => Key::Y,
+        Z => Key::Z,
+        Digit0 => Key::Digit0,
+        Digit1 => Key::Digit1,
+        Digit2 => Key::Digit2,
+        Digit3 => Key::Digit3,
+        Digit4 => Key::Digit4,
+        Digit5 => Key::Digit5,
+        Digit6 => Key::Digit6,
+        Digit7 => Key::Digit7,
+        Digit8 => Key::Digit8,
         Digit9 => Key::Digit9,
-        Enter => Key::Enter, Tab => Key::Tab, Backspace => Key::Backspace,
-        Escape => Key::Escape, Space => Key::Space, Delete => Key::Delete,
-        Insert => Key::Insert, Home => Key::Home, End => Key::End,
-        PageUp => Key::PageUp, PageDown => Key::PageDown,
-        ArrowUp => Key::ArrowUp, ArrowDown => Key::ArrowDown,
-        ArrowLeft => Key::ArrowLeft, ArrowRight => Key::ArrowRight,
-        F1 => Key::F1, F2 => Key::F2, F3 => Key::F3, F4 => Key::F4,
-        F5 => Key::F5, F6 => Key::F6, F7 => Key::F7, F8 => Key::F8,
-        F9 => Key::F9, F10 => Key::F10, F11 => Key::F11, F12 => Key::F12,
-        Minus => Key::Minus, Equal => Key::Equal, BracketLeft => Key::BracketLeft,
-        BracketRight => Key::BracketRight, Backslash => Key::Backslash,
-        Semicolon => Key::Semicolon, Quote => Key::Quote, Backquote => Key::Backquote,
-        Comma => Key::Comma, Period => Key::Period, Slash => Key::Slash,
+        Enter => Key::Enter,
+        Tab => Key::Tab,
+        Backspace => Key::Backspace,
+        Escape => Key::Escape,
+        Space => Key::Space,
+        Delete => Key::Delete,
+        Insert => Key::Insert,
+        Home => Key::Home,
+        End => Key::End,
+        PageUp => Key::PageUp,
+        PageDown => Key::PageDown,
+        ArrowUp => Key::ArrowUp,
+        ArrowDown => Key::ArrowDown,
+        ArrowLeft => Key::ArrowLeft,
+        ArrowRight => Key::ArrowRight,
+        F1 => Key::F1,
+        F2 => Key::F2,
+        F3 => Key::F3,
+        F4 => Key::F4,
+        F5 => Key::F5,
+        F6 => Key::F6,
+        F7 => Key::F7,
+        F8 => Key::F8,
+        F9 => Key::F9,
+        F10 => Key::F10,
+        F11 => Key::F11,
+        F12 => Key::F12,
+        Minus => Key::Minus,
+        Equal => Key::Equal,
+        BracketLeft => Key::BracketLeft,
+        BracketRight => Key::BracketRight,
+        Backslash => Key::Backslash,
+        Semicolon => Key::Semicolon,
+        Quote => Key::Quote,
+        Backquote => Key::Backquote,
+        Comma => Key::Comma,
+        Period => Key::Period,
+        Slash => Key::Slash,
     }
 }
 
@@ -144,7 +196,11 @@ mod tests {
         let r = s.cell(2, 0).unwrap();
         assert_eq!(r.text, "R");
         // Default ANSI red has a dominant red channel.
-        assert!(r.fg.r > r.fg.g && r.fg.r > r.fg.b, "expected reddish fg, got {:?}", r.fg);
+        assert!(
+            r.fg.r > r.fg.g && r.fg.r > r.fg.b,
+            "expected reddish fg, got {:?}",
+            r.fg
+        );
     }
 
     #[test]
@@ -217,7 +273,10 @@ mod tests {
         let bytes = eng.encode_key(&KeyInput {
             code: KeyCode::C,
             text: None,
-            mods: KeyMods { ctrl: true, ..Default::default() },
+            mods: KeyMods {
+                ctrl: true,
+                ..Default::default()
+            },
             press: true,
         });
         assert_eq!(bytes, b"\x03");
@@ -288,7 +347,11 @@ impl TerminalEngine for GhosttyVtEngine {
         self.encoder.set_options_from_terminal(&self.term);
 
         let mut out = Vec::with_capacity(16);
-        if self.encoder.encode_to_vec(&self.key_event, &mut out).is_err() {
+        if self
+            .encoder
+            .encode_to_vec(&self.key_event, &mut out)
+            .is_err()
+        {
             out.clear();
         }
         out

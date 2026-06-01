@@ -263,10 +263,23 @@ mod tests {
 
     #[test]
     fn parses_palette_entries() {
-        assert_eq!(parse_palette_entry("0=#1d1f21"), Some((0, Rgb::new(0x1d, 0x1f, 0x21))));
-        assert_eq!(parse_palette_entry(" 15 = #eaeaea "), Some((15, Rgb::new(0xea, 0xea, 0xea))));
-        assert_eq!(parse_palette_entry("255=#000000"), Some((255, Rgb::new(0, 0, 0))));
-        assert_eq!(parse_palette_entry("256=#000000"), None, "index out of range");
+        assert_eq!(
+            parse_palette_entry("0=#1d1f21"),
+            Some((0, Rgb::new(0x1d, 0x1f, 0x21)))
+        );
+        assert_eq!(
+            parse_palette_entry(" 15 = #eaeaea "),
+            Some((15, Rgb::new(0xea, 0xea, 0xea)))
+        );
+        assert_eq!(
+            parse_palette_entry("255=#000000"),
+            Some((255, Rgb::new(0, 0, 0)))
+        );
+        assert_eq!(
+            parse_palette_entry("256=#000000"),
+            None,
+            "index out of range"
+        );
         assert_eq!(parse_palette_entry("nope"), None);
     }
 

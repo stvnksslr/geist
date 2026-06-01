@@ -385,15 +385,24 @@ impl GpuResources {
                         bg = frame.selection_bg;
                     }
 
-                    out.push(Instance::solid([cell_left, cell_top, cw, ch], self.color(bg, 1.0)));
+                    out.push(Instance::solid(
+                        [cell_left, cell_top, cw, ch],
+                        self.color(bg, 1.0),
+                    ));
 
                     if cell.underline {
                         let y = (cell_top + ascent + line_h).round();
-                        glyphs.push(Instance::solid([cell_left, y, cw, line_h], self.color(fg, 1.0)));
+                        glyphs.push(Instance::solid(
+                            [cell_left, y, cw, line_h],
+                            self.color(fg, 1.0),
+                        ));
                     }
                     if cell.strikethrough {
                         let y = (cell_top + ch * 0.5).round();
-                        glyphs.push(Instance::solid([cell_left, y, cw, line_h], self.color(fg, 1.0)));
+                        glyphs.push(Instance::solid(
+                            [cell_left, y, cw, line_h],
+                            self.color(fg, 1.0),
+                        ));
                     }
                 }
             }
@@ -409,13 +418,14 @@ impl GpuResources {
                 // cell breaks the run so the next non-blank starts a fresh one).
                 let mut cur_open = false;
                 for x in 0..snap.cols {
-                    let Some(cell) = snap.cell(x, y) else { continue };
+                    let Some(cell) = snap.cell(x, y) else {
+                        continue;
+                    };
                     if cell.text.is_empty() {
                         cur_open = false;
                         continue;
                     }
-                    let is_cursor_cell =
-                        filled_block && x == snap.cursor_x && y == snap.cursor_y;
+                    let is_cursor_cell = filled_block && x == snap.cursor_x && y == snap.cursor_y;
                     let lin = y as usize * snap.cols as usize + x as usize;
                     let selected = pane.selection.is_some_and(|(a, b)| lin >= a && lin <= b);
                     let fg = if is_cursor_cell {
@@ -465,7 +475,9 @@ impl GpuResources {
                         // character; resolve it from the fallback chain (color
                         // emoji → mode 2, monochrome → mode 1).
                         let placed: Option<(_, u32)> = if sg.glyph_id != 0 {
-                            self.atlas.glyph(sg.glyph_id, r.style, queue).map(|g| (g, 1))
+                            self.atlas
+                                .glyph(sg.glyph_id, r.style, queue)
+                                .map(|g| (g, 1))
                         } else {
                             match r.text[sg.cluster as usize..]
                                 .chars()
@@ -509,9 +521,15 @@ impl GpuResources {
                 // Four 1px edges forming an outline around the cursor cell.
                 let t = 1.0_f32;
                 cursors.push(Instance::solid([cur_left, cur_top, cw, t], cur_color));
-                cursors.push(Instance::solid([cur_left, cur_top + ch - t, cw, t], cur_color));
+                cursors.push(Instance::solid(
+                    [cur_left, cur_top + ch - t, cw, t],
+                    cur_color,
+                ));
                 cursors.push(Instance::solid([cur_left, cur_top, t, ch], cur_color));
-                cursors.push(Instance::solid([cur_left + cw - t, cur_top, t, ch], cur_color));
+                cursors.push(Instance::solid(
+                    [cur_left + cw - t, cur_top, t, ch],
+                    cur_color,
+                ));
             } else if snap.cursor_visible && !filled_block {
                 let rect = match snap.cursor_shape {
                     CursorShape::Bar => [cur_left, cur_top, (cw * 0.12).max(1.0), ch],

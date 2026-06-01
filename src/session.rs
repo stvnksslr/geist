@@ -123,16 +123,28 @@ impl Session {
         if cols != self.cols || rows != self.rows {
             self.cols = cols;
             self.rows = rows;
-            let _ = self.engine.resize(cols, rows, (cell_w as u32, cell_h as u32));
+            let _ = self
+                .engine
+                .resize(cols, rows, (cell_w as u32, cell_h as u32));
             let _ = self.pty.resize(cols, rows);
         }
     }
 
     /// Convert a pointer position (points) to a clamped grid cell.
-    pub fn pos_to_cell(&self, pos: egui::Pos2, rect: egui::Rect, ppp: f32, cw: f32, ch: f32) -> (u16, u16) {
+    pub fn pos_to_cell(
+        &self,
+        pos: egui::Pos2,
+        rect: egui::Rect,
+        ppp: f32,
+        cw: f32,
+        ch: f32,
+    ) -> (u16, u16) {
         let x = ((pos.x - rect.min.x) * ppp / cw).floor().max(0.0) as u16;
         let y = ((pos.y - rect.min.y) * ppp / ch).floor().max(0.0) as u16;
-        (x.min(self.cols.saturating_sub(1)), y.min(self.rows.saturating_sub(1)))
+        (
+            x.min(self.cols.saturating_sub(1)),
+            y.min(self.rows.saturating_sub(1)),
+        )
     }
 
     pub fn begin_selection(&mut self, cell: (u16, u16)) {
@@ -302,10 +314,20 @@ impl Session {
     }
 
     /// Report mouse events to the running app (only when it tracks the mouse).
-    pub fn handle_mouse(&mut self, ctx: &egui::Context, rect: egui::Rect, ppp: f32, cw: f32, ch: f32) {
+    pub fn handle_mouse(
+        &mut self,
+        ctx: &egui::Context,
+        rect: egui::Rect,
+        ppp: f32,
+        cw: f32,
+        ch: f32,
+    ) {
         let (events, scroll_y) = ctx.input(|i| (i.events.clone(), i.smooth_scroll_delta.y));
         let cell_px = (cw as u32, ch as u32);
-        let screen_px = ((self.cols as f32 * cw) as u32, (self.rows as f32 * ch) as u32);
+        let screen_px = (
+            (self.cols as f32 * cw) as u32,
+            (self.rows as f32 * ch) as u32,
+        );
         let to_px = |pos: egui::Pos2| -> (u32, u32) {
             (
                 ((pos.x - rect.min.x) * ppp).max(0.0) as u32,
@@ -413,7 +435,20 @@ fn is_word_char(ch: char) -> bool {
     !ch.is_whitespace()
         && !matches!(
             ch,
-            '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' | '|' | '&' | ';' | ',' | '"' | '\'' | '`'
+            '(' | ')'
+                | '['
+                | ']'
+                | '{'
+                | '}'
+                | '<'
+                | '>'
+                | '|'
+                | '&'
+                | ';'
+                | ','
+                | '"'
+                | '\''
+                | '`'
         )
 }
 
@@ -464,7 +499,10 @@ fn find_url_at(snap: &GridSnapshot, x: u16, y: u16) -> Option<String> {
     }
     let token: String = (l..=r).filter_map(char_at).collect();
     let trimmed = token.trim_end_matches(|c| {
-        matches!(c, '.' | ',' | ')' | ']' | '}' | '>' | '"' | '\'' | ';' | ':')
+        matches!(
+            c,
+            '.' | ',' | ')' | ']' | '}' | '>' | '"' | '\'' | ';' | ':'
+        )
     });
     if trimmed.starts_with("http://")
         || trimmed.starts_with("https://")
@@ -511,29 +549,80 @@ fn map_egui_key(key: egui::Key) -> Option<KeyCode> {
     use KeyCode as C;
     use egui::Key as K;
     Some(match key {
-        K::A => C::A, K::B => C::B, K::C => C::C, K::D => C::D, K::E => C::E,
-        K::F => C::F, K::G => C::G, K::H => C::H, K::I => C::I, K::J => C::J,
-        K::K => C::K, K::L => C::L, K::M => C::M, K::N => C::N, K::O => C::O,
-        K::P => C::P, K::Q => C::Q, K::R => C::R, K::S => C::S, K::T => C::T,
-        K::U => C::U, K::V => C::V, K::W => C::W, K::X => C::X, K::Y => C::Y, K::Z => C::Z,
-        K::Num0 => C::Digit0, K::Num1 => C::Digit1, K::Num2 => C::Digit2,
-        K::Num3 => C::Digit3, K::Num4 => C::Digit4, K::Num5 => C::Digit5,
-        K::Num6 => C::Digit6, K::Num7 => C::Digit7, K::Num8 => C::Digit8,
+        K::A => C::A,
+        K::B => C::B,
+        K::C => C::C,
+        K::D => C::D,
+        K::E => C::E,
+        K::F => C::F,
+        K::G => C::G,
+        K::H => C::H,
+        K::I => C::I,
+        K::J => C::J,
+        K::K => C::K,
+        K::L => C::L,
+        K::M => C::M,
+        K::N => C::N,
+        K::O => C::O,
+        K::P => C::P,
+        K::Q => C::Q,
+        K::R => C::R,
+        K::S => C::S,
+        K::T => C::T,
+        K::U => C::U,
+        K::V => C::V,
+        K::W => C::W,
+        K::X => C::X,
+        K::Y => C::Y,
+        K::Z => C::Z,
+        K::Num0 => C::Digit0,
+        K::Num1 => C::Digit1,
+        K::Num2 => C::Digit2,
+        K::Num3 => C::Digit3,
+        K::Num4 => C::Digit4,
+        K::Num5 => C::Digit5,
+        K::Num6 => C::Digit6,
+        K::Num7 => C::Digit7,
+        K::Num8 => C::Digit8,
         K::Num9 => C::Digit9,
-        K::Enter => C::Enter, K::Tab => C::Tab, K::Backspace => C::Backspace,
-        K::Escape => C::Escape, K::Space => C::Space, K::Delete => C::Delete,
-        K::Insert => C::Insert, K::Home => C::Home, K::End => C::End,
-        K::PageUp => C::PageUp, K::PageDown => C::PageDown,
-        K::ArrowUp => C::ArrowUp, K::ArrowDown => C::ArrowDown,
-        K::ArrowLeft => C::ArrowLeft, K::ArrowRight => C::ArrowRight,
-        K::F1 => C::F1, K::F2 => C::F2, K::F3 => C::F3, K::F4 => C::F4,
-        K::F5 => C::F5, K::F6 => C::F6, K::F7 => C::F7, K::F8 => C::F8,
-        K::F9 => C::F9, K::F10 => C::F10, K::F11 => C::F11, K::F12 => C::F12,
-        K::Minus => C::Minus, K::Equals => C::Equal,
-        K::OpenBracket => C::BracketLeft, K::CloseBracket => C::BracketRight,
-        K::Backslash => C::Backslash, K::Semicolon => C::Semicolon,
-        K::Quote => C::Quote, K::Backtick => C::Backquote,
-        K::Comma => C::Comma, K::Period => C::Period, K::Slash => C::Slash,
+        K::Enter => C::Enter,
+        K::Tab => C::Tab,
+        K::Backspace => C::Backspace,
+        K::Escape => C::Escape,
+        K::Space => C::Space,
+        K::Delete => C::Delete,
+        K::Insert => C::Insert,
+        K::Home => C::Home,
+        K::End => C::End,
+        K::PageUp => C::PageUp,
+        K::PageDown => C::PageDown,
+        K::ArrowUp => C::ArrowUp,
+        K::ArrowDown => C::ArrowDown,
+        K::ArrowLeft => C::ArrowLeft,
+        K::ArrowRight => C::ArrowRight,
+        K::F1 => C::F1,
+        K::F2 => C::F2,
+        K::F3 => C::F3,
+        K::F4 => C::F4,
+        K::F5 => C::F5,
+        K::F6 => C::F6,
+        K::F7 => C::F7,
+        K::F8 => C::F8,
+        K::F9 => C::F9,
+        K::F10 => C::F10,
+        K::F11 => C::F11,
+        K::F12 => C::F12,
+        K::Minus => C::Minus,
+        K::Equals => C::Equal,
+        K::OpenBracket => C::BracketLeft,
+        K::CloseBracket => C::BracketRight,
+        K::Backslash => C::Backslash,
+        K::Semicolon => C::Semicolon,
+        K::Quote => C::Quote,
+        K::Backtick => C::Backquote,
+        K::Comma => C::Comma,
+        K::Period => C::Period,
+        K::Slash => C::Slash,
         _ => return None,
     })
 }
@@ -543,9 +632,32 @@ fn is_text_producing(code: KeyCode) -> bool {
     use KeyCode::*;
     !matches!(
         code,
-        Enter | Tab | Backspace | Escape | Delete | Insert | Home | End
-            | PageUp | PageDown | ArrowUp | ArrowDown | ArrowLeft | ArrowRight
-            | F1 | F2 | F3 | F4 | F5 | F6 | F7 | F8 | F9 | F10 | F11 | F12
+        Enter
+            | Tab
+            | Backspace
+            | Escape
+            | Delete
+            | Insert
+            | Home
+            | End
+            | PageUp
+            | PageDown
+            | ArrowUp
+            | ArrowDown
+            | ArrowLeft
+            | ArrowRight
+            | F1
+            | F2
+            | F3
+            | F4
+            | F5
+            | F6
+            | F7
+            | F8
+            | F9
+            | F10
+            | F11
+            | F12
     )
 }
 
@@ -610,10 +722,7 @@ mod tests {
     fn detects_url_under_cursor() {
         let s = grid(&["see https://aka.ms/x now"], 24);
         // Click inside the URL (cols 4..21).
-        assert_eq!(
-            find_url_at(&s, 10, 0).as_deref(),
-            Some("https://aka.ms/x")
-        );
+        assert_eq!(find_url_at(&s, 10, 0).as_deref(), Some("https://aka.ms/x"));
         // Click on a plain word → no URL.
         assert_eq!(find_url_at(&s, 1, 0), None); // "see"
         // Trailing period is stripped.
