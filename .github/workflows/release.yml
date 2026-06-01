@@ -1,0 +1,110 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # create the GitHub Release and upload assets
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false # never cancel a release mid-upload
+
+env:
+  # Keep in sync with the pinned commit in
+  # vendor/libghostty-rs/crates/libghostty-vt-sys/build.rs
+  GHOSTTY_COMMIT: b869a6e5ab0a50ce01e8eb5aa408a02b3cbe4f3a
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-pc-windows-msvc
+          - aarch64-pc-windows-msvc
+    env:
+      GHOSTTY_SOURCE_DIR: ${{ runner.temp }}/ghostty-src
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # ARM64 cross-link needs the ARM64 MSVC toolchain environment on the x64 runner.
+      - name: Set up ARM64 MSVC environment
+        if: matrix.target == 'aarch64-pc-windows-msvc'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64_arm64
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - uses: dtolnay/rust-toolchain@1.96
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache ghostty source
+        id: ghostty-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.GHOSTTY_SOURCE_DIR }}
+          key: ghostty-src-${{ env.GHOSTTY_COMMIT }}
+
+      - name: Fetch ghostty source (cache miss)
+        if: steps.ghostty-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --filter=blob:none --no-checkout https://github.com/ghostty-org/ghostty.git "$GHOSTTY_SOURCE_DIR"
+          git -C "$GHOSTTY_SOURCE_DIR" checkout "$GHOSTTY_COMMIT"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: rel-${{ matrix.target }}-${{ env.GHOSTTY_COMMIT }}
+
+      - name: Build release
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $ver  = "${env:GITHUB_REF_NAME}".TrimStart('v')
+          $stem = "giest-$ver-${{ matrix.target }}"
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/giest.exe" "dist/$stem.exe"
+          Compress-Archive -Path "target/${{ matrix.target }}/release/giest.exe" -DestinationPath "dist/$stem.zip" -Force
+          $hash = (Get-FileHash "dist/$stem.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $stem.zip" | Out-File -Encoding ascii "dist/$stem.zip.sha256"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: dist/*

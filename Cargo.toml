@@ -2,6 +2,7 @@
 name = "giest"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
 
 [dependencies]
 # Safe Rust bindings to libghostty-vt (Ghostty's VT engine). Vendored from

@@ -13,6 +13,26 @@ custom **wgpu glyph-atlas** pipeline; the shell runs over **ConPTY**.
 > macOS Ghostty parity; the remaining gaps (kitty graphics, explicit OSC 8) are
 > in the roadmap below.
 
+## Install (prebuilt binaries)
+
+Tagged releases publish ready-to-run Windows binaries on the
+[GitHub Releases](../../releases) page. Each release includes:
+
+- `giest-<version>-x86_64-pc-windows-msvc.exe` — for 64-bit Intel/AMD Windows.
+- `giest-<version>-aarch64-pc-windows-msvc.exe` — for ARM64 Windows.
+- A matching `.zip` and `.zip.sha256` checksum for each target.
+
+The binary is **self-contained** — the terminal font is embedded and the system
+fallback fonts ship with Windows, so there is nothing else to install. Download
+the `.exe` for your architecture and run it.
+
+> The binaries are **unsigned**, so Windows SmartScreen may warn on first launch
+> ("Windows protected your PC"). Choose *More info → Run anyway* to start it. To
+> verify a download, compare its SHA-256 against the published `.sha256` file:
+> `Get-FileHash giest-<version>-x86_64-pc-windows-msvc.zip -Algorithm SHA256`.
+
+To build from source instead, see [Build & run](#build--run) below.
+
 ## Architecture
 
 ```
@@ -33,7 +53,8 @@ directly — leaving room for a pure-Rust fallback engine without app changes.
 
 ## Build prerequisites
 
-- **Rust** (stable, edition 2024 — 1.95+).
+- **Rust** (edition 2024). A `rust-toolchain.toml` pins the compiler to `1.96`;
+  with [rustup] installed, the right toolchain is fetched automatically.
 - **Zig 0.15.2** on `PATH`. The vendored `libghostty-vt-sys` build script
   compiles Ghostty's VT library with Zig. The pinned Ghostty commit requires
   exactly the 0.15.x series; **0.16.x will not build it**. Get it from
@@ -175,3 +196,4 @@ colored output.)
 [libghostty-vt]: https://ghostty.org
 [Uzaaft/libghostty-rs]: https://github.com/Uzaaft/libghostty-rs
 [mise]: https://mise.jdx.dev
+[rustup]: https://rustup.rs

@@ -1,0 +1,5 @@
+[toolchain]
+# Pin the compiler so local builds, mise, and CI all agree. 1.96 satisfies the
+# vendored libghostty-rs workspace MSRV (1.90) and edition 2024 (stable since 1.85).
+channel = "1.96"
+components = ["rustfmt", "clippy"]
