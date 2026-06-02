@@ -1,0 +1,80 @@
+site_name: giest
+site_description: >-
+  A GPU-accelerated terminal emulator for Windows, in Rust — eframe (egui + wgpu)
+  for the window, libghostty-vt for the terminal model, ConPTY for the shell.
+site_url: https://stvnksslr.github.io/giest/
+repo_url: https://github.com/stvnksslr/giest
+repo_name: stvnksslr/giest
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.sections
+    - navigation.top
+    - navigation.indexes
+    - toc.follow
+    - content.code.copy
+    - content.code.annotate
+  palette:
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: deep purple
+      accent: purple
+      toggle:
+        icon: material/weather-night
+        name: Switch to light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: deep purple
+      accent: purple
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to dark mode
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+
+plugins:
+  - search
+
+nav:
+  - Home: index.md
+  - Architecture:
+      - Overview: architecture/overview.md
+      - Layered design: architecture/layers.md
+      - Data flow: architecture/data-flow.md
+  - OS / libghostty touch points:
+      - Overview: touchpoints/overview.md
+      - Operating system (Windows): touchpoints/os.md
+      - libghostty-vt: touchpoints/libghostty.md
+  - Components:
+      - app.rs — window & panes: components/app.md
+      - session.rs — one session: components/session.md
+      - engine — the VT trait: components/engine.md
+      - pty.rs — ConPTY: components/pty.md
+      - render — wgpu pipeline: components/render.md
+      - config & profiles: components/config-profiles.md
+      - osc52.rs — clipboard: components/osc52.md
+  - Guides:
+      - Building & testing: guides/building.md
+      - Configuration: guides/configuration.md
+  - Gotchas: gotchas.md

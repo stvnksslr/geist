@@ -1,3 +1,6 @@
 /target
 /.claude/settings.local.json
 *.log
+
+# MkDocs build output
+/site
