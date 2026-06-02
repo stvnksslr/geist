@@ -242,7 +242,8 @@ fn srgb_channel_to_linear(s: f32) -> f32 {
     }
 }
 
-const FONT_REGULAR: &[u8] = include_bytes!("../../assets/fonts/JetBrainsMonoNerdFont-Regular.ttf");
+pub(crate) const FONT_REGULAR: &[u8] =
+    include_bytes!("../../assets/fonts/JetBrainsMonoNerdFont-Regular.ttf");
 const FONT_BOLD: &[u8] = include_bytes!("../../assets/fonts/JetBrainsMonoNerdFont-Bold.ttf");
 const FONT_ITALIC: &[u8] = include_bytes!("../../assets/fonts/JetBrainsMonoNerdFont-Italic.ttf");
 const FONT_BOLD_ITALIC: &[u8] =

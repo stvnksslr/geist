@@ -82,7 +82,7 @@ impl GridSnapshot {
 }
 
 /// Keyboard modifiers, backend-neutral.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct KeyMods {
     pub shift: bool,
     pub ctrl: bool,
@@ -107,7 +107,7 @@ pub enum KeyCode {
 }
 
 /// A keyboard event to be encoded into a terminal byte sequence.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeyInput {
     pub code: KeyCode,
     /// Resolved text for this key, if egui produced any (used for layout/IME

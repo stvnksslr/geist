@@ -11,6 +11,13 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::engine::{CursorShape, GridSnapshot, Rgb};
 
+/// The embedded primary (regular) monospace font bytes. Exposed for benches that
+/// measure shaping throughput against the real shaping path (rustybuzz over this
+/// face) without needing a GPU device to build a full [`Atlas`].
+pub fn regular_font() -> &'static [u8] {
+    atlas::FONT_REGULAR
+}
+
 /// One instanced quad. `mode` 0 = solid fill (backgrounds/cursor), 1 = glyph
 /// (alpha = atlas coverage). Rect and uv are absolute pixels / normalized UV.
 #[repr(C)]

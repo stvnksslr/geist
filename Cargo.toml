@@ -34,3 +34,18 @@ base64 = "0.22"
 # Unicode display width (1 or 2 cells) for a grapheme cluster's leading char, so
 # the renderer can size/centre wide glyphs (CJK, emoji) over their full cell span.
 unicode-width = "0.2"
+
+[dev-dependencies]
+# Statistical benchmark harness for the host CPU-path benches (see benches/).
+criterion = "0.5"
+
+# Host-environment CPU-path benchmarks. They link the giest *library* (src/lib.rs)
+# so they can drive the engine snapshot and the shaping path directly. Run with
+# `cargo bench` (needs Zig 0.15.2 on PATH to build libghostty-vt).
+[[bench]]
+name = "snapshot"
+harness = false
+
+[[bench]]
+name = "shaping"
+harness = false

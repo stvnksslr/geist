@@ -222,6 +222,70 @@ mod tests {
         });
         assert_eq!(bytes, b"\x03");
     }
+
+    // --- Encode integration: verify giest drives libghostty's encoder with the
+    // live terminal modes (these assert standard xterm sequences, not a
+    // re-derivation of the protocol — that's libghostty's own test surface). ---
+
+    fn key(eng: &mut GhosttyVtEngine, code: KeyCode, mods: KeyMods) -> Vec<u8> {
+        eng.encode_key(&KeyInput {
+            code,
+            text: None,
+            mods,
+            press: true,
+        })
+    }
+
+    #[test]
+    fn arrows_normal_mode() {
+        let mut eng = GhosttyVtEngine::new(80, 24, 100).unwrap();
+        let none = KeyMods::default();
+        assert_eq!(key(&mut eng, KeyCode::ArrowUp, none), b"\x1b[A");
+        assert_eq!(key(&mut eng, KeyCode::ArrowDown, none), b"\x1b[B");
+        assert_eq!(key(&mut eng, KeyCode::ArrowRight, none), b"\x1b[C");
+        assert_eq!(key(&mut eng, KeyCode::ArrowLeft, none), b"\x1b[D");
+    }
+
+    #[test]
+    fn arrows_application_cursor_mode() {
+        let mut eng = GhosttyVtEngine::new(80, 24, 100).unwrap();
+        // DECCKM (application cursor keys) switches CSI to SS3 form.
+        eng.write(b"\x1b[?1h");
+        assert_eq!(key(&mut eng, KeyCode::ArrowUp, KeyMods::default()), b"\x1bOA");
+        assert_eq!(
+            key(&mut eng, KeyCode::ArrowRight, KeyMods::default()),
+            b"\x1bOC"
+        );
+    }
+
+    #[test]
+    fn modified_arrows_emit_csi_modifier() {
+        let mut eng = GhosttyVtEngine::new(80, 24, 100).unwrap();
+        let shift = KeyMods { shift: true, ..Default::default() };
+        let ctrl = KeyMods { ctrl: true, ..Default::default() };
+        let alt = KeyMods { alt: true, ..Default::default() };
+        // xterm modifier params: shift=2, alt=3, ctrl=5 (param-1 bitmask + 1).
+        assert_eq!(key(&mut eng, KeyCode::ArrowRight, shift), b"\x1b[1;2C");
+        assert_eq!(key(&mut eng, KeyCode::ArrowRight, alt), b"\x1b[1;3C");
+        assert_eq!(key(&mut eng, KeyCode::ArrowRight, ctrl), b"\x1b[1;5C");
+    }
+
+    #[test]
+    fn mouse_release_and_large_position_sgr() {
+        let mut eng = GhosttyVtEngine::new(200, 60, 100).unwrap();
+        eng.write(b"\x1b[?1000h\x1b[?1006h");
+        let out = eng.encode_mouse(&MouseInput {
+            action: MouseAction::Release,
+            button: Some(MouseButton::Left),
+            // 1005/10 = col 100 → 1-based 101; 1190/20 = row 59 → 1-based 60.
+            pos_px: (1005, 1190),
+            cell_px: (10, 20),
+            screen_px: (2000, 1200),
+            mods: KeyMods::default(),
+        });
+        // Release in SGR mode terminates with 'm' (press would be 'M').
+        assert_eq!(out, b"\x1b[<0;101;60m");
+    }
 }
 
 fn map_mouse_button(b: MouseButton) -> mouse::Button {

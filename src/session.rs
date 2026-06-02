@@ -118,8 +118,7 @@ impl Session {
 
     /// Resize the grid (and PTY) to fit `area` (points) at scale `ppp`.
     pub fn fit_grid(&mut self, area: egui::Rect, ppp: f32, cell_w: f32, cell_h: f32) {
-        let cols = ((area.width() * ppp / cell_w).floor() as u16).max(1);
-        let rows = ((area.height() * ppp / cell_h).floor() as u16).max(1);
+        let (cols, rows) = grid_dims(area.width(), area.height(), ppp, cell_w, cell_h);
         if cols != self.cols || rows != self.rows {
             self.cols = cols;
             self.rows = rows;
@@ -130,9 +129,7 @@ impl Session {
 
     /// Convert a pointer position (points) to a clamped grid cell.
     pub fn pos_to_cell(&self, pos: egui::Pos2, rect: egui::Rect, ppp: f32, cw: f32, ch: f32) -> (u16, u16) {
-        let x = ((pos.x - rect.min.x) * ppp / cw).floor().max(0.0) as u16;
-        let y = ((pos.y - rect.min.y) * ppp / ch).floor().max(0.0) as u16;
-        (x.min(self.cols.saturating_sub(1)), y.min(self.rows.saturating_sub(1)))
+        cell_from_pos(pos.x - rect.min.x, pos.y - rect.min.y, ppp, cw, ch, self.cols, self.rows)
     }
 
     pub fn begin_selection(&mut self, cell: (u16, u16)) {
@@ -226,71 +223,31 @@ impl Session {
                 // as these events — `command+C` matches whether or not Shift is
                 // held. Windows-Terminal semantics: with a selection, copy it
                 // (and clear); with none, Ctrl+C is an interrupt.
-                egui::Event::Copy | egui::Event::Cut => {
-                    if let Some(text) = self.selected_text() {
+                egui::Event::Copy | egui::Event::Cut => match copy_or_interrupt(self.selected_text())
+                {
+                    CopyAction::Copy(text) => {
                         ctx.copy_text(text);
                         self.clear_selection();
-                    } else {
-                        bytes.push(0x03);
                     }
-                }
+                    CopyAction::Interrupt => bytes.push(0x03),
+                },
                 egui::Event::Key {
                     key,
                     pressed: true,
                     modifiers,
                     ..
-                } => {
-                    let Some(code) = map_egui_key(*key) else {
-                        continue;
-                    };
-                    // Ctrl+Shift is the app's namespace; the shell never sees it.
-                    // The clipboard combos (Ctrl+Shift+C/V/X) arrive as
-                    // Copy/Paste/Cut events handled above, so here we just
-                    // swallow every other Ctrl+Shift combo (tab/split shortcuts).
-                    if modifiers.ctrl && modifiers.shift {
-                        continue;
+                } => match decide_key(*key, modifiers, self.rows) {
+                    KeyAction::Encode(input) => {
+                        bytes.extend_from_slice(&self.engine.encode_key(&input));
                     }
-                    if modifiers.ctrl && code == KeyCode::Tab {
-                        continue;
-                    }
-                    // Shift+PageUp/Down scroll by a page; Shift+Home/End jump to
-                    // the top/bottom of scrollback. These drive the viewport
-                    // instead of being sent to the shell (matches Ghostty).
-                    if modifiers.shift
-                        && matches!(
-                            code,
-                            KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End
-                        )
-                    {
-                        let page = self.rows.saturating_sub(1).max(1) as isize;
-                        match code {
-                            KeyCode::PageUp => self.engine.scroll(-page),
-                            KeyCode::PageDown => self.engine.scroll(page),
-                            KeyCode::Home => self.engine.scroll_to_top(),
-                            KeyCode::End => self.engine.scroll_to_bottom(),
-                            _ => {}
-                        }
-                        continue;
-                    }
-                    // Ctrl +/-/0 are reserved by the app for font zoom.
-                    if modifiers.ctrl
-                        && !modifiers.shift
-                        && matches!(code, KeyCode::Equal | KeyCode::Minus | KeyCode::Digit0)
-                    {
-                        continue;
-                    }
-                    let mods = key_mods(modifiers);
-                    if is_text_producing(code) && !mods.ctrl && !mods.alt {
-                        continue;
-                    }
-                    let encoded = self.engine.encode_key(&KeyInput {
-                        code,
-                        text: None,
-                        mods,
-                        press: true,
-                    });
-                    bytes.extend_from_slice(&encoded);
-                }
+                    KeyAction::Scroll(delta) => self.engine.scroll(delta),
+                    KeyAction::ScrollTop => self.engine.scroll_to_top(),
+                    KeyAction::ScrollBottom => self.engine.scroll_to_bottom(),
+                    // Reserved app combos (Ctrl+Shift/Ctrl+Tab/Ctrl-zoom) and
+                    // text-producing keys (handled by the `Text` event) emit no
+                    // bytes here.
+                    KeyAction::Swallow | KeyAction::Suppress => {}
+                },
                 _ => {}
             }
         }
@@ -308,8 +265,8 @@ impl Session {
         let screen_px = ((self.cols as f32 * cw) as u32, (self.rows as f32 * ch) as u32);
         let to_px = |pos: egui::Pos2| -> (u32, u32) {
             (
-                ((pos.x - rect.min.x) * ppp).max(0.0) as u32,
-                ((pos.y - rect.min.y) * ppp).max(0.0) as u32,
+                px_offset(pos.x - rect.min.x, ppp),
+                px_offset(pos.y - rect.min.y, ppp),
             )
         };
 
@@ -366,7 +323,7 @@ impl Session {
             } else {
                 MouseButton::WheelDown
             };
-            let notches = ((scroll_y.abs() / 40.0).ceil() as usize).clamp(1, 5);
+            let notches = wheel_notches(scroll_y);
             let pos = ctx
                 .input(|i| i.pointer.latest_pos())
                 .unwrap_or_else(|| rect.center());
@@ -403,6 +360,123 @@ fn key_mods(m: &egui::Modifiers) -> KeyMods {
         alt: m.alt,
         sup: false,
     }
+}
+
+/// What a key event resolves to once the host's reserved combos and viewport
+/// shortcuts are applied. The byte encoding itself is left to libghostty's
+/// encoder (the `Encode` arm); everything else is giest's own gating.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum KeyAction {
+    /// Hand this neutral key event to the engine's encoder for the PTY.
+    Encode(KeyInput),
+    /// Scroll the viewport by `delta` lines (Shift+PageUp/PageDown).
+    Scroll(isize),
+    /// Jump the viewport to the top of scrollback (Shift+Home).
+    ScrollTop,
+    /// Jump the viewport to the bottom (Shift+End).
+    ScrollBottom,
+    /// A combo reserved by the app (Ctrl+Shift namespace, Ctrl+Tab, Ctrl +/-/0
+    /// font zoom): the shell never sees it.
+    Swallow,
+    /// A text-producing key (or one we don't map): no bytes here — the matching
+    /// egui `Text` event carries the character.
+    Suppress,
+}
+
+/// Decide what a pressed key does, given the live modifiers and the grid height
+/// (for page scrolling). Pure: no engine/PTY/egui state, so every gating branch
+/// is unit-testable. Mirrors the Windows-Terminal/Ghostty host bindings.
+fn decide_key(key: egui::Key, modifiers: &egui::Modifiers, rows: u16) -> KeyAction {
+    let Some(code) = map_egui_key(key) else {
+        return KeyAction::Suppress;
+    };
+    // Ctrl+Shift is the app's namespace; the shell never sees it. The clipboard
+    // combos (Ctrl+Shift+C/V/X) arrive as Copy/Paste/Cut events handled
+    // elsewhere, so here we swallow every other Ctrl+Shift combo (tab/split).
+    if modifiers.ctrl && modifiers.shift {
+        return KeyAction::Swallow;
+    }
+    if modifiers.ctrl && code == KeyCode::Tab {
+        return KeyAction::Swallow;
+    }
+    // Shift+PageUp/Down scroll by a page; Shift+Home/End jump to the top/bottom
+    // of scrollback. These drive the viewport instead of going to the shell.
+    if modifiers.shift
+        && matches!(
+            code,
+            KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End
+        )
+    {
+        let page = rows.saturating_sub(1).max(1) as isize;
+        return match code {
+            KeyCode::PageUp => KeyAction::Scroll(-page),
+            KeyCode::PageDown => KeyAction::Scroll(page),
+            KeyCode::Home => KeyAction::ScrollTop,
+            KeyCode::End => KeyAction::ScrollBottom,
+            _ => unreachable!(),
+        };
+    }
+    // Ctrl +/-/0 are reserved by the app for font zoom.
+    if modifiers.ctrl
+        && !modifiers.shift
+        && matches!(code, KeyCode::Equal | KeyCode::Minus | KeyCode::Digit0)
+    {
+        return KeyAction::Swallow;
+    }
+    let mods = key_mods(modifiers);
+    if is_text_producing(code) && !mods.ctrl && !mods.alt {
+        return KeyAction::Suppress;
+    }
+    KeyAction::Encode(KeyInput {
+        code,
+        text: None,
+        mods,
+        press: true,
+    })
+}
+
+/// What a Copy/Cut event does, given the current selection text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CopyAction {
+    /// Copy this text to the clipboard (and clear the selection).
+    Copy(String),
+    /// No selection: send SIGINT (`0x03`) to the shell, like Windows Terminal.
+    Interrupt,
+}
+
+/// Resolve a Copy/Cut event: copy the selection if there is one, else interrupt.
+fn copy_or_interrupt(selection: Option<String>) -> CopyAction {
+    match selection {
+        Some(text) => CopyAction::Copy(text),
+        None => CopyAction::Interrupt,
+    }
+}
+
+/// Compute the grid dimensions (cols, rows) that fit `width`×`height` points at
+/// scale `ppp` given the cell size in pixels. Always at least 1×1.
+fn grid_dims(width_pts: f32, height_pts: f32, ppp: f32, cell_w: f32, cell_h: f32) -> (u16, u16) {
+    let cols = ((width_pts * ppp / cell_w).floor() as u16).max(1);
+    let rows = ((height_pts * ppp / cell_h).floor() as u16).max(1);
+    (cols, rows)
+}
+
+/// Map a pointer offset (points, relative to the grid's top-left) to a grid
+/// cell, clamped to the last valid cell. Negative offsets clamp to cell 0.
+fn cell_from_pos(rel_x: f32, rel_y: f32, ppp: f32, cw: f32, ch: f32, cols: u16, rows: u16) -> (u16, u16) {
+    let x = (rel_x * ppp / cw).floor().max(0.0) as u16;
+    let y = (rel_y * ppp / ch).floor().max(0.0) as u16;
+    (x.min(cols.saturating_sub(1)), y.min(rows.saturating_sub(1)))
+}
+
+/// Number of wheel "notches" to report for a smooth-scroll delta (clamped 1..=5).
+fn wheel_notches(scroll_y: f32) -> usize {
+    ((scroll_y.abs() / 40.0).ceil() as usize).clamp(1, 5)
+}
+
+/// Convert a pointer offset (points, relative to the grid origin) to a
+/// non-negative pixel coordinate at scale `ppp`.
+fn px_offset(rel: f32, ppp: f32) -> u32 {
+    (rel * ppp).max(0.0) as u32
 }
 
 /// Whether `ch` counts as part of a word for double-click selection. Word
@@ -551,8 +625,12 @@ fn is_text_producing(code: KeyCode) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_selection, find_url_at, word_bounds};
-    use crate::engine::{Cell, GridSnapshot};
+    use super::{
+        CopyAction, KeyAction, cell_from_pos, copy_or_interrupt, decide_key, extract_selection,
+        find_url_at, grid_dims, px_offset, wheel_notches, word_bounds,
+    };
+    use crate::engine::{Cell, GridSnapshot, KeyCode, KeyInput, KeyMods};
+    use eframe::egui;
 
     fn grid(rows: &[&str], cols: u16) -> GridSnapshot {
         let mut s = GridSnapshot {
@@ -625,5 +703,152 @@ mod tests {
             find_url_at(&s3, 2, 0).as_deref(),
             Some("https://www.example.com")
         );
+    }
+
+    // --- Input gating (decide_key / copy_or_interrupt) ---------------------
+
+    fn mods(ctrl: bool, shift: bool, alt: bool) -> egui::Modifiers {
+        egui::Modifiers {
+            alt,
+            ctrl,
+            shift,
+            mac_cmd: false,
+            command: false,
+        }
+    }
+
+    #[test]
+    fn ctrl_shift_combos_are_app_namespace() {
+        // Ctrl+Shift+D (split) and any other Ctrl+Shift combo never reach the shell.
+        assert_eq!(
+            decide_key(egui::Key::D, &mods(true, true, false), 24),
+            KeyAction::Swallow
+        );
+        assert_eq!(
+            decide_key(egui::Key::Num1, &mods(true, true, false), 24),
+            KeyAction::Swallow
+        );
+    }
+
+    #[test]
+    fn ctrl_tab_is_swallowed() {
+        assert_eq!(
+            decide_key(egui::Key::Tab, &mods(true, false, false), 24),
+            KeyAction::Swallow
+        );
+    }
+
+    #[test]
+    fn shift_scrollback_keys_drive_viewport_not_shell() {
+        // rows=25 → a page is rows-1 = 24 lines.
+        assert_eq!(
+            decide_key(egui::Key::PageUp, &mods(false, true, false), 25),
+            KeyAction::Scroll(-24)
+        );
+        assert_eq!(
+            decide_key(egui::Key::PageDown, &mods(false, true, false), 25),
+            KeyAction::Scroll(24)
+        );
+        assert_eq!(
+            decide_key(egui::Key::Home, &mods(false, true, false), 25),
+            KeyAction::ScrollTop
+        );
+        assert_eq!(
+            decide_key(egui::Key::End, &mods(false, true, false), 25),
+            KeyAction::ScrollBottom
+        );
+    }
+
+    #[test]
+    fn ctrl_zoom_keys_are_swallowed() {
+        for k in [egui::Key::Equals, egui::Key::Minus, egui::Key::Num0] {
+            assert_eq!(
+                decide_key(k, &mods(true, false, false), 24),
+                KeyAction::Swallow,
+                "Ctrl+{k:?} should be reserved for font zoom"
+            );
+        }
+    }
+
+    #[test]
+    fn plain_printable_defers_to_text_event() {
+        // A bare letter is produced as an egui Text event, so the key path emits nothing.
+        assert_eq!(
+            decide_key(egui::Key::A, &mods(false, false, false), 24),
+            KeyAction::Suppress
+        );
+    }
+
+    #[test]
+    fn ctrl_combo_and_control_keys_encode() {
+        assert_eq!(
+            decide_key(egui::Key::C, &mods(true, false, false), 24),
+            KeyAction::Encode(KeyInput {
+                code: KeyCode::C,
+                text: None,
+                mods: KeyMods {
+                    ctrl: true,
+                    ..Default::default()
+                },
+                press: true,
+            })
+        );
+        // Non-text-producing keys encode even with no modifiers.
+        assert!(matches!(
+            decide_key(egui::Key::Enter, &mods(false, false, false), 24),
+            KeyAction::Encode(_)
+        ));
+        assert!(matches!(
+            decide_key(egui::Key::ArrowUp, &mods(false, false, false), 24),
+            KeyAction::Encode(_)
+        ));
+    }
+
+    #[test]
+    fn copy_or_interrupt_branches() {
+        assert_eq!(
+            copy_or_interrupt(Some("sel".to_string())),
+            CopyAction::Copy("sel".to_string())
+        );
+        assert_eq!(copy_or_interrupt(None), CopyAction::Interrupt);
+    }
+
+    // --- Coordinate / resize math ------------------------------------------
+
+    #[test]
+    fn grid_dims_floors_and_scales() {
+        // 800pt × 240pt, 10×20px cells, ppp 1 → 80×12.
+        assert_eq!(grid_dims(800.0, 240.0, 1.0, 10.0, 20.0), (80, 12));
+        // ppp 2 doubles both dimensions.
+        assert_eq!(grid_dims(800.0, 240.0, 2.0, 10.0, 20.0), (160, 24));
+        // A sub-cell area still yields a 1×1 grid.
+        assert_eq!(grid_dims(1.0, 1.0, 1.0, 10.0, 20.0), (1, 1));
+    }
+
+    #[test]
+    fn cell_from_pos_clamps_edges_and_negatives() {
+        // Inside the grid: (25,30)pt at 10×20px → cell (2,1).
+        assert_eq!(cell_from_pos(25.0, 30.0, 1.0, 10.0, 20.0, 80, 24), (2, 1));
+        // Negative offsets clamp to cell (0,0).
+        assert_eq!(cell_from_pos(-5.0, -9.0, 1.0, 10.0, 20.0, 80, 24), (0, 0));
+        // Far beyond the grid clamps to the last cell.
+        assert_eq!(
+            cell_from_pos(1.0e6, 1.0e6, 1.0, 10.0, 20.0, 80, 24),
+            (79, 23)
+        );
+    }
+
+    #[test]
+    fn wheel_notches_clamp_one_to_five() {
+        assert_eq!(wheel_notches(0.0), 1);
+        assert_eq!(wheel_notches(10.0), 1);
+        assert_eq!(wheel_notches(45.0), 2);
+        assert_eq!(wheel_notches(-1.0e6), 5);
+    }
+
+    #[test]
+    fn px_offset_never_negative() {
+        assert_eq!(px_offset(10.0, 2.0), 20);
+        assert_eq!(px_offset(-3.0, 2.0), 0);
     }
 }

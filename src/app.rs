@@ -14,24 +14,26 @@ use crate::session::Session;
 
 /// A tab: a binary tree of panes (`Node`) with one focused leaf (by id). Each
 /// split divides only the focused pane, so splits nest (like Ghostty) instead of
-/// re-flowing every pane onto a single shared axis.
-struct Tab {
-    root: Node,
+/// re-flowing every pane onto a single shared axis. Generic over the leaf
+/// payload `T` (the app uses `Session`; tests use a lightweight stand-in) so the
+/// tree's structural logic is unit-testable without spawning a shell.
+struct Tab<T> {
+    root: Node<T>,
     /// Id of the focused leaf.
     focus: u64,
 }
 
-impl Tab {
-    fn leaf(id: u64, session: Session) -> Self {
+impl<T> Tab<T> {
+    fn leaf(id: u64, payload: T) -> Self {
         Self {
-            root: Node::Leaf { id, session },
+            root: Node::Leaf { id, payload },
             focus: id,
         }
     }
-    fn focused_session(&self) -> &Session {
+    fn focused_payload(&self) -> &T {
         self.root
-            .session(self.focus)
-            .unwrap_or_else(|| self.root.first_session())
+            .payload(self.focus)
+            .unwrap_or_else(|| self.root.first_payload())
     }
     fn leaf_count(&self) -> usize {
         self.root.leaf_count()
@@ -41,13 +43,13 @@ impl Tab {
 /// A node in a tab's split tree: a single pane (`Leaf`) or a binary split of two
 /// subtrees along one axis. `Empty` is a transient placeholder used only while
 /// restructuring the tree (never laid out or rendered).
-enum Node {
-    Leaf { id: u64, session: Session },
-    Split { vertical: bool, first: Box<Node>, second: Box<Node> },
+enum Node<T> {
+    Leaf { id: u64, payload: T },
+    Split { vertical: bool, first: Box<Node<T>>, second: Box<Node<T>> },
     Empty,
 }
 
-impl Node {
+impl<T> Node<T> {
     fn leaf_count(&self) -> usize {
         match self {
             Node::Leaf { .. } => 1,
@@ -67,22 +69,22 @@ impl Node {
         }
     }
 
-    /// The session for leaf `target`, if present.
-    fn session(&self, target: u64) -> Option<&Session> {
+    /// The payload for leaf `target`, if present.
+    fn payload(&self, target: u64) -> Option<&T> {
         match self {
-            Node::Leaf { id, session } if *id == target => Some(session),
+            Node::Leaf { id, payload } if *id == target => Some(payload),
             Node::Leaf { .. } | Node::Empty => None,
             Node::Split { first, second, .. } => {
-                first.session(target).or_else(|| second.session(target))
+                first.payload(target).or_else(|| second.payload(target))
             }
         }
     }
 
-    /// Any leaf's session (the tree always has at least one outside restructuring).
-    fn first_session(&self) -> &Session {
+    /// Any leaf's payload (the tree always has at least one outside restructuring).
+    fn first_payload(&self) -> &T {
         match self {
-            Node::Leaf { session, .. } => session,
-            Node::Split { first, .. } => first.first_session(),
+            Node::Leaf { payload, .. } => payload,
+            Node::Split { first, .. } => first.first_payload(),
             Node::Empty => unreachable!("empty split tree"),
         }
     }
@@ -96,36 +98,36 @@ impl Node {
         }
     }
 
-    fn for_each_session_mut(&mut self, f: &mut impl FnMut(&mut Session)) {
+    fn for_each_mut(&mut self, f: &mut impl FnMut(&mut T)) {
         match self {
-            Node::Leaf { session, .. } => f(session),
+            Node::Leaf { payload, .. } => f(payload),
             Node::Split { first, second, .. } => {
-                first.for_each_session_mut(f);
-                second.for_each_session_mut(f);
+                first.for_each_mut(f);
+                second.for_each_mut(f);
             }
             Node::Empty => {}
         }
     }
 
     /// Replace leaf `target` with a `Split` of the existing pane and a new leaf
-    /// (`new_id`/`new_session`) along `vertical`. Only the focused leaf changes;
+    /// (`new_id`/`new_payload`) along `vertical`. Only the focused leaf changes;
     /// the rest of the tree keeps its shape. Returns false if `target` is absent.
-    fn split_leaf(&mut self, target: u64, vertical: bool, new_id: u64, new_session: Session) -> bool {
+    fn split_leaf(&mut self, target: u64, vertical: bool, new_id: u64, new_payload: T) -> bool {
         match self {
             Node::Leaf { id, .. } if *id == target => {
                 let old = std::mem::replace(self, Node::Empty);
                 *self = Node::Split {
                     vertical,
                     first: Box::new(old),
-                    second: Box::new(Node::Leaf { id: new_id, session: new_session }),
+                    second: Box::new(Node::Leaf { id: new_id, payload: new_payload }),
                 };
                 true
             }
             Node::Split { first, second, .. } => {
                 if first.contains(target) {
-                    first.split_leaf(target, vertical, new_id, new_session)
+                    first.split_leaf(target, vertical, new_id, new_payload)
                 } else {
-                    second.split_leaf(target, vertical, new_id, new_session)
+                    second.split_leaf(target, vertical, new_id, new_payload)
                 }
             }
             _ => false,
@@ -134,7 +136,7 @@ impl Node {
 
     /// Remove leaf `target`, collapsing a split that loses a child into its
     /// surviving child. Returns the new subtree (`None` if it became empty).
-    fn remove_leaf(self, target: u64) -> Option<Node> {
+    fn remove_leaf(self, target: u64) -> Option<Node<T>> {
         match self {
             Node::Leaf { id, .. } if id == target => None,
             Node::Split { vertical, first, second } => {
@@ -152,13 +154,14 @@ impl Node {
         }
     }
 
-    /// Drop leaves whose shell has exited, collapsing splits. `None` if the whole
-    /// subtree is gone.
-    fn prune_dead(self) -> Option<Node> {
+    /// Drop leaves for which `dead` returns true, collapsing splits. `None` if
+    /// the whole subtree is gone. The predicate decouples the tree from the
+    /// liveness source (a live shell in the app; a flag in tests).
+    fn prune(self, dead: &mut impl FnMut(&T) -> bool) -> Option<Node<T>> {
         match self {
-            Node::Leaf { session, .. } if !session.is_alive() => None,
+            Node::Leaf { ref payload, .. } if dead(payload) => None,
             Node::Split { vertical, first, second } => {
-                match (first.prune_dead(), second.prune_dead()) {
+                match (first.prune(&mut *dead), second.prune(&mut *dead)) {
                     (Some(a), Some(b)) => Some(Node::Split {
                         vertical,
                         first: Box::new(a),
@@ -172,11 +175,11 @@ impl Node {
         }
     }
 
-    /// Append each leaf's (id, session, rect) to `out`, dividing `area` by each
+    /// Append each leaf's (id, payload, rect) to `out`, dividing `area` by each
     /// split's axis (with a gutter between children).
-    fn collect<'a>(&'a mut self, area: egui::Rect, out: &mut Vec<Leaf<'a>>) {
+    fn collect<'a>(&'a mut self, area: egui::Rect, out: &mut Vec<Leaf<'a, T>>) {
         match self {
-            Node::Leaf { id, session } => out.push(Leaf { id: *id, session, rect: area }),
+            Node::Leaf { id, payload } => out.push(Leaf { id: *id, payload, rect: area }),
             Node::Split { vertical, first, second } => {
                 let (a, b) = split_rect(area, *vertical);
                 first.collect(a, out);
@@ -187,15 +190,45 @@ impl Node {
     }
 }
 
-/// One laid-out pane: a focusable leaf with its session and screen rect.
-struct Leaf<'a> {
+/// Drop dead leaves/tabs across `tabs`, keeping the active tab selected (falling
+/// back to the nearest surviving tab before it if the active one died). Returns
+/// the surviving tabs and the new active index (0 when empty). Pure structural
+/// core of [`App::reap_dead`], split out so the side-effect-free reselection
+/// logic is testable; the caller handles the "no tabs left → close window" case.
+fn reap_tabs<T>(
+    tabs: Vec<Tab<T>>,
+    active: usize,
+    dead: &mut impl FnMut(&T) -> bool,
+) -> (Vec<Tab<T>>, usize) {
+    let mut survivors: Vec<Tab<T>> = Vec::with_capacity(tabs.len());
+    let mut new_active = 0;
+    for (i, tab) in tabs.into_iter().enumerate() {
+        let Tab { root, focus } = tab;
+        if let Some(root) = root.prune(&mut *dead) {
+            if i <= active {
+                new_active = survivors.len();
+            }
+            let focus = if root.contains(focus) {
+                focus
+            } else {
+                root.first_leaf_id()
+            };
+            survivors.push(Tab { root, focus });
+        }
+    }
+    let active = new_active.min(survivors.len().saturating_sub(1));
+    (survivors, active)
+}
+
+/// One laid-out pane: a focusable leaf with its payload and screen rect.
+struct Leaf<'a, T> {
     id: u64,
-    session: &'a mut Session,
+    payload: &'a mut T,
     rect: egui::Rect,
 }
 
 pub struct App {
-    tabs: Vec<Tab>,
+    tabs: Vec<Tab<Session>>,
     active_tab: usize,
     /// Monotonic source of unique pane (leaf) ids, used to track focus across
     /// splits/closes that reshape the tree.
@@ -374,31 +407,15 @@ impl App {
     /// close the window when the last tab is gone. Returns `false` if the
     /// window is closing (caller should skip rendering this frame).
     fn reap_dead(&mut self, ctx: &egui::Context) -> bool {
-        let active = self.active_tab;
-        let mut new_tabs: Vec<Tab> = Vec::with_capacity(self.tabs.len());
-        let mut new_active = 0;
-        for (i, tab) in self.tabs.drain(..).enumerate() {
-            let Tab { root, focus } = tab;
-            if let Some(root) = root.prune_dead() {
-                // Keep the active tab selected; if it died, fall back to the
-                // nearest surviving tab before it.
-                if i <= active {
-                    new_active = new_tabs.len();
-                }
-                let focus = if root.contains(focus) {
-                    focus
-                } else {
-                    root.first_leaf_id()
-                };
-                new_tabs.push(Tab { root, focus });
-            }
-        }
-        self.tabs = new_tabs;
+        let tabs = std::mem::take(&mut self.tabs);
+        let (survivors, active) =
+            reap_tabs(tabs, self.active_tab, &mut |s: &Session| !s.is_alive());
+        self.tabs = survivors;
         if self.tabs.is_empty() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return false;
         }
-        self.active_tab = new_active.min(self.tabs.len() - 1);
+        self.active_tab = active;
         true
     }
 
@@ -455,7 +472,7 @@ impl App {
         ui.horizontal(|ui| {
             for (i, tab) in self.tabs.iter().enumerate() {
                 let raw = tab
-                    .focused_session()
+                    .focused_payload()
                     .title()
                     .unwrap_or_else(|| format!("shell {}", i + 1));
                 let mut label = ellipsize(&raw, 24);
@@ -531,7 +548,7 @@ impl App {
 
         // Lay the split tree out across the full area; each leaf gets its rect
         // (padding is applied per-leaf below).
-        let mut leaves: Vec<Leaf> = Vec::new();
+        let mut leaves: Vec<Leaf<Session>> = Vec::new();
         tab.root.collect(full_area, &mut leaves);
         if leaves.is_empty() {
             return;
@@ -557,8 +574,8 @@ impl App {
         let focus_idx = leaves.iter().position(|l| l.id == focus_id).unwrap();
 
         // Keyboard goes to the focused pane.
-        let tracking = leaves[focus_idx].session.is_mouse_tracking();
-        leaves[focus_idx].session.handle_input(ctx, tracking, ch);
+        let tracking = leaves[focus_idx].payload.is_mouse_tracking();
+        leaves[focus_idx].payload.handle_input(ctx, tracking, ch);
 
         let mut frames: Vec<PaneFrame> = Vec::with_capacity(leaves.len());
         for leaf in leaves.iter_mut() {
@@ -567,7 +584,7 @@ impl App {
             let prect = leaf.rect.shrink2(pad);
             let leaf_id = leaf.id;
             let is_focus = leaf_id == focus_id;
-            let session = &mut *leaf.session;
+            let session = &mut *leaf.payload;
             session.fit_grid(prect, ppp, cw, ch);
             if !session.update_snapshot() {
                 continue;
@@ -682,7 +699,7 @@ impl App {
 
         // Fill the whole area (including the padding band) with the focused
         // pane's background first.
-        let bg = leaves[focus_idx].session.default_bg();
+        let bg = leaves[focus_idx].payload.default_bg();
         ui.painter()
             .rect_filled(full_area, 0.0, egui::Color32::from_rgb(bg.r, bg.g, bg.b));
 
@@ -724,7 +741,7 @@ impl eframe::App for App {
 
         // Pump every pane in every tab so background sessions keep flowing.
         for tab in &mut self.tabs {
-            tab.root.for_each_session_mut(&mut |pane| pane.pump_pty());
+            tab.root.for_each_mut(&mut |pane| pane.pump_pty());
         }
         // Close panes/tabs whose shell exited; bail if that closed the window.
         if !self.reap_dead(&ctx) {
@@ -740,7 +757,7 @@ impl eframe::App for App {
         let title = self
             .tabs
             .get(self.active_tab)
-            .and_then(|t| t.focused_session().title());
+            .and_then(|t| t.focused_payload().title());
         if title != self.last_window_title {
             let shown = title.clone().unwrap_or_else(|| "giest".to_string());
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(shown));
@@ -751,7 +768,7 @@ impl eframe::App for App {
         // cmd / WSL / …) is reachable even with a single tab.
         egui::Panel::top("giest-tabs").show_inside(ui, |ui| self.tab_bar(ui));
 
-        let bg = self.tabs[self.active_tab].focused_session().default_bg();
+        let bg = self.tabs[self.active_tab].focused_payload().default_bg();
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(egui::Color32::from_rgb(bg.r, bg.g, bg.b)))
             .show_inside(ui, |ui| self.render_active(ui, &ctx));
@@ -799,5 +816,131 @@ fn ellipsize(s: &str, max: usize) -> String {
         let mut out: String = chars[..max.saturating_sub(1)].iter().collect();
         out.push('…');
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Node, Tab, ellipsize, reap_tabs, split_rect};
+    use eframe::egui;
+
+    // The split tree is generic over its leaf payload; tests use a `u32` where
+    // `0` marks a "dead" leaf, so structure/liveness logic needs no real shell.
+    fn leaf(id: u64, payload: u32) -> Node<u32> {
+        Node::Leaf { id, payload }
+    }
+    fn split(vertical: bool, first: Node<u32>, second: Node<u32>) -> Node<u32> {
+        Node::Split {
+            vertical,
+            first: Box::new(first),
+            second: Box::new(second),
+        }
+    }
+
+    #[test]
+    fn split_leaf_nests_only_the_target() {
+        let mut root = leaf(1, 1);
+        assert!(root.split_leaf(1, true, 2, 1));
+        assert_eq!(root.leaf_count(), 2);
+        assert!(root.contains(1) && root.contains(2));
+        // Splitting the newly focused leaf nests under the existing split.
+        assert!(root.split_leaf(2, false, 3, 1));
+        assert_eq!(root.leaf_count(), 3);
+        // An absent target is a no-op.
+        assert!(!root.split_leaf(99, false, 4, 1));
+        assert_eq!(root.leaf_count(), 3);
+    }
+
+    #[test]
+    fn remove_leaf_collapses_into_sibling() {
+        let root = split(true, leaf(1, 1), leaf(2, 1));
+        let after = root.remove_leaf(2).expect("one leaf survives");
+        assert_eq!(after.leaf_count(), 1);
+        assert!(after.contains(1) && !after.contains(2));
+        // Removing the only leaf empties the tree.
+        assert!(leaf(1, 1).remove_leaf(1).is_none());
+    }
+
+    #[test]
+    fn prune_drops_dead_and_collapses() {
+        // Tree: [1 | (2 / 3)] with leaf 2 dead.
+        let root = split(true, leaf(1, 1), split(false, leaf(2, 0), leaf(3, 1)));
+        let pruned = root.prune(&mut |p: &u32| *p == 0).expect("survivors remain");
+        assert_eq!(pruned.leaf_count(), 2);
+        assert!(pruned.contains(1) && pruned.contains(3) && !pruned.contains(2));
+        // Every leaf dead → whole subtree gone.
+        let all_dead = split(true, leaf(1, 0), leaf(2, 0));
+        assert!(all_dead.prune(&mut |p: &u32| *p == 0).is_none());
+    }
+
+    #[test]
+    fn first_leaf_id_walks_to_leftmost() {
+        let root = split(false, split(true, leaf(7, 1), leaf(8, 1)), leaf(9, 1));
+        assert_eq!(root.first_leaf_id(), 7);
+        assert_eq!(Node::<u32>::Empty.first_leaf_id(), 0);
+    }
+
+    #[test]
+    fn collect_divides_area_with_gutter() {
+        // Vertical split → side-by-side columns with a 1px gutter.
+        let mut root = split(true, leaf(1, 1), leaf(2, 1));
+        let area = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(101.0, 50.0));
+        let mut leaves = Vec::new();
+        root.collect(area, &mut leaves);
+        assert_eq!(leaves.len(), 2);
+        assert_eq!(leaves[0].id, 1);
+        assert_eq!(leaves[1].id, 2);
+        // (101 - 1 gutter) / 2 = 50 per column.
+        assert!((leaves[0].rect.width() - 50.0).abs() < 0.01);
+        assert!(leaves[1].rect.min.x >= leaves[0].rect.max.x);
+    }
+
+    #[test]
+    fn split_rect_halves_each_axis() {
+        let area = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(101.0, 51.0));
+        let (a, b) = split_rect(area, true); // columns
+        assert!((a.width() - 50.0).abs() < 0.01);
+        assert!((b.width() - 50.0).abs() < 0.01);
+        assert_eq!(a.height(), 51.0);
+        let (c, _d) = split_rect(area, false); // rows
+        assert!((c.height() - 25.0).abs() < 0.01);
+        assert_eq!(c.width(), 101.0);
+    }
+
+    #[test]
+    fn reap_tabs_drops_dead_tab_and_reselects_before_it() {
+        // Active tab (index 1) dies entirely → fall back to the nearest tab before it.
+        let tabs = vec![Tab::leaf(1, 1u32), Tab::leaf(2, 0u32), Tab::leaf(3, 1u32)];
+        let (survivors, active) = reap_tabs(tabs, 1, &mut |p: &u32| *p == 0);
+        assert_eq!(survivors.len(), 2);
+        assert_eq!(active, 0);
+        assert_eq!(survivors[0].focus, 1);
+    }
+
+    #[test]
+    fn reap_tabs_keeps_surviving_active_after_earlier_drop() {
+        // Tab 0 dies; the active tab (index 1) survives and shifts to index 0.
+        let tabs = vec![Tab::leaf(1, 0u32), Tab::leaf(2, 1u32)];
+        let (survivors, active) = reap_tabs(tabs, 1, &mut |p: &u32| *p == 0);
+        assert_eq!(survivors.len(), 1);
+        assert_eq!(active, 0);
+        assert_eq!(survivors[0].focus, 2);
+    }
+
+    #[test]
+    fn reap_tabs_falls_back_focus_when_focused_pane_dies() {
+        // A split tab whose focused leaf (2) dies keeps the tab, refocusing the survivor.
+        let root = split(true, leaf(1, 1), leaf(2, 0));
+        let tabs = vec![Tab { root, focus: 2 }];
+        let (survivors, _active) = reap_tabs(tabs, 0, &mut |p: &u32| *p == 0);
+        assert_eq!(survivors.len(), 1);
+        assert_eq!(survivors[0].leaf_count(), 1);
+        assert_eq!(survivors[0].focus, 1);
+    }
+
+    #[test]
+    fn ellipsize_truncates_with_ellipsis() {
+        assert_eq!(ellipsize("short", 10), "short");
+        assert_eq!(ellipsize("a very long tab title", 6), "a ver…");
     }
 }

@@ -1,21 +1,8 @@
-//! giest — a Rust/egui terminal for Windows on libghostty-vt.
-//!
-//! egui/eframe owns the window and chrome; the terminal grid is drawn by a
-//! custom wgpu glyph-atlas pipeline (see [`render`]). The terminal state lives
-//! in libghostty-vt behind the [`engine::TerminalEngine`] trait, fed by a
-//! ConPTY-backed shell ([`pty`]).
+//! giest binary entry point. The terminal lives in the `giest` library crate
+//! (see `lib.rs`); this just configures eframe and launches the [`App`].
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod app;
-mod config;
-mod engine;
-mod osc52;
-mod profiles;
-mod pty;
-mod render;
-mod session;
-
-use app::App;
+use giest::app::App;
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
