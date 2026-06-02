@@ -118,6 +118,7 @@ background   = "#101218"  # default background color
 cursor_color = "#c5c8c6"  # cursor color (omit to defer to the program/default)
 padding_x    = 2.0        # logical-point padding left/right of the grid
 padding_y    = 2.0        # logical-point padding above/below the grid
+text_gamma   = 1.3        # text AA gamma; >1 thickens light-on-dark text (0.5–3.0)
 
 scrollback_limit = 10000   # max scrollback lines retained per pane
 

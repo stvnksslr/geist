@@ -850,6 +850,7 @@ dependencies = [
  "rustybuzz",
  "serde",
  "toml",
+ "unicode-width",
 ]
 
 [[package]]

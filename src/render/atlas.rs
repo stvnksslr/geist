@@ -100,13 +100,45 @@ struct LayerCollector {
     pending: Option<u16>,
 }
 
+/// Average a gradient's color stops into one representative solid color (RGBA).
+/// Win11's Segoe UI Emoji is COLRv1 with gradient-filled shapes; rather than
+/// rasterize true gradients we flatten each to its mean stop color so the whole
+/// shape renders (flat-shaded but complete) instead of vanishing. `None` if the
+/// gradient has no stops.
+fn average_stops<I: Iterator<Item = ttf_parser::colr::ColorStop>>(stops: I) -> Option<[u8; 4]> {
+    let (mut r, mut g, mut b, mut a, mut n) = (0u32, 0u32, 0u32, 0u32, 0u32);
+    for s in stops {
+        r += s.color.red as u32;
+        g += s.color.green as u32;
+        b += s.color.blue as u32;
+        a += s.color.alpha as u32;
+        n += 1;
+    }
+    if n == 0 {
+        return None;
+    }
+    Some([(r / n) as u8, (g / n) as u8, (b / n) as u8, (a / n) as u8])
+}
+
 impl<'a> ttf_parser::colr::Painter<'a> for LayerCollector {
     fn outline_glyph(&mut self, glyph_id: ttf_parser::GlyphId) {
         self.pending = Some(glyph_id.0);
     }
     fn paint(&mut self, paint: ttf_parser::colr::Paint<'a>) {
-        if let (Some(gid), ttf_parser::colr::Paint::Solid(c)) = (self.pending.take(), paint) {
-            self.layers.push((gid, [c.red, c.green, c.blue, c.alpha]));
+        use ttf_parser::colr::Paint;
+        let Some(gid) = self.pending.take() else {
+            return;
+        };
+        // Resolve the layer's fill to a single solid color. Gradients (COLRv1)
+        // are approximated by their mean stop color so the whole shape paints.
+        let color = match paint {
+            Paint::Solid(c) => Some([c.red, c.green, c.blue, c.alpha]),
+            Paint::LinearGradient(grad) => average_stops(grad.stops(0, &[])),
+            Paint::RadialGradient(grad) => average_stops(grad.stops(0, &[])),
+            Paint::SweepGradient(grad) => average_stops(grad.stops(0, &[])),
+        };
+        if let Some(color) = color {
+            self.layers.push((gid, color));
         }
     }
     fn push_clip(&mut self) {}
@@ -221,16 +253,77 @@ fn style_index(bold: bool, italic: bool) -> usize {
     (bold as usize) | ((italic as usize) << 1)
 }
 
+/// How a glyph should be fitted to the terminal cell. Most characters are
+/// [`Constraint::None`] (natural metrics); box-drawing and icon/emoji ranges are
+/// sized to the cell so they tile seamlessly / don't overflow into neighbours.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Constraint {
+    /// Natural metrics, baseline-placed (normal text, CJK, ligatures).
+    None,
+    /// Stretch to fill `span*cell_w × cell_h` exactly so adjacent cells tile with
+    /// no seam (box drawing, block elements, braille, powerline separators).
+    Fill,
+    /// Scale down (preserving aspect) to fit `span*cell_w × cell_h`, then centre
+    /// horizontally in the span and vertically in the cell (Nerd Font icons,
+    /// misc symbols, color emoji).
+    Fit,
+}
+
+/// Shrink-only scale factor to fit a `gw × gh` glyph within `max_w × max_h`
+/// preserving aspect (never enlarges). 0 if the glyph has no area.
+fn fit_scale(gw: f32, gh: f32, max_w: f32, max_h: f32) -> f32 {
+    if gw <= 0.0 || gh <= 0.0 {
+        return 0.0;
+    }
+    (max_w / gw).min(max_h / gh).min(1.0)
+}
+
+/// Classify a character into a cell-fitting [`Constraint`] by Unicode range.
+/// Keyed on the character (not the glyph id, which isn't stable across fonts).
+pub fn classify(ch: char) -> Constraint {
+    let c = ch as u32;
+    match c {
+        // Box drawing + block elements + geometric blocks → tile exactly. This
+        // arm precedes the geometric-shapes Fit arm so blocks get Fill.
+        0x2500..=0x259F => Constraint::Fill,
+        // Braille patterns are designed to tile the cell.
+        0x2800..=0x28FF => Constraint::Fill,
+        // Powerline separators/arrows must touch cell edges — matched before the
+        // broad PUA Fit arm below so they stay Fill.
+        0xE0B0..=0xE0D4 => Constraint::Fill,
+        // The entire Private Use Area is Nerd Font icon territory → fit (scale
+        // down + centre). Enumerating individual icon ranges leaves gaps that
+        // drop glyphs back to natural size (overflowing / clipped), so cover the
+        // whole PUA and both supplementary PUA planes uniformly.
+        0xE000..=0xF8FF                    // BMP Private Use Area
+        | 0xF0000..=0xFFFFD               // Supplementary PUA-A (Material Design)
+        | 0x100000..=0x10FFFD => Constraint::Fit, // Supplementary PUA-B
+        // Misc symbols / arrows / dingbats / emoji pictographs → fit.
+        0x2190..=0x21FF        // arrows
+        | 0x2300..=0x24FF      // misc technical + control pictures
+        | 0x25A0..=0x27BF      // geometric shapes (non-block) + misc symbols + dingbats
+        | 0x2B00..=0x2BFF      // misc symbols and arrows (e.g. heavy circle prompts)
+        | 0x1F000..=0x1FAFF => Constraint::Fit, // emoji & pictographs
+        _ => Constraint::None,
+    }
+}
+
 /// Placement of a rasterized glyph within the atlas, plus the offset needed to
 /// position it inside a cell relative to the cell's top-left at the baseline.
 #[derive(Clone, Copy)]
 pub struct GlyphInfo {
     /// Atlas UV: (u_min, v_min, u_width, v_height), normalized 0..1.
     pub uv: [f32; 4],
-    /// Pixel offset of the glyph quad from the cell's top-left.
+    /// Pixel offset of the glyph quad from the cell's top-left. For `None`
+    /// glyphs this is baseline-relative; for `Fit` glyphs it is cell-box-relative
+    /// (already centred). Ignored for layout when `fill` is set.
     pub offset: [f32; 2],
-    /// Glyph quad size in pixels.
+    /// Glyph quad size in pixels. Ignored for layout when `fill` is set.
     pub size: [f32; 2],
+    /// A `Fill` glyph: the renderer draws it at the exact integer cell rect
+    /// (ignoring `offset`/`size`) so neighbouring box/block cells tile with no
+    /// hairline seam. The coverage in the atlas was rasterized to fill the cell.
+    pub fill: bool,
 }
 
 /// One shaped glyph from a run: the resolved glyph id and the byte offset
@@ -273,8 +366,10 @@ pub struct Atlas {
     /// RGBA color atlas for emoji.
     color_texture: wgpu::Texture,
     pub color_view: wgpu::TextureView,
-    /// Cache keyed by (glyph id, style index).
-    cache: HashMap<(u16, usize), Option<GlyphInfo>>,
+    /// Cache keyed by (glyph id, style index, constraint). The constraint is
+    /// part of the key because `Fill` bakes the cell box into the bitmap and
+    /// `Fit` into the placement, so the same glyph id can have distinct entries.
+    cache: HashMap<(u16, usize, Constraint), Option<GlyphInfo>>,
     /// Monochrome fallback glyphs cached by character.
     fallback_cache: HashMap<char, Option<GlyphInfo>>,
     /// Color emoji glyphs cached by character.
@@ -455,29 +550,41 @@ impl Atlas {
     /// Get the glyph for shaped `glyph_id` in the requested style, rasterizing
     /// and uploading it on first use. Returns `None` for blank / outline-less
     /// glyphs (e.g. the space glyph).
-    pub fn glyph(&mut self, glyph_id: u16, style: usize, queue: &wgpu::Queue) -> Option<GlyphInfo> {
-        if let Some(info) = self.cache.get(&(glyph_id, style)) {
+    pub fn glyph(
+        &mut self,
+        glyph_id: u16,
+        style: usize,
+        constraint: Constraint,
+        span: u16,
+        queue: &wgpu::Queue,
+    ) -> Option<GlyphInfo> {
+        if let Some(info) = self.cache.get(&(glyph_id, style, constraint)) {
             return *info;
         }
-        let info = self.rasterize(glyph_id, style, queue);
-        self.cache.insert((glyph_id, style), info);
+        let info = self.rasterize(glyph_id, style, constraint, span, queue);
+        self.cache.insert((glyph_id, style, constraint), info);
         info
     }
 
     /// Resolve `ch` the primary font lacks: prefer a COLR/CPAL color glyph
     /// (emoji), else the monochrome system-fallback chain. Returns `None` if
     /// nothing covers it.
-    pub fn glyph_fallback(&mut self, ch: char, queue: &wgpu::Queue) -> Option<FallbackGlyph> {
-        if let Some(info) = self.color_glyph(ch, queue) {
+    pub fn glyph_fallback(
+        &mut self,
+        ch: char,
+        span: u16,
+        queue: &wgpu::Queue,
+    ) -> Option<FallbackGlyph> {
+        if let Some(info) = self.color_glyph(ch, span, queue) {
             return Some(FallbackGlyph::Color(info));
         }
-        self.mono_fallback(ch, queue).map(FallbackGlyph::Mono)
+        self.mono_fallback(ch, span, queue).map(FallbackGlyph::Mono)
     }
 
     /// Composite `ch` from the color (COLR/CPAL) emoji font into the color
     /// atlas, caching the result. `None` if there is no color font or `ch` is
     /// not a color glyph in it.
-    fn color_glyph(&mut self, ch: char, queue: &wgpu::Queue) -> Option<GlyphInfo> {
+    fn color_glyph(&mut self, ch: char, span: u16, queue: &wgpu::Queue) -> Option<GlyphInfo> {
         if let Some(info) = self.color_cache.get(&ch) {
             return *info;
         }
@@ -493,14 +600,18 @@ impl Atlas {
             cf.face.paint_color_glyph(gid, 0, fg, &mut collector)?;
             composite_color_layers(&cf.raster, &collector.layers, self.px, self.srgb)
         });
-        let info = composited.map(|(rgba, w, h, min)| self.upload_color(&rgba, w, h, min, queue));
+        // Emoji em-boxes dwarf a text cell, so always fit + centre them.
+        let info = composited.map(|(rgba, w, h, min)| {
+            let raw = self.upload_color(&rgba, w, h, min, queue);
+            self.constrain(raw, Constraint::Fit, span)
+        });
         self.color_cache.insert(ch, info);
         info
     }
 
     /// Find the first monochrome fallback face that has an outline for `ch`,
     /// rasterize it into the coverage atlas, and cache the result.
-    fn mono_fallback(&mut self, ch: char, queue: &wgpu::Queue) -> Option<GlyphInfo> {
+    fn mono_fallback(&mut self, ch: char, span: u16, queue: &wgpu::Queue) -> Option<GlyphInfo> {
         if let Some(info) = self.fallback_cache.get(&ch) {
             return *info;
         }
@@ -516,7 +627,10 @@ impl Atlas {
                 break;
             }
         }
-        let info = raster.map(|r| self.upload(r, queue));
+        let info = raster.map(|r| {
+            let raw = self.upload(r, queue);
+            self.constrain(raw, classify(ch), span)
+        });
         self.fallback_cache.insert(ch, info);
         info
     }
@@ -556,6 +670,7 @@ impl Atlas {
             uv: [ax as f32 * inv, ay as f32 * inv, w as f32 * inv, h as f32 * inv],
             offset: [min.0, self.ascent + min.1],
             size: [w as f32, h as f32],
+            fill: false,
         }
     }
 
@@ -582,10 +697,133 @@ impl Atlas {
         pos
     }
 
-    fn rasterize(&mut self, glyph_id: u16, style: usize, queue: &wgpu::Queue) -> Option<GlyphInfo> {
-        let glyph = GlyphId(glyph_id).with_scale_and_position(self.px, point(0.0, 0.0));
-        let raster = outline_to_bitmap(&self.fonts[style], glyph)?;
-        Some(self.upload(raster, queue))
+    fn rasterize(
+        &mut self,
+        glyph_id: u16,
+        style: usize,
+        constraint: Constraint,
+        span: u16,
+        queue: &wgpu::Queue,
+    ) -> Option<GlyphInfo> {
+        match constraint {
+            // Non-uniformly scale the glyph so its advance maps to the cell width
+            // and its em-height to the cell height, then composite it into a
+            // cell-sized coverage tile (see `upload_fill`). Box/block/braille
+            // glyphs are axis-aligned, so anisotropic scaling keeps lines
+            // straight, and cell-sized tiles let neighbours meet with no seam.
+            Constraint::Fill => {
+                let target_w = self.cell_w * span as f32;
+                let target_h = self.cell_h;
+                let font = &self.fonts[style];
+                let scaled = font.as_scaled(PxScale::from(self.px));
+                let adv = scaled.h_advance(GlyphId(glyph_id)).max(1.0);
+                let em_h = (scaled.ascent() - scaled.descent()).max(1.0);
+                let sx = self.px * (target_w / adv);
+                let sy = self.px * (target_h / em_h);
+                // Baseline within the scaled glyph: the em maps onto [0, cell_h],
+                // so the baseline sits `ascent` of the way down that range.
+                let fill_baseline = scaled.ascent() * (target_h / em_h);
+                let glyph = GlyphId(glyph_id)
+                    .with_scale_and_position(PxScale { x: sx, y: sy }, point(0.0, 0.0));
+                let raster = outline_to_bitmap(font, glyph)?;
+                Some(self.upload_fill(raster, span, fill_baseline, queue))
+            }
+            _ => {
+                let glyph = GlyphId(glyph_id).with_scale_and_position(self.px, point(0.0, 0.0));
+                let raster = outline_to_bitmap(&self.fonts[style], glyph)?;
+                let info = self.upload(raster, queue);
+                Some(self.constrain(info, constraint, span))
+            }
+        }
+    }
+
+    /// Apply a `Fit` constraint to a naturally-rasterized glyph's placement:
+    /// scale it DOWN (never up) to fit within `span*cell_w × cell_h` preserving
+    /// aspect, then centre it horizontally in the span and vertically in the
+    /// cell. The resulting `offset` is cell-box-relative (not baseline-relative).
+    /// `None` glyphs are returned untouched (natural, baseline-placed).
+    fn constrain(&self, mut info: GlyphInfo, constraint: Constraint, span: u16) -> GlyphInfo {
+        if constraint != Constraint::Fit {
+            return info;
+        }
+        let (gw, gh) = (info.size[0], info.size[1]);
+        // Allow icons up to 2 cells wide (many Nerd Font glyphs are designed
+        // double-width even when the grid reserves one cell) and the full cell
+        // height; only ever shrink. This keeps wide icons (e.g. a folder) from
+        // collapsing to a sliver while still capping overflow.
+        let max_w = self.cell_w * span.max(2) as f32;
+        let scale = fit_scale(gw, gh, max_w, self.cell_h);
+        if scale <= 0.0 {
+            return info;
+        }
+        let nh = gh * scale;
+        info.size = [gw * scale, nh];
+        // Keep the glyph's natural horizontal bearing (left-aligned in the cell,
+        // overflowing right into the following cell — usually a space), and
+        // centre it vertically within the cell.
+        info.offset = [info.offset[0] * scale, (self.cell_h - nh) * 0.5];
+        info.fill = false;
+        info
+    }
+
+    /// Composite a non-uniformly-scaled `Fill` glyph into a full cell-sized
+    /// coverage tile and upload it. The tile spans exactly `span*cell_w × cell_h`
+    /// with the glyph placed at its scaled left bearing / baseline, so drawing
+    /// the tile at the cell origin makes adjacent box/block cells tile seamlessly.
+    fn upload_fill(
+        &mut self,
+        raster: Raster,
+        span: u16,
+        fill_baseline: f32,
+        queue: &wgpu::Queue,
+    ) -> GlyphInfo {
+        let cw = (self.cell_w * span as f32).ceil() as u32;
+        let ch = self.cell_h.ceil() as u32;
+        let mut canvas = vec![0u8; (cw * ch) as usize];
+        let x0 = raster.min.0.round() as i32;
+        let y0 = (fill_baseline + raster.min.1).round() as i32;
+        for gy in 0..raster.h as i32 {
+            let ty = y0 + gy;
+            if ty < 0 || ty >= ch as i32 {
+                continue;
+            }
+            for gx in 0..raster.w as i32 {
+                let tx = x0 + gx;
+                if tx < 0 || tx >= cw as i32 {
+                    continue;
+                }
+                let v = raster.bitmap[(gy as u32 * raster.w + gx as u32) as usize];
+                let d = &mut canvas[(ty as u32 * cw + tx as u32) as usize];
+                *d = (*d).max(v);
+            }
+        }
+        let (ax, ay) = self.alloc(cw, ch);
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x: ax, y: ay, z: 0 },
+                aspect: wgpu::TextureAspect::All,
+            },
+            &canvas,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(cw),
+                rows_per_image: Some(ch),
+            },
+            wgpu::Extent3d {
+                width: cw,
+                height: ch,
+                depth_or_array_layers: 1,
+            },
+        );
+        let inv = 1.0 / ATLAS_SIZE as f32;
+        GlyphInfo {
+            uv: [ax as f32 * inv, ay as f32 * inv, cw as f32 * inv, ch as f32 * inv],
+            offset: [0.0, 0.0],
+            size: [cw as f32, ch as f32],
+            fill: true,
+        }
     }
 
     /// Pack an already-rasterized glyph bitmap into the atlas and return its
@@ -620,6 +858,7 @@ impl Atlas {
             uv: [ax as f32 * inv, ay as f32 * inv, w as f32 * inv, h as f32 * inv],
             offset: [min.0, self.ascent + min.1],
             size: [w as f32, h as f32],
+            fill: false,
         }
     }
 
@@ -652,8 +891,8 @@ impl Atlas {
 #[cfg(test)]
 mod tests {
     use super::{
-        COLOR_FONT, ColorFont, FALLBACK_FONTS, FONT_REGULAR, LayerCollector, ShapeFace,
-        composite_color_layers,
+        COLOR_FONT, ColorFont, Constraint, FALLBACK_FONTS, FONT_REGULAR, LayerCollector, ShapeFace,
+        classify, composite_color_layers, fit_scale,
     };
     use ab_glyph::{Font, FontRef, FontVec};
     use rustybuzz::ttf_parser;
@@ -747,6 +986,62 @@ mod tests {
         );
         // A plain letter pair is unaffected by ligature substitution.
         assert_eq!(glyph_ids("ab"), vec![glyph_ids("a")[0], glyph_ids("b")[0]]);
+    }
+
+    #[test]
+    fn classify_assigns_expected_constraints() {
+        // Box drawing, block elements, braille, powerline separators → Fill.
+        assert_eq!(classify('─'), Constraint::Fill, "horizontal box line");
+        assert_eq!(classify('│'), Constraint::Fill, "vertical box line");
+        assert_eq!(classify('█'), Constraint::Fill, "full block");
+        assert_eq!(classify('\u{2580}'), Constraint::Fill, "upper half block");
+        assert_eq!(classify('\u{2800}'), Constraint::Fill, "braille blank");
+        assert_eq!(classify('\u{E0B0}'), Constraint::Fill, "powerline separator");
+        // Nerd Font icons + misc symbols + emoji → Fit.
+        assert_eq!(classify('\u{EA60}'), Constraint::Fit, "codicon");
+        assert_eq!(classify('\u{F0001}'), Constraint::Fit, "material design icon");
+        assert_eq!(classify('→'), Constraint::Fit, "arrow");
+        assert_eq!(classify('😀'), Constraint::Fit, "emoji");
+        // The whole PUA is Fit with no gaps — codepoints that previously fell
+        // between enumerated icon ranges (and rendered un-fitted / cut off) must
+        // now classify as Fit. These sit in former gaps.
+        for &gap in &['\u{E100}', '\u{E2C0}', '\u{E4A0}', '\u{E900}', '\u{EC80}', '\u{F418}', '\u{F600}'] {
+            assert_eq!(classify(gap), Constraint::Fit, "PUA gap {:#X} must fit", gap as u32);
+        }
+        // Ordinary text → None.
+        assert_eq!(classify('a'), Constraint::None);
+        assert_eq!(classify('中'), Constraint::None);
+        assert_eq!(classify(' '), Constraint::None);
+    }
+
+    #[test]
+    fn fit_scale_shrinks_oversized_preserving_aspect() {
+        // A glyph wider/taller than the box shrinks by the binding dimension.
+        // 40×48 into 20×24 → both dims bind equally → 0.5.
+        assert!((fit_scale(40.0, 48.0, 20.0, 24.0) - 0.5).abs() < 1e-3);
+        // A wide-but-short glyph (folder-like) binds on width only.
+        assert!((fit_scale(30.0, 10.0, 15.0, 24.0) - 0.5).abs() < 1e-3);
+    }
+
+    #[test]
+    fn average_stops_means_gradient_colors() {
+        use rustybuzz::ttf_parser::RgbaColor;
+        use rustybuzz::ttf_parser::colr::ColorStop;
+        let stops = vec![
+            ColorStop { stop_offset: 0.0, color: RgbaColor::new(0, 0, 0, 255) },
+            ColorStop { stop_offset: 1.0, color: RgbaColor::new(200, 100, 50, 255) },
+        ];
+        assert_eq!(super::average_stops(stops.into_iter()), Some([100, 50, 25, 255]));
+        // No stops → nothing to fill.
+        assert_eq!(super::average_stops(std::iter::empty()), None);
+    }
+
+    #[test]
+    fn fit_scale_never_upscales_or_divides_by_zero() {
+        // A glyph already within the box keeps its natural size (scale 1).
+        assert_eq!(fit_scale(6.0, 8.0, 16.0, 24.0), 1.0);
+        // A zero-area glyph yields scale 0 (nothing to place).
+        assert_eq!(fit_scale(0.0, 8.0, 16.0, 24.0), 0.0);
     }
 
     #[test]

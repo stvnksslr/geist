@@ -21,6 +21,8 @@ struct FileConfig {
     padding_x: Option<f32>,
     /// Blank space (in logical points) above/below the grid.
     padding_y: Option<f32>,
+    /// Coverage gamma for text antialiasing; >1 thickens light-on-dark text.
+    text_gamma: Option<f32>,
     /// Palette overrides, Ghostty-style: each entry is `"<index>=#rrggbb"`,
     /// e.g. `palette = ["0=#1d1f21", "1=#cc6666"]`.
     palette: Option<Vec<String>>,
@@ -54,6 +56,9 @@ pub struct Config {
     pub padding_x: f32,
     /// Logical-point padding above/below the grid (Ghostty `window-padding-y`).
     pub padding_y: f32,
+    /// Coverage gamma applied to text antialiasing in the glyph shader; values
+    /// above 1 thicken light-on-dark text that linear blending renders too thin.
+    pub text_gamma: f32,
     /// Cursor color; `None` defers to the running program / engine default.
     pub cursor: Option<Rgb>,
     /// Maximum scrollback lines retained per pane (Ghostty `scrollback-limit`).
@@ -77,6 +82,7 @@ impl Default for Config {
             palette: xterm_palette(GIEST_ANSI16),
             padding_x: 20.0,
             padding_y: 2.0,
+            text_gamma: 1.3,
             cursor: None,
             scrollback_limit: 10_000,
             selection_bg: Rgb::new(0x38, 0x5a, 0x9c),
@@ -122,6 +128,9 @@ impl Config {
         }
         if let Some(p) = file.padding_y {
             self.padding_y = p.max(0.0);
+        }
+        if let Some(g) = file.text_gamma {
+            self.text_gamma = g.clamp(0.5, 3.0);
         }
         if let Some(c) = file.cursor_color.as_deref().and_then(parse_hex) {
             self.cursor = Some(c);
@@ -315,5 +324,22 @@ mod tests {
         let before = (c.font_points, c.fg, c.bg);
         c.apply(toml::from_str("").unwrap());
         assert_eq!((c.font_points, c.fg, c.bg), before);
+    }
+
+    #[test]
+    fn text_gamma_overrides_and_clamps() {
+        let mut c = Config::default();
+        assert_eq!(c.text_gamma, 1.3);
+        // An empty config keeps the default.
+        c.apply(toml::from_str("").unwrap());
+        assert_eq!(c.text_gamma, 1.3);
+        // A valid value round-trips.
+        c.apply(toml::from_str("text_gamma = 1.6").unwrap());
+        assert_eq!(c.text_gamma, 1.6);
+        // Out-of-range values clamp to [0.5, 3.0].
+        c.apply(toml::from_str("text_gamma = 10.0").unwrap());
+        assert_eq!(c.text_gamma, 3.0);
+        c.apply(toml::from_str("text_gamma = 0.1").unwrap());
+        assert_eq!(c.text_gamma, 0.5);
     }
 }

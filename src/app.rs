@@ -227,7 +227,7 @@ impl App {
         let config = Config::load();
         let ppp = cc.egui_ctx.pixels_per_point().max(1.0);
         let px = (config.font_points * ppp).round();
-        let (cell_w, cell_h) = render::init(render_state, px);
+        let (cell_w, cell_h) = render::init(render_state, px, config.text_gamma);
 
         let (profiles, default_profile) = profiles::detect(config.shell.as_deref());
         let first = Session::new(&cc.egui_ctx, &config, &profiles[default_profile])?;

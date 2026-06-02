@@ -31,3 +31,6 @@ serde = { version = "1.0.228", features = ["derive"] }
 arboard = "3"
 # Base64 decode for OSC 52 clipboard-set sequences.
 base64 = "0.22"
+# Unicode display width (1 or 2 cells) for a grapheme cluster's leading char, so
+# the renderer can size/centre wide glyphs (CJK, emoji) over their full cell span.
+unicode-width = "0.2"

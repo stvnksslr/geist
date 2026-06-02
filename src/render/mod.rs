@@ -7,6 +7,7 @@ mod atlas;
 use atlas::{Atlas, FallbackGlyph, ShapedGlyph};
 use eframe::egui_wgpu::{self, CallbackTrait};
 use eframe::wgpu::{self, util::DeviceExt};
+use unicode_width::UnicodeWidthChar;
 
 use crate::engine::{CursorShape, GridSnapshot, Rgb};
 
@@ -49,6 +50,9 @@ pub struct GpuResources {
     capacity: u64,
     atlas: Atlas,
     is_srgb: bool,
+    /// Coverage gamma for text antialiasing (>1 thickens light-on-dark AA).
+    /// Passed to the shader as its reciprocal each frame.
+    text_gamma: f32,
     num_instances: u32,
     /// Reusable per-frame scratch buffers. Retained across frames (cleared, not
     /// reallocated) so building the instance list does no per-frame growth
@@ -94,7 +98,7 @@ struct GlyphRun {
 
 /// Build the renderer resources and register them with egui. Returns the
 /// monospace cell size in physical pixels so the app can size the grid.
-pub fn init(render_state: &egui_wgpu::RenderState, px: f32) -> (f32, f32) {
+pub fn init(render_state: &egui_wgpu::RenderState, px: f32, text_gamma: f32) -> (f32, f32) {
     let device = &render_state.device;
     let format = render_state.target_format;
 
@@ -272,6 +276,7 @@ pub fn init(render_state: &egui_wgpu::RenderState, px: f32) -> (f32, f32) {
         capacity: INITIAL_INSTANCES,
         atlas,
         is_srgb: format.is_srgb(),
+        text_gamma,
         num_instances: 0,
         scratch_out: Vec::new(),
         scratch_glyphs: Vec::new(),
@@ -461,17 +466,21 @@ impl GpuResources {
                     self.atlas.shape_run(&r.text, r.style, &mut shaped);
                     let color = self.color(r.fg, 1.0);
                     for sg in &shaped {
+                        // The cluster's leading char drives cell-fit classification
+                        // and display width (1 or 2 cells), so icons/box-drawing/
+                        // emoji are sized to their cell span.
+                        let ch_first = r.text[sg.cluster as usize..].chars().next().unwrap_or(' ');
+                        let constraint = atlas::classify(ch_first);
+                        let span = UnicodeWidthChar::width(ch_first).unwrap_or(1).max(1) as u16;
                         // glyph id 0 (.notdef) means the primary font lacks this
                         // character; resolve it from the fallback chain (color
                         // emoji → mode 2, monochrome → mode 1).
                         let placed: Option<(_, u32)> = if sg.glyph_id != 0 {
-                            self.atlas.glyph(sg.glyph_id, r.style, queue).map(|g| (g, 1))
+                            self.atlas
+                                .glyph(sg.glyph_id, r.style, constraint, span, queue)
+                                .map(|g| (g, 1))
                         } else {
-                            match r.text[sg.cluster as usize..]
-                                .chars()
-                                .next()
-                                .and_then(|ch| self.atlas.glyph_fallback(ch, queue))
-                            {
+                            match self.atlas.glyph_fallback(ch_first, span, queue) {
                                 Some(FallbackGlyph::Mono(g)) => Some((g, 1)),
                                 Some(FallbackGlyph::Color(g)) => Some((g, 2)),
                                 None => None,
@@ -482,17 +491,24 @@ impl GpuResources {
                         };
                         let cell_x = r.byte_cell.get(sg.cluster as usize).copied().unwrap_or(0);
                         let cell_left = ox + cell_x as f32 * cw;
-                        // Snap the glyph quad to whole physical pixels. The atlas
-                        // bitmap is rasterized on the integer grid, so a whole-pixel
-                        // destination keeps it 1:1 (crisp) instead of being resampled
-                        // across pixel boundaries (blurry / shimmering on scroll).
-                        glyphs.push(Instance {
-                            rect: [
+                        // A Fill glyph is a cell-sized coverage tile: draw it at the
+                        // cell origin so neighbouring box/block cells tile seamlessly.
+                        // Otherwise snap the glyph quad to whole physical pixels — the
+                        // atlas bitmap is rasterized on the integer grid, so a
+                        // whole-pixel destination keeps it 1:1 (crisp) instead of
+                        // being resampled across pixel boundaries (blurry on scroll).
+                        let rect = if g.fill {
+                            [cell_left.round(), cell_top.round(), g.size[0], g.size[1]]
+                        } else {
+                            [
                                 (cell_left + g.offset[0]).round(),
                                 (cell_top + g.offset[1]).round(),
                                 g.size[0],
                                 g.size[1],
-                            ],
+                            ]
+                        };
+                        glyphs.push(Instance {
+                            rect,
                             uv: g.uv,
                             color,
                             mode,
@@ -546,10 +562,13 @@ impl CallbackTrait for TermFrame {
         let res: &mut GpuResources = resources.get_mut().expect("GpuResources missing");
 
         let [sw, sh] = screen_descriptor.size_in_pixels;
+        // Pass the gamma reciprocal so the shader applies `pow(cov, gamma_inv)`
+        // with a single op; >1 text_gamma → exponent <1 → thicker AA coverage.
+        let gamma_inv = 1.0 / res.text_gamma.max(0.1);
         queue.write_buffer(
             &res.uniform,
             0,
-            bytemuck::cast_slice(&[sw as f32, sh as f32, 0.0, 0.0]),
+            bytemuck::cast_slice(&[sw as f32, sh as f32, gamma_inv, 0.0]),
         );
 
         res.build_instances(self, queue);
@@ -593,7 +612,7 @@ impl CallbackTrait for TermFrame {
 }
 
 const SHADER: &str = r#"
-struct U { screen: vec2<f32>, pad: vec2<f32> };
+struct U { screen: vec2<f32>, gamma_inv: f32, pad: f32 };
 @group(0) @binding(0) var<uniform> u: U;
 @group(0) @binding(1) var atlas_tex: texture_2d<f32>;
 @group(0) @binding(2) var atlas_smp: sampler;
@@ -631,7 +650,9 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     // Color emoji: straight-alpha RGBA sampled from the color atlas.
     return textureSample(color_tex, atlas_smp, in.uv);
   }
+  // Coverage gamma thickens light-on-dark AA, which a linear-correct alpha
+  // blend (sRGB framebuffer) otherwise renders too thin/spindly.
   let cov = textureSample(atlas_tex, atlas_smp, in.uv).r;
-  return vec4<f32>(in.color.rgb, in.color.a * cov);
+  return vec4<f32>(in.color.rgb, in.color.a * pow(cov, u.gamma_inv));
 }
 "#;
