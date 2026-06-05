@@ -24,8 +24,6 @@ compact_str = "0.8"
 # substitution. We shape per-style cell runs and snap the resulting glyphs back
 # onto the terminal grid by cluster.
 rustybuzz = "0.20"
-toml = "1.1.2"
-serde = { version = "1.0.228", features = ["derive"] }
 # Clipboard read for Ctrl+Shift+V paste (egui only emits a paste event for
 # Ctrl+V; this lets us read the clipboard for the Ctrl+Shift+V binding too).
 arboard = "3"

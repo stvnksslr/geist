@@ -98,7 +98,7 @@ the static archive instead, so giest is a single self-contained `.exe`.
 - **Shell profiles:** the strip's `▾` menu opens a new tab running a chosen
   shell — **PowerShell 7 (pwsh)**, **Windows PowerShell**, **Command Prompt**,
   or **WSL** (whichever are installed). The default (used by `+` and
-  Ctrl+Shift+T) prefers `pwsh`, overridable with `shell` in the config.
+  Ctrl+Shift+T) prefers `pwsh`, overridable with `command` in the config.
 - **Splits:** Ctrl+Shift+D splits side-by-side, Ctrl+Shift+E stacks; click a pane
   to focus it (focused pane is outlined). Ctrl+Shift+W closes the focused pane.
 - The window title follows the active tab's shell (OSC 0/2). The grid resizes to
@@ -106,28 +106,33 @@ the static archive instead, so giest is a single self-contained `.exe`.
 
 ## Configuration
 
-On startup giest reads `%APPDATA%\giest\config.toml` (override the path with the
-`GIEST_CONFIG` environment variable). All keys are optional:
+On startup giest reads `%APPDATA%\giest\config` (override the path with the
+`GIEST_CONFIG` environment variable). The file uses **Ghostty's config format**
+(`key = value` lines, kebab-case keys, unquoted hex colors, `#` comment lines,
+repeatable `palette`), so keys are transposable with a real Ghostty config. All
+keys are optional, and keys giest doesn't support are ignored with a warning:
 
-```toml
-shell        = "pwsh"     # default shell: name (pwsh/powershell/cmd/wsl) or a
-                          # full path; unset auto-detects (PowerShell 7 preferred)
-font_points  = 16.0       # logical font size (scaled by display DPI)
-foreground   = "#c5c8c6"  # default text color
-background   = "#101218"  # default background color
-cursor_color = "#c5c8c6"  # cursor color (omit to defer to the program/default)
-padding_x    = 2.0        # logical-point padding left/right of the grid
-padding_y    = 2.0        # logical-point padding above/below the grid
-text_gamma   = 1.3        # text AA gamma; >1 thickens light-on-dark text (0.5–3.0)
+```ini
+command          = pwsh        # default shell: name (pwsh/powershell/cmd/wsl) or
+                               # a full path; unset auto-detects (PowerShell 7)
+font-size        = 16          # logical font size (scaled by display DPI)
+foreground       = #c5c8c6     # default text color
+background       = #101218     # default background color
+cursor-color     = #c5c8c6     # cursor color (omit to defer to the program)
+window-padding-x = 2           # logical-point padding left/right of the grid
+window-padding-y = 2           # logical-point padding above/below the grid
+text-gamma       = 1.3         # text AA gamma; >1 thickens light-on-dark (0.5–3.0)
 
-scrollback_limit = 10000   # max scrollback lines retained per pane
+scrollback-limit = 10000       # max scrollback lines retained per pane
 
-selection_background = "#385a9c"  # selected-cell background
-selection_foreground = "#ffffff"  # text color over a selection (optional)
-copy_on_select       = false      # copy to clipboard as soon as text is selected
+selection-background = #385a9c # selected-cell background
+selection-foreground = #ffffff # text color over a selection (optional)
+copy-on-select       = false   # copy to clipboard as soon as text is selected
 
-# Palette overrides, Ghostty-style ("<index>=#rrggbb"):
-palette = ["0=#101218", "1=#cc6666", "8=#666a73"]
+# Palette overrides — repeat the key, one entry per line:
+palette = 0=#101218
+palette = 1=#cc6666
+palette = 8=#666a73
 ```
 
 The bundled theme also defines the full ANSI 16 + 256-color palette (see

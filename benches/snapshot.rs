@@ -32,6 +32,11 @@ fn bench_snapshot(c: &mut Criterion) {
             let id = format!("{kind}/{cols}x{rows}");
             group.bench_function(id, |b| {
                 b.iter(|| {
+                    // Overwrite cell (0,0) to re-dirty the frame each iteration,
+                    // so we keep measuring the full per-cell copy-out (the engine
+                    // skips the rebuild on a clean frame — exercised by idle
+                    // frames in the app, not the cost this bench tracks).
+                    eng.write(b"\x1b[Hx");
                     eng.snapshot(&mut snap).unwrap();
                     std::hint::black_box(snap.cells.len())
                 })

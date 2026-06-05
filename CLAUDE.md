@@ -50,7 +50,8 @@ fallback engine without app changes:
   `CallbackTrait`. **`render/atlas.rs`** — rustybuzz shaping + ab_glyph rasterization (primary +
   system fallback faces) into an R8 atlas; COLR/CPAL color emoji composited into a separate RGBA atlas.
 - **`pty.rs`** — ConPTY shell via portable-pty with a reader thread that wakes the UI on output.
-- **`config.rs`** — TOML config from `%APPDATA%\giest\config.toml` (override with `GIEST_CONFIG`);
+- **`config.rs`** — Ghostty-format config (`key = value` lines, kebab-case keys, unquoted
+  colors, repeatable `palette`) from `%APPDATA%\giest\config` (override with `GIEST_CONFIG`);
   defines the full ANSI 16 + 256-color palette. **`profiles.rs`** — shell profiles (pwsh/powershell/cmd/wsl).
   **`osc52.rs`** — side-stream parser for OSC 52 clipboard-set.
 

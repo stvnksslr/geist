@@ -4,6 +4,9 @@
 
 mod atlas;
 
+use std::ops::Range;
+use std::sync::Arc;
+
 use atlas::{Atlas, FallbackGlyph, ShapedGlyph};
 use eframe::egui_wgpu::{self, CallbackTrait};
 use eframe::wgpu::{self, util::DeviceExt};
@@ -61,6 +64,10 @@ pub struct GpuResources {
     /// Passed to the shader as its reciprocal each frame.
     text_gamma: f32,
     num_instances: u32,
+    /// Per-pane instance ranges and their clip rect (device px `[x, y, w, h]`),
+    /// so `paint` can scissor each pane independently — needed because smooth
+    /// scrolling overdraws a partial row past the pane's top/bottom edge.
+    pane_ranges: Vec<(Range<u32>, [f32; 4])>,
     /// Reusable per-frame scratch buffers. Retained across frames (cleared, not
     /// reallocated) so building the instance list does no per-frame growth
     /// allocation. `scratch_out` also holds the assembled instance list that
@@ -74,13 +81,20 @@ pub struct GpuResources {
 
 /// One pane (terminal grid) within a frame, positioned at `origin_px`.
 pub struct PaneFrame {
-    pub snapshot: GridSnapshot,
+    pub snapshot: Arc<GridSnapshot>,
     pub origin_px: [f32; 2],
     /// Inclusive linear (row-major) cell range to highlight as selected.
     pub selection: Option<(usize, usize)>,
     /// Draw the block cursor as a hollow outline rather than a filled cell
     /// (Ghostty does this for unfocused panes / when the window loses focus).
     pub cursor_hollow: bool,
+    /// Hide the cursor this frame for blink-off (kept off the snapshot so the
+    /// blink toggle needs no snapshot mutation/clone).
+    pub cursor_blink_hidden: bool,
+    /// Sub-line vertical offset (device px, `0..cell_h`) to shift the grid down
+    /// by for smooth scrolling. When `> 0` the snapshot's `over_row` is drawn at
+    /// the top and the bottom row overhangs; the pane scissor trims both.
+    pub scroll_offset_px: f32,
 }
 
 /// Per-frame data handed to the paint callback: every visible pane. Rendering
@@ -285,6 +299,7 @@ pub fn init(render_state: &egui_wgpu::RenderState, px: f32, text_gamma: f32) -> 
         is_srgb: format.is_srgb(),
         text_gamma,
         num_instances: 0,
+        pane_ranges: Vec::new(),
         scratch_out: Vec::new(),
         scratch_glyphs: Vec::new(),
         scratch_cursors: Vec::new(),
@@ -341,58 +356,88 @@ impl GpuResources {
         }
     }
 
-    /// Build the instance list for one frame into `self.scratch_out`.
+    /// Build the instance list for one frame into `self.scratch_out`, grouped so
+    /// each pane's instances occupy a contiguous range (recorded in
+    /// `self.pane_ranges` with its clip rect) for per-pane scissoring in `paint`.
     fn build_instances(&mut self, frame: &TermFrame, queue: &wgpu::Queue) {
         let cw = self.atlas.cell_w;
         let ch = self.atlas.cell_h;
         let ascent = self.atlas.ascent;
         let line_h = (ch * 0.07).max(1.0);
 
-        // Three passes (across all panes): backgrounds, then glyphs +
-        // decorations, then non-block cursors on top. Move the reusable scratch
-        // out of `self` (so the atlas can be borrowed alongside) and clear it;
-        // its capacity carries over from previous frames. `runs` keeps its
-        // `GlyphRun` slots (and their string/Vec buffers) across frames too — we
-        // track how many are live per row with `run_count` instead of clearing.
+        // Move the reusable scratch out of `self` (so the atlas can be borrowed
+        // alongside) and clear it; capacity carries over from previous frames.
+        // `runs` keeps its `GlyphRun` slots (and their string/Vec buffers) across
+        // frames too — we track how many are live per row with `run_count`.
         let mut out = std::mem::take(&mut self.scratch_out);
         let mut glyphs = std::mem::take(&mut self.scratch_glyphs);
         let mut cursors = std::mem::take(&mut self.scratch_cursors);
         let mut runs = std::mem::take(&mut self.scratch_runs);
         let mut shaped = std::mem::take(&mut self.scratch_shaped);
+        let mut ranges = std::mem::take(&mut self.pane_ranges);
         out.clear();
-        glyphs.clear();
-        cursors.clear();
+        ranges.clear();
 
         for pane in &frame.panes {
+            // Per pane, emit background → glyphs/decorations → non-block cursor,
+            // contiguously, so the pane owns one instance range we can scissor.
+            let pane_start = out.len() as u32;
+            glyphs.clear();
+            cursors.clear();
+
             let snap = &pane.snapshot;
             let [ox, oy] = pane.origin_px;
+            // Sub-line smooth-scroll shift (device px, whole-pixel). When > 0 the
+            // row above the viewport (`over_row`) is drawn at virtual row -1 and
+            // the bottom row overhangs; both are trimmed by the pane scissor.
+            let shift = pane.scroll_offset_px;
+            let over = &snap.over_row;
+            let has_over = shift > 0.0 && !over.is_empty();
+            let start_y: i32 = if has_over { -1 } else { 0 };
+            let cell_at = |x: u16, y: i32| {
+                if y < 0 {
+                    over.get(x as usize)
+                } else {
+                    snap.cell(x, y as u16)
+                }
+            };
+
             // A filled block inverts the cell under it; a hollow block (set by
             // DECSCUSR, or applied when the pane/window is unfocused) draws an
-            // outline and leaves the glyph's normal colors.
-            let filled_block = snap.cursor_visible
+            // outline and leaves the glyph's normal colors. Blink-off hides the
+            // cursor without touching the snapshot.
+            let cursor_visible = snap.cursor_visible && !pane.cursor_blink_hidden;
+            let filled_block = cursor_visible
                 && snap.cursor_shape == CursorShape::Block
                 && !pane.cursor_hollow;
-            let hollow_block = snap.cursor_visible
+            let hollow_block = cursor_visible
                 && (snap.cursor_shape == CursorShape::HollowBlock
                     || (snap.cursor_shape == CursorShape::Block && pane.cursor_hollow));
 
-            for y in 0..snap.rows {
+            for y in start_y..snap.rows as i32 {
                 for x in 0..snap.cols {
-                    let Some(cell) = snap.cell(x, y) else {
+                    let Some(cell) = cell_at(x, y) else {
                         continue;
                     };
                     let cell_left = ox + x as f32 * cw;
-                    let cell_top = oy + y as f32 * ch;
+                    let cell_top = oy + y as f32 * ch + shift;
 
-                    let is_cursor_cell = filled_block && x == snap.cursor_x && y == snap.cursor_y;
+                    // The cursor and selection live in the base grid (y >= 0);
+                    // the over-row (y == -1) is plain history.
+                    let (is_cursor_cell, selected) = if y >= 0 {
+                        let yu = y as u16;
+                        let icc = filled_block && x == snap.cursor_x && yu == snap.cursor_y;
+                        let lin = yu as usize * snap.cols as usize + x as usize;
+                        let sel = pane.selection.is_some_and(|(a, b)| lin >= a && lin <= b);
+                        (icc, sel)
+                    } else {
+                        (false, false)
+                    };
                     let (fg, mut bg) = if is_cursor_cell {
                         (cell.bg, snap.cursor_color)
                     } else {
                         (cell.fg, cell.bg)
                     };
-
-                    let lin = y as usize * snap.cols as usize + x as usize;
-                    let selected = pane.selection.is_some_and(|(a, b)| lin >= a && lin <= b);
                     if selected && !is_cursor_cell {
                         bg = frame.selection_bg;
                     }
@@ -413,27 +458,32 @@ impl GpuResources {
             // Glyph pass: shape each row into runs of uniform color+style so the
             // font's ligatures apply, then place the shaped glyphs back on the
             // grid at the cell their cluster came from.
-            for y in 0..snap.rows {
+            for y in start_y..snap.rows as i32 {
                 // Live runs for this row occupy runs[0..run_count]; slots beyond
                 // are reused (their buffers retained) on the next row/frame.
                 let mut run_count = 0usize;
                 // Whether runs[run_count - 1] is still open for appending (a blank
                 // cell breaks the run so the next non-blank starts a fresh one).
                 let mut cur_open = false;
+                let yu = if y >= 0 { Some(y as u16) } else { None };
                 for x in 0..snap.cols {
-                    let Some(cell) = snap.cell(x, y) else { continue };
+                    let Some(cell) = cell_at(x, y) else { continue };
                     if cell.text.is_empty() {
                         cur_open = false;
                         continue;
                     }
-                    let is_cursor_cell =
-                        filled_block && x == snap.cursor_x && y == snap.cursor_y;
-                    let lin = y as usize * snap.cols as usize + x as usize;
-                    let selected = pane.selection.is_some_and(|(a, b)| lin >= a && lin <= b);
-                    let fg = if is_cursor_cell {
-                        cell.bg
-                    } else if selected {
-                        frame.selection_fg.unwrap_or(cell.fg)
+                    let fg = if let Some(yu) = yu {
+                        let is_cursor_cell =
+                            filled_block && x == snap.cursor_x && yu == snap.cursor_y;
+                        let lin = yu as usize * snap.cols as usize + x as usize;
+                        let selected = pane.selection.is_some_and(|(a, b)| lin >= a && lin <= b);
+                        if is_cursor_cell {
+                            cell.bg
+                        } else if selected {
+                            frame.selection_fg.unwrap_or(cell.fg)
+                        } else {
+                            cell.fg
+                        }
                     } else {
                         cell.fg
                     };
@@ -467,7 +517,7 @@ impl GpuResources {
                     cur_open = true;
                 }
 
-                let cell_top = oy + y as f32 * ch;
+                let cell_top = oy + y as f32 * ch + shift;
                 for r in &runs[..run_count] {
                     shaped.clear();
                     self.atlas.shape_run(&r.text, r.style, &mut shaped);
@@ -504,6 +554,7 @@ impl GpuResources {
                         // atlas bitmap is rasterized on the integer grid, so a
                         // whole-pixel destination keeps it 1:1 (crisp) instead of
                         // being resampled across pixel boundaries (blurry on scroll).
+                        // `cell_top` already includes the whole-pixel scroll shift.
                         let rect = if g.fill {
                             [cell_left.round(), cell_top.round(), g.size[0], g.size[1]]
                         } else {
@@ -526,7 +577,7 @@ impl GpuResources {
             }
 
             let cur_left = ox + snap.cursor_x as f32 * cw;
-            let cur_top = oy + snap.cursor_y as f32 * ch;
+            let cur_top = oy + snap.cursor_y as f32 * ch + shift;
             let cur_color = self.color(snap.cursor_color, 1.0);
             if hollow_block {
                 // Four 1px edges forming an outline around the cursor cell.
@@ -535,17 +586,21 @@ impl GpuResources {
                 cursors.push(Instance::solid([cur_left, cur_top + ch - t, cw, t], cur_color));
                 cursors.push(Instance::solid([cur_left, cur_top, t, ch], cur_color));
                 cursors.push(Instance::solid([cur_left + cw - t, cur_top, t, ch], cur_color));
-            } else if snap.cursor_visible && !filled_block {
+            } else if cursor_visible && !filled_block {
                 let rect = match snap.cursor_shape {
                     CursorShape::Bar => [cur_left, cur_top, (cw * 0.12).max(1.0), ch],
                     _ => [cur_left, cur_top + ch - 2.0, cw, 2.0], // Underline
                 };
                 cursors.push(Instance::solid(rect, cur_color));
             }
-        }
 
-        out.append(&mut glyphs);
-        out.append(&mut cursors);
+            // Append this pane's glyphs then cursors after its backgrounds, and
+            // record the contiguous range with its clip rect (the grid box).
+            out.append(&mut glyphs);
+            out.append(&mut cursors);
+            let clip = [ox, oy, snap.cols as f32 * cw, snap.rows as f32 * ch];
+            ranges.push((pane_start..out.len() as u32, clip));
+        }
 
         // Return the scratch (now reusable, with retained capacity) to `self`.
         // `out` holds the assembled instance list for `prepare` to upload.
@@ -554,6 +609,7 @@ impl GpuResources {
         self.scratch_cursors = cursors;
         self.scratch_runs = runs;
         self.scratch_shaped = shaped;
+        self.pane_ranges = ranges;
     }
 }
 
@@ -601,7 +657,7 @@ impl CallbackTrait for TermFrame {
 
     fn paint(
         &self,
-        _info: eframe::egui::PaintCallbackInfo,
+        info: eframe::egui::PaintCallbackInfo,
         render_pass: &mut wgpu::RenderPass<'static>,
         resources: &egui_wgpu::CallbackResources,
     ) {
@@ -614,7 +670,29 @@ impl CallbackTrait for TermFrame {
         render_pass.set_vertex_buffer(0, res.corners.slice(..));
         render_pass.set_vertex_buffer(1, res.instances.slice(..));
         render_pass.set_index_buffer(res.indices.slice(..), wgpu::IndexFormat::Uint16);
-        render_pass.draw_indexed(0..QUAD_INDICES.len() as u32, 0, 0..res.num_instances);
+
+        // egui's own clip (already clamped to the framebuffer) bounds every
+        // pane scissor, so intersections stay within the attachment.
+        let egui_clip = info.clip_rect_in_pixels();
+        let (ex0, ey0) = (egui_clip.left_px, egui_clip.top_px);
+        let (ex1, ey1) = (ex0 + egui_clip.width_px, ey0 + egui_clip.height_px);
+
+        for (range, clip) in &res.pane_ranges {
+            // Intersect the pane's grid box with egui's clip; skip if empty.
+            let px0 = clip[0].round() as i32;
+            let py0 = clip[1].round() as i32;
+            let px1 = (clip[0] + clip[2]).round() as i32;
+            let py1 = (clip[1] + clip[3]).round() as i32;
+            let x0 = px0.max(ex0);
+            let y0 = py0.max(ey0);
+            let x1 = px1.min(ex1);
+            let y1 = py1.min(ey1);
+            if x1 <= x0 || y1 <= y0 {
+                continue;
+            }
+            render_pass.set_scissor_rect(x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32);
+            render_pass.draw_indexed(0..QUAD_INDICES.len() as u32, 0, range.clone());
+        }
     }
 }
 

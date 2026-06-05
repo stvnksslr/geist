@@ -10,6 +10,14 @@ fn main() -> eframe::Result {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_inner_size([960.0, 600.0])
             .with_title("giest"),
+        // Keep vsync (no tearing) but cap the swapchain to a single in-flight
+        // frame instead of wgpu's default 2 — the content tracks the window
+        // border tightly on resize and input feels ~1 frame snappier.
+        wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
+            present_mode: eframe::wgpu::PresentMode::AutoVsync,
+            desired_maximum_frame_latency: Some(1),
+            ..Default::default()
+        },
         ..Default::default()
     };
 

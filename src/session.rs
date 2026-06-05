@@ -3,6 +3,7 @@
 //! owns a `Vec<Session>` for tabs; cell metrics live in the app and are passed in.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::Result;
 use eframe::egui;
@@ -23,9 +24,31 @@ const DEFAULT_ROWS: u16 = 24;
 pub struct Session {
     pty: Pty,
     engine: GhosttyVtEngine,
-    pub snapshot: GridSnapshot,
+    /// Shared so the per-frame render copy is a refcount bump, not a deep clone
+    /// of the cell grid (see `App::render_active`). `Arc` (not `Rc`) because the
+    /// egui paint callback that borrows it must be `Send + Sync`.
+    pub snapshot: Arc<GridSnapshot>,
     cols: u16,
     rows: u16,
+    /// Eased on-screen scroll position, in **device pixels** above the live
+    /// bottom (≥ 0), that chases `scroll_target_px`. Whole-line part drives the
+    /// engine viewport; the sub-line remainder becomes `scroll_offset_px` for
+    /// the renderer.
+    scroll_px: f32,
+    /// Immediate, un-smoothed scroll target (device px) set straight from raw
+    /// wheel/keyboard input. `scroll_px` eases toward it each frame, giving a
+    /// snappy-but-smooth response without egui's ~100ms input smoothing lag.
+    scroll_target_px: f32,
+    /// Sub-line vertical offset (device px, `0..cell_h`) the renderer shifts the
+    /// grid down by, derived from `scroll_px` each frame.
+    scroll_offset_px: f32,
+    /// The engine viewport's current offset from the bottom, in whole lines —
+    /// what we last commanded via `engine.scroll`. Lets us issue minimal
+    /// relative deltas as `scroll_px` changes.
+    engine_pin_lines: isize,
+    /// Fractional-notch carry for the mouse-reporting wheel path (`handle_mouse`),
+    /// so wheel events forwarded to vim/less are evenly paced.
+    scroll_notch_accum: f32,
     sel_anchor: Option<(u16, u16)>,
     sel_head: Option<(u16, u16)>,
     mouse_down: Option<MouseButton>,
@@ -63,9 +86,14 @@ impl Session {
         Ok(Self {
             pty,
             engine,
-            snapshot: GridSnapshot::default(),
+            snapshot: Arc::new(GridSnapshot::default()),
             cols: DEFAULT_COLS,
             rows: DEFAULT_ROWS,
+            scroll_px: 0.0,
+            scroll_target_px: 0.0,
+            scroll_offset_px: 0.0,
+            engine_pin_lines: 0,
+            scroll_notch_accum: 0.0,
             sel_anchor: None,
             sel_head: None,
             mouse_down: None,
@@ -129,7 +157,25 @@ impl Session {
     }
 
     pub fn update_snapshot(&mut self) -> bool {
-        self.engine.snapshot(&mut self.snapshot).is_ok()
+        // `make_mut` clones only if the previous frame's render still holds the
+        // Arc; in steady state it's released by now, so this is a no-op bump.
+        let snap = Arc::make_mut(&mut self.snapshot);
+        // While mid-line (a sub-line offset is showing), also capture the row
+        // the offset reveals above the viewport top.
+        if self.scroll_offset_px > 0.0 {
+            if self.engine.snapshot_over_row(&mut snap.over_row).is_err() {
+                return false;
+            }
+        } else {
+            snap.over_row.clear();
+        }
+        self.engine.snapshot(snap).is_ok()
+    }
+
+    /// The sub-line vertical offset (device px) the renderer shifts this pane's
+    /// grid down by for smooth scrolling. `0` when resting on a line boundary.
+    pub fn scroll_offset_px(&self) -> f32 {
+        self.scroll_offset_px
     }
 
     pub fn default_bg(&self) -> crate::engine::Rgb {
@@ -144,6 +190,12 @@ impl Session {
             self.rows = rows;
             let _ = self.engine.resize(cols, rows, (cell_w as u32, cell_h as u32));
             let _ = self.pty.resize(cols, rows);
+            // Reflow invalidates the line-based pin; snap back to the live bottom
+            // so scroll bookkeeping stays consistent.
+            self.scroll_px = 0.0;
+            self.scroll_offset_px = 0.0;
+            self.engine_pin_lines = 0;
+            self.engine.scroll_to_bottom();
         }
     }
 
@@ -215,25 +267,25 @@ impl Session {
     /// are reserved for the app (copy, tab management) and never sent to the
     /// shell, as is `Ctrl+Tab`.
     pub fn handle_input(&mut self, ctx: &egui::Context, tracking: bool, cell_h: f32) {
-        let (events, scroll_y, ppp) = ctx.input(|i| {
-            (
-                i.events.clone(),
-                i.smooth_scroll_delta.y,
-                i.pixels_per_point().max(1.0),
-            )
-        });
-
-        if !tracking && scroll_y.abs() > 0.5 {
-            let cell_h_pts = (cell_h / ppp).max(1.0);
-            let lines = (scroll_y / cell_h_pts).round() as isize;
-            if lines != 0 {
-                self.engine.scroll(-lines);
-            }
-        }
+        let (events, ppp) = ctx.input(|i| (i.events.clone(), i.pixels_per_point().max(1.0)));
+        let cell_h_pts = (cell_h / ppp).max(1.0);
 
         let mut bytes: Vec<u8> = Vec::new();
         for event in &events {
             match event {
+                // Raw wheel deltas set the scroll *target* immediately (no egui
+                // input smoothing). The mouse-reporting path (`tracking`)
+                // forwards the wheel to the app in `handle_mouse` instead, so
+                // only drive the local viewport when not tracking. Positive
+                // `delta.y` moves content down = scroll up into history.
+                egui::Event::MouseWheel { unit, delta, .. } if !tracking => {
+                    let pts = match unit {
+                        egui::MouseWheelUnit::Line => delta.y * LINE_SCROLL_PTS,
+                        egui::MouseWheelUnit::Point => delta.y,
+                        egui::MouseWheelUnit::Page => delta.y * self.rows as f32 * cell_h_pts,
+                    };
+                    self.scroll_target_px += pts * ppp;
+                }
                 egui::Event::Text(text) => bytes.extend_from_slice(text.as_bytes()),
                 egui::Event::Paste(text) => {
                     let encoded = self.engine.encode_paste(text);
@@ -260,9 +312,12 @@ impl Session {
                     KeyAction::Encode(input) => {
                         bytes.extend_from_slice(&self.engine.encode_key(&input));
                     }
-                    KeyAction::Scroll(delta) => self.engine.scroll(delta),
-                    KeyAction::ScrollTop => self.engine.scroll_to_top(),
-                    KeyAction::ScrollBottom => self.engine.scroll_to_bottom(),
+                    // Keyboard scrolling feeds the same target. `delta` is in
+                    // lines with the engine's sign (negative = up), so moving up
+                    // adds to the target.
+                    KeyAction::Scroll(delta) => self.scroll_target_px -= delta as f32 * cell_h,
+                    KeyAction::ScrollTop => self.scroll_target_px = f32::INFINITY,
+                    KeyAction::ScrollBottom => self.scroll_target_px = 0.0,
                     // Reserved app combos (Ctrl+Shift/Ctrl+Tab/Ctrl-zoom) and
                     // text-producing keys (handled by the `Text` event) emit no
                     // bytes here.
@@ -273,9 +328,56 @@ impl Session {
         }
         if !bytes.is_empty() {
             // Typing returns the viewport to the bottom (Ghostty behavior).
-            self.engine.scroll_to_bottom();
+            self.scroll_target_px = 0.0;
             let _ = self.pty.write(&bytes);
         }
+
+        // Ease the on-screen position toward the target and commit it to the
+        // engine viewport + renderer, once per frame.
+        self.animate_scroll(ctx, cell_h);
+    }
+
+    /// Ease `scroll_px` toward `scroll_target_px` (snappy exponential), then
+    /// resolve it into a whole-line engine viewport position plus a sub-line
+    /// render offset. Requests a repaint while still animating so frames don't
+    /// starve (egui stops repainting once its own coarse scroll delta decays).
+    /// Re-anchors to the live bottom when fully scrolled down (clearing pin
+    /// drift from streamed output), and does zero work when idle at the bottom.
+    fn animate_scroll(&mut self, ctx: &egui::Context, cell_h: f32) {
+        // Idle at the live bottom: nothing to ease, clamp, or repaint.
+        if self.scroll_target_px == 0.0 && self.scroll_px == 0.0 && self.engine_pin_lines == 0 {
+            self.scroll_offset_px = 0.0;
+            return;
+        }
+        let ch = cell_h.max(1.0);
+        let scrollback = self.engine.scrollback_rows();
+        let max = scrollback as f32 * ch;
+        self.scroll_target_px = self.scroll_target_px.clamp(0.0, max);
+
+        // Snappy ease (~90% in 60ms); snap and stop repainting once within ½px.
+        let diff = self.scroll_target_px - self.scroll_px;
+        if diff.abs() < 0.5 {
+            self.scroll_px = self.scroll_target_px;
+        } else {
+            let dt = ctx.input(|i| i.stable_dt).clamp(1.0e-4, 1.0 / 30.0);
+            self.scroll_px += diff * exp_smooth_factor(0.9, 0.06, dt);
+            ctx.request_repaint();
+        }
+
+        let (base, frac) = scroll_split(self.scroll_px, ch, scrollback);
+        if base <= 0 {
+            if self.engine_pin_lines != 0 {
+                self.engine.scroll_to_bottom();
+                self.engine_pin_lines = 0;
+            }
+        } else {
+            let delta = base - self.engine_pin_lines;
+            if delta != 0 {
+                self.engine.scroll(-delta);
+                self.engine_pin_lines = base;
+            }
+        }
+        self.scroll_offset_px = frac;
     }
 
     /// Report mouse events to the running app (only when it tracks the mouse).
@@ -337,13 +439,18 @@ impl Session {
             }
         }
 
-        if scroll_y.abs() > 0.5 {
-            let button = if scroll_y > 0.0 {
+        let (notches, button) = {
+            let (n, accum) = notch_split(self.scroll_notch_accum, scroll_y, NOTCH_PTS);
+            self.scroll_notch_accum = accum;
+            let button = if n > 0 {
                 MouseButton::WheelUp
             } else {
                 MouseButton::WheelDown
             };
-            let notches = wheel_notches(scroll_y);
+            // Cap per frame so a fast fling can't flood the PTY with reports.
+            ((n.unsigned_abs()).min(MAX_WHEEL_NOTCHES_PER_FRAME), button)
+        };
+        if notches > 0 {
             let pos = ctx
                 .input(|i| i.pointer.latest_pos())
                 .unwrap_or_else(|| rect.center());
@@ -488,9 +595,45 @@ fn cell_from_pos(rel_x: f32, rel_y: f32, ppp: f32, cw: f32, ch: f32, cols: u16, 
     (x.min(cols.saturating_sub(1)), y.min(rows.saturating_sub(1)))
 }
 
-/// Number of wheel "notches" to report for a smooth-scroll delta (clamped 1..=5).
-fn wheel_notches(scroll_y: f32) -> usize {
-    ((scroll_y.abs() / 40.0).ceil() as usize).clamp(1, 5)
+/// Points of smooth-scroll travel per reported wheel "notch" on the
+/// mouse-reporting path. Chosen to roughly match a physical wheel detent.
+const NOTCH_PTS: f32 = 40.0;
+/// Cap on wheel notches reported to the app in a single frame, so a fast fling
+/// can't flood the PTY.
+const MAX_WHEEL_NOTCHES_PER_FRAME: usize = 8;
+
+/// Points of scroll travel per wheel line (egui's default `line_scroll_speed`),
+/// applied to raw `MouseWheelUnit::Line` deltas so wheel feel matches egui.
+const LINE_SCROLL_PTS: f32 = 40.0;
+
+/// Per-frame easing fraction to reach `reach` of the remaining distance in
+/// `secs` seconds given frame time `dt` — `1 - (1-reach)^(dt/secs)`. Mirrors
+/// egui's `exponential_smooth_factor`; frame-rate independent.
+fn exp_smooth_factor(reach: f32, secs: f32, dt: f32) -> f32 {
+    1.0 - (1.0 - reach).powf(dt / secs.max(1.0e-4))
+}
+
+/// Split a continuous pixel scroll position into a whole-line engine viewport
+/// offset (`base`, lines above the bottom) and a sub-line render remainder
+/// (`frac`, device px in `0..cell_h`). `scroll_px` is clamped to the available
+/// scrollback first; `frac` stays whole-pixel (since `scroll_px` is rounded and
+/// `cell_h` is integer) so glyph quads remain crisp during a scroll.
+fn scroll_split(scroll_px: f32, cell_h: f32, scrollback_rows: usize) -> (isize, f32) {
+    let ch = cell_h.max(1.0);
+    let max = scrollback_rows as f32 * ch;
+    let q = scroll_px.clamp(0.0, max).round();
+    let base = (q / ch).floor() as isize;
+    let frac = q - base as f32 * ch;
+    (base, frac)
+}
+
+/// Accumulate a fractional smooth-scroll delta into whole wheel notches,
+/// retaining the remainder so no motion is lost across frames. Returns the
+/// signed notch count to report this frame (positive = up) and the carry.
+fn notch_split(accum: f32, scroll_y: f32, notch_pts: f32) -> (isize, f32) {
+    let acc = (accum + scroll_y / notch_pts.max(1.0)).clamp(-1.0e4, 1.0e4);
+    let whole = acc.trunc();
+    (whole as isize, acc - whole)
 }
 
 /// Convert a pointer offset (points, relative to the grid origin) to a
@@ -689,7 +832,7 @@ fn is_text_producing(code: KeyCode) -> bool {
 mod tests {
     use super::{
         CopyAction, KeyAction, cell_from_pos, copy_or_interrupt, decide_key, extract_selection,
-        find_url_at, grid_dims, osc7_to_path, px_offset, wheel_notches, word_bounds,
+        find_url_at, grid_dims, notch_split, osc7_to_path, px_offset, scroll_split, word_bounds,
     };
     use std::path::PathBuf;
     use crate::engine::{Cell, GridSnapshot, KeyCode, KeyInput, KeyMods};
@@ -924,11 +1067,40 @@ mod tests {
     }
 
     #[test]
-    fn wheel_notches_clamp_one_to_five() {
-        assert_eq!(wheel_notches(0.0), 1);
-        assert_eq!(wheel_notches(10.0), 1);
-        assert_eq!(wheel_notches(45.0), 2);
-        assert_eq!(wheel_notches(-1.0e6), 5);
+    fn scroll_split_quantizes_to_line_plus_pixel_remainder() {
+        // ch=14, 100 lines of scrollback (max scroll = 1400px).
+        // At the bottom: no line offset, no sub-line remainder.
+        assert_eq!(scroll_split(0.0, 14.0, 100), (0, 0.0));
+        // A 2px scroll stays on line 0 with a 2px sub-line offset.
+        assert_eq!(scroll_split(2.0, 14.0, 100), (0, 2.0));
+        // Exactly one line: offset 1, remainder 0.
+        assert_eq!(scroll_split(14.0, 14.0, 100), (1, 0.0));
+        // One line plus 2px.
+        assert_eq!(scroll_split(16.0, 14.0, 100), (1, 2.0));
+        // The remainder is always whole-pixel and < cell_h (kept crisp).
+        let (_, frac) = scroll_split(13.6, 14.0, 100);
+        assert_eq!(frac, 0.0); // 13.6 rounds to 14 -> line 1, frac 0
+        // Clamped to the available scrollback (can't scroll past the top).
+        assert_eq!(scroll_split(1.0e6, 14.0, 100), (100, 0.0));
+        // No scrollback -> always pinned to the bottom.
+        assert_eq!(scroll_split(500.0, 14.0, 0), (0, 0.0));
+    }
+
+    #[test]
+    fn notch_split_accumulates_without_losing_motion() {
+        // Sub-notch deltas accrue rather than rounding to zero/one each frame.
+        let (n1, a1) = notch_split(0.0, 10.0, 40.0); // 0.25 notch
+        assert_eq!(n1, 0);
+        let (n2, a2) = notch_split(a1, 10.0, 40.0); // 0.5
+        assert_eq!(n2, 0);
+        let (n3, a3) = notch_split(a2, 10.0, 40.0); // 0.75
+        assert_eq!(n3, 0);
+        let (n4, _) = notch_split(a3, 10.0, 40.0); // 1.0 -> one notch
+        assert_eq!(n4, 1);
+        // Four 10pt deltas == one 40pt delta == one notch.
+        assert_eq!(notch_split(0.0, 40.0, 40.0).0, 1);
+        // Downward scroll yields a negative notch count.
+        assert_eq!(notch_split(0.0, -80.0, 40.0).0, -2);
     }
 
     #[test]

@@ -3,12 +3,15 @@
 These two modules handle startup configuration: what the terminal looks like
 (`config.rs`) and which shell it runs (`profiles.rs`).
 
-## `config.rs` — the TOML config
+## `config.rs` — the Ghostty-format config
 
-On startup giest reads `%APPDATA%\giest\config.toml` (override the path with the
-`GIEST_CONFIG` environment variable). All keys are optional; missing ones fall
-back to the bundled defaults, which include the full ANSI 16 + 256-color
-palette.
+On startup giest reads `%APPDATA%\giest\config` (override the path with the
+`GIEST_CONFIG` environment variable). The file uses Ghostty's config format —
+`key = value` lines, kebab-case keys, unquoted hex colors, `#` comment lines, and
+a repeatable `palette` key — so keys are transposable with a real Ghostty config.
+All keys are optional; missing ones fall back to the bundled defaults (which
+include the full ANSI 16 + 256-color palette), an empty value resets a key to its
+default, and unsupported keys are ignored with a warning.
 
 ```mermaid
 classDiagram
@@ -31,8 +34,8 @@ classDiagram
 ```mermaid
 flowchart LR
     env["GIEST_CONFIG env var"]
-    appdata["%APPDATA%\giest\config.toml"]
-    parse["toml + serde → Config"]
+    appdata["%APPDATA%\giest\config"]
+    parse["line parser (key = value) → Config"]
     defaults["bundled defaults<br/>(ANSI 16 + 256 palette)"]
 
     env -->|if set| parse
@@ -55,7 +58,7 @@ Where each field is consumed:
 | `selection_bg/fg`, `copy_on_select` | `app::render_active` / `TermFrame` |
 | `shell` | `profiles::detect` |
 
-See [Configuration](../guides/configuration.md) for the full annotated TOML.
+See [Configuration](../guides/configuration.md) for the full annotated example.
 
 ## `profiles.rs` — shell profiles
 

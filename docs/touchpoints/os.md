@@ -153,8 +153,8 @@ title); `app.rs` consumes egui events and issues `ViewportCommand`s.
 
 ## 6 · Filesystem & environment
 
-- **Config:** `config.rs` reads `%APPDATA%\giest\config.toml`, overridable with
-  the `GIEST_CONFIG` env var.
+- **Config:** `config.rs` reads `%APPDATA%\giest\config` (Ghostty-format,
+  `key = value` lines), overridable with the `GIEST_CONFIG` env var.
 - **PATH probing:** `profiles::which` splits `PATH` to find shells.
 - **Window subsystem:** `main.rs` sets `windows_subsystem = "windows"` in
   release builds so launching the GUI doesn't open a console window.

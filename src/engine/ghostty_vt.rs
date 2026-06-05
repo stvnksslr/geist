@@ -7,7 +7,7 @@ use anyhow::Result;
 use libghostty_vt::key::{Action, Encoder, Event, Key, Mods};
 use libghostty_vt::mouse;
 use libghostty_vt::paste;
-use libghostty_vt::render::{CellIterator, CursorVisualStyle, RowIterator};
+use libghostty_vt::render::{CellIteration, CellIterator, CursorVisualStyle, Dirty, RowIterator};
 use libghostty_vt::style::Underline;
 use libghostty_vt::terminal::{Mode, ScrollViewport};
 use libghostty_vt::{RenderState, Terminal, TerminalOptions};
@@ -32,6 +32,11 @@ pub struct GhosttyVtEngine {
     mouse_encoder: mouse::Encoder<'static>,
     mouse_event: mouse::Event<'static>,
     responses: ResponseSink,
+    /// Set when the viewport is scrolled, forcing the next [`Self::snapshot`] to
+    /// do a full rebuild even if libghostty reports the frame clean — insurance
+    /// for the dirty-skip fast path against any case where a pure viewport move
+    /// isn't flagged dirty.
+    viewport_moved: bool,
 }
 
 impl GhosttyVtEngine {
@@ -58,6 +63,7 @@ impl GhosttyVtEngine {
             mouse_encoder: mouse::Encoder::new()?,
             mouse_event: mouse::Event::new()?,
             responses,
+            viewport_moved: false,
         })
     }
 }
@@ -327,6 +333,35 @@ fn rgb(c: libghostty_vt::style::RgbColor) -> Rgb {
     Rgb::new(c.r, c.g, c.b)
 }
 
+/// Copy one libghostty render cell into a neutral [`Cell`], resolving colors
+/// (applying `inverse`) against the given defaults and reusing `dst`'s inline
+/// string buffer. Shared by the full-grid snapshot and the smooth-scroll
+/// over-row read.
+fn copy_cell(
+    cell: &CellIteration<'_, '_>,
+    default_fg: Rgb,
+    default_bg: Rgb,
+    dst: &mut Cell,
+) -> Result<()> {
+    let style = cell.style()?;
+    let mut fg = cell.fg_color()?.map(rgb).unwrap_or(default_fg);
+    let mut bg = cell.bg_color()?.map(rgb).unwrap_or(default_bg);
+    if style.inverse {
+        std::mem::swap(&mut fg, &mut bg);
+    }
+    dst.text.clear();
+    for ch in cell.graphemes()? {
+        dst.text.push(ch);
+    }
+    dst.fg = fg;
+    dst.bg = bg;
+    dst.bold = style.bold;
+    dst.italic = style.italic;
+    dst.underline = !matches!(style.underline, Underline::None);
+    dst.strikethrough = style.strikethrough;
+    Ok(())
+}
+
 impl TerminalEngine for GhosttyVtEngine {
     fn write(&mut self, bytes: &[u8]) {
         self.term.vt_write(bytes);
@@ -360,14 +395,53 @@ impl TerminalEngine for GhosttyVtEngine {
 
     fn scroll(&mut self, delta: isize) {
         self.term.scroll_viewport(ScrollViewport::Delta(delta));
+        self.viewport_moved = true;
     }
 
     fn scroll_to_bottom(&mut self) {
         self.term.scroll_viewport(ScrollViewport::Bottom);
+        self.viewport_moved = true;
     }
 
     fn scroll_to_top(&mut self) {
         self.term.scroll_viewport(ScrollViewport::Top);
+        self.viewport_moved = true;
+    }
+
+    fn scrollback_rows(&self) -> usize {
+        self.term.scrollback_rows().unwrap_or(0)
+    }
+
+    fn snapshot_over_row(&mut self, out: &mut Vec<Cell>) -> Result<()> {
+        // Reveal the line just above the viewport top by scrolling up one line,
+        // read its cells, then restore the viewport. The net Delta is zero, so
+        // the caller's pin is unchanged.
+        self.term.scroll_viewport(ScrollViewport::Delta(-1));
+        let read = (|| -> Result<()> {
+            let snapshot = self.render_state.update(&self.term)?;
+            let colors = snapshot.colors()?;
+            let cols = snapshot.cols()? as usize;
+            let default_fg = rgb(colors.foreground);
+            let default_bg = rgb(colors.background);
+            out.clear();
+            out.resize(cols, Cell::default());
+            let mut rows_iter = self.rows_buf.update(&snapshot)?;
+            if let Some(row) = rows_iter.next() {
+                let mut x = 0usize;
+                let mut cells_iter = self.cells_buf.update(row)?;
+                while let Some(cell) = cells_iter.next() {
+                    if x >= cols {
+                        break;
+                    }
+                    copy_cell(cell, default_fg, default_bg, &mut out[x])?;
+                    x += 1;
+                }
+            }
+            Ok(())
+        })();
+        // Restore the viewport regardless of read errors.
+        self.term.scroll_viewport(ScrollViewport::Delta(1));
+        read
     }
 
     fn apply_theme(&mut self, fg: Rgb, bg: Rgb, palette: &[Rgb; 256]) -> Result<()> {
@@ -462,13 +536,30 @@ impl TerminalEngine for GhosttyVtEngine {
     }
 
     fn snapshot(&mut self, out: &mut GridSnapshot) -> Result<()> {
+        let moved = self.viewport_moved;
+        self.viewport_moved = false;
+
         // Borrows of the distinct fields below are disjoint, so the snapshot
         // (which holds &mut render_state) coexists with the iterator buffers.
         let snapshot = self.render_state.update(&self.term)?;
 
-        let colors = snapshot.colors()?;
         let cols = snapshot.cols()?;
         let rows = snapshot.rows()?;
+
+        // Nothing changed since the last snapshot of this same-sized grid: keep
+        // the previously-filled cells and skip the O(rows*cols) per-cell FFI
+        // walk. (`update` consumed the dirty state; writes re-dirty it, and a
+        // viewport scroll sets `moved`, so only idle/cursor-blink frames skip.)
+        if !moved
+            && matches!(snapshot.dirty()?, Dirty::Clean)
+            && !out.cells.is_empty()
+            && out.cols == cols
+            && out.rows == rows
+        {
+            return Ok(());
+        }
+
+        let colors = snapshot.colors()?;
 
         out.cols = cols;
         out.rows = rows;
@@ -517,24 +608,9 @@ impl TerminalEngine for GhosttyVtEngine {
                 if x >= cols as usize {
                     break;
                 }
-                let style = cell.style()?;
-                let mut fg = cell.fg_color()?.map(rgb).unwrap_or(out.default_fg);
-                let mut bg = cell.bg_color()?.map(rgb).unwrap_or(out.default_bg);
-                if style.inverse {
-                    std::mem::swap(&mut fg, &mut bg);
-                }
-
                 // Fill in place, reusing the blanked cell's string buffer.
                 let dst = &mut out.cells[y * cols as usize + x];
-                for ch in cell.graphemes()? {
-                    dst.text.push(ch);
-                }
-                dst.fg = fg;
-                dst.bg = bg;
-                dst.bold = style.bold;
-                dst.italic = style.italic;
-                dst.underline = !matches!(style.underline, Underline::None);
-                dst.strikethrough = style.strikethrough;
+                copy_cell(cell, out.default_fg, out.default_bg, dst)?;
                 x += 1;
             }
             y += 1;

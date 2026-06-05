@@ -76,7 +76,8 @@ the upstream repo (`github.com/ghostty-org/ghostty`).
 
 | Module                        | File                        | Count | What it covers                                                |
 | ----------------------------- | --------------------------- | ----- | ------------------------------------------------------------ |
-| Config                        | `src/config.rs`             | 9     | palette well-formedness, hex parse, TOML overrides, gamma clamp |
+| Config                        | `src/config.rs`             | 15    | palette well-formedness, hex parse, Ghostty-format overrides, empty-resets, unknown-key tolerance, gamma clamp |
+| Config conformance            | `tests/config_conformance.rs` | 22  | Ghostty config-format parity: unquoted colors, comment/blank/malformed lines, last-wins, empty-resets, repeatable palette, every supported key, realistic pasted Ghostty config |
 | Profiles                      | `src/profiles.rs`           | 4     | shell detection, override, case/exe-insensitive match        |
 | OSC 52                        | `src/osc52.rs`              | 6     | BEL/ST set, split-chunk parsing, query ignore, primary target |
 | Selection / word / URL        | `src/session.rs`            | 4     | text-flow extraction, word bounds, URL-under-cursor          |

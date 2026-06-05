@@ -62,6 +62,11 @@ pub struct GridSnapshot {
     pub cols: u16,
     pub rows: u16,
     pub cells: Vec<Cell>,
+    /// The single grid row immediately *above* the viewport top — the line a
+    /// sub-line upward scroll partially reveals. Populated only while smooth
+    /// scrolling (see [`crate::session::Session::scroll_offset_px`]); empty
+    /// otherwise. `cols` cells wide.
+    pub over_row: Vec<Cell>,
     pub cursor_x: u16,
     pub cursor_y: u16,
     pub cursor_visible: bool,
@@ -167,6 +172,15 @@ pub trait TerminalEngine {
 
     /// Jump the viewport to the top (oldest scrollback).
     fn scroll_to_top(&mut self);
+
+    /// Number of rows in scrollback above the viewport (i.e. how many lines the
+    /// viewport can still be scrolled up). Used to clamp the scroll position.
+    fn scrollback_rows(&self) -> usize;
+
+    /// Capture the single grid row immediately above the current viewport top
+    /// (the line a sub-line upward scroll reveals) into `out` (`cols` cells).
+    /// Leaves the viewport position unchanged. Used only for smooth scrolling.
+    fn snapshot_over_row(&mut self, out: &mut Vec<Cell>) -> Result<()>;
 
     /// Apply a color theme: default foreground/background and the 256-color
     /// palette. Snapshots taken afterward resolve colors against these.

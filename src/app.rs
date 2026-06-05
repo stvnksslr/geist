@@ -688,14 +688,16 @@ impl App {
                 }
             }
 
-            let mut snapshot = session.snapshot.clone();
+            // Cheap Rc bump (not a grid clone); the blink toggle rides on a
+            // separate flag so the snapshot stays shared and unmutated.
+            let snapshot = session.snapshot.clone();
             // Only the focused pane of a focused window gets a live (solid,
             // blinking) cursor; every other visible cursor is drawn hollow.
             let pane_active = is_focus && window_focused;
+            let cursor_blink_hidden = pane_active
+                && snapshot.cursor_blinking
+                && ctx.input(|i| i.time) % 1.0 >= 0.5;
             if pane_active && snapshot.cursor_blinking {
-                if ctx.input(|i| i.time) % 1.0 >= 0.5 {
-                    snapshot.cursor_visible = false;
-                }
                 ctx.request_repaint_after(Duration::from_millis(100));
             }
             frames.push(PaneFrame {
@@ -708,6 +710,8 @@ impl App {
                 origin_px: [(prect.min.x * ppp).round(), (prect.min.y * ppp).round()],
                 selection: session.selection_range(),
                 cursor_hollow: !pane_active,
+                cursor_blink_hidden,
+                scroll_offset_px: session.scroll_offset_px(),
             });
         }
 
