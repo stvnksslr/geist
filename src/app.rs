@@ -258,12 +258,20 @@ impl App {
             .expect("eframe must run with the wgpu backend");
 
         let config = Config::load();
+        // Disable egui's built-in Ctrl +/-/0 zoom. It scales the global
+        // `pixels_per_point`, which grows the *whole* UI (tab strip, padding,
+        // split layout). We want those shortcuts to change only the text size,
+        // which `handle_font_zoom` does by re-rasterizing the glyph atlas and
+        // re-fitting the grid. Leaving both enabled makes them fight: the chrome
+        // scales up while the text appears to stay the same size.
+        cc.egui_ctx
+            .options_mut(|o| o.zoom_with_keyboard = false);
         let ppp = cc.egui_ctx.pixels_per_point().max(1.0);
         let px = (config.font_points * ppp).round();
         let (cell_w, cell_h) = render::init(render_state, px, config.text_gamma);
 
         let (profiles, default_profile) = profiles::detect(config.shell.as_deref());
-        let first = Session::new(&cc.egui_ctx, &config, &profiles[default_profile])?;
+        let first = Session::new(&cc.egui_ctx, &config, &profiles[default_profile], None)?;
 
         Ok(Self {
             tabs: vec![Tab::leaf(1, first)],
@@ -334,17 +342,18 @@ impl App {
         id
     }
 
-    /// Spawn a session for profile `idx` (clamped to the default if invalid).
-    fn spawn_session(&self, idx: usize) -> Option<Session> {
+    /// Spawn a session for profile `idx` (clamped to the default if invalid),
+    /// starting in `cwd` when given (else the process default directory).
+    fn spawn_session(&self, idx: usize, cwd: Option<&std::path::Path>) -> Option<Session> {
         let profile = self.profiles.get(idx).unwrap_or(&self.profiles[self.default_profile]);
-        Session::new(&self.egui_ctx, &self.config, profile)
+        Session::new(&self.egui_ctx, &self.config, profile, cwd)
             .map_err(|e| eprintln!("giest: failed to open session: {e}"))
             .ok()
     }
 
     /// Open a new tab running profile `idx`.
     fn new_tab(&mut self, idx: usize) {
-        if let Some(s) = self.spawn_session(idx) {
+        if let Some(s) = self.spawn_session(idx, None) {
             let id = self.alloc_id();
             self.tabs.push(Tab::leaf(id, s));
             self.active_tab = self.tabs.len() - 1;
@@ -352,9 +361,14 @@ impl App {
     }
 
     /// Split only the focused pane along `vertical` axis, focusing the new pane.
-    /// The rest of the tab's split layout is untouched (splits nest).
+    /// The rest of the tab's split layout is untouched (splits nest). The new
+    /// pane inherits the focused pane's working directory (via OSC 7).
     fn split(&mut self, vertical: bool) {
-        if let Some(s) = self.spawn_session(self.default_profile) {
+        let cwd = {
+            let tab = &self.tabs[self.active_tab];
+            tab.root.payload(tab.focus).and_then(|s| s.pwd())
+        };
+        if let Some(s) = self.spawn_session(self.default_profile, cwd.as_deref()) {
             let id = self.alloc_id();
             let tab = &mut self.tabs[self.active_tab];
             let focus = tab.focus;
@@ -504,7 +518,7 @@ impl App {
                 want_new = Some(self.default_profile);
             }
             // Profile picker: open a tab running a chosen shell.
-            ui.menu_button("▾", |ui| {
+            ui.menu_button("⏷", |ui| {
                 for (i, profile) in self.profiles.iter().enumerate() {
                     if ui.button(&profile.name).clicked() {
                         want_new = Some(i);

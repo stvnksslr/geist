@@ -4,6 +4,9 @@
 
 use std::path::PathBuf;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
+
 /// One launchable shell: a display name plus the program and args to spawn.
 #[derive(Clone, Debug)]
 pub struct Profile {
@@ -27,7 +30,53 @@ impl Profile {
         let norm = |x: &str| x.trim_end_matches(".exe").to_ascii_lowercase();
         norm(&self.name) == norm(s) || norm(&self.program) == norm(s)
     }
+
+    /// The full arg list to spawn this shell with. For the built-in PowerShell
+    /// and cmd profiles we prepend a small startup hook that makes the shell
+    /// report its working directory via OSC 7 — so a new split can open in the
+    /// parent pane's directory. Shells we don't recognise (WSL, a user's custom
+    /// command, or any profile that already carries args) are spawned untouched.
+    pub fn launch_args(&self) -> Vec<String> {
+        if !self.args.is_empty() {
+            return self.args.clone();
+        }
+        let prog = self.program.trim_end_matches(".exe").to_ascii_lowercase();
+        let prog = prog.rsplit(['\\', '/']).next().unwrap_or(&prog);
+        match prog {
+            "pwsh" | "powershell" => {
+                // `-EncodedCommand` runs after the user's $PROFILE loads, so the
+                // hook wraps their customised prompt; `-NoExit` keeps it interactive.
+                let utf16: Vec<u8> = PWSH_OSC7_HOOK
+                    .encode_utf16()
+                    .flat_map(u16::to_le_bytes)
+                    .collect();
+                let encoded = STANDARD.encode(utf16);
+                vec!["-NoExit".into(), "-EncodedCommand".into(), encoded]
+            }
+            // cmd expands $E -> ESC (Win10+) and $P -> current path each render;
+            // %COMPUTERNAME% expands once. Yields `file://HOST/C:\dir`, which the
+            // OSC 7 parser in `session.rs` tolerates (backslashes included).
+            "cmd" => vec![
+                "/K".into(),
+                "prompt $E]7;file://%COMPUTERNAME%/$P$E\\$P$G".into(),
+            ],
+            _ => Vec::new(),
+        }
+    }
 }
+
+/// PowerShell startup hook: wrap the existing `prompt` to also emit an OSC 7
+/// working-directory report before rendering. Encoded as UTF-16LE base64 and
+/// passed via `-EncodedCommand` (see [`Profile::launch_args`]).
+const PWSH_OSC7_HOOK: &str = r#"$global:__giestPrompt = $function:prompt
+function global:prompt {
+  $p = (Get-Location).ProviderPath
+  if ($p) {
+    $u = 'file://' + [System.Net.Dns]::GetHostName() + '/' + ($p -replace '\\','/')
+    [Console]::Write("$([char]27)]7;$u$([char]27)\")
+  }
+  & $global:__giestPrompt
+}"#;
 
 /// Find `exe` on the `PATH`, returning its full path if present.
 fn which(exe: &str) -> Option<PathBuf> {

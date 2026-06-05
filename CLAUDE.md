@@ -74,3 +74,12 @@ fallback engine without app changes:
   Windows-Terminal semantics: `Event::Copy` copies the selection if one exists, else sends `0x03` (SIGINT).
   OSC 52 clipboard *write* runs from `pump_pty` (no ctx) via `arboard` in `osc52.rs`; OSC 52 read/query
   is intentionally unanswered to avoid leaking the clipboard to terminal output.
+- **OSC 7 (working dir) must be side-scanned — `Terminal::pwd()` is always empty.** libghostty-vt's
+  *read-only* stream parses OSC 7 but discards `report_pwd` (it never reaches the terminal's `pwd`), so
+  the binding's `pwd()` returns `None` even after a valid report (unlike `title()`, which works). So a new
+  split's "inherit the parent's cwd" is built by side-scanning the PTY bytes ourselves in `osc7.rs`
+  (`Osc7Scanner`, fed from `pump_pty` like `osc52.rs`) and feeding the URI to `Session::pwd`. PowerShell
+  and cmd don't emit OSC 7 by default, so `Profile::launch_args` (`profiles.rs`) injects a prompt hook at
+  spawn (`pwsh`/`powershell` via `-EncodedCommand`, `cmd` via `prompt $E]7;…`); WSL/custom shells just
+  fall back to the default dir. The split's cwd is read in `App::split` and passed through `Session::new`
+  → `Pty::spawn` → `CommandBuilder::cwd`.

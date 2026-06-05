@@ -2,6 +2,7 @@
 //! background thread, and write input/responses back to it.
 
 use std::io::Write;
+use std::path::Path;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
 
@@ -22,11 +23,13 @@ pub struct Pty {
 
 impl Pty {
     /// Open a PTY of `cols`x`rows` and spawn `program` with `args` (e.g.
-    /// `pwsh.exe`, `wsl.exe`). `wake` is invoked on the reader thread whenever
-    /// new output arrives, so the UI can schedule a repaint.
+    /// `pwsh.exe`, `wsl.exe`) in `cwd` (the process default when `None`). `wake`
+    /// is invoked on the reader thread whenever new output arrives, so the UI can
+    /// schedule a repaint.
     pub fn spawn<W: Fn() + Send + 'static>(
         program: &str,
         args: &[String],
+        cwd: Option<&Path>,
         cols: u16,
         rows: u16,
         wake: W,
@@ -44,6 +47,9 @@ impl Pty {
         let mut cmd = CommandBuilder::new(program);
         for arg in args {
             cmd.arg(arg);
+        }
+        if let Some(cwd) = cwd {
+            cmd.cwd(cwd);
         }
         let child = pair
             .slave

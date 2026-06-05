@@ -2,6 +2,8 @@
 //! per-tab interaction state (selection, held mouse button). The [`App`](crate::app)
 //! owns a `Vec<Session>` for tabs; cell metrics live in the app and are passed in.
 
+use std::path::{Path, PathBuf};
+
 use anyhow::Result;
 use eframe::egui;
 
@@ -11,6 +13,7 @@ use crate::engine::{
     MouseInput, TerminalEngine,
 };
 use crate::osc52::Osc52Scanner;
+use crate::osc7::Osc7Scanner;
 use crate::profiles::Profile;
 use crate::pty::Pty;
 
@@ -30,16 +33,25 @@ pub struct Session {
     alive: bool,
     /// Side parser for OSC 52 clipboard-set sequences in the PTY output.
     osc52: Osc52Scanner,
+    /// Side parser tracking the shell's OSC 7 working directory, so a new split
+    /// can inherit it.
+    osc7: Osc7Scanner,
 }
 
 impl Session {
     /// Spawn `profile`'s shell and build its engine. `ctx` is cloned so the PTY
     /// reader thread can wake the UI when output arrives.
-    pub fn new(ctx: &egui::Context, config: &Config, profile: &Profile) -> Result<Self> {
+    pub fn new(
+        ctx: &egui::Context,
+        config: &Config,
+        profile: &Profile,
+        cwd: Option<&Path>,
+    ) -> Result<Self> {
         let wake_ctx = ctx.clone();
         let pty = Pty::spawn(
             &profile.program,
-            &profile.args,
+            &profile.launch_args(),
+            cwd,
             DEFAULT_COLS,
             DEFAULT_ROWS,
             move || wake_ctx.request_repaint(),
@@ -59,6 +71,7 @@ impl Session {
             mouse_down: None,
             alive: true,
             osc52: Osc52Scanner::new(),
+            osc7: Osc7Scanner::new(),
         })
     }
 
@@ -72,6 +85,7 @@ impl Session {
                 Ok(chunk) => {
                     self.engine.write(&chunk);
                     self.osc52.feed(&chunk, &mut clipboard_sets);
+                    self.osc7.feed(&chunk);
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
@@ -106,6 +120,12 @@ impl Session {
     /// The shell-set window/tab title, if any.
     pub fn title(&self) -> Option<String> {
         self.engine.title()
+    }
+
+    /// The shell's current working directory (reported via OSC 7), as a usable
+    /// filesystem path. `None` if the shell never reported one.
+    pub fn pwd(&self) -> Option<PathBuf> {
+        osc7_to_path(self.osc7.pwd()?)
     }
 
     pub fn update_snapshot(&mut self) -> bool {
@@ -612,6 +632,48 @@ fn map_egui_key(key: egui::Key) -> Option<KeyCode> {
     })
 }
 
+/// Convert the value reported via OSC 7 into a filesystem path. The canonical
+/// form is a `file://HOST/PATH` URI, but we tolerate a missing scheme, a missing
+/// host, percent-encoding, and Windows backslashes (cmd emits `file://HOST/C:\d`).
+/// Returns `None` for empty/non-absolute values.
+fn osc7_to_path(raw: &str) -> Option<PathBuf> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    // Strip the scheme and host: after `file://` (or a bare `//`), everything up
+    // to the first `/` is the host, which we drop, keeping the path from `/`.
+    let path = if let Some(rest) = raw.strip_prefix("file:") {
+        let rest = rest.strip_prefix("//").unwrap_or(rest);
+        match rest.find('/') {
+            Some(i) => &rest[i..],
+            // No path separator after the host — nothing usable.
+            None => return None,
+        }
+    } else {
+        raw
+    };
+    let decoded = percent_encoding::percent_decode_str(path)
+        .decode_utf8()
+        .ok()?;
+    // A Windows file URI path is `/C:/...`; drop the leading slash before the
+    // drive letter so it becomes a real path.
+    let bytes = decoded.as_bytes();
+    let trimmed = if bytes.len() >= 3
+        && bytes[0] == b'/'
+        && bytes[1].is_ascii_alphabetic()
+        && bytes[2] == b':'
+    {
+        &decoded[1..]
+    } else {
+        &decoded[..]
+    };
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(trimmed))
+}
+
 /// Keys that also produce an egui `Text` event when pressed without Ctrl/Alt.
 fn is_text_producing(code: KeyCode) -> bool {
     use KeyCode::*;
@@ -627,8 +689,9 @@ fn is_text_producing(code: KeyCode) -> bool {
 mod tests {
     use super::{
         CopyAction, KeyAction, cell_from_pos, copy_or_interrupt, decide_key, extract_selection,
-        find_url_at, grid_dims, px_offset, wheel_notches, word_bounds,
+        find_url_at, grid_dims, osc7_to_path, px_offset, wheel_notches, word_bounds,
     };
+    use std::path::PathBuf;
     use crate::engine::{Cell, GridSnapshot, KeyCode, KeyInput, KeyMods};
     use eframe::egui;
 
@@ -650,6 +713,28 @@ mod tests {
             }
         }
         s
+    }
+
+    #[test]
+    fn osc7_parses_file_uris_and_paths() {
+        let p = |s: &str| osc7_to_path(s);
+        // file:// URI with a host, forward slashes.
+        assert_eq!(p("file://HOST/C:/Users/foo"), Some(PathBuf::from("C:/Users/foo")));
+        // Empty host (`file:///...`).
+        assert_eq!(p("file:///C:/Users/foo"), Some(PathBuf::from("C:/Users/foo")));
+        // cmd's backslash form round-trips.
+        assert_eq!(p("file://HOST/C:\\Users\\foo"), Some(PathBuf::from("C:\\Users\\foo")));
+        // Percent-encoded spaces are decoded.
+        assert_eq!(
+            p("file://HOST/C:/Program%20Files"),
+            Some(PathBuf::from("C:/Program Files"))
+        );
+        // A bare absolute path with no scheme is accepted as-is.
+        assert_eq!(p("C:\\Users\\foo"), Some(PathBuf::from("C:\\Users\\foo")));
+        // Empty / unusable values yield None.
+        assert_eq!(p(""), None);
+        assert_eq!(p("   "), None);
+        assert_eq!(p("file://HOST"), None);
     }
 
     #[test]

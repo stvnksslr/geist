@@ -14,6 +14,7 @@ pub mod app;
 pub mod config;
 pub mod engine;
 pub mod osc52;
+pub mod osc7;
 pub mod profiles;
 pub mod pty;
 pub mod render;

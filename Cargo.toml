@@ -29,8 +29,12 @@ serde = { version = "1.0.228", features = ["derive"] }
 # Clipboard read for Ctrl+Shift+V paste (egui only emits a paste event for
 # Ctrl+V; this lets us read the clipboard for the Ctrl+Shift+V binding too).
 arboard = "3"
-# Base64 decode for OSC 52 clipboard-set sequences.
+# Base64 decode for OSC 52 clipboard-set sequences; also base64-encode the
+# PowerShell OSC 7 startup hook for `-EncodedCommand` (see profiles.rs).
 base64 = "0.22"
+# Percent-decode the OSC 7 working-directory URI a shell reports, so a new split
+# can inherit the parent pane's directory (see session.rs::osc7_to_path).
+percent-encoding = "2"
 # Unicode display width (1 or 2 cells) for a grapheme cluster's leading char, so
 # the renderer can size/centre wide glyphs (CJK, emoji) over their full cell span.
 unicode-width = "0.2"

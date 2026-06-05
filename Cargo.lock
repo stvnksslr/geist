@@ -987,6 +987,7 @@ dependencies = [
  "criterion",
  "eframe",
  "libghostty-vt",
+ "percent-encoding",
  "portable-pty",
  "rustybuzz",
  "serde",
