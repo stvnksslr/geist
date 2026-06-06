@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel superseded runs on the same ref to save Windows minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Keep in sync with the pinned commit in
+  # vendor/libghostty-rs/crates/libghostty-vt-sys/build.rs
+  GHOSTTY_COMMIT: b869a6e5ab0a50ce01e8eb5aa408a02b3cbe4f3a
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  ci:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      # Pre-cloned ghostty source the native build script consumes, kept
+      # outside target/ so it survives rust-cache's pruning. Uses
+      # `github.workspace` (not `runner.temp`): the `runner` context is not
+      # available in job-level `env`, only inside steps.
+      GHOSTTY_SOURCE_DIR: ${{ github.workspace }}/ghostty-src
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # Zig 0.15.2 (exact pin). Also caches the Zig global cache for us.
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - uses: dtolnay/rust-toolchain@1.96
+        with:
+          components: rustfmt, clippy
+
+      # Cache the pinned ghostty source so we skip the ~100 MB clone on warm runs.
+      - name: Cache ghostty source
+        id: ghostty-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.GHOSTTY_SOURCE_DIR }}
+          key: ghostty-src-${{ env.GHOSTTY_COMMIT }}
+
+      # On a cache miss, populate GHOSTTY_SOURCE_DIR ourselves; the build script
+      # asserts $GHOSTTY_SOURCE_DIR/build.zig exists.
+      - name: Fetch ghostty source (cache miss)
+        if: steps.ghostty-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --filter=blob:none --no-checkout https://github.com/ghostty-org/ghostty.git "$GHOSTTY_SOURCE_DIR"
+          git -C "$GHOSTTY_SOURCE_DIR" checkout "$GHOSTTY_COMMIT"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: zig0.15.2-ghostty-${{ env.GHOSTTY_COMMIT }}
+
+      - name: Build
+        run: cargo build --locked
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Rustfmt
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
