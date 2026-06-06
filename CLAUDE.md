@@ -16,7 +16,12 @@ mise dev                 # debug build + run (recommended; injects Zig 0.15.2)
 mise release             # optimized release build (recommended)
 cargo test               # ~31 unit tests (engine, input, selection, paste, mouse, theming, ligatures, OSC 52, URL detection)
 cargo test <name>        # single test by name substring
+cargo bench              # criterion perf benches (stream, snapshot, shaping, render) — see docs/benchmarking.md
 ```
+
+Benchmarks mirror Ghostty's suite (VT-write/OSC throughput, snapshot copy, shaping,
+headless renderer cost) and can be compared against upstream `ghostty-bench` via
+`scripts/bench-vs-ghostty.ps1`. Full guide: **docs/benchmarking.md**.
 
 - **Requires Zig 0.15.2 on PATH** — the vendored `libghostty-vt-sys/build.rs` runs `zig build`
   to compile Ghostty's VT library. **0.16.x will NOT build it** (the pinned ghostty commit

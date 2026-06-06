@@ -77,4 +77,6 @@ nav:
   - Guides:
       - Building & testing: guides/building.md
       - Configuration: guides/configuration.md
+      - Benchmarking: benchmarking.md
+      - Testing & perf gap analysis: testing-host-env-gap-analysis.md
   - Gotchas: gotchas.md

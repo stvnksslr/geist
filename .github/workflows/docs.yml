@@ -24,6 +24,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Ensure Pages is enabled AND its source is "GitHub Actions". A repo whose
+      # Pages source is "Deploy from a branch" serves the README via Jekyll, not
+      # the MkDocs site this workflow builds. `configure-pages` creates a brand-new
+      # site as build_type=workflow but no-ops (409) on an already-enabled site,
+      # so the explicit PUT below switches an existing branch-based site over.
+      - uses: actions/configure-pages@v5
+        with:
+          enablement: true
+      - name: Force Pages source to GitHub Actions
+        # Best-effort: if the token can't change the Pages source, don't fail the
+        # whole build — set it once manually (Settings → Pages → Source → GitHub
+        # Actions) and subsequent runs deploy fine.
+        continue-on-error: true
+        run: gh api --method PUT "repos/${{ github.repository }}/pages" -f build_type=workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"

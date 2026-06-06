@@ -120,11 +120,32 @@ struct GlyphRun {
 /// Build the renderer resources and register them with egui. Returns the
 /// monospace cell size in physical pixels so the app can size the grid.
 pub fn init(render_state: &egui_wgpu::RenderState, px: f32, text_gamma: f32) -> (f32, f32) {
-    let device = &render_state.device;
-    let format = render_state.target_format;
+    let resources = build_resources(
+        &render_state.device,
+        render_state.target_format,
+        px,
+        text_gamma,
+    );
+    let cell = resources.cell_size();
+    render_state
+        .renderer
+        .write()
+        .callback_resources
+        .insert(resources);
+    cell
+}
 
+/// Build the renderer's persistent GPU resources for `format` at pixel font size
+/// `px`. Used by [`init`] (which then registers them with egui) and by the
+/// headless render bench, which drives [`GpuResources::build_frame_instances`]
+/// directly against an offscreen device — no surface or egui needed.
+pub fn build_resources(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    px: f32,
+    text_gamma: f32,
+) -> GpuResources {
     let atlas = Atlas::new(device, px, format.is_srgb());
-    let (cell_w, cell_h) = (atlas.cell_w, atlas.cell_h);
 
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("term-shader"),
@@ -287,7 +308,7 @@ pub fn init(render_state: &egui_wgpu::RenderState, px: f32, text_gamma: f32) -> 
         mapped_at_creation: false,
     });
 
-    let resources = GpuResources {
+    GpuResources {
         pipeline,
         bind_group,
         uniform,
@@ -305,14 +326,7 @@ pub fn init(render_state: &egui_wgpu::RenderState, px: f32, text_gamma: f32) -> 
         scratch_cursors: Vec::new(),
         scratch_runs: Vec::new(),
         scratch_shaped: Vec::new(),
-    };
-    render_state
-        .renderer
-        .write()
-        .callback_resources
-        .insert(resources);
-
-    (cell_w, cell_h)
+    }
 }
 
 /// Re-rasterize the glyph atlas at a new pixel font size and return the new
@@ -354,6 +368,29 @@ impl GpuResources {
                 alpha,
             ]
         }
+    }
+
+    /// Monospace cell size (physical px) the atlas computed for the current font
+    /// size. Same value [`init`] returns.
+    pub fn cell_size(&self) -> (f32, f32) {
+        (self.atlas.cell_w, self.atlas.cell_h)
+    }
+
+    /// Assemble the instance list for `frame` — shaping, glyph rasterization +
+    /// atlas upload (via `queue`), and instance build into the reusable scratch
+    /// buffer. This is the per-frame CPU/upload work the renderer does before the
+    /// draw; returns the instance count produced. Exposed for the headless render
+    /// bench (the real frame path runs this from `CallbackTrait::prepare`).
+    pub fn build_frame_instances(&mut self, frame: &TermFrame, queue: &wgpu::Queue) -> u32 {
+        self.build_instances(frame, queue);
+        self.scratch_out.len() as u32
+    }
+
+    /// Drop all cached glyphs / shaped runs so the next `build_frame_instances`
+    /// re-rasterizes from cold — lets a bench measure rasterization cost rather
+    /// than the warm-atlas steady state.
+    pub fn reset_atlas_cache(&mut self) {
+        self.atlas.reset_cache();
     }
 
     /// Build the instance list for one frame into `self.scratch_out`, grouped so

@@ -481,6 +481,13 @@ impl Atlas {
         }
     }
 
+    /// Drop all cached glyphs/shaped runs and reset the shelf allocator so the
+    /// next glyph requests re-rasterize from cold (metrics unchanged). Used by the
+    /// render bench to measure rasterization cost rather than warm-cache lookups.
+    pub fn reset_cache(&mut self) {
+        self.set_px(self.px);
+    }
+
     /// Change the rasterization pixel size: recompute the monospace cell
     /// metrics, drop cached glyphs, and reset the shelf allocator so subsequent
     /// glyphs re-rasterize at the new size into the (reused) atlas texture.

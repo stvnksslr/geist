@@ -108,6 +108,31 @@ pub fn osc(count: usize, seed: u64) -> Vec<u8> {
     out
 }
 
+/// Resolve a benchmark input stream. If the env var `GIEST_BENCH_DATA` points at
+/// a readable file, its bytes are used verbatim (mirrors Ghostty's `--data`
+/// corpus approach — feed a real captured session); otherwise fall back to the
+/// seeded synthetic generator `gen` of roughly `len` bytes. Returns the bytes and
+/// the case label to report (`"corpus"` vs the generator's `kind`), so a bench
+/// can distinguish a real-corpus run from a synthetic one.
+///
+/// Generation is still kept out of the timed loop — call this once during setup.
+pub fn corpus(kind: &str, len: usize, seed: u64, generate: impl Fn(usize, u64) -> Vec<u8>) -> (Vec<u8>, &'static str) {
+    if let Ok(path) = std::env::var("GIEST_BENCH_DATA") {
+        match std::fs::read(&path) {
+            Ok(bytes) if !bytes.is_empty() => return (bytes, "corpus"),
+            Ok(_) => eprintln!("GIEST_BENCH_DATA={path} is empty; using synthetic {kind}"),
+            Err(e) => eprintln!("GIEST_BENCH_DATA={path} unreadable ({e}); using synthetic {kind}"),
+        }
+    }
+    // Leak the kind into a 'static label without allocating per call.
+    let label: &'static str = match kind {
+        "utf8" => "utf8",
+        "osc" => "osc",
+        _ => "ascii",
+    };
+    (generate(len, seed), label)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

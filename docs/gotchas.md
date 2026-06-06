@@ -50,6 +50,27 @@ The pinned Ghostty commit declares `minimum_zig_version = 0.15.2`. **0.16.x will
 not build it.** `mise.toml` pins `zig = "0.15.2"`; prefer the `mise dev` /
 `mise release` tasks, which put the right Zig on `PATH`.
 
+## The release profile feeds the Zig build via `DEBUG`
+
+`Cargo.toml`'s `[profile.release]` is tuned for max speed (`lto = "fat"`,
+`codegen-units = 1`, `panic = "abort"`, `strip`). The trap is the **`debug`**
+flag: Cargo passes a profile's `debug` setting to build scripts as the `DEBUG`
+env var, and `libghostty-vt-sys/build.rs` reads it — `DEBUG=true` switches the
+Zig VT library from `ReleaseFast` to a **slow `Debug` build**.
+
+**Implication:** never add `debug = true` to `[profile.release]` to get profiling
+symbols — it silently halves engine throughput. Use a dedicated profile instead:
+
+```toml
+[profile.profiling]
+inherits = "release"
+debug = true   # only here; this profile's DEBUG=true is the price of symbols
+```
+
+`panic = "abort"` also means a panic anywhere (including the PTY reader thread)
+aborts the process rather than unwinding — intended, and safer across the
+libghostty-vt FFI boundary. `cargo test`/`cargo bench` still build with unwind.
+
 ## Always run cargo from the project root
 
 Running cargo from inside `vendor/libghostty-rs/...` builds the **vendored

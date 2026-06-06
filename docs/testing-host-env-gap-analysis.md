@@ -230,14 +230,31 @@ ones (66 total) pass under `cargo test`.
   embedded font, ascii vs ligature-dense); seeded synthetic `ascii`/`utf8`/`osc`
   generators in `src/synthetic.rs`. ConPTY throughput harness in
   `tests/conpty_throughput.rs` (`#[ignore]`d; spawns real PowerShell).
+- **§5.3 Perf (round 2)** — closed the remaining gaps vs Ghostty's suite:
+  `benches/stream.rs` (the `TerminalStream`/`OscParser` analog — `engine.write()`
+  throughput for ascii/utf8/osc across grid sizes, plus giest's own
+  `Osc52Scanner`/`Osc7Scanner` side-scanners); `benches/render.rs` (the deferred
+  headless-wgpu bench, see below); `synthetic::corpus` + `GIEST_BENCH_DATA` real-
+  corpus support (`benches/data/`, mirrors Ghostty's `--data`); and
+  `scripts/bench-vs-ghostty.ps1` to compare giest vs upstream `ghostty-bench` over
+  the same corpus. Full guide in [benchmarking.md](benchmarking.md).
 - **Library target** — `src/lib.rs` now exposes the modules so `benches/` and
   `tests/` can drive the host code; `main.rs` is a thin binary over `giest::app`.
 
-### Deferred (with reason)
+### Previously deferred — now landed
 
 - **Instance-assembly + GPU-upload bench.** `Atlas::new` and `build_instances`
-  require a live `wgpu::Device`/`Queue`, so benching them needs a headless-GPU
-  harness (create an adapter/device with no surface) that doesn't exist yet. The
-  shaping bench covers the largest CPU component of the glyph path without a GPU;
-  full assembly/upload timing is left for a future headless-wgpu harness. This is
-  consistent with §5.4 (GPU-submit timing out of scope for now).
+  required a live `wgpu::Device`/`Queue`. `render/mod.rs` now exposes a headless
+  path — `build_resources(device, format, px, gamma)` (the non-egui half of
+  `init`) plus `GpuResources::build_frame_instances`/`reset_atlas_cache` — and
+  `benches/render.rs` spins up an offscreen adapter (no surface) to bench warm
+  per-frame instance assembly and cold rasterization across grid sizes/classes.
+  It **skips gracefully** when no adapter is available, so CI without a GPU is
+  unaffected (consistent with §5.4: live GPU-submit/latency timing stays out of
+  scope — this measures CPU assembly + atlas upload, not swapchain present).
+
+### Still deferred (with reason)
+
+- **Input→render latency / GPU-submit timing** — per §5.4, needs a live
+  window/GPU and an external typometer-style approach; Ghostty doesn't measure it
+  internally either.

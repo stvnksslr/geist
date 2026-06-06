@@ -40,6 +40,9 @@ unicode-width = "0.2"
 [dev-dependencies]
 # Statistical benchmark harness for the host CPU-path benches (see benches/).
 criterion = "0.5"
+# Block on wgpu's async adapter/device requests in the headless render bench
+# (benches/render.rs). Already in the dependency tree via wgpu.
+pollster = "0.4"
 
 # Host-environment CPU-path benchmarks. They link the giest *library* (src/lib.rs)
 # so they can drive the engine snapshot and the shaping path directly. Run with
@@ -51,3 +54,41 @@ harness = false
 [[bench]]
 name = "shaping"
 harness = false
+
+# VT-write throughput (Ghostty's TerminalStream/OscParser analog) + giest's own
+# OSC side-scanners.
+[[bench]]
+name = "stream"
+harness = false
+
+# Renderer cost (glyph rasterization + per-frame instance assembly). Needs a
+# headless wgpu device; skips gracefully when no GPU adapter is available.
+[[bench]]
+name = "render"
+harness = false
+
+# Maximally-optimized release build. Trades longer compile times for the fastest
+# runtime — appropriate for a GPU terminal whose hot paths (VT parse, shaping,
+# per-frame instance assembly) run thousands of times a second.
+#
+# NOTE: the vendored libghostty-vt Zig lib picks its own optimization from cargo's
+# env in `libghostty-vt-sys/build.rs` — `cargo build --release` sets OPT_LEVEL=3 +
+# DEBUG=false → Zig `ReleaseFast` (already maximal). Do NOT set `debug = true`
+# here: that sets DEBUG=true and silently downgrades the Zig lib to a slow `Debug`
+# build (see docs/benchmarking.md). Profile locally via `perf`/`samply` on a
+# separate profiling profile instead.
+[profile.release]
+opt-level = 3        # max speed (default, made explicit)
+lto = "fat"          # whole-program LTO across giest + all deps (incl. wgpu/eframe)
+codegen-units = 1    # one unit → no cross-unit optimization barriers
+panic = "abort"      # drop unwinding tables: smaller + lets the optimizer assume
+                     # no unwind. A panic aborts the process (incl. the PTY reader
+                     # thread) instead of unwinding — fine for a terminal, and
+                     # safer across the libghostty-vt FFI boundary. `cargo
+                     # test`/`bench` still build with unwind automatically.
+strip = "symbols"    # strip symbols from the shipped binary (size only)
+
+# Benchmarks inherit `release`, so the perf benches in `benches/` already measure
+# this fully-optimized build. (Profile kept explicit for clarity.)
+[profile.bench]
+inherits = "release"

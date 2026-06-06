@@ -988,6 +988,7 @@ dependencies = [
  "eframe",
  "libghostty-vt",
  "percent-encoding",
+ "pollster",
  "portable-pty",
  "rustybuzz",
  "unicode-width",
