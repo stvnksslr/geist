@@ -14,7 +14,7 @@ trait; the shell runs over **ConPTY**. North-star goal: feature parity with the 
 ```powershell
 mise dev                 # debug build + run (recommended; injects Zig 0.15.2)
 mise release             # optimized release build (recommended)
-cargo test               # ~31 unit tests (engine, input, selection, paste, mouse, theming, ligatures, OSC 52, URL detection)
+cargo test               # ~79 unit tests (engine, input, selection, paste, mouse, theming, ligatures, OSC 7/52, URL detection)
 cargo test <name>        # single test by name substring
 cargo bench              # criterion perf benches (stream, snapshot, shaping, render) — see docs/benchmarking.md
 ```
@@ -89,3 +89,19 @@ fallback engine without app changes:
   spawn (`pwsh`/`powershell` via `-EncodedCommand`, `cmd` via `prompt $E]7;…`); WSL/custom shells just
   fall back to the default dir. The split's cwd is read in `App::split` and passed through `Session::new`
   → `Pty::spawn` → `CommandBuilder::cwd`.
+
+## Verifying visual/rendering changes
+
+A passing `cargo build`/`cargo test` does **not** confirm a rendering change *looks* right — the
+hard bugs here (glyph clipping, emoji fragments, pane padding, scroll pacing, transparency) are
+perceptual and the unit tests don't see them. Self-captured screenshots have repeatedly produced
+false "it works" conclusions on exactly these tasks.
+
+- For any change to `render/*`, padding, font sizing, or window compositing: state plainly that it
+  needs **human visual confirmation**, describe what should look different, and ask the user to
+  eyeball it rather than declaring success from a screenshot harness.
+- If you do capture, the working method is: inject deterministic glyphs via a startup shell-wrapper
+  (no synthetic keyboard) and grab the window with **PrintWindow** — not a generic screen grab.
+  Treat the capture as a sanity check, not proof.
+- Effect sizes can be below the visible threshold (e.g. 8px padding read as "flush"). When a change
+  "should" be visible but isn't, suspect the magnitude before re-debugging the mechanism.
