@@ -7,10 +7,10 @@ use anyhow::Result;
 use eframe::egui;
 use eframe::egui_wgpu;
 
-use crate::config::Config;
+use crate::config::{Config, MiddleClickAction, RightClickAction};
 use crate::profiles::{self, Profile};
 use crate::render::{self, PaneFrame, TermFrame};
-use crate::session::Session;
+use crate::session::{self, Session};
 
 /// A tab: a binary tree of panes (`Node`) with one focused leaf (by id). Each
 /// split divides only the focused pane, so splits nest (like Ghostty) instead of
@@ -21,6 +21,11 @@ struct Tab<T> {
     root: Node<T>,
     /// Id of the focused leaf.
     focus: u64,
+    /// User-set title override (via "Rename Tab…"); `None` uses the focused
+    /// pane's terminal title.
+    name: Option<String>,
+    /// User-set tab tint (via "Tab Color"); `None` uses the default chrome color.
+    color: Option<egui::Color32>,
 }
 
 impl<T> Tab<T> {
@@ -28,6 +33,8 @@ impl<T> Tab<T> {
         Self {
             root: Node::Leaf { id, payload },
             focus: id,
+            name: None,
+            color: None,
         }
     }
     fn focused_payload(&self) -> &T {
@@ -216,7 +223,7 @@ fn reap_tabs<T>(
     let mut survivors: Vec<Tab<T>> = Vec::with_capacity(tabs.len());
     let mut new_active = 0;
     for (i, tab) in tabs.into_iter().enumerate() {
-        let Tab { root, focus } = tab;
+        let Tab { root, focus, name, color } = tab;
         if let Some(root) = root.prune(&mut *dead) {
             if i <= active {
                 new_active = survivors.len();
@@ -226,11 +233,39 @@ fn reap_tabs<T>(
             } else {
                 root.first_leaf_id()
             };
-            survivors.push(Tab { root, focus });
+            survivors.push(Tab { root, focus, name, color });
         }
     }
     let active = new_active.min(survivors.len().saturating_sub(1));
     (survivors, active)
+}
+
+/// Keep only `tabs[keep]` (Ghostty's "Close Other Tabs"), returning it at index 0
+/// with the active selection on it. A no-op when `keep` is out of range. Pure core
+/// of [`App::close_other_tabs`], split out so the reselection is testable.
+fn keep_only_tab<T>(mut tabs: Vec<Tab<T>>, keep: usize, active: usize) -> (Vec<Tab<T>>, usize) {
+    if keep >= tabs.len() {
+        return (tabs, active);
+    }
+    tabs.swap(0, keep);
+    tabs.truncate(1);
+    (tabs, 0)
+}
+
+/// Drop every tab after `idx` (Ghostty's "Close Tabs to the Right"), clamping the
+/// active selection into the survivors. Pure core of [`App::close_tabs_to_right`].
+fn truncate_tabs_to_right<T>(
+    mut tabs: Vec<Tab<T>>,
+    idx: usize,
+    active: usize,
+) -> (Vec<Tab<T>>, usize) {
+    if idx + 1 < tabs.len() {
+        tabs.truncate(idx + 1);
+        let active = active.min(tabs.len() - 1);
+        (tabs, active)
+    } else {
+        (tabs, active)
+    }
 }
 
 /// One laid-out pane: a focusable leaf with its payload and screen rect.
@@ -261,11 +296,28 @@ pub struct App {
     /// by `render_active` so `handle_shortcuts` (which runs before layout) can
     /// resolve directional split-focus navigation geometrically.
     last_layout: Vec<(u64, egui::Rect)>,
+    /// When a tab is being renamed inline ("Rename Tab…"), its index and the
+    /// in-progress edit text; `None` when no rename is active.
+    renaming: Option<(usize, String)>,
 }
 
 /// Runtime font-size bounds in logical points.
 const MIN_FONT_POINTS: f32 = 6.0;
 const MAX_FONT_POINTS: f32 = 48.0;
+
+/// Tab tint palette offered by the "Tab Color" context-menu submenu, mirroring
+/// Ghostty's set. The menu also offers a "None" entry that clears the tint.
+const TAB_COLORS: &[(&str, egui::Color32)] = &[
+    ("Blue", egui::Color32::from_rgb(0x32, 0x7e, 0xff)),
+    ("Purple", egui::Color32::from_rgb(0x9b, 0x59, 0xf6)),
+    ("Pink", egui::Color32::from_rgb(0xff, 0x5c, 0xa8)),
+    ("Red", egui::Color32::from_rgb(0xe7, 0x4c, 0x3c)),
+    ("Orange", egui::Color32::from_rgb(0xf5, 0x9e, 0x0b)),
+    ("Yellow", egui::Color32::from_rgb(0xf1, 0xc4, 0x0f)),
+    ("Green", egui::Color32::from_rgb(0x2e, 0xcc, 0x71)),
+    ("Teal", egui::Color32::from_rgb(0x1a, 0xbc, 0x9c)),
+    ("Graphite", egui::Color32::from_rgb(0x60, 0x6a, 0x76)),
+];
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Result<Self> {
@@ -303,6 +355,7 @@ impl App {
             egui_ctx: cc.egui_ctx.clone(),
             last_window_title: None,
             last_layout: Vec::new(),
+            renaming: None,
         })
     }
 
@@ -457,6 +510,24 @@ impl App {
         }
     }
 
+    /// Close every tab except `keep`, leaving it focused (Ghostty's "Close Other
+    /// Tabs"). A no-op if `keep` is out of range; always leaves one tab.
+    fn close_other_tabs(&mut self, keep: usize) {
+        let tabs = std::mem::take(&mut self.tabs);
+        let (tabs, active) = keep_only_tab(tabs, keep, self.active_tab);
+        self.tabs = tabs;
+        self.active_tab = active;
+    }
+
+    /// Close every tab to the right of `idx` (Ghostty's "Close Tabs to the
+    /// Right"), clamping the active tab into the survivors.
+    fn close_tabs_to_right(&mut self, idx: usize) {
+        let tabs = std::mem::take(&mut self.tabs);
+        let (tabs, active) = truncate_tabs_to_right(tabs, idx, self.active_tab);
+        self.tabs = tabs;
+        self.active_tab = active;
+    }
+
     /// Remove panes whose shell has exited; drop tabs that become empty and
     /// close the window when the last tab is gone. Returns `false` if the
     /// window is closing (caller should skip rendering this frame).
@@ -491,7 +562,9 @@ impl App {
                 match key {
                     egui::Key::T => self.new_tab(self.default_profile),
                     egui::Key::W => self.close_focused(ctx),
-                    egui::Key::O => self.split(true),  // new split right (columns)
+                    // Split right (columns): D mirrors macOS Ghostty's Cmd+D;
+                    // O matches Ghostty's GTK default. Both are accepted.
+                    egui::Key::D | egui::Key::O => self.split(true),
                     egui::Key::E => self.split(false), // new split down (rows)
                     // Cycle split focus in creation order (Ghostty's goto_split).
                     egui::Key::OpenBracket => self.focus_cycle(false),
@@ -535,61 +608,212 @@ impl App {
     }
 
     fn tab_bar(&mut self, ui: &mut egui::Ui) {
+        // Deferred intents collected while `self.tabs` is borrowed immutably for
+        // iteration, then applied after the loop (the strip can't mutate the tabs
+        // it's drawing). The `×`, middle-click, and right-click menu all feed these.
         let mut switch_to = None;
         let mut want_close = None;
+        let mut want_close_others: Option<usize> = None;
+        let mut want_close_right: Option<usize> = None;
         // Profile index to open a new tab with (default unless the menu picks one).
         let mut want_new: Option<usize> = None;
+        let mut want_rename: Option<usize> = None;
+        let mut want_color: Option<(usize, Option<egui::Color32>)> = None;
+        let mut commit_rename: Option<(usize, Option<String>)> = None;
+        let mut stop_rename = false;
+        // Pull the in-progress rename out so its buffer can be edited as a local
+        // (it can't stay borrowed from `self` while we iterate `self.tabs`).
+        let mut renaming = std::mem::take(&mut self.renaming);
+
+        // Hoist the data the menu closures need, so they capture plain locals
+        // instead of `self` (which iteration already borrows).
+        let active = self.active_tab;
+        let ntabs = self.tabs.len();
+        let default_profile = self.default_profile;
+        let profile_names: Vec<String> = self.profiles.iter().map(|p| p.name.clone()).collect();
+
         ui.horizontal(|ui| {
             for (i, tab) in self.tabs.iter().enumerate() {
                 let raw = tab
-                    .focused_payload()
-                    .title()
+                    .name
+                    .clone()
+                    .or_else(|| tab.focused_payload().title())
                     .unwrap_or_else(|| format!("shell {}", i + 1));
                 let mut label = ellipsize(&raw, 24);
                 let count = tab.leaf_count();
                 if count > 1 {
                     label = format!("{label} [{count}]");
                 }
-                let resp = ui.selectable_label(i == self.active_tab, label);
-                if resp.clicked() {
-                    switch_to = Some(i);
-                }
-                // Middle-click closes the tab, like a browser.
-                if resp.clicked_by(egui::PointerButton::Middle) {
-                    want_close = Some(i);
-                }
-                if ui
-                    .small_button("×")
-                    .on_hover_text("Close tab (Ctrl+Shift+W)")
-                    .clicked()
-                {
-                    want_close = Some(i);
+                let editing = matches!(&renaming, Some((ri, _)) if *ri == i);
+
+                // Each tab is one tinted frame holding the title and a folded-in
+                // close `×`. The tint (when set) is the only visible difference
+                // between a plain and a colored tab.
+                let fill = tab.color.unwrap_or(egui::Color32::TRANSPARENT);
+                let frame = egui::Frame::NONE
+                    .fill(fill)
+                    .inner_margin(egui::Margin::symmetric(4, 1))
+                    .corner_radius(egui::CornerRadius::same(4));
+                let title_resp = frame
+                    .show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.x = 2.0;
+                        ui.horizontal(|ui| {
+                            let resp = if editing {
+                                let text = &mut renaming.as_mut().unwrap().1;
+                                let te = ui.add(
+                                    egui::TextEdit::singleline(text).desired_width(120.0),
+                                );
+                                if !te.has_focus() {
+                                    te.request_focus();
+                                }
+                                // Escape cancels; Enter or clicking away commits
+                                // (empty text clears the override).
+                                if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                                    stop_rename = true;
+                                } else if te.lost_focus() {
+                                    let val = if text.trim().is_empty() {
+                                        None
+                                    } else {
+                                        Some(text.clone())
+                                    };
+                                    commit_rename = Some((i, val));
+                                    stop_rename = true;
+                                }
+                                te
+                            } else {
+                                let resp = ui.selectable_label(i == active, label);
+                                if resp.clicked() {
+                                    switch_to = Some(i);
+                                }
+                                // Middle-click closes the tab, like a browser.
+                                if resp.clicked_by(egui::PointerButton::Middle) {
+                                    want_close = Some(i);
+                                }
+                                resp
+                            };
+                            if ui
+                                .small_button("×")
+                                .on_hover_text("Close tab (Ctrl+Shift+W)")
+                                .clicked()
+                            {
+                                want_close = Some(i);
+                            }
+                            resp
+                        })
+                        .inner
+                    })
+                    .inner;
+
+                if !editing {
+                    title_resp.context_menu(|ui| {
+                        if ui.button("New Tab").clicked() {
+                            want_new = Some(default_profile);
+                            ui.close();
+                        }
+                        ui.menu_button("New Tab with shell", |ui| {
+                            for (pi, name) in profile_names.iter().enumerate() {
+                                if ui.button(name).clicked() {
+                                    want_new = Some(pi);
+                                    ui.close();
+                                }
+                            }
+                        });
+                        ui.separator();
+                        if ui.button("Rename Tab…").clicked() {
+                            want_rename = Some(i);
+                            ui.close();
+                        }
+                        ui.menu_button("Tab Color", |ui| {
+                            if ui.button("None").clicked() {
+                                want_color = Some((i, None));
+                                ui.close();
+                            }
+                            for (name, col) in TAB_COLORS {
+                                if ui.button(*name).clicked() {
+                                    want_color = Some((i, Some(*col)));
+                                    ui.close();
+                                }
+                            }
+                        });
+                        ui.separator();
+                        if ui.button("Close Tab").clicked() {
+                            want_close = Some(i);
+                            ui.close();
+                        }
+                        if ui
+                            .add_enabled(ntabs > 1, egui::Button::new("Close Other Tabs"))
+                            .clicked()
+                        {
+                            want_close_others = Some(i);
+                            ui.close();
+                        }
+                        if ui
+                            .add_enabled(
+                                i + 1 < ntabs,
+                                egui::Button::new("Close Tabs to the Right"),
+                            )
+                            .clicked()
+                        {
+                            want_close_right = Some(i);
+                            ui.close();
+                        }
+                    });
                 }
             }
-            if ui
-                .button("+")
-                .on_hover_text("New tab (Ctrl+Shift+T)")
-                .clicked()
-            {
-                want_new = Some(self.default_profile);
-            }
-            // Profile picker: open a tab running a chosen shell.
+            // Profile picker: open a tab running a chosen shell (also the primary
+            // new-tab affordance now that the standalone `+` is gone).
             ui.menu_button("⏷", |ui| {
-                for (i, profile) in self.profiles.iter().enumerate() {
-                    if ui.button(&profile.name).clicked() {
-                        want_new = Some(i);
+                if ui.button("New Tab").clicked() {
+                    want_new = Some(default_profile);
+                    ui.close();
+                }
+                ui.separator();
+                for (pi, name) in profile_names.iter().enumerate() {
+                    if ui.button(name).clicked() {
+                        want_new = Some(pi);
                         ui.close();
                     }
                 }
             })
             .response
-            .on_hover_text("New tab with a specific shell");
+            .on_hover_text("New tab (pick a shell)");
         });
+
+        // Apply collected intents. Index-stable edits first; tab-removing actions
+        // last so earlier intents still refer to valid indices.
+        if stop_rename {
+            renaming = None;
+        }
+        self.renaming = renaming;
         if let Some(i) = switch_to {
             self.active_tab = i;
         }
+        if let Some((i, col)) = want_color {
+            if let Some(t) = self.tabs.get_mut(i) {
+                t.color = col;
+            }
+        }
+        if let Some((i, val)) = commit_rename {
+            if let Some(t) = self.tabs.get_mut(i) {
+                t.name = val;
+            }
+        }
+        if let Some(i) = want_rename {
+            let cur = self
+                .tabs
+                .get(i)
+                .and_then(|t| t.name.clone())
+                .unwrap_or_default();
+            self.renaming = Some((i, cur));
+        }
         if let Some(idx) = want_new {
             self.new_tab(idx);
+        }
+        if let Some(i) = want_close_others {
+            self.close_other_tabs(i);
+        }
+        if let Some(i) = want_close_right {
+            self.close_tabs_to_right(i);
         }
         if let Some(i) = want_close {
             self.close_tab(i, &ui.ctx().clone());
@@ -609,12 +833,17 @@ impl App {
         let pad = egui::vec2(self.config.padding_x, self.config.padding_y);
         let window_focused = ctx.input(|i| i.focused);
         let copy_on_select = self.config.copy_on_select;
+        let right_click_action = self.config.right_click_action;
+        let middle_click_action = self.config.middle_click_action;
         let sel_bg = self.config.selection_bg;
         let sel_fg = self.config.selection_fg;
         let active_tab = self.active_tab;
 
         let tab = &mut self.tabs[active_tab];
         let mut focus_id = tab.focus;
+        // Right-click "Split" needs `&mut self`, which we can't take while
+        // `leaves`/`tab` borrow `self.tabs`; defer it past the leaf loop.
+        let mut want_split: Option<bool> = None;
 
         // Lay the split tree out across the full area; each leaf gets its rect
         // (padding is applied per-leaf below).
@@ -744,6 +973,78 @@ impl App {
                             ctx.copy_text(text);
                         }
                     }
+
+                    // Right-click: context menu (default) or a direct action.
+                    // Only reached when the app isn't capturing the mouse (the
+                    // `tracking` branch above), matching Ghostty's suppression.
+                    let copy_sel = |s: &Session| {
+                        if let Some(text) = s.selection_text() {
+                            ctx.copy_text(text);
+                        }
+                    };
+                    let paste = |s: &mut Session| {
+                        if let Some(text) = session::read_clipboard() {
+                            s.paste_str(&text);
+                        }
+                    };
+                    match right_click_action {
+                        RightClickAction::ContextMenu => {
+                            let has_sel = session.selection_range().is_some();
+                            resp.context_menu(|ui| {
+                                if ui
+                                    .add_enabled(has_sel, egui::Button::new("Copy"))
+                                    .clicked()
+                                {
+                                    copy_sel(session);
+                                    ui.close();
+                                }
+                                if ui.button("Paste").clicked() {
+                                    paste(session);
+                                    ui.close();
+                                }
+                                ui.separator();
+                                if ui.button("Split Right").clicked() {
+                                    want_split = Some(true);
+                                    ui.close();
+                                }
+                                if ui.button("Split Down").clicked() {
+                                    want_split = Some(false);
+                                    ui.close();
+                                }
+                                ui.separator();
+                                if ui.button("Select All").clicked() {
+                                    session.select_all();
+                                    ui.close();
+                                }
+                                if ui.button("Reset Terminal").clicked() {
+                                    session.reset();
+                                    ui.close();
+                                }
+                            });
+                        }
+                        action if resp.clicked_by(egui::PointerButton::Secondary) => {
+                            match action {
+                                RightClickAction::Copy => copy_sel(session),
+                                RightClickAction::Paste => paste(session),
+                                RightClickAction::CopyOrPaste => {
+                                    if session.selection_range().is_some() {
+                                        copy_sel(session);
+                                    } else {
+                                        paste(session);
+                                    }
+                                }
+                                RightClickAction::Ignore | RightClickAction::ContextMenu => {}
+                            }
+                        }
+                        _ => {}
+                    }
+
+                    // Middle-click pastes the clipboard (no PRIMARY on Windows).
+                    if middle_click_action == MiddleClickAction::PrimaryPaste
+                        && resp.clicked_by(egui::PointerButton::Middle)
+                    {
+                        paste(session);
+                    }
                 }
             }
 
@@ -805,6 +1106,13 @@ impl App {
         // Commit the (possibly click-updated) focus back to the tab. Done last,
         // after the final use of `leaves` (which borrows `tab.root`).
         self.tabs[active_tab].focus = focus_id;
+
+        // Apply a deferred right-click "Split" now that `leaves`/`tab` are no
+        // longer borrowing `self.tabs`. `split` inherits the pane's cwd and
+        // focuses the new pane.
+        if let Some(vertical) = want_split {
+            self.split(vertical);
+        }
     }
 }
 
@@ -955,7 +1263,10 @@ fn ellipsize(s: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Dir, Node, Tab, cycle_pick, ellipsize, nav_dir, reap_tabs, split_rect};
+    use super::{
+        Dir, Node, Tab, cycle_pick, ellipsize, keep_only_tab, nav_dir, reap_tabs, split_rect,
+        truncate_tabs_to_right,
+    };
     use eframe::egui;
 
     fn rect(x: f32, y: f32, w: f32, h: f32) -> egui::Rect {
@@ -1126,11 +1437,58 @@ mod tests {
     fn reap_tabs_falls_back_focus_when_focused_pane_dies() {
         // A split tab whose focused leaf (2) dies keeps the tab, refocusing the survivor.
         let root = split(true, leaf(1, 1), leaf(2, 0));
-        let tabs = vec![Tab { root, focus: 2 }];
+        let tabs = vec![Tab { root, focus: 2, name: None, color: None }];
         let (survivors, _active) = reap_tabs(tabs, 0, &mut |p: &u32| *p == 0);
         assert_eq!(survivors.len(), 1);
         assert_eq!(survivors[0].leaf_count(), 1);
         assert_eq!(survivors[0].focus, 1);
+    }
+
+    #[test]
+    fn keep_only_tab_collapses_to_one_and_selects_it() {
+        let tabs = vec![Tab::leaf(1, 0u32), Tab::leaf(2, 0u32), Tab::leaf(3, 0u32)];
+        let (survivors, active) = keep_only_tab(tabs, 1, 2);
+        assert_eq!(survivors.len(), 1);
+        assert_eq!(active, 0);
+        assert_eq!(survivors[0].focus, 2); // the kept tab's leaf id
+    }
+
+    #[test]
+    fn keep_only_tab_is_noop_when_out_of_range() {
+        let tabs = vec![Tab::leaf(1, 0u32), Tab::leaf(2, 0u32)];
+        let (survivors, active) = keep_only_tab(tabs, 5, 1);
+        assert_eq!(survivors.len(), 2);
+        assert_eq!(active, 1);
+    }
+
+    #[test]
+    fn truncate_tabs_to_right_drops_later_tabs_and_clamps_active() {
+        // Active is past the cut → clamps back to the new last index.
+        let tabs = vec![
+            Tab::leaf(1, 0u32),
+            Tab::leaf(2, 0u32),
+            Tab::leaf(3, 0u32),
+            Tab::leaf(4, 0u32),
+        ];
+        let (survivors, active) = truncate_tabs_to_right(tabs, 1, 3);
+        assert_eq!(survivors.len(), 2);
+        assert_eq!(active, 1);
+    }
+
+    #[test]
+    fn truncate_tabs_to_right_keeps_active_when_left_of_cut() {
+        let tabs = vec![Tab::leaf(1, 0u32), Tab::leaf(2, 0u32), Tab::leaf(3, 0u32)];
+        let (survivors, active) = truncate_tabs_to_right(tabs, 1, 0);
+        assert_eq!(survivors.len(), 2);
+        assert_eq!(active, 0);
+    }
+
+    #[test]
+    fn truncate_tabs_to_right_is_noop_at_last_tab() {
+        let tabs = vec![Tab::leaf(1, 0u32), Tab::leaf(2, 0u32)];
+        let (survivors, active) = truncate_tabs_to_right(tabs, 1, 1);
+        assert_eq!(survivors.len(), 2);
+        assert_eq!(active, 1);
     }
 
     #[test]

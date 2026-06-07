@@ -33,6 +33,8 @@ scrollback-limit = 10000       # max scrollback lines retained per pane
 selection-background = #385a9c # selected-cell background
 selection-foreground = #ffffff # text color over a selection (optional)
 copy-on-select       = false   # copy to clipboard as soon as text is selected
+right-click-action   = context-menu  # context-menu | copy | paste | copy-or-paste | ignore
+middle-click-action  = primary-paste # primary-paste | ignore
 
 # Palette overrides — repeat the key, one entry per line:
 palette = 0=#101218
@@ -54,6 +56,8 @@ palette = 8=#666a73
 | `selection-background` | `#rrggbb` | Background of selected cells. |
 | `selection-foreground` | `#rrggbb` | Text color over a selection (optional; omit to keep each cell's own fg). |
 | `copy-on-select` | enum | `false` off; `true`/`clipboard`/`primary` copy on selection. Windows has no primary selection, so the three truthy values behave identically. |
+| `right-click-action` | enum | What a right-click in a pane does: `context-menu` (default; Copy/Paste/Split/Select All/Reset), `copy`, `paste`, `copy-or-paste` (copy if a selection exists, else paste), or `ignore`. Suppressed while a program is capturing the mouse. |
+| `middle-click-action` | enum | `primary-paste` (default) pastes the clipboard; `ignore` does nothing. Windows has no primary selection, so this reads the system clipboard. |
 | `palette` | repeated `<index>=#rrggbb` | Override individual 256-color palette entries; everything else keeps the bundled theme. |
 
 ## How a value reaches the screen

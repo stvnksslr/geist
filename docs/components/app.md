@@ -8,7 +8,15 @@ everything.
 
 A `Tab` is a **binary split tree** of panes with one focused leaf. Splits divide
 only the *focused* pane, so they nest like Ghostty rather than re-flowing onto a
-shared axis.
+shared axis. Each tab also carries an optional `name` (a rename override, set via
+the right-click menu's "Rename Tab…"; otherwise the label tracks the focused pane's
+terminal title) and an optional `color` tint.
+
+The tab strip's right-click context menu (in `tab_bar`) mirrors Ghostty: New Tab /
+New Tab with shell, Rename Tab…, Tab Color (`TAB_COLORS` palette), and Close
+Tab / Close Other Tabs (`keep_only_tab`) / Close Tabs to the Right
+(`truncate_tabs_to_right`). The `×` close is folded into each tab; new tabs come
+from the `⏷` chevron or the menu (there's no standalone `+`).
 
 ```mermaid
 classDiagram
@@ -24,6 +32,8 @@ classDiagram
     class Tab {
         root: Node
         focus: u64
+        name: Option~String~
+        color: Option~Color32~
     }
     class Node {
         <<enum>>
@@ -72,7 +82,7 @@ flowchart TB
     short["handle_shortcuts (tabs, splits, focus)"]
     zoom["handle_font_zoom (Ctrl +/-/0)"]
     title["sync window title from focused pane (OSC 0/2)"]
-    bar["draw tab strip + profile picker"]
+    bar["draw tab strip (folded × close, right-click menu) + profile picker"]
     active["render_active: lay out, drive, paint panes"]
 
     repaint --> pump --> reap --> short --> zoom --> title --> bar --> active
@@ -110,6 +120,14 @@ Notable behaviors:
   (`cursor_hollow`), matching Ghostty.
 - **Pixel snapping.** The grid origin is snapped to the physical pixel grid so
   cell boundaries land on pixels and glyphs stay crisp.
+- **Pane mouse actions (right/middle click).** In the *non-tracking* branch of a
+  focused pane, right-click runs `right-click-action` (default `context-menu`:
+  Copy / Paste / Split Right / Split Down / Select All / Reset Terminal; the
+  Split items defer to `self.split` past the `leaves` borrow via a `want_split`
+  flag) and middle-click runs `middle-click-action` (default pastes the
+  clipboard). Both live in the `else` of the `tracking` check, so a program
+  capturing the mouse receives the clicks instead and no menu appears — matching
+  Ghostty. Config: `right-click-action` / `middle-click-action`.
 
 ## Keyboard shortcut ownership
 
@@ -119,7 +137,7 @@ partition the keyboard:
 | Keys | Owner | Effect |
 | --- | --- | --- |
 | Ctrl+Shift+T / W | app | new / close tab (or pane) |
-| Ctrl+Shift+D / E | app | split vertical / horizontal |
+| Ctrl+Shift+D or O / E | app | split right (columns) / split down (rows) |
 | Ctrl+Shift+1–9 | app | jump to tab (9 = last) |
 | Ctrl+Tab / Ctrl+Shift+Tab | app | cycle tabs |
 | Ctrl+ +/-/0 | app | font zoom in/out/reset |

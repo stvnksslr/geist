@@ -14,6 +14,31 @@ use std::path::PathBuf;
 
 use crate::engine::Rgb;
 
+/// What a right-click inside a terminal pane does. Ghostty `right-click-action`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RightClickAction {
+    /// Show a context menu (Copy/Paste/Split/Reset/Select All). The default.
+    ContextMenu,
+    /// Copy the current selection.
+    Copy,
+    /// Paste the clipboard.
+    Paste,
+    /// Copy if there is a selection, otherwise paste.
+    CopyOrPaste,
+    /// Do nothing.
+    Ignore,
+}
+
+/// What a middle-click inside a terminal pane does. Ghostty `middle-click-action`.
+/// Windows has no PRIMARY selection, so `primary-paste` reads the system clipboard.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MiddleClickAction {
+    /// Paste the (system) clipboard. The default.
+    PrimaryPaste,
+    /// Do nothing.
+    Ignore,
+}
+
 /// User-facing configuration applied at startup.
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -52,6 +77,10 @@ pub struct Config {
     /// `copy-on-select` (an enum there; Windows has no primary selection, so
     /// `clipboard`/`primary`/`true` all map to true).
     pub copy_on_select: bool,
+    /// What a right-click in a terminal pane does. Ghostty `right-click-action`.
+    pub right_click_action: RightClickAction,
+    /// What a middle-click in a terminal pane does. Ghostty `middle-click-action`.
+    pub middle_click_action: MiddleClickAction,
     /// Configured default shell (name or path); `None` auto-detects. Ghostty
     /// `command`.
     pub shell: Option<String>,
@@ -72,6 +101,8 @@ impl Default for Config {
             selection_bg: Rgb::new(0x38, 0x5a, 0x9c),
             selection_fg: None,
             copy_on_select: false,
+            right_click_action: RightClickAction::ContextMenu,
+            middle_click_action: MiddleClickAction::PrimaryPaste,
             shell: None,
         }
     }
@@ -172,6 +203,25 @@ impl Config {
                     "false" | "0" | "off" | "no" => false,
                     "true" | "1" | "on" | "yes" | "clipboard" | "primary" => true,
                     _ => self.copy_on_select,
+                }
+            }
+            "right-click-action" => {
+                self.right_click_action = match value.to_ascii_lowercase().as_str() {
+                    "" => defaults.right_click_action,
+                    "context-menu" => RightClickAction::ContextMenu,
+                    "copy" => RightClickAction::Copy,
+                    "paste" => RightClickAction::Paste,
+                    "copy-or-paste" => RightClickAction::CopyOrPaste,
+                    "ignore" => RightClickAction::Ignore,
+                    _ => self.right_click_action,
+                }
+            }
+            "middle-click-action" => {
+                self.middle_click_action = match value.to_ascii_lowercase().as_str() {
+                    "" => defaults.middle_click_action,
+                    "primary-paste" => MiddleClickAction::PrimaryPaste,
+                    "ignore" => MiddleClickAction::Ignore,
+                    _ => self.middle_click_action,
                 }
             }
             "command" => {
@@ -395,6 +445,69 @@ mod tests {
         assert!(parsed("copy-on-select = clipboard").copy_on_select);
         assert!(parsed("copy-on-select = primary").copy_on_select);
         assert!(!parsed("copy-on-select = false").copy_on_select);
+    }
+
+    #[test]
+    fn click_action_defaults() {
+        let d = Config::default();
+        assert_eq!(d.right_click_action, RightClickAction::ContextMenu);
+        assert_eq!(d.middle_click_action, MiddleClickAction::PrimaryPaste);
+        // Empty config keeps the defaults.
+        assert_eq!(parsed("").right_click_action, RightClickAction::ContextMenu);
+        assert_eq!(parsed("").middle_click_action, MiddleClickAction::PrimaryPaste);
+    }
+
+    #[test]
+    fn right_click_action_parses_each_value() {
+        assert_eq!(
+            parsed("right-click-action = context-menu").right_click_action,
+            RightClickAction::ContextMenu
+        );
+        assert_eq!(
+            parsed("right-click-action = copy").right_click_action,
+            RightClickAction::Copy
+        );
+        assert_eq!(
+            parsed("right-click-action = paste").right_click_action,
+            RightClickAction::Paste
+        );
+        assert_eq!(
+            parsed("right-click-action = copy-or-paste").right_click_action,
+            RightClickAction::CopyOrPaste
+        );
+        assert_eq!(
+            parsed("right-click-action = ignore").right_click_action,
+            RightClickAction::Ignore
+        );
+        // Empty resets to default; garbage keeps the current (here, the default).
+        assert_eq!(
+            parsed("right-click-action =").right_click_action,
+            RightClickAction::ContextMenu
+        );
+        assert_eq!(
+            parsed("right-click-action = nonsense").right_click_action,
+            RightClickAction::ContextMenu
+        );
+    }
+
+    #[test]
+    fn middle_click_action_parses_each_value() {
+        assert_eq!(
+            parsed("middle-click-action = primary-paste").middle_click_action,
+            MiddleClickAction::PrimaryPaste
+        );
+        assert_eq!(
+            parsed("middle-click-action = ignore").middle_click_action,
+            MiddleClickAction::Ignore
+        );
+        assert_eq!(
+            parsed("middle-click-action =").middle_click_action,
+            MiddleClickAction::PrimaryPaste
+        );
+        assert_eq!(
+            parsed("middle-click-action = nonsense").middle_click_action,
+            MiddleClickAction::PrimaryPaste
+        );
     }
 
     #[test]

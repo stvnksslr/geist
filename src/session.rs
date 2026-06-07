@@ -239,6 +239,26 @@ impl Session {
         self.sel_head = Some((self.cols.saturating_sub(1), cell.1));
     }
 
+    /// Select the entire visible viewport (right-click menu "Select All").
+    /// Viewport-scoped: giest's selection model is grid-cell based, so this does
+    /// not span scrollback (matching double/triple-click selection).
+    pub fn select_all(&mut self) {
+        self.sel_anchor = Some((0, 0));
+        self.sel_head = Some((self.cols.saturating_sub(1), self.rows.saturating_sub(1)));
+    }
+
+    /// Paste `text` into the shell, honoring bracketed-paste mode (menu Paste /
+    /// middle-click). Mirrors the `Event::Paste` arm in `handle_input`.
+    pub fn paste_str(&mut self, text: &str) {
+        let encoded = self.engine.encode_paste(text);
+        let _ = self.pty.write(&encoded);
+    }
+
+    /// Send a full terminal reset (RIS) to the shell (menu "Reset Terminal").
+    pub fn reset(&mut self) {
+        let _ = self.pty.write(b"\x1bc");
+    }
+
     /// The URL under `cell`, if any (for Ctrl+click to open).
     pub fn url_at(&self, cell: (u16, u16)) -> Option<String> {
         find_url_at(&self.snapshot, cell.0, cell.1)
@@ -477,6 +497,12 @@ fn write_clipboard(text: &str) {
     if let Ok(mut cb) = arboard::Clipboard::new() {
         let _ = cb.set_text(text.to_owned());
     }
+}
+
+/// Read text from the system clipboard (best-effort). Windows has no separate
+/// PRIMARY selection, so middle-click / menu paste reads this.
+pub fn read_clipboard() -> Option<String> {
+    arboard::Clipboard::new().ok()?.get_text().ok()
 }
 
 /// Translate egui modifiers to backend-neutral key modifiers.

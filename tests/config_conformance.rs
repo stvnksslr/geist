@@ -12,7 +12,7 @@
 //! keys, unquoted values, `#` comment lines (no inline comments), repeatable
 //! keys (e.g. `palette`), and an empty value resets a key to its default.
 
-use giest::config::Config;
+use giest::config::{Config, MiddleClickAction, RightClickAction};
 use giest::engine::Rgb;
 
 /// Parse a Ghostty-format body over the built-in defaults.
@@ -167,6 +167,46 @@ fn copy_on_select_enum_values() {
     assert!(cfg("copy-on-select = clipboard").copy_on_select);
     // Windows has no primary selection, so `primary` behaves like the others.
     assert!(cfg("copy-on-select = primary").copy_on_select);
+}
+
+#[test]
+fn right_click_action_enum_values() {
+    // Ghostty's right-click-action enum; default is context-menu.
+    assert_eq!(cfg("").right_click_action, RightClickAction::ContextMenu);
+    assert_eq!(
+        cfg("right-click-action = context-menu").right_click_action,
+        RightClickAction::ContextMenu
+    );
+    assert_eq!(
+        cfg("right-click-action = copy").right_click_action,
+        RightClickAction::Copy
+    );
+    assert_eq!(
+        cfg("right-click-action = paste").right_click_action,
+        RightClickAction::Paste
+    );
+    assert_eq!(
+        cfg("right-click-action = copy-or-paste").right_click_action,
+        RightClickAction::CopyOrPaste
+    );
+    assert_eq!(
+        cfg("right-click-action = ignore").right_click_action,
+        RightClickAction::Ignore
+    );
+}
+
+#[test]
+fn middle_click_action_enum_values() {
+    // Ghostty's middle-click-action; default is primary-paste.
+    assert_eq!(cfg("").middle_click_action, MiddleClickAction::PrimaryPaste);
+    assert_eq!(
+        cfg("middle-click-action = primary-paste").middle_click_action,
+        MiddleClickAction::PrimaryPaste
+    );
+    assert_eq!(
+        cfg("middle-click-action = ignore").middle_click_action,
+        MiddleClickAction::Ignore
+    );
 }
 
 #[test]
