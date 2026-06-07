@@ -444,9 +444,8 @@ impl GpuResources {
             // outline and leaves the glyph's normal colors. Blink-off hides the
             // cursor without touching the snapshot.
             let cursor_visible = snap.cursor_visible && !pane.cursor_blink_hidden;
-            let filled_block = cursor_visible
-                && snap.cursor_shape == CursorShape::Block
-                && !pane.cursor_hollow;
+            let filled_block =
+                cursor_visible && snap.cursor_shape == CursorShape::Block && !pane.cursor_hollow;
             let hollow_block = cursor_visible
                 && (snap.cursor_shape == CursorShape::HollowBlock
                     || (snap.cursor_shape == CursorShape::Block && pane.cursor_hollow));
@@ -479,15 +478,24 @@ impl GpuResources {
                         bg = frame.selection_bg;
                     }
 
-                    out.push(Instance::solid([cell_left, cell_top, cw, ch], self.color(bg, 1.0)));
+                    out.push(Instance::solid(
+                        [cell_left, cell_top, cw, ch],
+                        self.color(bg, 1.0),
+                    ));
 
                     if cell.underline {
                         let y = (cell_top + ascent + line_h).round();
-                        glyphs.push(Instance::solid([cell_left, y, cw, line_h], self.color(fg, 1.0)));
+                        glyphs.push(Instance::solid(
+                            [cell_left, y, cw, line_h],
+                            self.color(fg, 1.0),
+                        ));
                     }
                     if cell.strikethrough {
                         let y = (cell_top + ch * 0.5).round();
-                        glyphs.push(Instance::solid([cell_left, y, cw, line_h], self.color(fg, 1.0)));
+                        glyphs.push(Instance::solid(
+                            [cell_left, y, cw, line_h],
+                            self.color(fg, 1.0),
+                        ));
                     }
                 }
             }
@@ -620,9 +628,15 @@ impl GpuResources {
                 // Four 1px edges forming an outline around the cursor cell.
                 let t = 1.0_f32;
                 cursors.push(Instance::solid([cur_left, cur_top, cw, t], cur_color));
-                cursors.push(Instance::solid([cur_left, cur_top + ch - t, cw, t], cur_color));
+                cursors.push(Instance::solid(
+                    [cur_left, cur_top + ch - t, cw, t],
+                    cur_color,
+                ));
                 cursors.push(Instance::solid([cur_left, cur_top, t, ch], cur_color));
-                cursors.push(Instance::solid([cur_left + cw - t, cur_top, t, ch], cur_color));
+                cursors.push(Instance::solid(
+                    [cur_left + cw - t, cur_top, t, ch],
+                    cur_color,
+                ));
             } else if cursor_visible && !filled_block {
                 let rect = match snap.cursor_shape {
                     CursorShape::Bar => [cur_left, cur_top, (cw * 0.12).max(1.0), ch],

@@ -17,8 +17,8 @@
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use giest::engine::{GhosttyVtEngine, TerminalEngine};
-use giest::osc52::Osc52Scanner;
 use giest::osc7::Osc7Scanner;
+use giest::osc52::Osc52Scanner;
 use giest::synthetic;
 
 /// Roughly how many bytes of stream to push per timed iteration. A few MiB keeps

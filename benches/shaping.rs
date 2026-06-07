@@ -29,8 +29,7 @@ fn bench_shaping(c: &mut Criterion) {
         .cycle()
         .take(80)
         .collect();
-    let ligatures = "=> != === >= <= |> <| -> <- ... :: && || ++ -- ==> <=> /* */ "
-        .repeat(2);
+    let ligatures = "=> != === >= <= |> <| -> <- ... :: && || ++ -- ==> <=> /* */ ".repeat(2);
 
     let mut group = c.benchmark_group("shaping");
     group.throughput(Throughput::Bytes(ascii.len() as u64));

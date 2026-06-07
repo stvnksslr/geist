@@ -58,7 +58,11 @@ fn no_inline_comments() {
     // so a color followed by a comment is not a valid color and is rejected
     // (the field keeps its default rather than silently truncating).
     let c = cfg("background = #1d1f21 # not a comment");
-    assert_eq!(c.bg, Config::default().bg, "trailing text invalidates the value");
+    assert_eq!(
+        c.bg,
+        Config::default().bg,
+        "trailing text invalidates the value"
+    );
 }
 
 #[test]

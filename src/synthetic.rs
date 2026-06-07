@@ -63,8 +63,8 @@ pub fn utf8(len: usize, seed: u64) -> Vec<u8> {
     let mut col = 0u32;
     // A small repertoire spanning 1–4 byte encodings.
     let samples: &[char] = &[
-        'a', 'Z', '7', 'é', 'ü', 'ñ', 'ß', 'Ω', 'д', '中', '文', '日', '本', '語', '한', '글',
-        '€', '→', '★', '😀', '🚀',
+        'a', 'Z', '7', 'é', 'ü', 'ñ', 'ß', 'Ω', 'д', '中', '文', '日', '本', '語', '한', '글', '€',
+        '→', '★', '😀', '🚀',
     ];
     while out.len() < len {
         let word = 1 + rng.below(8);
@@ -116,7 +116,12 @@ pub fn osc(count: usize, seed: u64) -> Vec<u8> {
 /// can distinguish a real-corpus run from a synthetic one.
 ///
 /// Generation is still kept out of the timed loop — call this once during setup.
-pub fn corpus(kind: &str, len: usize, seed: u64, generate: impl Fn(usize, u64) -> Vec<u8>) -> (Vec<u8>, &'static str) {
+pub fn corpus(
+    kind: &str,
+    len: usize,
+    seed: u64,
+    generate: impl Fn(usize, u64) -> Vec<u8>,
+) -> (Vec<u8>, &'static str) {
     if let Ok(path) = std::env::var("GIEST_BENCH_DATA") {
         match std::fs::read(&path) {
             Ok(bytes) if !bytes.is_empty() => return (bytes, "corpus"),

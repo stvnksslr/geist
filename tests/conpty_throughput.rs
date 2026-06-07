@@ -61,7 +61,9 @@ fn conpty_read_drain_throughput() {
     let dt = start.elapsed();
     let mib = total as f64 / (1024.0 * 1024.0);
     let rate = mib / dt.as_secs_f64().max(1e-9);
-    eprintln!("ConPTY drain: {total} bytes ({mib:.2} MiB) in {dt:?} = {rate:.1} MiB/s, {LINES} lines");
+    eprintln!(
+        "ConPTY drain: {total} bytes ({mib:.2} MiB) in {dt:?} = {rate:.1} MiB/s, {LINES} lines"
+    );
 
     // Throughput floor sanity check: at least one byte per emitted line drained.
     assert!(

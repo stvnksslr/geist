@@ -166,8 +166,12 @@ impl Config {
             "foreground" => self.fg = color(value, defaults.fg, self.fg),
             "background" => self.bg = color(value, defaults.bg, self.bg),
             "cursor-color" => self.cursor = opt_color(value, defaults.cursor, self.cursor),
-            "window-padding-x" => self.padding_x = padding(value, defaults.padding_x, self.padding_x),
-            "window-padding-y" => self.padding_y = padding(value, defaults.padding_y, self.padding_y),
+            "window-padding-x" => {
+                self.padding_x = padding(value, defaults.padding_x, self.padding_x)
+            }
+            "window-padding-y" => {
+                self.padding_y = padding(value, defaults.padding_y, self.padding_y)
+            }
             "text-gamma" => {
                 if value.is_empty() {
                     self.text_gamma = defaults.text_gamma;
@@ -398,10 +402,23 @@ mod tests {
 
     #[test]
     fn parses_palette_entries() {
-        assert_eq!(parse_palette_entry("0=#1d1f21"), Some((0, Rgb::new(0x1d, 0x1f, 0x21))));
-        assert_eq!(parse_palette_entry(" 15 = #eaeaea "), Some((15, Rgb::new(0xea, 0xea, 0xea))));
-        assert_eq!(parse_palette_entry("255=#000000"), Some((255, Rgb::new(0, 0, 0))));
-        assert_eq!(parse_palette_entry("256=#000000"), None, "index out of range");
+        assert_eq!(
+            parse_palette_entry("0=#1d1f21"),
+            Some((0, Rgb::new(0x1d, 0x1f, 0x21)))
+        );
+        assert_eq!(
+            parse_palette_entry(" 15 = #eaeaea "),
+            Some((15, Rgb::new(0xea, 0xea, 0xea)))
+        );
+        assert_eq!(
+            parse_palette_entry("255=#000000"),
+            Some((255, Rgb::new(0, 0, 0)))
+        );
+        assert_eq!(
+            parse_palette_entry("256=#000000"),
+            None,
+            "index out of range"
+        );
         assert_eq!(parse_palette_entry("nope"), None);
     }
 
@@ -454,7 +471,10 @@ mod tests {
         assert_eq!(d.middle_click_action, MiddleClickAction::PrimaryPaste);
         // Empty config keeps the defaults.
         assert_eq!(parsed("").right_click_action, RightClickAction::ContextMenu);
-        assert_eq!(parsed("").middle_click_action, MiddleClickAction::PrimaryPaste);
+        assert_eq!(
+            parsed("").middle_click_action,
+            MiddleClickAction::PrimaryPaste
+        );
     }
 
     #[test]
@@ -515,7 +535,9 @@ mod tests {
         assert_eq!(parsed("command = pwsh").shell.as_deref(), Some("pwsh"));
         // Quoted values are tolerated for paths with spaces.
         assert_eq!(
-            parsed("command = \"C:\\Program Files\\bash.exe\"").shell.as_deref(),
+            parsed("command = \"C:\\Program Files\\bash.exe\"")
+                .shell
+                .as_deref(),
             Some("C:\\Program Files\\bash.exe")
         );
     }

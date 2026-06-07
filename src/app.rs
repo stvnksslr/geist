@@ -51,8 +51,15 @@ impl<T> Tab<T> {
 /// subtrees along one axis. `Empty` is a transient placeholder used only while
 /// restructuring the tree (never laid out or rendered).
 enum Node<T> {
-    Leaf { id: u64, payload: T },
-    Split { vertical: bool, first: Box<Node<T>>, second: Box<Node<T>> },
+    Leaf {
+        id: u64,
+        payload: T,
+    },
+    Split {
+        vertical: bool,
+        first: Box<Node<T>>,
+        second: Box<Node<T>>,
+    },
     Empty,
 }
 
@@ -69,9 +76,7 @@ impl<T> Node<T> {
     fn contains(&self, target: u64) -> bool {
         match self {
             Node::Leaf { id, .. } => *id == target,
-            Node::Split { first, second, .. } => {
-                first.contains(target) || second.contains(target)
-            }
+            Node::Split { first, second, .. } => first.contains(target) || second.contains(target),
             Node::Empty => false,
         }
     }
@@ -126,7 +131,10 @@ impl<T> Node<T> {
                 *self = Node::Split {
                     vertical,
                     first: Box::new(old),
-                    second: Box::new(Node::Leaf { id: new_id, payload: new_payload }),
+                    second: Box::new(Node::Leaf {
+                        id: new_id,
+                        payload: new_payload,
+                    }),
                 };
                 true
             }
@@ -146,17 +154,19 @@ impl<T> Node<T> {
     fn remove_leaf(self, target: u64) -> Option<Node<T>> {
         match self {
             Node::Leaf { id, .. } if id == target => None,
-            Node::Split { vertical, first, second } => {
-                match (first.remove_leaf(target), second.remove_leaf(target)) {
-                    (Some(a), Some(b)) => Some(Node::Split {
-                        vertical,
-                        first: Box::new(a),
-                        second: Box::new(b),
-                    }),
-                    (Some(n), None) | (None, Some(n)) => Some(n),
-                    (None, None) => None,
-                }
-            }
+            Node::Split {
+                vertical,
+                first,
+                second,
+            } => match (first.remove_leaf(target), second.remove_leaf(target)) {
+                (Some(a), Some(b)) => Some(Node::Split {
+                    vertical,
+                    first: Box::new(a),
+                    second: Box::new(b),
+                }),
+                (Some(n), None) | (None, Some(n)) => Some(n),
+                (None, None) => None,
+            },
             other => Some(other),
         }
     }
@@ -167,17 +177,19 @@ impl<T> Node<T> {
     fn prune(self, dead: &mut impl FnMut(&T) -> bool) -> Option<Node<T>> {
         match self {
             Node::Leaf { ref payload, .. } if dead(payload) => None,
-            Node::Split { vertical, first, second } => {
-                match (first.prune(&mut *dead), second.prune(&mut *dead)) {
-                    (Some(a), Some(b)) => Some(Node::Split {
-                        vertical,
-                        first: Box::new(a),
-                        second: Box::new(b),
-                    }),
-                    (Some(n), None) | (None, Some(n)) => Some(n),
-                    (None, None) => None,
-                }
-            }
+            Node::Split {
+                vertical,
+                first,
+                second,
+            } => match (first.prune(&mut *dead), second.prune(&mut *dead)) {
+                (Some(a), Some(b)) => Some(Node::Split {
+                    vertical,
+                    first: Box::new(a),
+                    second: Box::new(b),
+                }),
+                (Some(n), None) | (None, Some(n)) => Some(n),
+                (None, None) => None,
+            },
             other => Some(other),
         }
     }
@@ -199,8 +211,16 @@ impl<T> Node<T> {
     /// split's axis (with a gutter between children).
     fn collect<'a>(&'a mut self, area: egui::Rect, out: &mut Vec<Leaf<'a, T>>) {
         match self {
-            Node::Leaf { id, payload } => out.push(Leaf { id: *id, payload, rect: area }),
-            Node::Split { vertical, first, second } => {
+            Node::Leaf { id, payload } => out.push(Leaf {
+                id: *id,
+                payload,
+                rect: area,
+            }),
+            Node::Split {
+                vertical,
+                first,
+                second,
+            } => {
                 let (a, b) = split_rect(area, *vertical);
                 first.collect(a, out);
                 second.collect(b, out);
@@ -223,7 +243,12 @@ fn reap_tabs<T>(
     let mut survivors: Vec<Tab<T>> = Vec::with_capacity(tabs.len());
     let mut new_active = 0;
     for (i, tab) in tabs.into_iter().enumerate() {
-        let Tab { root, focus, name, color } = tab;
+        let Tab {
+            root,
+            focus,
+            name,
+            color,
+        } = tab;
         if let Some(root) = root.prune(&mut *dead) {
             if i <= active {
                 new_active = survivors.len();
@@ -233,7 +258,12 @@ fn reap_tabs<T>(
             } else {
                 root.first_leaf_id()
             };
-            survivors.push(Tab { root, focus, name, color });
+            survivors.push(Tab {
+                root,
+                focus,
+                name,
+                color,
+            });
         }
     }
     let active = new_active.min(survivors.len().saturating_sub(1));
@@ -333,8 +363,7 @@ impl App {
         // which `handle_font_zoom` does by re-rasterizing the glyph atlas and
         // re-fitting the grid. Leaving both enabled makes them fight: the chrome
         // scales up while the text appears to stay the same size.
-        cc.egui_ctx
-            .options_mut(|o| o.zoom_with_keyboard = false);
+        cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
         let ppp = cc.egui_ctx.pixels_per_point().max(1.0);
         let px = (config.font_points * ppp).round();
         let (cell_w, cell_h) = render::init(render_state, px, config.text_gamma);
@@ -416,7 +445,10 @@ impl App {
     /// Spawn a session for profile `idx` (clamped to the default if invalid),
     /// starting in `cwd` when given (else the process default directory).
     fn spawn_session(&self, idx: usize, cwd: Option<&std::path::Path>) -> Option<Session> {
-        let profile = self.profiles.get(idx).unwrap_or(&self.profiles[self.default_profile]);
+        let profile = self
+            .profiles
+            .get(idx)
+            .unwrap_or(&self.profiles[self.default_profile]);
         Session::new(&self.egui_ctx, &self.config, profile, cwd)
             .map_err(|e| eprintln!("giest: failed to open session: {e}"))
             .ok()
@@ -660,9 +692,8 @@ impl App {
                         ui.horizontal(|ui| {
                             let resp = if editing {
                                 let text = &mut renaming.as_mut().unwrap().1;
-                                let te = ui.add(
-                                    egui::TextEdit::singleline(text).desired_width(120.0),
-                                );
+                                let te =
+                                    ui.add(egui::TextEdit::singleline(text).desired_width(120.0));
                                 if !te.has_focus() {
                                     te.request_focus();
                                 }
@@ -991,10 +1022,7 @@ impl App {
                         RightClickAction::ContextMenu => {
                             let has_sel = session.selection_range().is_some();
                             resp.context_menu(|ui| {
-                                if ui
-                                    .add_enabled(has_sel, egui::Button::new("Copy"))
-                                    .clicked()
-                                {
+                                if ui.add_enabled(has_sel, egui::Button::new("Copy")).clicked() {
                                     copy_sel(session);
                                     ui.close();
                                 }
@@ -1022,20 +1050,18 @@ impl App {
                                 }
                             });
                         }
-                        action if resp.clicked_by(egui::PointerButton::Secondary) => {
-                            match action {
-                                RightClickAction::Copy => copy_sel(session),
-                                RightClickAction::Paste => paste(session),
-                                RightClickAction::CopyOrPaste => {
-                                    if session.selection_range().is_some() {
-                                        copy_sel(session);
-                                    } else {
-                                        paste(session);
-                                    }
+                        action if resp.clicked_by(egui::PointerButton::Secondary) => match action {
+                            RightClickAction::Copy => copy_sel(session),
+                            RightClickAction::Paste => paste(session),
+                            RightClickAction::CopyOrPaste => {
+                                if session.selection_range().is_some() {
+                                    copy_sel(session);
+                                } else {
+                                    paste(session);
                                 }
-                                RightClickAction::Ignore | RightClickAction::ContextMenu => {}
                             }
-                        }
+                            RightClickAction::Ignore | RightClickAction::ContextMenu => {}
+                        },
                         _ => {}
                     }
 
@@ -1054,9 +1080,8 @@ impl App {
             // Only the focused pane of a focused window gets a live (solid,
             // blinking) cursor; every other visible cursor is drawn hollow.
             let pane_active = is_focus && window_focused;
-            let cursor_blink_hidden = pane_active
-                && snapshot.cursor_blinking
-                && ctx.input(|i| i.time) % 1.0 >= 0.5;
+            let cursor_blink_hidden =
+                pane_active && snapshot.cursor_blinking && ctx.input(|i| i.time) % 1.0 >= 0.5;
             if pane_active && snapshot.cursor_blinking {
                 ctx.request_repaint_after(Duration::from_millis(100));
             }
@@ -1191,10 +1216,30 @@ fn nav_dir(layout: &[(u64, egui::Rect)], focus: u64, dir: Dir) -> Option<u64> {
         }
         let c = r.center();
         let (beyond, gap, overlap, cross) = match dir {
-            Dir::Left => (c.x < fc.x, fc.x - c.x, r.min.y < f.max.y && r.max.y > f.min.y, (c.y - fc.y).abs()),
-            Dir::Right => (c.x > fc.x, c.x - fc.x, r.min.y < f.max.y && r.max.y > f.min.y, (c.y - fc.y).abs()),
-            Dir::Up => (c.y < fc.y, fc.y - c.y, r.min.x < f.max.x && r.max.x > f.min.x, (c.x - fc.x).abs()),
-            Dir::Down => (c.y > fc.y, c.y - fc.y, r.min.x < f.max.x && r.max.x > f.min.x, (c.x - fc.x).abs()),
+            Dir::Left => (
+                c.x < fc.x,
+                fc.x - c.x,
+                r.min.y < f.max.y && r.max.y > f.min.y,
+                (c.y - fc.y).abs(),
+            ),
+            Dir::Right => (
+                c.x > fc.x,
+                c.x - fc.x,
+                r.min.y < f.max.y && r.max.y > f.min.y,
+                (c.y - fc.y).abs(),
+            ),
+            Dir::Up => (
+                c.y < fc.y,
+                fc.y - c.y,
+                r.min.x < f.max.x && r.max.x > f.min.x,
+                (c.x - fc.x).abs(),
+            ),
+            Dir::Down => (
+                c.y > fc.y,
+                c.y - fc.y,
+                r.min.x < f.max.x && r.max.x > f.min.x,
+                (c.x - fc.x).abs(),
+            ),
         };
         if !beyond || !overlap {
             continue;
@@ -1219,7 +1264,11 @@ fn cycle_pick(ids: &[u64], focus: u64, forward: bool) -> Option<u64> {
     }
     let cur = ids.iter().position(|&id| id == focus).unwrap_or(0);
     let n = ids.len();
-    let next = if forward { (cur + 1) % n } else { (cur + n - 1) % n };
+    let next = if forward {
+        (cur + 1) % n
+    } else {
+        (cur + n - 1) % n
+    };
     Some(ids[next])
 }
 
@@ -1314,7 +1363,9 @@ mod tests {
     fn prune_drops_dead_and_collapses() {
         // Tree: [1 | (2 / 3)] with leaf 2 dead.
         let root = split(true, leaf(1, 1), split(false, leaf(2, 0), leaf(3, 1)));
-        let pruned = root.prune(&mut |p: &u32| *p == 0).expect("survivors remain");
+        let pruned = root
+            .prune(&mut |p: &u32| *p == 0)
+            .expect("survivors remain");
         assert_eq!(pruned.leaf_count(), 2);
         assert!(pruned.contains(1) && pruned.contains(3) && !pruned.contains(2));
         // Every leaf dead → whole subtree gone.
@@ -1437,7 +1488,12 @@ mod tests {
     fn reap_tabs_falls_back_focus_when_focused_pane_dies() {
         // A split tab whose focused leaf (2) dies keeps the tab, refocusing the survivor.
         let root = split(true, leaf(1, 1), leaf(2, 0));
-        let tabs = vec![Tab { root, focus: 2, name: None, color: None }];
+        let tabs = vec![Tab {
+            root,
+            focus: 2,
+            name: None,
+            color: None,
+        }];
         let (survivors, _active) = reap_tabs(tabs, 0, &mut |p: &u32| *p == 0);
         assert_eq!(survivors.len(), 1);
         assert_eq!(survivors[0].leaf_count(), 1);
