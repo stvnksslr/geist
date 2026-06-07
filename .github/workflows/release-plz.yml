@@ -1,0 +1,46 @@
+name: release-plz
+
+# release-plz owns version management: on every push to main it opens/updates a
+# "release PR" that bumps Cargo.toml + CHANGELOG.md from conventional commits.
+# When that PR merges, it creates the git tag and GitHub Release. That Release
+# (created via the RELEASE_PLZ_TOKEN PAT) is what triggers the binary build in
+# release.yml — releases created with the default GITHUB_TOKEN do NOT fire other
+# workflows, hence the PAT.
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-plz-${{ github.ref }}
+  cancel-in-progress: false # never cancel a release mid-flight
+
+jobs:
+  release-plz:
+    name: release-plz
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write       # bump version, push tag, create the GitHub Release
+      pull-requests: write  # open/update the release PR
+      id-token: write       # required by release-plz-action
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_PLZ_TOKEN }}
+
+      # release-plz only reads `cargo metadata` (no build-script execution) and
+      # does git/version/changelog work — it never compiles giest, so Zig 0.15.2
+      # is intentionally NOT installed here. Match ci.yml's toolchain pin.
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.96
+
+      - name: Run release-plz
+        uses: MarcoIeni/release-plz-action@v0.5
+        env:
+          # PAT (not GITHUB_TOKEN) so the created Release triggers release.yml.
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}

@@ -2,6 +2,7 @@
 name = "giest"
 version = "0.1.0"
 edition = "2024"
+publish = false # binary app with a vendored path dep — never goes to crates.io
 
 [dependencies]
 # Safe Rust bindings to libghostty-vt (Ghostty's VT engine). Vendored from

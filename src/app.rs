@@ -175,6 +175,19 @@ impl<T> Node<T> {
         }
     }
 
+    /// Append every leaf id to `out` in tree (left-to-right) order. Used by
+    /// split-focus cycling, which then sorts to recover creation order.
+    fn leaf_ids(&self, out: &mut Vec<u64>) {
+        match self {
+            Node::Leaf { id, .. } => out.push(*id),
+            Node::Split { first, second, .. } => {
+                first.leaf_ids(out);
+                second.leaf_ids(out);
+            }
+            Node::Empty => {}
+        }
+    }
+
     /// Append each leaf's (id, payload, rect) to `out`, dividing `area` by each
     /// split's axis (with a gutter between children).
     fn collect<'a>(&'a mut self, area: egui::Rect, out: &mut Vec<Leaf<'a, T>>) {
@@ -244,6 +257,10 @@ pub struct App {
     default_profile: usize,
     egui_ctx: egui::Context,
     last_window_title: Option<String>,
+    /// The active tab's `(leaf id, rect)` layout from the previous frame, cached
+    /// by `render_active` so `handle_shortcuts` (which runs before layout) can
+    /// resolve directional split-focus navigation geometrically.
+    last_layout: Vec<(u64, egui::Rect)>,
 }
 
 /// Runtime font-size bounds in logical points.
@@ -285,6 +302,7 @@ impl App {
             default_profile,
             egui_ctx: cc.egui_ctx.clone(),
             last_window_title: None,
+            last_layout: Vec::new(),
         })
     }
 
@@ -394,10 +412,32 @@ impl App {
         }
     }
 
-    /// Switch to tab `idx` if it exists (Ctrl+Shift+number).
+    /// Switch to tab `idx` if it exists (Alt+number).
     fn goto_tab(&mut self, idx: usize) {
         if idx < self.tabs.len() {
             self.active_tab = idx;
+        }
+    }
+
+    /// Move focus to the spatially adjacent pane (`Ctrl+Alt+arrow`), using the
+    /// previous frame's cached layout. A no-op if there is no neighbor that way.
+    fn focus_dir(&mut self, dir: Dir) {
+        let focus = self.tabs[self.active_tab].focus;
+        if let Some(id) = nav_dir(&self.last_layout, focus, dir) {
+            self.tabs[self.active_tab].focus = id;
+        }
+    }
+
+    /// Cycle focus to the next/previous pane in creation order (`Ctrl+Shift+]` /
+    /// `Ctrl+Shift+[`), wrapping around. Leaf ids are monotonic, so sorting them
+    /// ascending recovers creation order (matching Ghostty's `goto_split:next`).
+    fn focus_cycle(&mut self, forward: bool) {
+        let tab = &mut self.tabs[self.active_tab];
+        let mut ids = Vec::new();
+        tab.root.leaf_ids(&mut ids);
+        ids.sort_unstable();
+        if let Some(id) = cycle_pick(&ids, tab.focus, forward) {
+            tab.focus = id;
         }
     }
 
@@ -451,9 +491,25 @@ impl App {
                 match key {
                     egui::Key::T => self.new_tab(self.default_profile),
                     egui::Key::W => self.close_focused(ctx),
-                    egui::Key::D => self.split(true),  // vertical (columns)
-                    egui::Key::E => self.split(false), // horizontal (rows)
-                    // Ctrl+Shift+1..8 jump to that tab; Ctrl+Shift+9 → last tab.
+                    egui::Key::O => self.split(true),  // new split right (columns)
+                    egui::Key::E => self.split(false), // new split down (rows)
+                    // Cycle split focus in creation order (Ghostty's goto_split).
+                    egui::Key::OpenBracket => self.focus_cycle(false),
+                    egui::Key::CloseBracket => self.focus_cycle(true),
+                    _ => {}
+                }
+            } else if modifiers.ctrl && modifiers.alt {
+                // Ctrl+Alt+arrow: move focus to the adjacent split (goto_split:dir).
+                match key {
+                    egui::Key::ArrowLeft => self.focus_dir(Dir::Left),
+                    egui::Key::ArrowRight => self.focus_dir(Dir::Right),
+                    egui::Key::ArrowUp => self.focus_dir(Dir::Up),
+                    egui::Key::ArrowDown => self.focus_dir(Dir::Down),
+                    _ => {}
+                }
+            } else if modifiers.alt && !modifiers.ctrl && !modifiers.shift {
+                // Alt+1..8 jump to that tab; Alt+9 → last tab (Ghostty defaults).
+                match key {
                     egui::Key::Num1 => self.goto_tab(0),
                     egui::Key::Num2 => self.goto_tab(1),
                     egui::Key::Num3 => self.goto_tab(2),
@@ -567,6 +623,9 @@ impl App {
         if leaves.is_empty() {
             return;
         }
+        // Cache this frame's layout so the next frame's `handle_shortcuts` (which
+        // runs before layout) can resolve directional split-focus navigation.
+        self.last_layout = leaves.iter().map(|l| (l.id, l.rect)).collect();
 
         // Focus-follows-click: a press inside a pane focuses it.
         let press_pos = ctx.input(|i| {
@@ -799,8 +858,65 @@ fn open_url(url: &str) {
     let _ = std::process::Command::new("explorer").arg(url).spawn();
 }
 
+/// Direction for split-focus navigation (`Ctrl+Alt+arrow`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Dir {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+/// Pick the spatially adjacent leaf to `focus` in direction `dir`, given the
+/// laid-out `(id, rect)` pairs (from the previous frame). A candidate qualifies
+/// when its center is beyond the focused pane on the primary axis *and* its rect
+/// overlaps the focused pane on the cross axis — exact adjacency for a binary
+/// split tree. The nearest such pane wins, ties broken by the closer cross-axis
+/// center. Returns `None` when there is no neighbor on that side.
+fn nav_dir(layout: &[(u64, egui::Rect)], focus: u64, dir: Dir) -> Option<u64> {
+    let f = layout.iter().find(|(id, _)| *id == focus)?.1;
+    let fc = f.center();
+    let mut best: Option<(u64, f32, f32)> = None; // (id, primary gap, cross dist)
+    for &(id, r) in layout {
+        if id == focus {
+            continue;
+        }
+        let c = r.center();
+        let (beyond, gap, overlap, cross) = match dir {
+            Dir::Left => (c.x < fc.x, fc.x - c.x, r.min.y < f.max.y && r.max.y > f.min.y, (c.y - fc.y).abs()),
+            Dir::Right => (c.x > fc.x, c.x - fc.x, r.min.y < f.max.y && r.max.y > f.min.y, (c.y - fc.y).abs()),
+            Dir::Up => (c.y < fc.y, fc.y - c.y, r.min.x < f.max.x && r.max.x > f.min.x, (c.x - fc.x).abs()),
+            Dir::Down => (c.y > fc.y, c.y - fc.y, r.min.x < f.max.x && r.max.x > f.min.x, (c.x - fc.x).abs()),
+        };
+        if !beyond || !overlap {
+            continue;
+        }
+        let better = match best {
+            None => true,
+            Some((_, bg, bc)) => gap < bg || (gap == bg && cross < bc),
+        };
+        if better {
+            best = Some((id, gap, cross));
+        }
+    }
+    best.map(|(id, _, _)| id)
+}
+
+/// The next (`forward`) or previous id in `ids` after `focus`, wrapping around.
+/// `ids` is assumed sorted (creation order); an absent `focus` starts from the
+/// first. Returns `None` when there are fewer than two panes to cycle through.
+fn cycle_pick(ids: &[u64], focus: u64, forward: bool) -> Option<u64> {
+    if ids.len() < 2 {
+        return None;
+    }
+    let cur = ids.iter().position(|&id| id == focus).unwrap_or(0);
+    let n = ids.len();
+    let next = if forward { (cur + 1) % n } else { (cur + n - 1) % n };
+    Some(ids[next])
+}
+
 /// Split `area` into two halves along one axis with a 1px gutter between them.
-/// `vertical` = a vertical divider, i.e. side-by-side columns (Ctrl+Shift+D);
+/// `vertical` = a vertical divider, i.e. side-by-side columns (Ctrl+Shift+O);
 /// otherwise stacked rows (Ctrl+Shift+E).
 fn split_rect(area: egui::Rect, vertical: bool) -> (egui::Rect, egui::Rect) {
     let gap = 1.0;
@@ -839,8 +955,12 @@ fn ellipsize(s: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Node, Tab, ellipsize, reap_tabs, split_rect};
+    use super::{Dir, Node, Tab, cycle_pick, ellipsize, nav_dir, reap_tabs, split_rect};
     use eframe::egui;
+
+    fn rect(x: f32, y: f32, w: f32, h: f32) -> egui::Rect {
+        egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, h))
+    }
 
     // The split tree is generic over its leaf payload; tests use a `u32` where
     // `0` marks a "dead" leaf, so structure/liveness logic needs no real shell.
@@ -896,6 +1016,63 @@ mod tests {
         let root = split(false, split(true, leaf(7, 1), leaf(8, 1)), leaf(9, 1));
         assert_eq!(root.first_leaf_id(), 7);
         assert_eq!(Node::<u32>::Empty.first_leaf_id(), 0);
+    }
+
+    #[test]
+    fn leaf_ids_walks_the_tree() {
+        let root = split(false, split(true, leaf(7, 1), leaf(8, 1)), leaf(9, 1));
+        let mut ids = Vec::new();
+        root.leaf_ids(&mut ids);
+        assert_eq!(ids, vec![7, 8, 9]);
+    }
+
+    #[test]
+    fn cycle_pick_wraps_both_ways() {
+        let ids = [1u64, 2, 3];
+        assert_eq!(cycle_pick(&ids, 1, true), Some(2));
+        assert_eq!(cycle_pick(&ids, 3, true), Some(1)); // wrap forward
+        assert_eq!(cycle_pick(&ids, 1, false), Some(3)); // wrap backward
+        assert_eq!(cycle_pick(&ids, 2, false), Some(1));
+        // An absent focus starts from the first; <2 panes has nothing to cycle.
+        assert_eq!(cycle_pick(&ids, 99, true), Some(2));
+        assert_eq!(cycle_pick(&[5u64], 5, true), None);
+    }
+
+    #[test]
+    fn nav_dir_picks_the_adjacent_pane() {
+        // A 2x2 grid: 1 2 / 3 4 (1px gutters between the 50px cells).
+        let layout = [
+            (1u64, rect(0.0, 0.0, 50.0, 50.0)),
+            (2, rect(51.0, 0.0, 50.0, 50.0)),
+            (3, rect(0.0, 51.0, 50.0, 50.0)),
+            (4, rect(51.0, 51.0, 50.0, 50.0)),
+        ];
+        // Directional moves pick the cross-axis-overlapping neighbor, not the diagonal.
+        assert_eq!(nav_dir(&layout, 1, Dir::Right), Some(2));
+        assert_eq!(nav_dir(&layout, 2, Dir::Left), Some(1));
+        assert_eq!(nav_dir(&layout, 1, Dir::Down), Some(3));
+        assert_eq!(nav_dir(&layout, 4, Dir::Up), Some(2));
+        // No neighbor on that side → None (and unknown focus → None).
+        assert_eq!(nav_dir(&layout, 1, Dir::Left), None);
+        assert_eq!(nav_dir(&layout, 1, Dir::Up), None);
+        assert_eq!(nav_dir(&layout, 99, Dir::Right), None);
+    }
+
+    #[test]
+    fn nav_dir_prefers_the_nearest_on_axis() {
+        // One tall pane on the left, two stacked on the right; from the left pane,
+        // Right should pick whichever right pane overlaps its center band.
+        let layout = [
+            (1u64, rect(0.0, 0.0, 50.0, 100.0)),
+            (2, rect(51.0, 0.0, 50.0, 50.0)),
+            (3, rect(51.0, 51.0, 50.0, 50.0)),
+        ];
+        // Pane 1's center (y=50) sits on the boundary; both right panes overlap,
+        // and the tie breaks to the nearer cross-axis center.
+        let pick = nav_dir(&layout, 1, Dir::Right);
+        assert!(pick == Some(2) || pick == Some(3));
+        assert_eq!(nav_dir(&layout, 2, Dir::Down), Some(3));
+        assert_eq!(nav_dir(&layout, 3, Dir::Up), Some(2));
     }
 
     #[test]

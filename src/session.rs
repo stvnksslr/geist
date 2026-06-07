@@ -526,6 +526,36 @@ fn decide_key(key: egui::Key, modifiers: &egui::Modifiers, rows: u16) -> KeyActi
     if modifiers.ctrl && code == KeyCode::Tab {
         return KeyAction::Swallow;
     }
+    // Ctrl+Alt+arrow moves focus between splits (goto_split:dir) — app-reserved.
+    // Kept arrow-specific so Ctrl+Alt (AltGr) text entry is otherwise untouched.
+    if modifiers.ctrl
+        && modifiers.alt
+        && matches!(
+            code,
+            KeyCode::ArrowLeft | KeyCode::ArrowRight | KeyCode::ArrowUp | KeyCode::ArrowDown
+        )
+    {
+        return KeyAction::Swallow;
+    }
+    // Alt+1..9 jump to a tab (Ghostty's goto_tab) — reserved by the app.
+    if modifiers.alt
+        && !modifiers.ctrl
+        && !modifiers.shift
+        && matches!(
+            code,
+            KeyCode::Digit1
+                | KeyCode::Digit2
+                | KeyCode::Digit3
+                | KeyCode::Digit4
+                | KeyCode::Digit5
+                | KeyCode::Digit6
+                | KeyCode::Digit7
+                | KeyCode::Digit8
+                | KeyCode::Digit9
+        )
+    {
+        return KeyAction::Swallow;
+    }
     // Shift+PageUp/Down scroll by a page; Shift+Home/End jump to the top/bottom
     // of scrollback. These drive the viewport instead of going to the shell.
     if modifiers.shift
