@@ -7,6 +7,7 @@ use anyhow::Result;
 use eframe::egui;
 use eframe::egui_wgpu;
 
+use crate::command::{self, Action, PaletteState};
 use crate::config::{Config, MiddleClickAction, RightClickAction};
 use crate::profiles::{self, Profile};
 use crate::render::{self, PaneFrame, TermFrame};
@@ -88,6 +89,22 @@ impl<T> Node<T> {
             Node::Leaf { .. } | Node::Empty => None,
             Node::Split { first, second, .. } => {
                 first.payload(target).or_else(|| second.payload(target))
+            }
+        }
+    }
+
+    /// Mutable counterpart of [`payload`](Self::payload) (the palette's focused-
+    /// pane actions need `&mut`). Written with an early return rather than
+    /// `or_else` so the borrow of `first` ends before `second` is tried.
+    fn payload_mut(&mut self, target: u64) -> Option<&mut T> {
+        match self {
+            Node::Leaf { id, payload } if *id == target => Some(payload),
+            Node::Leaf { .. } | Node::Empty => None,
+            Node::Split { first, second, .. } => {
+                if let Some(p) = first.payload_mut(target) {
+                    return Some(p);
+                }
+                second.payload_mut(target)
             }
         }
     }
@@ -329,6 +346,10 @@ pub struct App {
     /// When a tab is being renamed inline ("Rename Tab…"), its index and the
     /// in-progress edit text; `None` when no rename is active.
     renaming: Option<(usize, String)>,
+    /// The open command palette (Ctrl+Shift+P), or `None` when closed. While
+    /// `Some`, app shortcuts and terminal input are suppressed so the palette is
+    /// modal (see `ui`/`render_active`).
+    palette: Option<PaletteState>,
 }
 
 /// Runtime font-size bounds in logical points.
@@ -385,6 +406,7 @@ impl App {
             last_window_title: None,
             last_layout: Vec::new(),
             renaming: None,
+            palette: None,
         })
     }
 
@@ -504,6 +526,22 @@ impl App {
         }
     }
 
+    /// Activate the next tab, wrapping (Ctrl+Tab / palette "Next Tab").
+    fn next_tab(&mut self) {
+        let n = self.tabs.len();
+        if n > 1 {
+            self.active_tab = (self.active_tab + 1) % n;
+        }
+    }
+
+    /// Activate the previous tab, wrapping (Ctrl+Shift+Tab / palette "Previous Tab").
+    fn prev_tab(&mut self) {
+        let n = self.tabs.len();
+        if n > 1 {
+            self.active_tab = (self.active_tab + n - 1) % n;
+        }
+    }
+
     /// Move focus to the spatially adjacent pane (`Ctrl+Alt+arrow`), using the
     /// previous frame's cached layout. A no-op if there is no neighbor that way.
     fn focus_dir(&mut self, dir: Dir) {
@@ -601,6 +639,10 @@ impl App {
                     // Cycle split focus in creation order (Ghostty's goto_split).
                     egui::Key::OpenBracket => self.focus_cycle(false),
                     egui::Key::CloseBracket => self.focus_cycle(true),
+                    // Open the command palette (Ghostty's toggle_command_palette,
+                    // Cmd+Shift+P on macOS). Already swallowed by `decide_key` as
+                    // a Ctrl+Shift combo, so the shell never sees it.
+                    egui::Key::P => self.palette = Some(PaletteState::new(self.build_catalog())),
                     _ => {}
                 }
             } else if modifiers.ctrl && modifiers.alt {
@@ -627,16 +669,340 @@ impl App {
                     _ => {}
                 }
             } else if modifiers.ctrl && *key == egui::Key::Tab {
-                let n = self.tabs.len();
-                if n > 1 {
-                    self.active_tab = if modifiers.shift {
-                        (self.active_tab + n - 1) % n
-                    } else {
-                        (self.active_tab + 1) % n
-                    };
+                if modifiers.shift {
+                    self.prev_tab();
+                } else {
+                    self.next_tab();
                 }
             }
         }
+    }
+
+    /// Build the command-palette catalog for the current shell profiles.
+    fn build_catalog(&self) -> Vec<command::Command> {
+        let names: Vec<String> = self.profiles.iter().map(|p| p.name.clone()).collect();
+        command::build_catalog(&names)
+    }
+
+    /// The focused pane's session, if any (the palette's pane-scoped actions —
+    /// copy/paste/select/scroll — act on it).
+    fn focused_session_mut(&mut self) -> Option<&mut Session> {
+        let tab = self.tabs.get_mut(self.active_tab)?;
+        let focus = tab.focus;
+        tab.root.payload_mut(focus)
+    }
+
+    /// Nudge the font size by `delta` points (palette font commands; needs the
+    /// render state to rebuild the atlas, like `handle_font_zoom`).
+    fn font_zoom_by(&mut self, render_state: Option<&egui_wgpu::RenderState>, delta: f32) {
+        if let Some(rs) = render_state {
+            let ppp = self.egui_ctx.pixels_per_point().max(1.0);
+            self.set_font_points(rs, self.font_points + delta, ppp);
+        }
+    }
+
+    /// Reset the font size to the configured default (palette "Reset Font Size").
+    fn font_reset(&mut self, render_state: Option<&egui_wgpu::RenderState>) {
+        if let Some(rs) = render_state {
+            let ppp = self.egui_ctx.pixels_per_point().max(1.0);
+            self.set_font_points(rs, self.config.font_points, ppp);
+        }
+    }
+
+    /// Reload the config file and re-apply what can change at runtime: the color
+    /// theme/cursor (re-applied to every live engine) and the font size.
+    /// Selection colors, padding, and click actions are read fresh each frame, so
+    /// they take effect on the next frame from `self.config`. NOTE: the
+    /// scrollback limit is fixed at engine creation and is not changed here.
+    fn reload_config(&mut self, render_state: Option<&egui_wgpu::RenderState>) {
+        let cfg = Config::load();
+        for tab in &mut self.tabs {
+            tab.root.for_each_mut(&mut |s: &mut Session| s.apply_config(&cfg));
+        }
+        let new_font = cfg.font_points;
+        self.config = cfg;
+        if let Some(rs) = render_state {
+            let ppp = self.egui_ctx.pixels_per_point().max(1.0);
+            self.set_font_points(rs, new_font, ppp);
+        }
+    }
+
+    /// Run a command chosen from the palette by dispatching to the existing
+    /// app/session methods. App-level actions mutate `self` directly; pane-scoped
+    /// ones act on the focused session. `render_state` is needed only by the font
+    /// and reload actions (it's `None` when unavailable, making those a no-op).
+    fn execute_action(
+        &mut self,
+        ctx: &egui::Context,
+        render_state: Option<&egui_wgpu::RenderState>,
+        action: Action,
+    ) {
+        match action {
+            Action::NewTab => self.new_tab(self.default_profile),
+            Action::NewTabWithProfile(i) => self.new_tab(i),
+            Action::CloseTab => self.close_tab(self.active_tab, ctx),
+            Action::CloseOtherTabs => self.close_other_tabs(self.active_tab),
+            Action::CloseTabsToRight => self.close_tabs_to_right(self.active_tab),
+            Action::NextTab => self.next_tab(),
+            Action::PrevTab => self.prev_tab(),
+            Action::SplitRight => self.split(true),
+            Action::SplitDown => self.split(false),
+            Action::ClosePane => self.close_focused(ctx),
+            Action::FocusSplitLeft => self.focus_dir(Dir::Left),
+            Action::FocusSplitRight => self.focus_dir(Dir::Right),
+            Action::FocusSplitUp => self.focus_dir(Dir::Up),
+            Action::FocusSplitDown => self.focus_dir(Dir::Down),
+            Action::FocusSplitNext => self.focus_cycle(true),
+            Action::FocusSplitPrev => self.focus_cycle(false),
+            Action::IncreaseFontSize => self.font_zoom_by(render_state, 1.0),
+            Action::DecreaseFontSize => self.font_zoom_by(render_state, -1.0),
+            Action::ResetFontSize => self.font_reset(render_state),
+            Action::Copy => {
+                if let Some(s) = self.focused_session_mut() {
+                    if let Some(text) = s.selection_text() {
+                        ctx.copy_text(text);
+                        s.clear_selection();
+                    }
+                }
+            }
+            Action::Paste => {
+                if let Some(text) = session::read_clipboard() {
+                    if let Some(s) = self.focused_session_mut() {
+                        s.paste_str(&text);
+                    }
+                }
+            }
+            Action::SelectAll => {
+                if let Some(s) = self.focused_session_mut() {
+                    s.select_all();
+                }
+            }
+            Action::ClearSelection => {
+                if let Some(s) = self.focused_session_mut() {
+                    s.clear_selection();
+                }
+            }
+            Action::ResetTerminal => {
+                if let Some(s) = self.focused_session_mut() {
+                    s.reset();
+                }
+            }
+            Action::ScrollPageUp => {
+                let ch = self.cell_h;
+                if let Some(s) = self.focused_session_mut() {
+                    let page = s.page_lines();
+                    s.scroll_lines(-page, ch);
+                }
+            }
+            Action::ScrollPageDown => {
+                let ch = self.cell_h;
+                if let Some(s) = self.focused_session_mut() {
+                    let page = s.page_lines();
+                    s.scroll_lines(page, ch);
+                }
+            }
+            Action::ScrollToTop => {
+                if let Some(s) = self.focused_session_mut() {
+                    s.scroll_to_top();
+                }
+            }
+            Action::ScrollToBottom => {
+                if let Some(s) = self.focused_session_mut() {
+                    s.scroll_to_bottom_view();
+                }
+            }
+            Action::OpenConfig => open_config(),
+            Action::ReloadConfig => self.reload_config(render_state),
+        }
+        ctx.request_repaint();
+    }
+
+    /// Render the open command palette (if any) and return the action the user
+    /// chose this frame. Ghostty-style: a dimmed click-to-dismiss backdrop and a
+    /// centered, fuzzy-filtered command list. Uses the deferred-intent pattern —
+    /// the `PaletteState` is taken out and either put back or dropped — so the
+    /// returned action runs in `ui` with no borrow held on `self`.
+    fn render_palette(&mut self, ctx: &egui::Context) -> Option<Action> {
+        let mut state = self.palette.take()?;
+        // The opening Ctrl+Shift+P is still queued on the first frame; remember
+        // that so the toggle-close below doesn't immediately re-close it.
+        let opened_this_frame = state.just_opened;
+        let mut chosen: Option<Action> = None;
+        let mut keep_open = true;
+        let screen = ctx.content_rect();
+
+        // Dimmed backdrop: above the panes (Middle), below the modal (Foreground);
+        // a click anywhere on it closes the palette.
+        egui::Area::new(egui::Id::new("giest-palette-backdrop"))
+            .order(egui::Order::Middle)
+            .fixed_pos(egui::Pos2::ZERO)
+            .show(ctx, |ui| {
+                let resp = ui.allocate_rect(screen, egui::Sense::click());
+                ui.painter()
+                    .rect_filled(screen, 0.0, egui::Color32::from_black_alpha(160));
+                if resp.clicked() {
+                    keep_open = false;
+                }
+            });
+
+        let width = (screen.width() * 0.6).clamp(560.0, 900.0).min(screen.width() - 40.0);
+        egui::Area::new(egui::Id::new("giest-palette"))
+            .order(egui::Order::Foreground)
+            .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, screen.height() * 0.12))
+            .show(ctx, |ui| {
+                egui::Frame::NONE
+                    .fill(ui.visuals().window_fill)
+                    .stroke(ui.visuals().window_stroke)
+                    .corner_radius(egui::CornerRadius::same(10))
+                    .inner_margin(egui::Margin::same(10))
+                    .show(ui, |ui| {
+                        ui.set_width(width);
+
+                        // Search box: auto-focus once; reset the selection on edit.
+                        let resp = ui.add(
+                            egui::TextEdit::singleline(&mut state.query)
+                                .hint_text("Execute a command…")
+                                .desired_width(f32::INFINITY)
+                                .font(egui::FontId::proportional(20.0))
+                                .margin(egui::Margin::symmetric(12, 10)),
+                        );
+                        if state.just_opened {
+                            resp.request_focus();
+                            state.just_opened = false;
+                        }
+                        if resp.changed() {
+                            state.selected = 0;
+                        }
+                        // Enter in a singleline field arrives as lost_focus + the
+                        // Enter press — the canonical egui "submit" signal.
+                        let entered =
+                            resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+
+                        let filtered = command::filter_commands(&state.catalog, &state.query);
+                        let n = filtered.len();
+
+                        // Navigation: Up/Down (and Ctrl+P/Ctrl+N) move the
+                        // selection; consume them so the text box doesn't also act.
+                        let (mut up, mut down) = (false, false);
+                        ui.input_mut(|i| {
+                            if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown)
+                                || i.consume_key(egui::Modifiers::CTRL, egui::Key::N)
+                            {
+                                down = true;
+                            }
+                            if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp)
+                                || i.consume_key(egui::Modifiers::CTRL, egui::Key::P)
+                            {
+                                up = true;
+                            }
+                        });
+                        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                            keep_open = false;
+                        }
+                        // Ctrl+Shift+P toggles the palette closed (parity with
+                        // Ghostty's toggle binding), except on the frame it opened
+                        // (the opening keypress is still in the queue).
+                        let toggled = ui.input_mut(|i| {
+                            i.consume_key(
+                                egui::Modifiers {
+                                    ctrl: true,
+                                    shift: true,
+                                    ..Default::default()
+                                },
+                                egui::Key::P,
+                            )
+                        });
+                        if toggled && !opened_this_frame {
+                            keep_open = false;
+                        }
+                        if n > 0 {
+                            if down {
+                                state.selected = (state.selected + 1) % n;
+                            }
+                            if up {
+                                state.selected = (state.selected + n - 1) % n;
+                            }
+                        }
+                        if state.selected >= n {
+                            state.selected = n.saturating_sub(1);
+                        }
+                        // Hover also moves the selection, but only while the
+                        // pointer is moving, so it doesn't fight the keyboard.
+                        let pointer_moved = ctx.input(|i| i.pointer.delta() != egui::Vec2::ZERO);
+
+                        ui.separator();
+                        egui::ScrollArea::vertical()
+                            .max_height(screen.height() * 0.6)
+                            .show(ui, |ui| {
+                                let font = egui::FontId::proportional(16.0);
+                                for (row, &cmd_idx) in filtered.iter().enumerate() {
+                                    let selected = row == state.selected;
+                                    let (rect, resp) = ui.allocate_exact_size(
+                                        egui::vec2(ui.available_width(), 30.0),
+                                        egui::Sense::click(),
+                                    );
+                                    if resp.hovered() && pointer_moved {
+                                        state.selected = row;
+                                    }
+                                    if selected {
+                                        ui.painter().rect_filled(
+                                            rect,
+                                            egui::CornerRadius::same(4),
+                                            ui.visuals().selection.bg_fill,
+                                        );
+                                    } else if resp.hovered() {
+                                        ui.painter().rect_filled(
+                                            rect,
+                                            egui::CornerRadius::same(4),
+                                            ui.visuals().widgets.hovered.weak_bg_fill,
+                                        );
+                                    }
+                                    let cmd = &state.catalog[cmd_idx];
+                                    let text_color = if selected {
+                                        ui.visuals().selection.stroke.color
+                                    } else {
+                                        ui.visuals().text_color()
+                                    };
+                                    ui.painter().text(
+                                        rect.left_center() + egui::vec2(10.0, 0.0),
+                                        egui::Align2::LEFT_CENTER,
+                                        &cmd.title,
+                                        font.clone(),
+                                        text_color,
+                                    );
+                                    if let Some(kb) = &cmd.keybind {
+                                        ui.painter().text(
+                                            rect.right_center() - egui::vec2(10.0, 0.0),
+                                            egui::Align2::RIGHT_CENTER,
+                                            kb,
+                                            font.clone(),
+                                            ui.visuals().weak_text_color(),
+                                        );
+                                    }
+                                    if selected && (up || down) {
+                                        resp.scroll_to_me(Some(egui::Align::Center));
+                                    }
+                                    if resp.clicked() {
+                                        chosen = Some(cmd.action);
+                                        keep_open = false;
+                                    }
+                                }
+                            });
+
+                        if entered {
+                            if let Some(&idx) = filtered.get(state.selected) {
+                                chosen = Some(state.catalog[idx].action);
+                            }
+                            keep_open = false;
+                        }
+                    });
+            });
+
+        // Put the state back unless the palette was dismissed or fired an action.
+        if chosen.is_none() && keep_open {
+            self.palette = Some(state);
+        }
+        chosen
     }
 
     fn tab_bar(&mut self, ui: &mut egui::Ui) {
@@ -869,6 +1235,9 @@ impl App {
         let sel_bg = self.config.selection_bg;
         let sel_fg = self.config.selection_fg;
         let active_tab = self.active_tab;
+        // When the palette is open it's modal: don't feed keys to the focused
+        // pane or let it grab keyboard focus (the palette owns both).
+        let palette_open = self.palette.is_some();
 
         let tab = &mut self.tabs[active_tab];
         let mut focus_id = tab.focus;
@@ -906,9 +1275,13 @@ impl App {
         }
         let focus_idx = leaves.iter().position(|l| l.id == focus_id).unwrap();
 
-        // Keyboard goes to the focused pane.
+        // Keyboard goes to the focused pane — unless the command palette is open
+        // (it's modal and owns the keyboard; see `render_palette`). `tracking` is
+        // also used by the mouse block below, so compute it regardless.
         let tracking = leaves[focus_idx].payload.is_mouse_tracking();
-        leaves[focus_idx].payload.handle_input(ctx, tracking, ch);
+        if !palette_open {
+            leaves[focus_idx].payload.handle_input(ctx, tracking, ch);
+        }
 
         let mut frames: Vec<PaneFrame> = Vec::with_capacity(leaves.len());
         for leaf in leaves.iter_mut() {
@@ -923,8 +1296,9 @@ impl App {
                 continue;
             }
 
-            // Mouse / selection interaction only for the focused pane.
-            if is_focus {
+            // Mouse / selection interaction only for the focused pane, and not
+            // while the palette is modal (so clicks/keys don't leak to the pane).
+            if is_focus && !palette_open {
                 // Hold keyboard focus on the terminal and lock the navigation keys
                 // to it. Otherwise egui's built-in focus traversal swallows Tab
                 // (which the shell wants for completion) to cycle focus through the
@@ -1157,10 +1531,14 @@ impl eframe::App for App {
         if !self.reap_dead(&ctx) {
             return;
         }
-        self.handle_shortcuts(&ctx);
-        if let Some(render_state) = frame.wgpu_render_state() {
-            let render_state = render_state.clone();
-            self.handle_font_zoom(&ctx, &render_state);
+        // App shortcuts and font zoom are suppressed while the palette is open
+        // (it's modal); opening/closing it is handled by the palette itself.
+        if self.palette.is_none() {
+            self.handle_shortcuts(&ctx);
+            if let Some(render_state) = frame.wgpu_render_state() {
+                let render_state = render_state.clone();
+                self.handle_font_zoom(&ctx, &render_state);
+            }
         }
 
         // Window title from the active tab's focused pane.
@@ -1182,6 +1560,13 @@ impl eframe::App for App {
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(egui::Color32::from_rgb(bg.r, bg.g, bg.b)))
             .show_inside(ui, |ui| self.render_active(ui, &ctx));
+
+        // The command palette draws over everything; a chosen command runs after
+        // the modal closes, so it mutates `self` with no outstanding borrow.
+        let render_state = frame.wgpu_render_state().cloned();
+        if let Some(action) = self.render_palette(&ctx) {
+            self.execute_action(&ctx, render_state.as_ref(), action);
+        }
     }
 }
 
@@ -1189,6 +1574,20 @@ impl eframe::App for App {
 /// http/https/etc. to the default browser without flashing a console window.
 fn open_url(url: &str) {
     let _ = std::process::Command::new("explorer").arg(url).spawn();
+}
+
+/// Reveal the config file in Explorer (palette "Open Config"). Falls back to the
+/// containing folder when the file doesn't exist yet, so the user can create it.
+fn open_config() {
+    let Some(path) = crate::config::config_path() else {
+        return;
+    };
+    let target = if path.exists() {
+        path
+    } else {
+        path.parent().map(|p| p.to_path_buf()).unwrap_or(path)
+    };
+    let _ = std::process::Command::new("explorer").arg(target).spawn();
 }
 
 /// Direction for split-focus navigation (`Ctrl+Alt+arrow`).
@@ -1378,6 +1777,17 @@ mod tests {
         let root = split(false, split(true, leaf(7, 1), leaf(8, 1)), leaf(9, 1));
         assert_eq!(root.first_leaf_id(), 7);
         assert_eq!(Node::<u32>::Empty.first_leaf_id(), 0);
+    }
+
+    #[test]
+    fn payload_mut_finds_and_mutates_target() {
+        let mut root = split(true, leaf(1, 10), split(false, leaf(2, 20), leaf(3, 30)));
+        // A nested leaf is reachable and mutable through &mut.
+        *root.payload_mut(2).expect("leaf 2 present") = 99;
+        assert_eq!(root.payload(2), Some(&99));
+        // The other leaves are untouched; an absent id yields None.
+        assert_eq!(root.payload(3), Some(&30));
+        assert!(root.payload_mut(42).is_none());
     }
 
     #[test]

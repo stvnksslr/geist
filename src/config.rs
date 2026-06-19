@@ -242,7 +242,8 @@ impl Config {
 
 /// Resolve the config file path: `$GIEST_CONFIG` if set, else
 /// `%APPDATA%\giest\config` (Ghostty names its file `config`, no extension).
-fn config_path() -> Option<PathBuf> {
+/// Public so the command palette's "Open Config" can reveal it.
+pub fn config_path() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("GIEST_CONFIG") {
         return Some(PathBuf::from(p));
     }

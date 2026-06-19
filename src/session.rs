@@ -276,6 +276,38 @@ impl Session {
         let _ = self.pty.write(b"\x1bc");
     }
 
+    /// Re-apply runtime-changeable config to the live engine (command palette's
+    /// "Reload Config"): the color theme and cursor color. The next frame's
+    /// snapshot picks up the new colors. `scrollback-limit` is fixed at engine
+    /// creation and is intentionally *not* changed here.
+    pub fn apply_config(&mut self, config: &Config) {
+        let _ = self.engine.apply_theme(config.fg, config.bg, &config.palette);
+        let _ = self.engine.set_cursor_color(config.cursor);
+    }
+
+    /// Scroll the viewport by `delta` lines (negative scrolls up into history),
+    /// mirroring the `KeyAction::Scroll` arm in `handle_input`. The eased
+    /// `animate_scroll` chases this target on the next frame.
+    pub fn scroll_lines(&mut self, delta: isize, cell_h: f32) {
+        self.scroll_target_px -= delta as f32 * cell_h;
+    }
+
+    /// Jump the viewport to the top of scrollback (`Shift+Home` equivalent).
+    pub fn scroll_to_top(&mut self) {
+        self.scroll_target_px = f32::INFINITY;
+    }
+
+    /// Jump the viewport to the live bottom (`Shift+End` equivalent).
+    pub fn scroll_to_bottom_view(&mut self) {
+        self.scroll_target_px = 0.0;
+    }
+
+    /// One page of scrolling in lines (grid height minus one), matching the page
+    /// size `decide_key` uses for `Shift+PageUp/Down`.
+    pub fn page_lines(&self) -> isize {
+        self.rows.saturating_sub(1).max(1) as isize
+    }
+
     /// The URL under `cell`, if any (for Ctrl+click to open).
     pub fn url_at(&self, cell: (u16, u16)) -> Option<String> {
         find_url_at(&self.snapshot, cell.0, cell.1)
