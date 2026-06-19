@@ -8,11 +8,12 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use atlas::{Atlas, FallbackGlyph, ShapedGlyph};
+pub use atlas::FontSpec;
 use eframe::egui_wgpu::{self, CallbackTrait};
 use eframe::wgpu::{self, util::DeviceExt};
 use unicode_width::UnicodeWidthChar;
 
-use crate::engine::{CursorShape, GridSnapshot, Rgb};
+use crate::engine::{CursorShape, GridSnapshot, Rgb, UnderlineStyle};
 
 /// The embedded primary (regular) monospace font bytes. Exposed for benches that
 /// measure shaping throughput against the real shaping path (rustybuzz over this
@@ -21,8 +22,12 @@ pub fn regular_font() -> &'static [u8] {
     atlas::FONT_REGULAR
 }
 
-/// One instanced quad. `mode` 0 = solid fill (backgrounds/cursor), 1 = glyph
-/// (alpha = atlas coverage). Rect and uv are absolute pixels / normalized UV.
+/// One instanced quad. `mode` 0 = solid fill (backgrounds/cursor/straight
+/// underlines), 1 = glyph (alpha = atlas coverage), 2 = color emoji, 3 =
+/// procedural decoration (dotted/dashed/curly underline, sub-style chosen by
+/// `param`). Rect and uv are absolute pixels / normalized UV; for mode 3, `uv.x`
+/// is an absolute-pixel phase (so the pattern tiles seamlessly across cells) and
+/// `uv.y` spans 0..1 over the quad height.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Instance {
@@ -30,8 +35,23 @@ struct Instance {
     uv: [f32; 4],
     color: [f32; 4],
     mode: u32,
-    _pad: [u32; 3],
+    param: u32,
+    _pad: [u32; 2],
 }
+
+/// Procedural underline sub-styles for `Instance::mode == 3`, passed in `param`.
+const DECO_DOTTED: u32 = 0;
+const DECO_DASHED: u32 = 1;
+const DECO_CURLY: u32 = 2;
+
+/// Alpha applied to faint/dim (SGR 2) glyphs and decorations — a partial
+/// opacity over the background, matching Ghostty's default faint look.
+const FAINT_ALPHA: f32 = 0.55;
+
+/// Background tint for scrollback-search matches; the *current* (navigated) match
+/// uses the brighter shade so it stands out among the others.
+const SEARCH_MATCH_BG: Rgb = Rgb::new(0x53, 0x49, 0x1a);
+const SEARCH_CURRENT_BG: Rgb = Rgb::new(0xc2, 0x9c, 0x22);
 
 impl Instance {
     fn solid(rect: [f32; 4], color: [f32; 4]) -> Self {
@@ -40,7 +60,24 @@ impl Instance {
             uv: [0.0; 4],
             color,
             mode: 0,
-            _pad: [0; 3],
+            param: 0,
+            _pad: [0; 2],
+        }
+    }
+
+    /// A procedural decoration quad (mode 3). `phase_x0` is the quad's left edge
+    /// in absolute pixels and `period` the pattern period in pixels, encoded into
+    /// `uv` so the fragment shader can evaluate the pattern continuously across
+    /// adjacent cells.
+    fn deco(rect: [f32; 4], color: [f32; 4], style: u32, period: f32) -> Self {
+        let p = period.max(1.0);
+        Self {
+            rect,
+            uv: [rect[0] / p, 0.0, rect[2] / p, 1.0],
+            color,
+            mode: 3,
+            param: style,
+            _pad: [0; 2],
         }
     }
 }
@@ -91,10 +128,17 @@ pub struct PaneFrame {
     /// Hide the cursor this frame for blink-off (kept off the snapshot so the
     /// blink toggle needs no snapshot mutation/clone).
     pub cursor_blink_hidden: bool,
+    /// Hide blink-attributed cells this frame (the blink-off phase). Shared
+    /// across panes from one app-level clock; only matters when the snapshot has
+    /// blinking cells (`GridSnapshot::has_blink`).
+    pub blink_hidden: bool,
     /// Sub-line vertical offset (device px, `0..cell_h`) to shift the grid down
     /// by for smooth scrolling. When `> 0` the snapshot's `over_row` is drawn at
     /// the top and the bottom row overhangs; the pane scissor trims both.
     pub scroll_offset_px: f32,
+    /// Scrollback-search matches visible in this pane's viewport (their cells get
+    /// a highlight tint; the `current` one is brighter). Empty when no search.
+    pub search_highlights: Vec<crate::search::SearchHighlight>,
 }
 
 /// Per-frame data handed to the paint callback: every visible pane. Rendering
@@ -107,6 +151,32 @@ pub struct TermFrame {
     pub selection_fg: Option<Rgb>,
 }
 
+/// Build the per-cell search-highlight mask for a viewport (`0` none, `1` match,
+/// `2` current match), indexed `row * cols + col`. Returns an empty vec when
+/// there's nothing to highlight so the cell loop can skip the lookup entirely.
+fn build_search_mask(
+    highlights: &[crate::search::SearchHighlight],
+    cols: u16,
+    rows: u16,
+) -> Vec<u8> {
+    if highlights.is_empty() || cols == 0 || rows == 0 {
+        return Vec::new();
+    }
+    let mut mask = vec![0u8; cols as usize * rows as usize];
+    for h in highlights {
+        if h.row >= rows {
+            continue;
+        }
+        let base = h.row as usize * cols as usize;
+        let last = h.col_end.min(cols - 1);
+        for c in h.col_start..=last {
+            let v = if h.current { 2 } else { 1 };
+            mask[base + c as usize] = mask[base + c as usize].max(v);
+        }
+    }
+    mask
+}
+
 /// A maximal horizontal run of cells sharing fg color and style, gathered for
 /// shaping. `byte_cell[i]` is the grid column the byte at offset `i` in `text`
 /// came from, so a shaped glyph's cluster maps back to its origin cell.
@@ -115,16 +185,25 @@ struct GlyphRun {
     byte_cell: Vec<u16>,
     fg: Rgb,
     style: usize,
+    /// Faint (SGR 2) cells render at reduced alpha and break runs from
+    /// non-faint cells so a single run has a uniform opacity.
+    faint: bool,
 }
 
 /// Build the renderer resources and register them with egui. Returns the
 /// monospace cell size in physical pixels so the app can size the grid.
-pub fn init(render_state: &egui_wgpu::RenderState, px: f32, text_gamma: f32) -> (f32, f32) {
+pub fn init(
+    render_state: &egui_wgpu::RenderState,
+    px: f32,
+    text_gamma: f32,
+    font: &FontSpec,
+) -> (f32, f32) {
     let resources = build_resources(
         &render_state.device,
         render_state.target_format,
         px,
         text_gamma,
+        font,
     );
     let cell = resources.cell_size();
     render_state
@@ -144,8 +223,9 @@ pub fn build_resources(
     format: wgpu::TextureFormat,
     px: f32,
     text_gamma: f32,
+    font: &FontSpec,
 ) -> GpuResources {
-    let atlas = Atlas::new(device, px, format.is_srgb());
+    let atlas = Atlas::new(device, px, format.is_srgb(), font);
 
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("term-shader"),
@@ -259,6 +339,7 @@ pub fn build_resources(
                         2 => Float32x4, // uv
                         3 => Float32x4, // color
                         4 => Uint32,    // mode
+                        5 => Uint32,    // param (mode-3 decoration sub-style)
                     ],
                 },
             ],
@@ -446,9 +527,16 @@ impl GpuResources {
             let cursor_visible = snap.cursor_visible && !pane.cursor_blink_hidden;
             let filled_block =
                 cursor_visible && snap.cursor_shape == CursorShape::Block && !pane.cursor_hollow;
+            // An unfocused pane always shows a hollow *block*, whatever the
+            // requested shape (Ghostty's cursor.zig returns block_hollow for any
+            // unfocused cursor before consulting the terminal style) — so a bar
+            // or underline cursor must not fall through to its filled form here.
             let hollow_block = cursor_visible
-                && (snap.cursor_shape == CursorShape::HollowBlock
-                    || (snap.cursor_shape == CursorShape::Block && pane.cursor_hollow));
+                && (pane.cursor_hollow || snap.cursor_shape == CursorShape::HollowBlock);
+
+            // Per-cell search-highlight mask (0 = none, 1 = match, 2 = current),
+            // built only when a search is active so the common path pays nothing.
+            let search_mask = build_search_mask(&pane.search_highlights, snap.cols, snap.rows);
 
             for y in start_y..snap.rows as i32 {
                 for x in 0..snap.cols {
@@ -477,24 +565,87 @@ impl GpuResources {
                     if selected && !is_cursor_cell {
                         bg = frame.selection_bg;
                     }
+                    // Search highlights tint the cell background (over a selection,
+                    // since you're actively navigating matches); the cursor cell
+                    // keeps its cursor color.
+                    if !is_cursor_cell && y >= 0 && !search_mask.is_empty() {
+                        let idx = y as usize * snap.cols as usize + x as usize;
+                        match search_mask.get(idx).copied().unwrap_or(0) {
+                            2 => bg = SEARCH_CURRENT_BG,
+                            1 => bg = SEARCH_MATCH_BG,
+                            _ => {}
+                        }
+                    }
 
                     out.push(Instance::solid(
                         [cell_left, cell_top, cw, ch],
                         self.color(bg, 1.0),
                     ));
 
-                    if cell.underline {
-                        let y = (cell_top + ascent + line_h).round();
+                    // Decorations (drawn in the glyph pass so they layer over the
+                    // background but under nothing). Faint dims them like glyphs;
+                    // a blink-off cell hides them with its glyph.
+                    let deco_alpha = if cell.faint { FAINT_ALPHA } else { 1.0 };
+                    let deco_hidden = cell.blink && pane.blink_hidden;
+                    if !deco_hidden && cell.underline != UnderlineStyle::None {
+                        // Top of the underline line, just below the baseline.
+                        let uy = (cell_top + ascent + line_h).round();
+                        let uc = self.color(cell.underline_color.unwrap_or(fg), deco_alpha);
+                        match cell.underline {
+                            UnderlineStyle::Single => {
+                                glyphs.push(Instance::solid([cell_left, uy, cw, line_h], uc));
+                            }
+                            UnderlineStyle::Double => {
+                                glyphs.push(Instance::solid([cell_left, uy, cw, line_h], uc));
+                                glyphs.push(Instance::solid(
+                                    [cell_left, uy + 2.0 * line_h, cw, line_h],
+                                    uc,
+                                ));
+                            }
+                            UnderlineStyle::Dotted => {
+                                glyphs.push(Instance::deco(
+                                    [cell_left, uy, cw, line_h],
+                                    uc,
+                                    DECO_DOTTED,
+                                    (line_h * 3.0).max(3.0),
+                                ));
+                            }
+                            UnderlineStyle::Dashed => {
+                                glyphs.push(Instance::deco(
+                                    [cell_left, uy, cw, line_h],
+                                    uc,
+                                    DECO_DASHED,
+                                    (ch * 0.4).max(4.0),
+                                ));
+                            }
+                            UnderlineStyle::Curly => {
+                                // A tall band gives the thick wave vertical room,
+                                // centered on the single-underline position; the
+                                // pane scissor trims any spill past the cell.
+                                let band = (line_h * 4.0).max(4.0);
+                                let top = uy + line_h * 0.5 - band * 0.5;
+                                glyphs.push(Instance::deco(
+                                    [cell_left, top, cw, band],
+                                    uc,
+                                    DECO_CURLY,
+                                    (ch * 0.5).max(6.0),
+                                ));
+                            }
+                            UnderlineStyle::None => {}
+                        }
+                    }
+                    if !deco_hidden && cell.overline {
+                        let oy = cell_top.round();
                         glyphs.push(Instance::solid(
-                            [cell_left, y, cw, line_h],
-                            self.color(fg, 1.0),
+                            [cell_left, oy, cw, line_h],
+                            self.color(fg, deco_alpha),
                         ));
                     }
-                    if cell.strikethrough {
+                    if !deco_hidden && cell.strikethrough {
                         let y = (cell_top + ch * 0.5).round();
                         glyphs.push(Instance::solid(
                             [cell_left, y, cw, line_h],
-                            self.color(fg, 1.0),
+                            self.color(fg, deco_alpha),
                         ));
                     }
                 }
@@ -513,7 +664,13 @@ impl GpuResources {
                 let yu = if y >= 0 { Some(y as u16) } else { None };
                 for x in 0..snap.cols {
                     let Some(cell) = cell_at(x, y) else { continue };
-                    if cell.text.is_empty() {
+                    // A blank, concealed (invisible), or blink-off cell draws no
+                    // glyph and breaks the run so the next visible cell starts a
+                    // fresh one. The background/decorations were already emitted.
+                    if cell.text.is_empty()
+                        || cell.invisible
+                        || (cell.blink && pane.blink_hidden)
+                    {
                         cur_open = false;
                         continue;
                     }
@@ -533,9 +690,10 @@ impl GpuResources {
                         cell.fg
                     };
                     let style = Atlas::style_index(cell.bold, cell.italic);
+                    let faint = cell.faint;
                     if cur_open {
                         let r = &mut runs[run_count - 1];
-                        if r.fg == fg && r.style == style {
+                        if r.fg == fg && r.style == style && r.faint == faint {
                             r.text.push_str(&cell.text);
                             r.byte_cell.resize(r.text.len(), x);
                             continue;
@@ -549,6 +707,7 @@ impl GpuResources {
                             byte_cell: Vec::new(),
                             fg,
                             style,
+                            faint,
                         });
                     }
                     let r = &mut runs[run_count];
@@ -556,6 +715,7 @@ impl GpuResources {
                     r.byte_cell.clear();
                     r.fg = fg;
                     r.style = style;
+                    r.faint = faint;
                     r.text.push_str(&cell.text);
                     r.byte_cell.resize(r.text.len(), x);
                     run_count += 1;
@@ -566,7 +726,7 @@ impl GpuResources {
                 for r in &runs[..run_count] {
                     shaped.clear();
                     self.atlas.shape_run(&r.text, r.style, &mut shaped);
-                    let color = self.color(r.fg, 1.0);
+                    let color = self.color(r.fg, if r.faint { FAINT_ALPHA } else { 1.0 });
                     for sg in &shaped {
                         // The cluster's leading char drives cell-fit classification
                         // and display width (1 or 2 cells), so icons/box-drawing/
@@ -615,7 +775,8 @@ impl GpuResources {
                             uv: g.uv,
                             color,
                             mode,
-                            _pad: [0; 3],
+                            param: 0,
+                            _pad: [0; 2],
                         });
                     }
                 }
@@ -754,11 +915,14 @@ struct U { screen: vec2<f32>, gamma_inv: f32, pad: f32 };
 @group(0) @binding(2) var atlas_smp: sampler;
 @group(0) @binding(3) var color_tex: texture_2d<f32>;
 
+const TAU: f32 = 6.2831853;
+
 struct VsOut {
   @builtin(position) pos: vec4<f32>,
   @location(0) uv: vec2<f32>,
   @location(1) color: vec4<f32>,
   @location(2) @interpolate(flat) mode: u32,
+  @location(3) @interpolate(flat) param: u32,
 };
 
 @vertex
@@ -766,7 +930,8 @@ fn vs(@location(0) corner: vec2<f32>,
       @location(1) rect: vec4<f32>,
       @location(2) uvr: vec4<f32>,
       @location(3) color: vec4<f32>,
-      @location(4) mode: u32) -> VsOut {
+      @location(4) mode: u32,
+      @location(5) param: u32) -> VsOut {
   let px = rect.xy + corner * rect.zw;
   let ndc = vec2<f32>(px.x / u.screen.x * 2.0 - 1.0, 1.0 - px.y / u.screen.y * 2.0);
   var out: VsOut;
@@ -774,6 +939,7 @@ fn vs(@location(0) corner: vec2<f32>,
   out.uv = uvr.xy + corner * uvr.zw;
   out.color = color;
   out.mode = mode;
+  out.param = param;
   return out;
 }
 
@@ -786,9 +952,59 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     // Color emoji: straight-alpha RGBA sampled from the color atlas.
     return textureSample(color_tex, atlas_smp, in.uv);
   }
+  if (in.mode == 3u) {
+    // Procedural underline decoration. uv.x is an absolute-pixel phase divided
+    // by the pattern period (continuous across cells); uv.y spans 0..1.
+    var cov = 0.0;
+    if (in.param == 0u) {            // dotted: ~50% duty cycle
+      cov = select(0.0, 1.0, fract(in.uv.x) < 0.5);
+    } else if (in.param == 1u) {     // dashed: ~66% duty cycle
+      cov = select(0.0, 1.0, fract(in.uv.x) < 0.66);
+    } else {                         // curly: a thick sine wave within the band
+      // `band` height is 4*line_h, so a half-thickness of 0.20 makes the stroke
+      // ~1.6*line_h — noticeably heavier than a flat 1*line_h line, which a wavy
+      // path otherwise reads thinner than. Amplitude 0.22 keeps peaks in-band.
+      let center = 0.5 + 0.22 * sin(in.uv.x * TAU);
+      cov = 1.0 - smoothstep(0.20, 0.26, abs(in.uv.y - center));
+    }
+    return vec4<f32>(in.color.rgb, in.color.a * cov);
+  }
   // Coverage gamma thickens light-on-dark AA, which a linear-correct alpha
   // blend (sRGB framebuffer) otherwise renders too thin/spindly.
   let cov = textureSample(atlas_tex, atlas_smp, in.uv).r;
   return vec4<f32>(in.color.rgb, in.color.a * pow(cov, u.gamma_inv));
 }
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::build_search_mask;
+    use crate::search::SearchHighlight;
+
+    #[test]
+    fn search_mask_marks_match_and_current_spans() {
+        let hl = vec![
+            SearchHighlight { row: 0, col_start: 1, col_end: 3, current: false },
+            SearchHighlight { row: 1, col_start: 0, col_end: 0, current: true },
+        ];
+        let m = build_search_mask(&hl, 4, 2);
+        // Row 0 cols 1..=3 are plain matches (1); col 0 untouched.
+        assert_eq!(m, vec![0, 1, 1, 1, 2, 0, 0, 0]);
+    }
+
+    #[test]
+    fn search_mask_empty_when_no_highlights() {
+        assert!(build_search_mask(&[], 10, 10).is_empty());
+    }
+
+    #[test]
+    fn search_mask_clamps_out_of_range() {
+        // col_end past the last column is clamped; an off-grid row is skipped.
+        let hl = vec![
+            SearchHighlight { row: 0, col_start: 2, col_end: 99, current: true },
+            SearchHighlight { row: 5, col_start: 0, col_end: 1, current: false },
+        ];
+        let m = build_search_mask(&hl, 3, 1);
+        assert_eq!(m, vec![0, 0, 2]);
+    }
+}

@@ -8,11 +8,13 @@
 //! shaped glyphs onto the terminal grid by cluster.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use ab_glyph::{Font, FontRef, FontVec, GlyphId, PxScale, ScaleFont, point};
 use eframe::wgpu;
 use rustybuzz::ttf_parser;
-use rustybuzz::{Direction, Face as ShapeFace, UnicodeBuffer};
+use rustybuzz::{Direction, Face as ShapeFace, Feature, UnicodeBuffer};
 
 const ATLAS_SIZE: u32 = 2048;
 
@@ -249,9 +251,205 @@ const FONT_ITALIC: &[u8] = include_bytes!("../../assets/fonts/JetBrainsMonoNerdF
 const FONT_BOLD_ITALIC: &[u8] =
     include_bytes!("../../assets/fonts/JetBrainsMonoNerdFont-BoldItalic.ttf");
 
+/// User font selection, neutral of `Config` (the app builds it from config so
+/// the render layer stays config-agnostic). Empty/`None` everywhere means the
+/// built-in JetBrains Mono with the font's default OpenType features.
+#[derive(Clone, Debug, Default)]
+pub struct FontSpec {
+    /// Primary family (name or file path). `None` = built-in font.
+    pub family: Option<String>,
+    /// Per-style family overrides; each falls back to `family` when `None`.
+    pub family_bold: Option<String>,
+    pub family_italic: Option<String>,
+    pub family_bold_italic: Option<String>,
+    /// OpenType feature specs (e.g. `-calt`, `ss01`, `cv01=2`) applied at shaping.
+    pub features: Vec<String>,
+}
+
 /// Style index into the font table: bit 0 = bold, bit 1 = italic.
 fn style_index(bold: bool, italic: bool) -> usize {
     (bold as usize) | ((italic as usize) << 1)
+}
+
+/// Parse `font-feature` specs into rustybuzz features, skipping unparseable ones
+/// (with a warning). The standard HarfBuzz syntax is accepted (`kern`, `+liga`,
+/// `-calt`, `ss01=1`, `liga off`, …) via [`Feature::from_str`]. A tag that isn't
+/// exactly 4 characters is rejected up front (Ghostty's rule): rustybuzz would
+/// otherwise space-pad a short tag and apply a bogus OpenType feature.
+fn parse_features(specs: &[String]) -> Vec<Feature> {
+    let mut out = Vec::new();
+    for spec in specs {
+        if !has_4char_tag(spec) {
+            eprintln!("giest: ignoring font-feature '{spec}' (tag must be 4 characters)");
+            continue;
+        }
+        match Feature::from_str(spec) {
+            Ok(f) => out.push(f),
+            Err(_) => eprintln!("giest: ignoring invalid font-feature '{spec}'"),
+        }
+    }
+    out
+}
+
+/// Whether `spec`'s OpenType tag is exactly 4 characters, mirroring Ghostty
+/// (which rejects any other length). The tag is the leading ASCII-alphanumeric
+/// run after an optional `+`/`-` sign and an optional opening quote.
+fn has_4char_tag(spec: &str) -> bool {
+    let s = spec.trim();
+    let s = s.strip_prefix(['+', '-']).unwrap_or(s);
+    let s = s.strip_prefix(['\'', '"']).unwrap_or(s);
+    s.chars().take_while(char::is_ascii_alphanumeric).count() == 4
+}
+
+/// Leak font bytes to `'static`. The atlas (and its `FontRef`/`ShapeFace`, which
+/// borrow `'static`) lives until the process exits or a restart-triggering
+/// config change; user fonts are loaded once at atlas construction, mirroring the
+/// embedded `'static` consts and the leaked color/fallback faces.
+fn leak_font(bytes: Vec<u8>) -> &'static [u8] {
+    Box::leak(bytes.into_boxed_slice())
+}
+
+/// Directories scanned for a configured `font-family`: the user's per-account
+/// font store first (installed-for-me fonts), then the system store.
+fn font_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        dirs.push(PathBuf::from(local).join(r"Microsoft\Windows\Fonts"));
+    }
+    let windir = std::env::var_os("WINDIR").unwrap_or_else(|| r"C:\Windows".into());
+    dirs.push(PathBuf::from(windir).join("Fonts"));
+    dirs
+}
+
+/// Whether `face` is the requested `family` (matched against the family and
+/// typographic-family name records, case-insensitively) in the requested style.
+fn face_matches(face: &ttf_parser::Face, family: &str, bold: bool, italic: bool) -> bool {
+    family_name_matches(face, family) && face.is_bold() == bold && face.is_italic() == italic
+}
+
+/// Whether `face`'s family matches `family` by its family / typographic-family
+/// name records, case-insensitively (the name half of [`face_matches`]).
+fn family_name_matches(face: &ttf_parser::Face, family: &str) -> bool {
+    let want = family.trim();
+    face.names().into_iter().any(|n| {
+        matches!(
+            n.name_id,
+            ttf_parser::name_id::FAMILY | ttf_parser::name_id::TYPOGRAPHIC_FAMILY
+        ) && n.to_string().is_some_and(|s| s.trim().eq_ignore_ascii_case(want))
+    })
+}
+
+/// Scan the font sources for the first face that `accept`s. A `family` that is an
+/// existing file path is loaded directly (face index 0, unconditionally — the
+/// user named the exact file); otherwise the font directories are scanned and
+/// every face tested. The returned bytes are leaked to `'static`.
+fn scan_fonts(
+    family: &str,
+    accept: impl Fn(&ttf_parser::Face) -> bool,
+) -> Option<(&'static [u8], u32)> {
+    let family = family.trim();
+    if family.is_empty() {
+        return None;
+    }
+    let path = Path::new(family);
+    if path.is_file() {
+        let bytes = std::fs::read(path).ok()?;
+        return Some((leak_font(bytes), 0));
+    }
+    for dir in font_dirs() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(str::to_ascii_lowercase);
+            if !matches!(ext.as_deref(), Some("ttf" | "otf" | "ttc" | "otc")) {
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(&path) else {
+                continue;
+            };
+            let faces = ttf_parser::fonts_in_collection(&bytes).unwrap_or(1);
+            for idx in 0..faces {
+                if ttf_parser::Face::parse(&bytes, idx).is_ok_and(|face| accept(&face)) {
+                    return Some((leak_font(bytes), idx));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Resolve a font `family` + exact style to its data and face index, or `None`.
+fn find_font(family: &str, bold: bool, italic: bool) -> Option<(&'static [u8], u32)> {
+    scan_fonts(family, |face| face_matches(face, family, bold, italic))
+}
+
+/// Resolve the *regular* slot tolerantly: prefer an exact flags-clear regular
+/// face, else accept the family's first face of any style. Ghostty's regular
+/// discovery doesn't constrain on style bits, so this keeps the user on their
+/// configured font when a family ships only a styled master or carries unusual
+/// OS/2 style metadata, rather than dropping the whole selection to the built-in.
+fn find_regular_font(family: &str) -> Option<(&'static [u8], u32)> {
+    find_font(family, false, false)
+        .or_else(|| scan_fonts(family, |face| family_name_matches(face, family)))
+}
+
+/// Resolve the four style slots (regular, bold, italic, bold-italic) to font
+/// data + face index. A configured `font-family` whose *regular* face can't be
+/// found is reported and ignored (the built-in font is kept rather than half
+/// applying); missing style variants of a found family fall back to that
+/// family's regular face, then to the built-in per-slot face.
+fn resolve_slots(spec: &FontSpec) -> [(&'static [u8], u32); 4] {
+    let embedded = [
+        (FONT_REGULAR, 0u32),
+        (FONT_BOLD, 0),
+        (FONT_ITALIC, 0),
+        (FONT_BOLD_ITALIC, 0),
+    ];
+    // The family for each slot: a per-style override, else the primary family.
+    fn slot_family<'a>(over: &'a Option<String>, primary: &'a Option<String>) -> Option<&'a str> {
+        over.as_deref().or(primary.as_deref())
+    }
+    let slots = [
+        (slot_family(&spec.family, &spec.family), false, false),
+        (slot_family(&spec.family_bold, &spec.family), true, false),
+        (slot_family(&spec.family_italic, &spec.family), false, true),
+        (slot_family(&spec.family_bold_italic, &spec.family), true, true),
+    ];
+
+    let regular = slots[0].0.and_then(find_regular_font);
+    // If the primary family is set but unresolvable (and no per-style override is
+    // picking up the slack), keep the built-in font entirely.
+    if spec.family.is_some()
+        && regular.is_none()
+        && spec.family_bold.is_none()
+        && spec.family_italic.is_none()
+        && spec.family_bold_italic.is_none()
+    {
+        if let Some(f) = spec.family.as_deref() {
+            eprintln!("giest: font-family '{f}' not found; using the built-in font");
+        }
+        return embedded;
+    }
+
+    let mut out = embedded;
+    for (i, (family, bold, italic)) in slots.into_iter().enumerate() {
+        // Regular slot: the tolerant lookup. Styled slots: exact style → the
+        // family's regular → built-in for this slot.
+        let found = if i == 0 {
+            regular
+        } else {
+            family.and_then(|f| find_font(f, bold, italic)).or(regular)
+        };
+        if let Some(found) = found {
+            out[i] = found;
+        }
+    }
+    out
 }
 
 /// How a glyph should be fitted to the terminal cell. Most characters are
@@ -348,6 +546,9 @@ pub enum FallbackGlyph {
 pub struct Atlas {
     fonts: [FontRef<'static>; 4],
     shapers: [ShapeFace<'static>; 4],
+    /// OpenType features applied to every shaped run (from `font-feature`). Empty
+    /// = the font's own defaults (which still include `calt`/`liga`).
+    features: Vec<Feature>,
     /// System fallback faces (owned font data), tried in order for characters
     /// the primary font lacks.
     fallbacks: Vec<FontVec>,
@@ -391,20 +592,37 @@ pub struct Atlas {
 
 impl Atlas {
     /// Build an atlas for the given pixel font size. `srgb` is whether the
-    /// render target is sRGB (so color emoji are stored in linear space).
-    pub fn new(device: &wgpu::Device, px: f32, srgb: bool) -> Self {
-        let fonts = [
-            FontRef::try_from_slice(FONT_REGULAR).expect("regular font"),
-            FontRef::try_from_slice(FONT_BOLD).expect("bold font"),
-            FontRef::try_from_slice(FONT_ITALIC).expect("italic font"),
-            FontRef::try_from_slice(FONT_BOLD_ITALIC).expect("bold-italic font"),
-        ];
-        let shapers = [
-            ShapeFace::from_slice(FONT_REGULAR, 0).expect("regular shaper"),
-            ShapeFace::from_slice(FONT_BOLD, 0).expect("bold shaper"),
-            ShapeFace::from_slice(FONT_ITALIC, 0).expect("italic shaper"),
-            ShapeFace::from_slice(FONT_BOLD_ITALIC, 0).expect("bold-italic shaper"),
-        ];
+    /// render target is sRGB (so color emoji are stored in linear space). `spec`
+    /// selects the user font family and OpenType features (default = built-in
+    /// JetBrains Mono with the font's own default features).
+    pub fn new(device: &wgpu::Device, px: f32, srgb: bool, spec: &FontSpec) -> Self {
+        // Resolve the four style slots to font data + face index (built-in font
+        // when unconfigured / unresolved), then build the rasterizer and shaper
+        // faces over the same bytes per slot.
+        let slots = resolve_slots(spec);
+        let face = |i: usize| -> (FontRef<'static>, ShapeFace<'static>) {
+            let (bytes, idx) = slots[i];
+            // The built-in fonts always parse; a resolved user font that fails to
+            // build (corrupt/unsupported) falls back to the built-in for that slot.
+            let embedded = [FONT_REGULAR, FONT_BOLD, FONT_ITALIC, FONT_BOLD_ITALIC][i];
+            let font = FontRef::try_from_slice_and_index(bytes, idx)
+                .or_else(|_| FontRef::try_from_slice(embedded))
+                .expect("font face");
+            let shaper = ShapeFace::from_slice(bytes, idx)
+                .or_else(|| ShapeFace::from_slice(embedded, 0))
+                .expect("shaper face");
+            (font, shaper)
+        };
+        let (f0, s0) = face(0);
+        let (f1, s1) = face(1);
+        let (f2, s2) = face(2);
+        let (f3, s3) = face(3);
+        let fonts = [f0, f1, f2, f3];
+        let shapers = [s0, s1, s2, s3];
+        // Mirror Ghostty: `liga` is forced on as a baseline, then the user's
+        // features are appended so a later `-liga` (or any override) wins.
+        let mut features = vec![Feature::from_str("liga").expect("liga feature")];
+        features.extend(parse_features(&spec.features));
         // Load whichever system fallback fonts are present; missing ones are
         // simply skipped (e.g. a stripped-down Windows install).
         let mut fallbacks = Vec::new();
@@ -456,6 +674,7 @@ impl Atlas {
         Self {
             fonts,
             shapers,
+            features,
             fallbacks,
             color_font: ColorFont::load(COLOR_FONT),
             shape_buf: Some(UnicodeBuffer::new()),
@@ -529,7 +748,7 @@ impl Atlas {
         let mut buf = self.shape_buf.take().unwrap_or_else(UnicodeBuffer::new);
         buf.push_str(text);
         buf.set_direction(Direction::LeftToRight);
-        let glyphs = rustybuzz::shape(&self.shapers[style], &[], buf);
+        let glyphs = rustybuzz::shape(&self.shapers[style], &self.features, buf);
         let start = out.len();
         for info in glyphs.glyph_infos() {
             out.push(ShapedGlyph {
@@ -914,12 +1133,15 @@ impl Atlas {
 #[cfg(test)]
 mod tests {
     use super::{
-        COLOR_FONT, ColorFont, Constraint, FALLBACK_FONTS, FONT_REGULAR, LayerCollector, ShapeFace,
-        classify, composite_color_layers, fit_scale,
+        COLOR_FONT, ColorFont, Constraint, FALLBACK_FONTS, FONT_BOLD, FONT_BOLD_ITALIC,
+        FONT_ITALIC, FONT_REGULAR, Feature, FontSpec, LayerCollector, ShapeFace, classify,
+        composite_color_layers, face_matches, family_name_matches, find_font, find_regular_font,
+        fit_scale, has_4char_tag, parse_features, resolve_slots,
     };
     use ab_glyph::{Font, FontRef, FontVec};
     use rustybuzz::ttf_parser;
     use rustybuzz::{Direction, UnicodeBuffer};
+    use std::str::FromStr;
 
     #[test]
     fn color_emoji_composites_to_colored_rgba() {
@@ -1027,6 +1249,137 @@ mod tests {
         );
         // A plain letter pair is unaffected by ligature substitution.
         assert_eq!(glyph_ids("ab"), vec![glyph_ids("a")[0], glyph_ids("b")[0]]);
+    }
+
+    /// Glyph ids the regular face produces for `s` with the given OpenType
+    /// features applied (the same path `shape_run` drives).
+    fn glyph_ids_feat(s: &str, feats: &[&str]) -> Vec<u16> {
+        let face = ShapeFace::from_slice(FONT_REGULAR, 0).unwrap();
+        let features: Vec<Feature> = feats.iter().map(|f| Feature::from_str(f).unwrap()).collect();
+        let mut buf = UnicodeBuffer::new();
+        buf.push_str(s);
+        buf.set_direction(Direction::LeftToRight);
+        rustybuzz::shape(&face, &features, buf)
+            .glyph_infos()
+            .iter()
+            .map(|i| i.glyph_id as u16)
+            .collect()
+    }
+
+    #[test]
+    fn disabling_calt_suppresses_ligatures() {
+        // The standalone glyphs for '!' and '='.
+        let plain = vec![glyph_ids("!")[0], glyph_ids("=")[0]];
+        // calt on (font default): "!=" is ligature-substituted, so it differs.
+        assert_ne!(glyph_ids("!="), plain, "ligature applies by default");
+        // calt off (font-feature = -calt): "!=" reverts to the standalone glyphs,
+        // proving the feature reaches the shaper.
+        assert_eq!(
+            glyph_ids_feat("!=", &["-calt"]),
+            plain,
+            "-calt suppresses the ligature substitution"
+        );
+    }
+
+    #[test]
+    fn parse_features_keeps_valid_drops_invalid() {
+        let f = parse_features(&[
+            "-calt".to_string(),
+            "ss01".to_string(),
+            String::new(), // invalid (empty)
+        ]);
+        assert_eq!(f.len(), 2, "two valid features parsed, the empty one dropped");
+    }
+
+    #[test]
+    fn feature_tag_must_be_four_chars() {
+        // Ghostty rejects non-4-char tags; rustybuzz would otherwise space-pad a
+        // short tag into a bogus feature. The leading run after +/- and a quote
+        // is the tag.
+        assert!(has_4char_tag("ss01"));
+        assert!(has_4char_tag("-calt"));
+        assert!(has_4char_tag("cv01=2"));
+        assert!(has_4char_tag("liga off"));
+        assert!(has_4char_tag("'aalt' 2"));
+        assert!(!has_4char_tag("sht"), "3-char tag rejected");
+        assert!(!has_4char_tag("k"), "1-char tag rejected");
+        assert!(!has_4char_tag("toolong"), "long tag rejected");
+        assert!(!has_4char_tag(""));
+        // parse_features applies the guard: the short tag is dropped.
+        assert_eq!(parse_features(&["sht".into(), "ss01".into()]).len(), 1);
+    }
+
+    #[test]
+    fn find_regular_font_prefers_exact_then_any() {
+        // Consolas ships with Windows; skip cleanly if absent.
+        if !std::path::Path::new(r"C:\Windows\Fonts\consola.ttf").exists() {
+            return;
+        }
+        // The tolerant regular lookup resolves to a real Consolas face.
+        let (bytes, idx) = find_regular_font("Consolas").expect("resolve Consolas regular");
+        let face = ttf_parser::Face::parse(bytes, idx).unwrap();
+        assert!(family_name_matches(&face, "consolas"));
+        // The exact path is preferred, so the regular face is neither bold/italic.
+        assert!(!face.is_bold() && !face.is_italic());
+    }
+
+    #[test]
+    fn default_spec_uses_embedded_fonts() {
+        // With no family configured, every slot is the built-in JetBrains Mono.
+        // (Compare by content — a `const` may be duplicated in rodata, so pointer
+        // identity isn't reliable; `==` is a cheap memcmp here.)
+        let slots = resolve_slots(&FontSpec::default());
+        assert!(slots[0].0 == FONT_REGULAR && slots[0].1 == 0);
+        assert!(slots[1].0 == FONT_BOLD);
+        assert!(slots[2].0 == FONT_ITALIC);
+        assert!(slots[3].0 == FONT_BOLD_ITALIC);
+    }
+
+    #[test]
+    fn unknown_family_falls_back_to_embedded() {
+        let spec = FontSpec {
+            family: Some("This Font Surely Does Not Exist 9000".into()),
+            ..Default::default()
+        };
+        let slots = resolve_slots(&spec);
+        assert!(
+            slots[0].0 == FONT_REGULAR,
+            "an unresolvable family keeps the built-in font"
+        );
+    }
+
+    #[test]
+    fn embedded_font_covers_ui_symbol_glyphs() {
+        // The egui chrome (search bar buttons) falls back to this font for symbols
+        // Ubuntu-Light lacks; assert the glyphs we use actually exist so they
+        // don't render as tofu boxes.
+        let f = FontRef::try_from_slice(FONT_REGULAR).unwrap();
+        // The search-bar buttons: prev (↑), next (↓), close (×).
+        for ch in ['\u{2191}', '\u{2193}', '\u{00d7}'] {
+            assert_ne!(
+                f.glyph_id(ch).0,
+                0,
+                "embedded font missing glyph U+{:04X}",
+                ch as u32
+            );
+        }
+    }
+
+    #[test]
+    fn finds_font_by_path_and_matches_family_and_style() {
+        // Consolas ships with Windows; skip cleanly if absent.
+        let consola = r"C:\Windows\Fonts\consola.ttf";
+        if !std::path::Path::new(consola).exists() {
+            return;
+        }
+        // An explicit path loads directly (face index 0).
+        let (bytes, idx) = find_font(consola, false, false).expect("load Consolas by path");
+        let face = ttf_parser::Face::parse(bytes, idx).unwrap();
+        // Family match is case-insensitive; the regular face is neither bold/italic.
+        assert!(face_matches(&face, "Consolas", false, false));
+        assert!(face_matches(&face, "consolas", false, false));
+        assert!(!face_matches(&face, "Consolas", true, false), "regular ≠ bold");
+        assert!(!face_matches(&face, "Arial", false, false), "wrong family");
     }
 
     #[test]

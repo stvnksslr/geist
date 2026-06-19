@@ -83,7 +83,9 @@ fn term_frame(snap: GridSnapshot) -> TermFrame {
             selection: None,
             cursor_hollow: false,
             cursor_blink_hidden: false,
+            blink_hidden: false,
             scroll_offset_px: 0.0,
+            search_highlights: Vec::new(),
         }],
         selection_bg: Rgb::new(40, 60, 90),
         selection_fg: None,
@@ -104,7 +106,8 @@ fn bench_render(c: &mut Criterion) {
     for &(cols, rows) in &[(80u16, 24u16), (200, 50), (400, 100)] {
         for kind in ["ascii", "utf8", "ligature"] {
             let frame = term_frame(snapshot_for(cols, rows, kind));
-            let mut res = render::build_resources(&device, TARGET_FORMAT, FONT_PX, TEXT_GAMMA);
+            let mut res =
+            render::build_resources(&device, TARGET_FORMAT, FONT_PX, TEXT_GAMMA, &render::FontSpec::default());
             // Warm the atlas so the timed loop measures the warm-cache path.
             res.build_frame_instances(&frame, &queue);
             g.throughput(Throughput::Elements(cols as u64 * rows as u64));
@@ -122,7 +125,8 @@ fn bench_render(c: &mut Criterion) {
     let (cols, rows) = (200u16, 50u16);
     for kind in ["ascii", "utf8", "ligature"] {
         let frame = term_frame(snapshot_for(cols, rows, kind));
-        let mut res = render::build_resources(&device, TARGET_FORMAT, FONT_PX, TEXT_GAMMA);
+        let mut res =
+            render::build_resources(&device, TARGET_FORMAT, FONT_PX, TEXT_GAMMA, &render::FontSpec::default());
         r.throughput(Throughput::Elements(cols as u64 * rows as u64));
         r.bench_function(kind, |b| {
             b.iter(|| {

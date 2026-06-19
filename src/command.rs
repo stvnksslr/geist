@@ -21,6 +21,17 @@ pub enum Action {
     CloseTabsToRight,
     NextTab,
     PrevTab,
+    /// Jump to the tab at this 0-based index (Ghostty `goto_tab:N`, 1-based).
+    GotoTab(u8),
+    /// Jump to the last tab (Ghostty `last_tab`).
+    LastTab,
+    /// Open the command palette (Ghostty `toggle_command_palette`).
+    TogglePalette,
+    /// Toggle the scrollback-search overlay on the focused pane.
+    ToggleSearch,
+    /// Jump to the previous (`delta < 0`) or next (`delta > 0`) OSC 133 prompt
+    /// (Ghostty `jump_to_prompt:N`).
+    JumpToPrompt(i8),
     SplitRight,
     SplitDown,
     ClosePane,
@@ -60,6 +71,17 @@ impl Action {
             Action::CloseTabsToRight => "Close Tabs to the Right",
             Action::NextTab => "Next Tab",
             Action::PrevTab => "Previous Tab",
+            Action::GotoTab(_) => "Go to Tab",
+            Action::LastTab => "Go to Last Tab",
+            Action::TogglePalette => "Command Palette",
+            Action::ToggleSearch => "Search Scrollback",
+            Action::JumpToPrompt(d) => {
+                if d < 0 {
+                    "Jump to Previous Prompt"
+                } else {
+                    "Jump to Next Prompt"
+                }
+            }
             Action::SplitRight => "Split Right",
             Action::SplitDown => "Split Down",
             Action::ClosePane => "Close Pane",
@@ -94,6 +116,11 @@ impl Action {
             Action::NewTab => "Ctrl+Shift+T",
             Action::NextTab => "Ctrl+Tab",
             Action::PrevTab => "Ctrl+Shift+Tab",
+            Action::LastTab => "Alt+9",
+            Action::TogglePalette => "Ctrl+Shift+P",
+            Action::ToggleSearch => "Ctrl+Shift+F",
+            Action::JumpToPrompt(d) if d < 0 => "Ctrl+Shift+\u{2191}",
+            Action::JumpToPrompt(_) => "Ctrl+Shift+\u{2193}",
             Action::SplitRight => "Ctrl+Shift+D",
             Action::SplitDown => "Ctrl+Shift+E",
             Action::ClosePane => "Ctrl+Shift+W",
@@ -112,8 +139,9 @@ impl Action {
             Action::ScrollPageDown => "Shift+PgDn",
             Action::ScrollToTop => "Shift+Home",
             Action::ScrollToBottom => "Shift+End",
-            // No default binding.
+            // No default binding (or per-index, shown elsewhere).
             Action::NewTabWithProfile(_)
+            | Action::GotoTab(_)
             | Action::CloseTab
             | Action::CloseOtherTabs
             | Action::CloseTabsToRight
@@ -122,6 +150,114 @@ impl Action {
             | Action::ResetTerminal
             | Action::OpenConfig
             | Action::ReloadConfig => return None,
+        })
+    }
+
+    /// The action's stable, Ghostty-style name — the identifier used in
+    /// `keybind = <trigger>=<name>` config lines and the inverse of
+    /// [`Action::from_name`]. Parametrized actions encode the parameter
+    /// (`goto_tab:2`, 1-based like Ghostty).
+    pub fn name(self) -> String {
+        match self {
+            Action::NewTab => "new_tab".into(),
+            Action::NewTabWithProfile(i) => format!("new_tab_with_profile:{i}"),
+            Action::CloseTab => "close_tab".into(),
+            Action::CloseOtherTabs => "close_other_tabs".into(),
+            Action::CloseTabsToRight => "close_tabs_to_right".into(),
+            Action::NextTab => "next_tab".into(),
+            Action::PrevTab => "previous_tab".into(),
+            Action::GotoTab(i) => format!("goto_tab:{}", i as u16 + 1),
+            Action::LastTab => "last_tab".into(),
+            Action::SplitRight => "new_split:right".into(),
+            Action::SplitDown => "new_split:down".into(),
+            Action::ClosePane => "close_surface".into(),
+            Action::FocusSplitLeft => "goto_split:left".into(),
+            Action::FocusSplitRight => "goto_split:right".into(),
+            Action::FocusSplitUp => "goto_split:up".into(),
+            Action::FocusSplitDown => "goto_split:down".into(),
+            Action::FocusSplitNext => "goto_split:next".into(),
+            Action::FocusSplitPrev => "goto_split:previous".into(),
+            Action::IncreaseFontSize => "increase_font_size".into(),
+            Action::DecreaseFontSize => "decrease_font_size".into(),
+            Action::ResetFontSize => "reset_font_size".into(),
+            Action::Copy => "copy_to_clipboard".into(),
+            Action::Paste => "paste_from_clipboard".into(),
+            Action::SelectAll => "select_all".into(),
+            Action::ClearSelection => "clear_selection".into(),
+            Action::ResetTerminal => "reset".into(),
+            Action::ScrollPageUp => "scroll_page_up".into(),
+            Action::ScrollPageDown => "scroll_page_down".into(),
+            Action::ScrollToTop => "scroll_to_top".into(),
+            Action::ScrollToBottom => "scroll_to_bottom".into(),
+            Action::OpenConfig => "open_config".into(),
+            Action::ReloadConfig => "reload_config".into(),
+            Action::TogglePalette => "toggle_command_palette".into(),
+            Action::ToggleSearch => "toggle_search".into(),
+            Action::JumpToPrompt(d) => format!("jump_to_prompt:{d}"),
+        }
+    }
+
+    /// Parse a Ghostty-style action name (the value side of a `keybind` line)
+    /// into an [`Action`]. Accepts the canonical names from [`Action::name`] plus
+    /// a few common aliases; returns `None` for unknown or unsupported actions.
+    /// `NewTabWithProfile` is intentionally not parseable (it is profile-relative
+    /// and built only from the live profile list).
+    pub fn from_name(s: &str) -> Option<Action> {
+        let s = s.trim();
+        if let Some(rest) = s.strip_prefix("goto_tab:") {
+            // Ghostty's goto_tab is 1-based; giest indexes tabs from 0.
+            let n: u16 = rest.trim().parse().ok()?;
+            return n.checked_sub(1).map(|i| Action::GotoTab(i.min(u8::MAX as u16) as u8));
+        }
+        if let Some(rest) = s.strip_prefix("jump_to_prompt:") {
+            let n: i8 = rest.trim().parse().ok()?;
+            return Some(Action::JumpToPrompt(n));
+        }
+        if let Some(rest) = s.strip_prefix("new_split:") {
+            // giest splits the focused pane; left/right share an axis, up/down too.
+            return match rest.trim() {
+                "right" | "left" => Some(Action::SplitRight),
+                "down" | "up" => Some(Action::SplitDown),
+                _ => None,
+            };
+        }
+        if let Some(rest) = s.strip_prefix("goto_split:") {
+            return match rest.trim() {
+                "left" => Some(Action::FocusSplitLeft),
+                "right" => Some(Action::FocusSplitRight),
+                "up" => Some(Action::FocusSplitUp),
+                "down" => Some(Action::FocusSplitDown),
+                "next" => Some(Action::FocusSplitNext),
+                "previous" | "prev" => Some(Action::FocusSplitPrev),
+                _ => None,
+            };
+        }
+        Some(match s {
+            "new_tab" => Action::NewTab,
+            "close_tab" => Action::CloseTab,
+            "close_other_tabs" => Action::CloseOtherTabs,
+            "close_tabs_to_right" => Action::CloseTabsToRight,
+            "next_tab" => Action::NextTab,
+            "previous_tab" | "prev_tab" => Action::PrevTab,
+            "last_tab" => Action::LastTab,
+            "close_surface" | "close_pane" => Action::ClosePane,
+            "increase_font_size" => Action::IncreaseFontSize,
+            "decrease_font_size" => Action::DecreaseFontSize,
+            "reset_font_size" => Action::ResetFontSize,
+            "copy_to_clipboard" | "copy" => Action::Copy,
+            "paste_from_clipboard" | "paste" => Action::Paste,
+            "select_all" => Action::SelectAll,
+            "clear_selection" => Action::ClearSelection,
+            "reset" | "reset_terminal" => Action::ResetTerminal,
+            "scroll_page_up" => Action::ScrollPageUp,
+            "scroll_page_down" => Action::ScrollPageDown,
+            "scroll_to_top" => Action::ScrollToTop,
+            "scroll_to_bottom" => Action::ScrollToBottom,
+            "open_config" => Action::OpenConfig,
+            "reload_config" => Action::ReloadConfig,
+            "toggle_command_palette" => Action::TogglePalette,
+            "toggle_search" | "search" => Action::ToggleSearch,
+            _ => return None,
         })
     }
 }
@@ -158,6 +294,9 @@ const BASE_ACTIONS: &[Action] = &[
     Action::ScrollPageDown,
     Action::ScrollToTop,
     Action::ScrollToBottom,
+    Action::JumpToPrompt(-1),
+    Action::JumpToPrompt(1),
+    Action::ToggleSearch,
     Action::OpenConfig,
     Action::ReloadConfig,
 ];

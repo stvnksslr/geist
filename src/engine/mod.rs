@@ -27,8 +27,40 @@ impl Rgb {
     }
 }
 
+/// Policy for the foreground color of **bold** text. Ghostty's `bold-color`
+/// option, which also subsumes the deprecated `bold-is-bright`. Resolved in the
+/// engine's per-cell color pass (it needs the cell's *raw* style color, which
+/// the renderer never sees once palette indices are flattened to RGB).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BoldColor {
+    /// No special treatment: bold text keeps the cell's own foreground. Default.
+    #[default]
+    None,
+    /// Bold text using a standard ANSI color (0–7) uses the bright variant
+    /// (8–15). This is `bold-is-bright`.
+    Bright,
+    /// Bold text uses this fixed color (for default/RGB foregrounds; an explicit
+    /// ANSI palette color is still brightened, matching Ghostty).
+    Color(Rgb),
+}
+
+/// Underline style reported by the terminal (SGR 4 and its `4:n` variants).
+/// Mirrors libghostty-vt's `style::Underline`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum UnderlineStyle {
+    #[default]
+    None,
+    Single,
+    Double,
+    Curly,
+    Dotted,
+    Dashed,
+}
+
 /// A single rendered grid cell. `inverse` is already applied to `fg`/`bg`, so
-/// the renderer can paint these colors directly.
+/// the renderer can paint these colors directly. The remaining decoration
+/// attributes (underline style/color, overline, strikethrough, faint, blink,
+/// invisible) are carried verbatim from the VT engine for the renderer to honor.
 #[derive(Clone, Debug, Default)]
 pub struct Cell {
     /// Grapheme cluster for this cell. Empty means a blank cell (or the tail
@@ -40,8 +72,19 @@ pub struct Cell {
     pub bg: Rgb,
     pub bold: bool,
     pub italic: bool,
-    pub underline: bool,
+    /// Underline style; [`UnderlineStyle::None`] means no underline.
+    pub underline: UnderlineStyle,
+    /// Explicit underline color (SGR 58); `None` underlines in the cell's `fg`.
+    pub underline_color: Option<Rgb>,
     pub strikethrough: bool,
+    /// Overline (SGR 53).
+    pub overline: bool,
+    /// Faint / dim (SGR 2): the glyph is drawn at reduced intensity.
+    pub faint: bool,
+    /// Blink (SGR 5): the glyph is hidden on the blink-off phase.
+    pub blink: bool,
+    /// Invisible / conceal (SGR 8): the glyph is not drawn (background remains).
+    pub invisible: bool,
 }
 
 /// Cursor shape reported by the terminal (DECSCUSR / app-set).
@@ -75,6 +118,10 @@ pub struct GridSnapshot {
     pub cursor_color: Rgb,
     pub default_fg: Rgb,
     pub default_bg: Rgb,
+    /// True if any cell in this snapshot has the blink attribute set, so the app
+    /// knows to keep repainting for the blink animation (and can skip the timer
+    /// when nothing blinks).
+    pub has_blink: bool,
 }
 
 impl GridSnapshot {
@@ -84,6 +131,18 @@ impl GridSnapshot {
         }
         self.cells.get(y as usize * self.cols as usize + x as usize)
     }
+}
+
+/// One screen row rendered to text for scrollback search: the row's characters
+/// (each cell's grapheme, blank cells as a space, trailing blanks trimmed) and,
+/// parallel to `chars`, the grid column each char originated from — so a match's
+/// char range maps back to a cell-column span.
+#[derive(Clone, Debug, Default)]
+pub struct RowText {
+    /// Absolute screen-row index (0 = the oldest scrollback row).
+    pub row: u32,
+    pub chars: Vec<char>,
+    pub cols: Vec<u16>,
 }
 
 /// Keyboard modifiers, backend-neutral.
@@ -256,6 +315,16 @@ pub trait TerminalEngine {
     /// against this.
     fn set_cursor_color(&mut self, color: Option<Rgb>) -> Result<()>;
 
+    /// Set the bold-text foreground policy (Ghostty `bold-color` /
+    /// `bold-is-bright`). Applied while building each snapshot's cell colors.
+    fn set_bold_color(&mut self, bold: BoldColor) -> Result<()>;
+
+    /// Set the minimum foreground/background contrast ratio (WCAG; Ghostty
+    /// `minimum-contrast`, in `1.0..=21.0`; `1.0` disables it). When a cell's
+    /// resolved colors fall below this ratio the foreground is forced to pure
+    /// black or white — whichever contrasts more — as the snapshot is built.
+    fn set_min_contrast(&mut self, ratio: f32) -> Result<()>;
+
     /// Whether the running app has enabled mouse reporting (any tracking mode).
     fn is_mouse_tracking(&self) -> bool;
 
@@ -279,6 +348,39 @@ pub trait TerminalEngine {
     /// device queries, status reports, etc.). Returns empty when there's none.
     fn take_responses(&mut self) -> Vec<u8>;
 
+    /// Take and clear the "a bell rang since the last drain" flag (set when the
+    /// terminal processed a BEL, 0x07). One-shot. Engines without bell support
+    /// return `false` (the default).
+    fn take_bell(&mut self) -> bool {
+        false
+    }
+
     /// The window title set by the shell via OSC 0/2, if any.
     fn title(&self) -> Option<String>;
+
+    /// The OSC 8 hyperlink URI at viewport cell `(x, y)`, if that cell is part of
+    /// a hyperlink. Resolved on demand (e.g. on Ctrl+click), not per frame — the
+    /// backing grid-reference API is explicitly *not* meant for the render loop.
+    /// Engines without hyperlink support return `None` (the default).
+    fn hyperlink_at(&self, _x: u16, _y: u16) -> Option<String> {
+        None
+    }
+
+    /// Read every screen row (scrollback + viewport), oldest first, as text for
+    /// scrollback search. Resolved on demand (when a search runs/refreshes), never
+    /// per frame — it walks the whole grid cell-by-cell. Engines without support
+    /// return an empty vec (the default).
+    fn screen_text(&self) -> Vec<RowText> {
+        Vec::new()
+    }
+
+    /// Find the OSC 133 prompt to jump to: the `delta`-th semantic-prompt row
+    /// above (`delta < 0`) or below (`delta > 0`) the current viewport top.
+    /// Returns the target's offset in whole lines above the live bottom (`0` =
+    /// bottom), which the caller turns into a scroll position, or `None` if there
+    /// is no such prompt (or the engine lacks semantic-prompt support — the
+    /// default). Resolved on demand (a keypress), not per frame.
+    fn jump_to_prompt(&self, _delta: isize) -> Option<usize> {
+        None
+    }
 }

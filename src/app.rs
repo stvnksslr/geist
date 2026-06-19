@@ -10,6 +10,7 @@ use eframe::egui_wgpu;
 use crate::command::{self, Action, PaletteState};
 use crate::config::{Config, MiddleClickAction, RightClickAction};
 use crate::profiles::{self, Profile};
+use crate::keybind::{Chord, Keymap};
 use crate::render::{self, PaneFrame, TermFrame};
 use crate::session::{self, Session};
 
@@ -350,6 +351,9 @@ pub struct App {
     /// `Some`, app shortcuts and terminal input are suppressed so the palette is
     /// modal (see `ui`/`render_active`).
     palette: Option<PaletteState>,
+    /// Chord → action bindings (built-in defaults plus the config's `keybind`
+    /// overrides). `handle_shortcuts` resolves each key event through this.
+    keymap: Keymap,
 }
 
 /// Runtime font-size bounds in logical points.
@@ -385,12 +389,15 @@ impl App {
         // re-fitting the grid. Leaving both enabled makes them fight: the chrome
         // scales up while the text appears to stay the same size.
         cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
+        install_ui_fallback_font(&cc.egui_ctx);
         let ppp = cc.egui_ctx.pixels_per_point().max(1.0);
         let px = (config.font_points * ppp).round();
-        let (cell_w, cell_h) = render::init(render_state, px, config.text_gamma);
+        let (cell_w, cell_h) = render::init(render_state, px, config.text_gamma, &font_spec(&config));
 
         let (profiles, default_profile) = profiles::detect(config.shell.as_deref());
         let first = Session::new(&cc.egui_ctx, &config, &profiles[default_profile], None)?;
+
+        let keymap = Keymap::from_config(&config.keybinds);
 
         Ok(Self {
             tabs: vec![Tab::leaf(1, first)],
@@ -407,6 +414,7 @@ impl App {
             last_layout: Vec::new(),
             renaming: None,
             palette: None,
+            keymap,
         })
     }
 
@@ -614,8 +622,12 @@ impl App {
         true
     }
 
-    /// App-level shortcuts (reserved by `Session::handle_input`, never sent to
-    /// the shell): tabs, splits, focus switching.
+    /// App-level shortcuts, resolved through the [`Keymap`] (built-in defaults
+    /// plus the config's `keybind` overrides). Each pressed-key event is turned
+    /// into a [`Chord`] and dispatched to [`Self::execute_action`]. These chords
+    /// live in the modifier namespaces `Session::decide_key` reserves, so the
+    /// shell never sees them. `render_state` is `None` here — none of the
+    /// keymap-dispatched actions need it (font/reload have their own paths).
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
         let events = ctx.input(|i| i.events.clone());
         for event in &events {
@@ -628,52 +640,15 @@ impl App {
             else {
                 continue;
             };
-            if modifiers.ctrl && modifiers.shift {
-                match key {
-                    egui::Key::T => self.new_tab(self.default_profile),
-                    egui::Key::W => self.close_focused(ctx),
-                    // Split right (columns): D mirrors macOS Ghostty's Cmd+D;
-                    // O matches Ghostty's GTK default. Both are accepted.
-                    egui::Key::D | egui::Key::O => self.split(true),
-                    egui::Key::E => self.split(false), // new split down (rows)
-                    // Cycle split focus in creation order (Ghostty's goto_split).
-                    egui::Key::OpenBracket => self.focus_cycle(false),
-                    egui::Key::CloseBracket => self.focus_cycle(true),
-                    // Open the command palette (Ghostty's toggle_command_palette,
-                    // Cmd+Shift+P on macOS). Already swallowed by `decide_key` as
-                    // a Ctrl+Shift combo, so the shell never sees it.
-                    egui::Key::P => self.palette = Some(PaletteState::new(self.build_catalog())),
-                    _ => {}
-                }
-            } else if modifiers.ctrl && modifiers.alt {
-                // Ctrl+Alt+arrow: move focus to the adjacent split (goto_split:dir).
-                match key {
-                    egui::Key::ArrowLeft => self.focus_dir(Dir::Left),
-                    egui::Key::ArrowRight => self.focus_dir(Dir::Right),
-                    egui::Key::ArrowUp => self.focus_dir(Dir::Up),
-                    egui::Key::ArrowDown => self.focus_dir(Dir::Down),
-                    _ => {}
-                }
-            } else if modifiers.alt && !modifiers.ctrl && !modifiers.shift {
-                // Alt+1..8 jump to that tab; Alt+9 → last tab (Ghostty defaults).
-                match key {
-                    egui::Key::Num1 => self.goto_tab(0),
-                    egui::Key::Num2 => self.goto_tab(1),
-                    egui::Key::Num3 => self.goto_tab(2),
-                    egui::Key::Num4 => self.goto_tab(3),
-                    egui::Key::Num5 => self.goto_tab(4),
-                    egui::Key::Num6 => self.goto_tab(5),
-                    egui::Key::Num7 => self.goto_tab(6),
-                    egui::Key::Num8 => self.goto_tab(7),
-                    egui::Key::Num9 => self.goto_tab(self.tabs.len().saturating_sub(1)),
-                    _ => {}
-                }
-            } else if modifiers.ctrl && *key == egui::Key::Tab {
-                if modifiers.shift {
-                    self.prev_tab();
-                } else {
-                    self.next_tab();
-                }
+            let Some(code) = session::map_egui_key(*key) else {
+                continue;
+            };
+            let chord = Chord {
+                mods: session::key_mods(modifiers),
+                code,
+            };
+            if let Some(action) = self.keymap.lookup(&chord) {
+                self.execute_action(ctx, None, action);
             }
         }
     }
@@ -682,6 +657,15 @@ impl App {
     fn build_catalog(&self) -> Vec<command::Command> {
         let names: Vec<String> = self.profiles.iter().map(|p| p.name.clone()).collect();
         command::build_catalog(&names)
+    }
+
+    /// Whether the focused pane's scrollback-search overlay is open. While it is,
+    /// the overlay owns the keyboard (it's modal like the palette), so app
+    /// shortcuts and the pane's terminal input are suppressed.
+    fn focused_search_open(&self) -> bool {
+        self.tabs
+            .get(self.active_tab)
+            .is_some_and(|t| t.focused_payload().search_active())
     }
 
     /// The focused pane's session, if any (the palette's pane-scoped actions —
@@ -720,6 +704,7 @@ impl App {
             tab.root.for_each_mut(&mut |s: &mut Session| s.apply_config(&cfg));
         }
         let new_font = cfg.font_points;
+        self.keymap = Keymap::from_config(&cfg.keybinds);
         self.config = cfg;
         if let Some(rs) = render_state {
             let ppp = self.egui_ctx.pixels_per_point().max(1.0);
@@ -745,6 +730,20 @@ impl App {
             Action::CloseTabsToRight => self.close_tabs_to_right(self.active_tab),
             Action::NextTab => self.next_tab(),
             Action::PrevTab => self.prev_tab(),
+            Action::GotoTab(i) => self.goto_tab(i as usize),
+            Action::LastTab => self.goto_tab(self.tabs.len().saturating_sub(1)),
+            Action::TogglePalette => {
+                self.palette = Some(PaletteState::new(self.build_catalog()))
+            }
+            Action::ToggleSearch => {
+                if let Some(s) = self.focused_session_mut() {
+                    if s.search_active() {
+                        s.close_search();
+                    } else {
+                        s.open_search();
+                    }
+                }
+            }
             Action::SplitRight => self.split(true),
             Action::SplitDown => self.split(false),
             Action::ClosePane => self.close_focused(ctx),
@@ -809,6 +808,12 @@ impl App {
             Action::ScrollToBottom => {
                 if let Some(s) = self.focused_session_mut() {
                     s.scroll_to_bottom_view();
+                }
+            }
+            Action::JumpToPrompt(delta) => {
+                let ch = self.cell_h;
+                if let Some(s) = self.focused_session_mut() {
+                    s.jump_to_prompt(delta as isize, ch);
                 }
             }
             Action::OpenConfig => open_config(),
@@ -1003,6 +1008,147 @@ impl App {
             self.palette = Some(state);
         }
         chosen
+    }
+
+    /// Render the focused pane's scrollback-search overlay (a compact top-right
+    /// bar) when its search is open, and apply the resulting edits to the session.
+    /// Modal for the keyboard like the palette: it owns Enter / Shift+Enter (next
+    /// / previous match), Esc and Ctrl+Shift+F (close), and the query box. Edits
+    /// are deferred to after the egui closure so no session borrow spans it.
+    fn render_search(&mut self, ctx: &egui::Context) {
+        let cell_h = self.cell_h;
+        // Snapshot the overlay state (and clear the one-shot focus flag).
+        let (mut query, count, current, case, just_opened) = {
+            let Some(s) = self.focused_session_mut() else {
+                return;
+            };
+            if !s.search_active() {
+                return;
+            }
+            let just = s.take_search_just_opened();
+            let st = s.search_state().expect("search active");
+            (
+                st.query.clone(),
+                st.count(),
+                st.current,
+                st.case_sensitive,
+                just,
+            )
+        };
+
+        let mut close = false;
+        let mut changed = false;
+        let mut next = false;
+        let mut prev = false;
+        let mut toggle_case = false;
+
+        egui::Area::new(egui::Id::new("giest-search"))
+            .order(egui::Order::Foreground)
+            .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-16.0, 8.0))
+            .show(ctx, |ui| {
+                egui::Frame::NONE
+                    .fill(ui.visuals().window_fill)
+                    .stroke(ui.visuals().window_stroke)
+                    .corner_radius(egui::CornerRadius::same(8))
+                    .inner_margin(egui::Margin::same(8))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            let resp = ui.add(
+                                egui::TextEdit::singleline(&mut query)
+                                    .hint_text("Find…")
+                                    .desired_width(220.0)
+                                    .font(egui::FontId::proportional(16.0)),
+                            );
+                            if just_opened {
+                                resp.request_focus();
+                            }
+                            if resp.changed() {
+                                changed = true;
+                            }
+                            // Enter submits → next match; Shift+Enter → previous.
+                            // Re-focus so the box keeps the keyboard after submit.
+                            if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                                if ui.input(|i| i.modifiers.shift) {
+                                    prev = true;
+                                } else {
+                                    next = true;
+                                }
+                                resp.request_focus();
+                            }
+                            let label = if count == 0 {
+                                if query.is_empty() {
+                                    String::new()
+                                } else {
+                                    "0/0".to_string()
+                                }
+                            } else {
+                                format!("{}/{}", current + 1, count)
+                            };
+                            ui.add_sized([54.0, 0.0], egui::Label::new(label));
+                            if ui
+                                .selectable_label(case, "Aa")
+                                .on_hover_text("Match case")
+                                .clicked()
+                            {
+                                toggle_case = true;
+                            }
+                            if ui
+                                .button("\u{2191}")
+                                .on_hover_text("Previous (Shift+Enter)")
+                                .clicked()
+                            {
+                                prev = true;
+                            }
+                            if ui.button("\u{2193}").on_hover_text("Next (Enter)").clicked() {
+                                next = true;
+                            }
+                            if ui.button("\u{00d7}").on_hover_text("Close (Esc)").clicked() {
+                                close = true;
+                            }
+                        });
+                    });
+            });
+
+        // Overlay-level modal keys: Esc and the Ctrl+Shift+F toggle close it
+        // (skip the toggle on the opening frame, whose keypress is still queued).
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            close = true;
+        }
+        let toggled = ctx.input_mut(|i| {
+            i.consume_key(
+                egui::Modifiers {
+                    ctrl: true,
+                    shift: true,
+                    ..Default::default()
+                },
+                egui::Key::F,
+            )
+        });
+        if toggled && !just_opened {
+            close = true;
+        }
+
+        // Apply, deferred so no session borrow is held across the egui closure.
+        // Fetch the session once, then act on the collected flags.
+        if let Some(s) = self.focused_session_mut() {
+            if close {
+                s.close_search();
+            } else {
+                if toggle_case {
+                    s.toggle_search_case(cell_h);
+                }
+                if changed {
+                    s.set_search_query(query, cell_h);
+                }
+                if next {
+                    s.step_search(true, cell_h);
+                }
+                if prev {
+                    s.step_search(false, cell_h);
+                }
+            }
+        }
+        ctx.request_repaint();
     }
 
     fn tab_bar(&mut self, ui: &mut egui::Ui) {
@@ -1234,6 +1380,12 @@ impl App {
         let middle_click_action = self.config.middle_click_action;
         let sel_bg = self.config.selection_bg;
         let sel_fg = self.config.selection_fg;
+        // Snapshot the keymap so the focused pane's `handle_input` can consult it
+        // without holding a borrow on `self` across the pane-tree mutation below.
+        // Cheap: a couple dozen (Chord, Action) entries, both `Copy`.
+        let keymap = self.keymap.clone();
+        let bell_visual = self.config.bell_visual;
+        let now = ctx.input(|i| i.time);
         let active_tab = self.active_tab;
         // When the palette is open it's modal: don't feed keys to the focused
         // pane or let it grab keyboard focus (the palette owns both).
@@ -1265,40 +1417,71 @@ impl App {
                 _ => None,
             })
         });
-        if let Some(pos) = press_pos {
+        // Resolve the current focus first so we can tell whether its search
+        // overlay is open. The overlay is modal and window-anchored, so in a
+        // split it floats over a *different* pane — a click on it must NOT move
+        // focus there (that would vanish the overlay mid-use and orphan the
+        // searching pane's highlights). So suppress focus-follows-click while the
+        // focused pane's search is open.
+        if !leaves.iter().any(|l| l.id == focus_id) {
+            focus_id = leaves[0].id;
+        }
+        let cur_idx = leaves.iter().position(|l| l.id == focus_id).unwrap();
+        let search_open = leaves[cur_idx].payload.search_active();
+        // Suppress the click-focus while search is modal (`None` = don't move).
+        let click_pos = if search_open { None } else { press_pos };
+        if let Some(pos) = click_pos {
             if let Some(l) = leaves.iter().find(|l| l.rect.contains(pos)) {
                 focus_id = l.id;
             }
         }
-        if !leaves.iter().any(|l| l.id == focus_id) {
-            focus_id = leaves[0].id;
-        }
         let focus_idx = leaves.iter().position(|l| l.id == focus_id).unwrap();
+        // The search overlay is modal for the keyboard: while it's open the
+        // search box owns input, so the pane doesn't take key/text input or grab
+        // egui focus (see `render_search`).
 
         // Keyboard goes to the focused pane — unless the command palette is open
         // (it's modal and owns the keyboard; see `render_palette`). `tracking` is
         // also used by the mouse block below, so compute it regardless.
         let tracking = leaves[focus_idx].payload.is_mouse_tracking();
-        if !palette_open {
-            leaves[focus_idx].payload.handle_input(ctx, tracking, ch);
+        if !palette_open && !search_open {
+            leaves[focus_idx]
+                .payload
+                .handle_input(ctx, tracking, ch, &keymap);
+        } else if search_open {
+            // The search overlay owns the keyboard, so input (and its scroll
+            // easing) is skipped — but keep the viewport easing toward the match
+            // that `scroll_to_match` targeted.
+            leaves[focus_idx].payload.tick_scroll(ctx, ch);
         }
 
         let mut frames: Vec<PaneFrame> = Vec::with_capacity(leaves.len());
+        // (pane rect, flash intensity) for any pane ringing its visual bell.
+        let mut bell_flashes: Vec<(egui::Rect, f32)> = Vec::new();
         for leaf in leaves.iter_mut() {
             // The pane occupies `leaf.rect`; the grid is inset by the padding so
             // text clears the pane's edges (window border or split divider alike).
             let prect = leaf.rect.shrink2(pad);
+            let leaf_rect = leaf.rect;
             let leaf_id = leaf.id;
             let is_focus = leaf_id == focus_id;
             let session = &mut *leaf.payload;
+            // Visual bell: advance/drain this pane's flash every frame (so a BEL
+            // isn't lost even if its snapshot transiently fails below).
+            let flash = session.bell_flash_alpha(now);
+            if bell_visual {
+                if let Some(a) = flash {
+                    bell_flashes.push((leaf_rect, a));
+                }
+            }
             session.fit_grid(prect, ppp, cw, ch);
             if !session.update_snapshot() {
                 continue;
             }
 
             // Mouse / selection interaction only for the focused pane, and not
-            // while the palette is modal (so clicks/keys don't leak to the pane).
-            if is_focus && !palette_open {
+            // while a modal overlay (palette or search) owns input/focus.
+            if is_focus && !palette_open && !search_open {
                 // Hold keyboard focus on the terminal and lock the navigation keys
                 // to it. Otherwise egui's built-in focus traversal swallows Tab
                 // (which the shell wants for completion) to cycle focus through the
@@ -1459,6 +1642,12 @@ impl App {
             if pane_active && snapshot.cursor_blinking {
                 ctx.request_repaint_after(Duration::from_millis(100));
             }
+            // Text blink (SGR 5) rides the same ~1 Hz phase but applies to every
+            // pane; only keep repainting while the grid actually has blink cells.
+            let blink_hidden = ctx.input(|i| i.time) % 1.0 >= 0.5;
+            if snapshot.has_blink {
+                ctx.request_repaint_after(Duration::from_millis(100));
+            }
             frames.push(PaneFrame {
                 snapshot,
                 // Snap the grid origin to the physical pixel grid. The cell size
@@ -1470,7 +1659,9 @@ impl App {
                 selection: session.selection_range(),
                 cursor_hollow: !pane_active,
                 cursor_blink_hidden,
+                blink_hidden,
                 scroll_offset_px: session.scroll_offset_px(),
+                search_highlights: session.search_highlights(),
             });
         }
 
@@ -1502,6 +1693,23 @@ impl App {
             );
         }
 
+        // Visual bell: a warm border that fades over ~0.2s on each pane that rang.
+        // Drawn over the terminal (after the pane callback) and kept animating by
+        // requesting repaints while any flash is active.
+        if !bell_flashes.is_empty() {
+            ctx.request_repaint();
+            for (rect, a) in &bell_flashes {
+                let alpha = (a * 220.0) as u8;
+                let col = egui::Color32::from_rgba_unmultiplied(0xff, 0xc6, 0x6b, alpha);
+                ui.painter().rect_stroke(
+                    *rect,
+                    0.0,
+                    egui::Stroke::new(3.0, col),
+                    egui::StrokeKind::Inside,
+                );
+            }
+        }
+
         // Commit the (possibly click-updated) focus back to the tab. Done last,
         // after the final use of `leaves` (which borrows `tab.root`).
         self.tabs[active_tab].focus = focus_id;
@@ -1531,9 +1739,10 @@ impl eframe::App for App {
         if !self.reap_dead(&ctx) {
             return;
         }
-        // App shortcuts and font zoom are suppressed while the palette is open
-        // (it's modal); opening/closing it is handled by the palette itself.
-        if self.palette.is_none() {
+        // App shortcuts and font zoom are suppressed while a modal overlay (the
+        // command palette or the scrollback-search bar) is open; each overlay
+        // handles its own keys, including its toggle-close.
+        if self.palette.is_none() && !self.focused_search_open() {
             self.handle_shortcuts(&ctx);
             if let Some(render_state) = frame.wgpu_render_state() {
                 let render_state = render_state.clone();
@@ -1567,6 +1776,9 @@ impl eframe::App for App {
         if let Some(action) = self.render_palette(&ctx) {
             self.execute_action(&ctx, render_state.as_ref(), action);
         }
+        // The scrollback-search overlay (self-gating: a no-op unless the focused
+        // pane's search is open).
+        self.render_search(&ctx);
     }
 }
 
@@ -1574,6 +1786,41 @@ impl eframe::App for App {
 /// http/https/etc. to the default browser without flashing a console window.
 fn open_url(url: &str) {
     let _ = std::process::Command::new("explorer").arg(url).spawn();
+}
+
+/// Append giest's embedded JetBrains Mono Nerd Font as the last fallback for both
+/// egui UI font families. egui's bundled fonts (Ubuntu-Light / Hack) lack many
+/// symbols — arrows, `×`, box/powerline glyphs — so chrome like the search bar's
+/// prev/next/close buttons would otherwise render as tofu boxes. As a *fallback*
+/// it only supplies glyphs the primary UI fonts are missing.
+fn install_ui_fallback_font(ctx: &egui::Context) {
+    use std::sync::Arc;
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(
+        "giest-nerd".to_owned(),
+        Arc::new(egui::FontData::from_static(render::regular_font())),
+    );
+    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+        fonts
+            .families
+            .entry(family)
+            .or_default()
+            .push("giest-nerd".to_owned());
+    }
+    ctx.set_fonts(fonts);
+}
+
+/// Build the renderer's neutral font selection from config. Cloned at atlas
+/// construction (startup); `font-family`/`font-feature` are not re-applied on
+/// config reload (the atlas isn't rebuilt there).
+fn font_spec(config: &Config) -> render::FontSpec {
+    render::FontSpec {
+        family: config.font_family.clone(),
+        family_bold: config.font_family_bold.clone(),
+        family_italic: config.font_family_italic.clone(),
+        family_bold_italic: config.font_family_bold_italic.clone(),
+        features: config.font_features.clone(),
+    }
 }
 
 /// Reveal the config file in Explorer (palette "Open Config"). Falls back to the

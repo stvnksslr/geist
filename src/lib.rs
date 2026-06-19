@@ -13,11 +13,14 @@
 pub mod app;
 pub mod command;
 pub mod config;
+pub mod decscusr;
 pub mod engine;
+pub mod keybind;
 pub mod osc52;
 pub mod osc7;
 pub mod profiles;
 pub mod pty;
 pub mod render;
+pub mod search;
 pub mod session;
 pub mod synthetic;

@@ -33,9 +33,11 @@ impl Profile {
 
     /// The full arg list to spawn this shell with. For the built-in PowerShell
     /// and cmd profiles we prepend a small startup hook that makes the shell
-    /// report its working directory via OSC 7 — so a new split can open in the
-    /// parent pane's directory. Shells we don't recognise (WSL, a user's custom
-    /// command, or any profile that already carries args) are spawned untouched.
+    /// report its working directory via OSC 7 (so a new split can open in the
+    /// parent pane's directory) and mark its prompt via OSC 133 A/B (so
+    /// `jump_to_prompt` can navigate between prompts). Shells we don't recognise
+    /// (WSL, a user's custom command, or any profile that already carries args)
+    /// are spawned untouched.
     pub fn launch_args(&self) -> Vec<String> {
         if !self.args.is_empty() {
             return self.args.clone();
@@ -46,7 +48,7 @@ impl Profile {
             "pwsh" | "powershell" => {
                 // `-EncodedCommand` runs after the user's $PROFILE loads, so the
                 // hook wraps their customised prompt; `-NoExit` keeps it interactive.
-                let utf16: Vec<u8> = PWSH_OSC7_HOOK
+                let utf16: Vec<u8> = PWSH_SHELL_HOOK
                     .encode_utf16()
                     .flat_map(u16::to_le_bytes)
                     .collect();
@@ -54,28 +56,34 @@ impl Profile {
                 vec!["-NoExit".into(), "-EncodedCommand".into(), encoded]
             }
             // cmd expands $E -> ESC (Win10+) and $P -> current path each render;
-            // %COMPUTERNAME% expands once. Yields `file://HOST/C:\dir`, which the
-            // OSC 7 parser in `session.rs` tolerates (backslashes included).
+            // %COMPUTERNAME% expands once. Emits OSC 133 A (prompt start), the
+            // OSC 7 cwd report (`file://HOST/C:\dir`, which the session's OSC 7
+            // parser tolerates), the visible `path>` prompt, then OSC 133 B
+            // (prompt end / input start).
             "cmd" => vec![
                 "/K".into(),
-                "prompt $E]7;file://%COMPUTERNAME%/$P$E\\$P$G".into(),
+                "prompt $E]133;A$E\\$E]7;file://%COMPUTERNAME%/$P$E\\$P$G$E]133;B$E\\".into(),
             ],
             _ => Vec::new(),
         }
     }
 }
 
-/// PowerShell startup hook: wrap the existing `prompt` to also emit an OSC 7
-/// working-directory report before rendering. Encoded as UTF-16LE base64 and
-/// passed via `-EncodedCommand` (see [`Profile::launch_args`]).
-const PWSH_OSC7_HOOK: &str = r#"$global:__giestPrompt = $function:prompt
+/// PowerShell startup hook: wrap the existing `prompt` so each prompt also emits
+/// an OSC 7 working-directory report and OSC 133 A/B semantic-prompt marks.
+/// Encoded as UTF-16LE base64 and passed via `-EncodedCommand` (see
+/// [`Profile::launch_args`]). OSC 133 A is written at the prompt's start column;
+/// B is appended to the returned prompt string (where user input begins).
+const PWSH_SHELL_HOOK: &str = r#"$global:__giestPrompt = $function:prompt
 function global:prompt {
   $p = (Get-Location).ProviderPath
   if ($p) {
     $u = 'file://' + [System.Net.Dns]::GetHostName() + '/' + ($p -replace '\\','/')
     [Console]::Write("$([char]27)]7;$u$([char]27)\")
   }
-  & $global:__giestPrompt
+  [Console]::Write("$([char]27)]133;A$([char]27)\")
+  $base = & $global:__giestPrompt
+  "$base$([char]27)]133;B$([char]27)\"
 }"#;
 
 /// Find `exe` on the `PATH`, returning its full path if present.
@@ -141,6 +149,19 @@ mod tests {
         let (profiles, default) = detect(Some("C:\\msys64\\usr\\bin\\bash.exe"));
         assert_eq!(default, 0);
         assert_eq!(profiles[0].program, "C:\\msys64\\usr\\bin\\bash.exe");
+    }
+
+    #[test]
+    fn shell_hooks_emit_osc133_prompt_marks() {
+        // The PowerShell hook wraps the prompt with OSC 133 A (start) and B (end).
+        assert!(PWSH_SHELL_HOOK.contains("]133;A"));
+        assert!(PWSH_SHELL_HOOK.contains("]133;B"));
+        // The cmd prompt argument carries the same marks (alongside OSC 7).
+        let args = Profile::new("Command Prompt", "cmd.exe").launch_args();
+        let prompt = args.iter().find(|a| a.contains("prompt")).expect("cmd prompt arg");
+        assert!(prompt.contains("]133;A"), "cmd prompt missing OSC 133 A: {prompt}");
+        assert!(prompt.contains("]133;B"), "cmd prompt missing OSC 133 B: {prompt}");
+        assert!(prompt.contains("]7;"), "cmd prompt should still emit OSC 7");
     }
 
     #[test]

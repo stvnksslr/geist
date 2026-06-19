@@ -8,13 +8,14 @@ use libghostty_vt::key::{Action, Encoder, Event, Key, Mods};
 use libghostty_vt::mouse;
 use libghostty_vt::paste;
 use libghostty_vt::render::{CellIteration, CellIterator, CursorVisualStyle, Dirty, RowIterator};
-use libghostty_vt::style::Underline;
-use libghostty_vt::terminal::{Mode, ScrollViewport};
+use libghostty_vt::screen::{CellWide, RowSemanticPrompt};
+use libghostty_vt::style::{StyleColor, Underline};
+use libghostty_vt::terminal::{Mode, Point, PointCoordinate, PointSpace, ScrollViewport};
 use libghostty_vt::{RenderState, Terminal, TerminalOptions};
 
 use super::{
-    Cell, CursorShape, GridSnapshot, KeyCode, KeyInput, MouseAction, MouseButton, MouseInput, Rgb,
-    TerminalEngine,
+    BoldColor, Cell, CursorShape, GridSnapshot, KeyCode, KeyInput, MouseAction, MouseButton,
+    MouseInput, Rgb, TerminalEngine, UnderlineStyle,
 };
 
 /// Shared sink for bytes libghostty wants written back to the PTY. The
@@ -32,11 +33,20 @@ pub struct GhosttyVtEngine {
     mouse_encoder: mouse::Encoder<'static>,
     mouse_event: mouse::Event<'static>,
     responses: ResponseSink,
+    /// Set by the `on_bell` callback when the terminal processes a BEL (0x07);
+    /// drained one-shot by [`Self::take_bell`] so the app can flash a visual bell.
+    /// (Fully qualified to avoid clashing with the grid [`Cell`].)
+    bell: Rc<std::cell::Cell<bool>>,
     /// Set when the viewport is scrolled, forcing the next [`Self::snapshot`] to
     /// do a full rebuild even if libghostty reports the frame clean — insurance
     /// for the dirty-skip fast path against any case where a pure viewport move
     /// isn't flagged dirty.
     viewport_moved: bool,
+    /// Bold-text foreground policy (Ghostty `bold-color` / `bold-is-bright`),
+    /// applied per cell in [`copy_cell`].
+    bold_color: BoldColor,
+    /// Minimum fg/bg contrast ratio (Ghostty `minimum-contrast`); `1.0` = off.
+    min_contrast: f32,
 }
 
 impl GhosttyVtEngine {
@@ -53,6 +63,12 @@ impl GhosttyVtEngine {
             sink.borrow_mut().extend_from_slice(data);
         })?;
 
+        let bell = Rc::new(std::cell::Cell::new(false));
+        let bell_sink = bell.clone();
+        term.on_bell(move |_term| {
+            bell_sink.set(true);
+        })?;
+
         Ok(Self {
             term,
             render_state: RenderState::new()?,
@@ -63,7 +79,10 @@ impl GhosttyVtEngine {
             mouse_encoder: mouse::Encoder::new()?,
             mouse_event: mouse::Event::new()?,
             responses,
+            bell,
             viewport_moved: false,
+            bold_color: BoldColor::None,
+            min_contrast: 1.0,
         })
     }
 }
@@ -153,7 +172,7 @@ mod tests {
     use super::GhosttyVtEngine;
     use crate::engine::{
         GridSnapshot, KeyCode, KeyInput, KeyMods, MouseAction, MouseButton, MouseInput, Rgb,
-        TerminalEngine,
+        TerminalEngine, UnderlineStyle,
     };
 
     #[test]
@@ -210,6 +229,140 @@ mod tests {
     }
 
     #[test]
+    fn captures_extended_text_attrs() {
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        // faint F, double-underline D, curly-underline C, overline O, blink K,
+        // invisible V — each style reset before the next cell.
+        eng.write(
+            b"\x1b[2mF\x1b[0m\
+              \x1b[4:2mD\x1b[0m\
+              \x1b[4:3mC\x1b[0m\
+              \x1b[53mO\x1b[0m\
+              \x1b[5mK\x1b[0m\
+              \x1b[8mV\x1b[0m",
+        );
+        let s = snap(&mut eng);
+        assert!(s.cell(0, 0).unwrap().faint, "expected faint cell");
+        assert_eq!(s.cell(1, 0).unwrap().underline, UnderlineStyle::Double);
+        assert_eq!(s.cell(2, 0).unwrap().underline, UnderlineStyle::Curly);
+        assert!(s.cell(3, 0).unwrap().overline, "expected overline cell");
+        assert!(s.cell(4, 0).unwrap().blink, "expected blink cell");
+        assert!(s.has_blink, "snapshot.has_blink set when any cell blinks");
+        assert!(s.cell(5, 0).unwrap().invisible, "expected invisible cell");
+    }
+
+    #[test]
+    fn resolves_palette_underline_color() {
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        // The render iterator resolves fg/bg but not the underline color, so the
+        // engine resolves a palette-index underline color against its palette.
+        let mut pal = [Rgb::new(0, 0, 0); 256];
+        pal[5] = Rgb::new(200, 50, 25);
+        eng.apply_theme(Rgb::new(200, 200, 200), Rgb::new(0, 0, 0), &pal)
+            .unwrap();
+        // Underline on; underline color = palette index 5 (SGR 58:5:5).
+        eng.write(b"\x1b[4m\x1b[58:5:5mU");
+        let c = snap(&mut eng).cell(0, 0).unwrap().clone();
+        assert_eq!(c.underline, UnderlineStyle::Single);
+        assert_eq!(c.underline_color, Some(Rgb::new(200, 50, 25)));
+    }
+
+    #[test]
+    fn bold_is_bright_uses_bright_palette_variant() {
+        use crate::engine::BoldColor;
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        let mut pal = [Rgb::new(0, 0, 0); 256];
+        pal[1] = Rgb::new(100, 0, 0); // ANSI red
+        pal[9] = Rgb::new(200, 50, 25); // bright red
+        eng.apply_theme(Rgb::new(200, 200, 200), Rgb::new(0, 0, 0), &pal)
+            .unwrap();
+
+        // Without the policy, bold red stays the plain ANSI red (palette 1).
+        eng.write(b"\x1b[1;31mR\x1b[0m");
+        assert_eq!(snap(&mut eng).cell(0, 0).unwrap().fg, Rgb::new(100, 0, 0));
+
+        // With bold-is-bright, bold + ANSI red (idx 1) brightens to idx 9.
+        eng.set_bold_color(BoldColor::Bright).unwrap();
+        eng.write(b"\x1b[2J\x1b[H\x1b[1;31mR\x1b[0m");
+        assert_eq!(snap(&mut eng).cell(0, 0).unwrap().fg, Rgb::new(200, 50, 25));
+    }
+
+    #[test]
+    fn bold_color_sets_fixed_color_for_default_fg() {
+        use crate::engine::BoldColor;
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        let mut pal = [Rgb::new(0, 0, 0); 256];
+        pal[1] = Rgb::new(100, 0, 0);
+        pal[9] = Rgb::new(200, 50, 25);
+        eng.apply_theme(Rgb::new(200, 200, 200), Rgb::new(0, 0, 0), &pal)
+            .unwrap();
+        eng.set_bold_color(BoldColor::Color(Rgb::new(10, 20, 30))).unwrap();
+
+        // A bold default-foreground cell takes the fixed bold color.
+        eng.write(b"\x1b[1mB\x1b[0m");
+        assert_eq!(snap(&mut eng).cell(0, 0).unwrap().fg, Rgb::new(10, 20, 30));
+
+        // A bold ANSI palette color is still brightened (not the fixed color).
+        eng.write(b"\x1b[2J\x1b[H\x1b[1;31mR\x1b[0m");
+        assert_eq!(snap(&mut eng).cell(0, 0).unwrap().fg, Rgb::new(200, 50, 25));
+    }
+
+    #[test]
+    fn bold_is_bright_tracks_osc4_palette_redefinition() {
+        use crate::engine::BoldColor;
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        let mut pal = [Rgb::new(0, 0, 0); 256];
+        pal[1] = Rgb::new(100, 0, 0);
+        pal[9] = Rgb::new(200, 50, 25);
+        eng.apply_theme(Rgb::new(200, 200, 200), Rgb::new(0, 0, 0), &pal)
+            .unwrap();
+        eng.set_bold_color(BoldColor::Bright).unwrap();
+        // Redefine bright-red (index 9) to green via OSC 4; the bold-bright bump
+        // must follow the live palette, not the static config copy.
+        eng.write(b"\x1b]4;9;rgb:00/ff/00\x1b\\");
+        eng.write(b"\x1b[1;31mR\x1b[0m");
+        assert_eq!(snap(&mut eng).cell(0, 0).unwrap().fg, Rgb::new(0, 255, 0));
+    }
+
+    #[test]
+    fn min_contrast_forced_glyph_drops_faint() {
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        eng.apply_theme(Rgb::new(30, 30, 30), Rgb::new(0, 0, 0), &[Rgb::new(0, 0, 0); 256])
+            .unwrap();
+        eng.set_min_contrast(21.0).unwrap();
+        // Faint + a low-contrast fg: min-contrast forces white, and faint is
+        // dropped so the now-readable glyph renders opaque (matching Ghostty's
+        // contrasted_color returning alpha 1.0).
+        eng.write(b"\x1b[2mX"); // SGR 2 = faint
+        let c = snap(&mut eng).cell(0, 0).unwrap().clone();
+        assert_eq!(c.fg, Rgb::new(255, 255, 255));
+        assert!(!c.faint, "faint is dropped when min-contrast forces a color");
+
+        // A faint glyph that already passes contrast keeps its faint flag
+        // (truecolor white on black easily clears the ratio).
+        eng.write(b"\x1b[2J\x1b[H\x1b[2;38;2;255;255;255mX");
+        let c2 = snap(&mut eng).cell(0, 0).unwrap().clone();
+        assert!(c2.faint, "faint kept when the cell already meets contrast");
+    }
+
+    #[test]
+    fn minimum_contrast_forces_readable_foreground() {
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        // Near-black fg on black bg: far below any real contrast ratio.
+        eng.apply_theme(Rgb::new(30, 30, 30), Rgb::new(0, 0, 0), &[Rgb::new(0, 0, 0); 256])
+            .unwrap();
+
+        // Off (ratio 1.0): the faint foreground is left untouched.
+        eng.write(b"X");
+        assert_eq!(snap(&mut eng).cell(0, 0).unwrap().fg, Rgb::new(30, 30, 30));
+
+        // With a high minimum, fg is forced to white (it contrasts black best).
+        eng.set_min_contrast(21.0).unwrap();
+        eng.write(b"\x1b[2J\x1b[HX");
+        assert_eq!(snap(&mut eng).cell(0, 0).unwrap().fg, Rgb::new(255, 255, 255));
+    }
+
+    #[test]
     fn newline_advances_cursor_row() {
         let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
         eng.write(b"hi\r\n");
@@ -221,10 +374,85 @@ mod tests {
     }
 
     #[test]
+    fn screen_text_reads_rows_with_column_mapping() {
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        eng.write(b"hello\r\nworld\r\n");
+        let rows = eng.screen_text();
+        assert_eq!(rows.len(), 3, "scrollback(0) + 3 viewport rows");
+        assert_eq!(rows[0].chars.iter().collect::<String>(), "hello");
+        assert_eq!(rows[0].cols, vec![0, 1, 2, 3, 4], "each char maps to its column");
+        assert_eq!(rows[0].row, 0);
+        assert_eq!(rows[1].chars.iter().collect::<String>(), "world");
+        // The empty cursor row trims to nothing.
+        assert!(rows[2].chars.is_empty());
+    }
+
+    #[test]
+    fn screen_text_skips_wide_char_tail_cells() {
+        // Wide (CJK) chars occupy two columns; their empty spacer-tail cell must
+        // be skipped so the codepoints stay adjacent (searchable), with columns
+        // reflecting physical placement (世 at col 0, 界 at col 2, x at col 4).
+        let mut eng = GhosttyVtEngine::new(20, 2, 100).unwrap();
+        eng.write("世界x".as_bytes());
+        let rows = eng.screen_text();
+        assert_eq!(rows[0].chars.iter().collect::<String>(), "世界x");
+        assert_eq!(rows[0].cols, vec![0, 2, 4]);
+    }
+
+    #[test]
     fn osc_sets_window_title() {
         let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
         eng.write(b"\x1b]2;hello\x07");
         assert_eq!(eng.title().as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn jump_to_prompt_finds_marked_prompts() {
+        // Without OSC 133 marks there is nothing to jump to, even with scrollback.
+        let mut eng = GhosttyVtEngine::new(20, 4, 100).unwrap();
+        eng.write(b"plain\r\noutput\r\nlines\r\nhere\r\nmore\r\n");
+        assert_eq!(eng.jump_to_prompt(-1), None);
+
+        // Three OSC 133 A prompt marks separated by output; with rows = 4 the
+        // earliest prompts spill into scrollback above the live viewport.
+        let mut eng = GhosttyVtEngine::new(20, 4, 100).unwrap();
+        let mark = b"\x1b]133;A\x1b\\";
+        let mut data = Vec::new();
+        for body in [&b"p1\r\na\r\nb\r\n"[..], &b"p2\r\nc\r\nd\r\n"[..], &b"p3"[..]] {
+            data.extend_from_slice(mark);
+            data.extend_from_slice(body);
+        }
+        eng.write(&data);
+        // From the live bottom, a previous prompt sits above the viewport top.
+        let up = eng.jump_to_prompt(-1);
+        assert!(up.is_some_and(|n| n >= 1), "expected a prompt above, got {up:?}");
+    }
+
+    #[test]
+    fn bell_sets_one_shot_flag() {
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        assert!(!eng.take_bell(), "no bell yet");
+        eng.write(b"a\x07b");
+        assert!(eng.take_bell(), "BEL (0x07) should set the bell flag");
+        assert!(!eng.take_bell(), "the flag is one-shot and clears on read");
+    }
+
+    #[test]
+    fn reads_osc8_hyperlink_uri() {
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        // OSC 8 hyperlink: start (empty params, URI), display text "LINK", end.
+        // ST is ESC '\'. The link covers the four cells of "LINK".
+        eng.write(b"\x1b]8;;https://example.com\x1b\\LINK\x1b]8;;\x1b\\");
+        assert_eq!(
+            eng.hyperlink_at(0, 0).as_deref(),
+            Some("https://example.com")
+        );
+        assert_eq!(
+            eng.hyperlink_at(3, 0).as_deref(),
+            Some("https://example.com")
+        );
+        // A cell past the link text carries no hyperlink.
+        assert_eq!(eng.hyperlink_at(10, 0), None);
     }
 
     #[test]
@@ -404,6 +632,129 @@ fn rgb(c: libghostty_vt::style::RgbColor) -> Rgb {
     Rgb::new(c.r, c.g, c.b)
 }
 
+/// Map libghostty's underline style to the neutral [`UnderlineStyle`]. The
+/// binding enum is `#[non_exhaustive]`, so any future variant degrades to a
+/// plain single underline rather than failing to compile.
+fn map_underline(u: Underline) -> UnderlineStyle {
+    match u {
+        Underline::None => UnderlineStyle::None,
+        Underline::Single => UnderlineStyle::Single,
+        Underline::Double => UnderlineStyle::Double,
+        Underline::Curly => UnderlineStyle::Curly,
+        Underline::Dotted => UnderlineStyle::Dotted,
+        Underline::Dashed => UnderlineStyle::Dashed,
+        _ => UnderlineStyle::Single,
+    }
+}
+
+/// Resolve a style color (none / palette index / direct RGB) to concrete RGB
+/// against `palette`. Used for the underline color, which the render iterator
+/// (unlike `fg_color`/`bg_color`) does not pre-resolve. `None` means unset.
+fn resolve_color(c: StyleColor, palette: &[Rgb; 256]) -> Option<Rgb> {
+    match c {
+        StyleColor::None => None,
+        StyleColor::Rgb(c) => Some(rgb(c)),
+        StyleColor::Palette(idx) => palette.get(idx.0 as usize).copied(),
+    }
+}
+
+/// Adjust an already-resolved bold foreground for the bold-color policy, mirroring
+/// Ghostty's `Style.fg` (see `terminal/style.zig`). Only called for bold cells
+/// when a policy is active. `resolved` is the cell's normal foreground (from the
+/// render iterator, which honors the terminal's live palette); `raw` is the cell's
+/// unflattened style color, needed to tell an explicit ANSI palette index from a
+/// default/RGB foreground:
+/// - an ANSI palette color (0–7) brightens to its 8–15 variant (under *either*
+///   policy — `bright` or a fixed color);
+/// - a `none`/default or default-valued RGB foreground takes the fixed color
+///   (and is left untouched under `bright`).
+///
+/// `inverse` is **not** applied here — the caller swaps fg/bg afterward, matching
+/// where Ghostty applies it.
+fn apply_bold_color(
+    raw: StyleColor,
+    resolved: Rgb,
+    default_fg: Rgb,
+    palette: &[Rgb; 256],
+    policy: BoldColor,
+) -> Rgb {
+    match raw {
+        StyleColor::Palette(idx) => {
+            let i = idx.0;
+            if i < 8 {
+                return palette.get((i + 8) as usize).copied().unwrap_or(resolved);
+            }
+            resolved
+        }
+        StyleColor::None => match policy {
+            BoldColor::Color(c) => c,
+            _ => resolved,
+        },
+        StyleColor::Rgb(_) => match policy {
+            BoldColor::Color(c) if resolved == default_fg => c,
+            _ => resolved,
+        },
+    }
+}
+
+/// Linearize one sRGB channel (0–255) to linear light in `0.0..=1.0`, matching
+/// the shader's `linearize` (the WCAG transfer function Ghostty uses for
+/// contrast). Required so the contrast ratio is computed in the same space.
+fn srgb_to_linear(c: u8) -> f32 {
+    let v = c as f32 / 255.0;
+    if v <= 0.04045 {
+        v / 12.92
+    } else {
+        ((v + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// Relative luminance of an sRGB color, per WCAG (linearized channels weighted
+/// 0.2126/0.7152/0.0722). Mirrors the renderer's `luminance`.
+fn luminance(c: Rgb) -> f32 {
+    0.2126 * srgb_to_linear(c.r) + 0.7152 * srgb_to_linear(c.g) + 0.0722 * srgb_to_linear(c.b)
+}
+
+/// WCAG contrast ratio between two colors (`1.0..=21.0`). Mirrors the renderer's
+/// `contrast_ratio`.
+fn contrast_ratio(a: Rgb, b: Rgb) -> f32 {
+    let la = luminance(a) + 0.05;
+    let lb = luminance(b) + 0.05;
+    la.max(lb) / la.min(lb)
+}
+
+/// If `fg` on `bg` fails the `min` contrast ratio, replace it with pure white or
+/// black (whichever contrasts more), exactly like the shader's `contrasted_color`.
+/// Otherwise `fg` is returned unchanged. `min <= 1.0` is a no-op.
+fn enforce_contrast(fg: Rgb, bg: Rgb, min: f32) -> Rgb {
+    if min <= 1.0 || contrast_ratio(fg, bg) >= min {
+        return fg;
+    }
+    let white = Rgb::new(255, 255, 255);
+    let black = Rgb::new(0, 0, 0);
+    if contrast_ratio(white, bg) > contrast_ratio(black, bg) {
+        white
+    } else {
+        black
+    }
+}
+
+/// Whether minimum-contrast should be skipped for `text` because it is a
+/// graphics glyph (box-drawing, block, legacy-computing, or Powerline), where
+/// forcing pure black/white looks wrong. Mirrors Ghostty's `noMinContrast`
+/// (`renderer/cell.zig`). Tested on the first scalar of the cell's grapheme.
+fn is_graphics_element(text: &str) -> bool {
+    let Some(ch) = text.chars().next() else {
+        return false;
+    };
+    let c = ch as u32;
+    matches!(c,
+        0x2500..=0x257F   // box drawing
+        | 0x2580..=0x259F // block elements
+        | 0x1FB00..=0x1FBFF | 0x1CC00..=0x1CEBF // legacy computing (+ supplement)
+        | 0xE0B0..=0xE0D7) // Powerline
+}
+
 /// Copy one libghostty render cell into a neutral [`Cell`], resolving colors
 /// (applying `inverse`) against the given defaults and reusing `dst`'s inline
 /// string buffer. Shared by the full-grid snapshot and the smooth-scroll
@@ -412,10 +763,18 @@ fn copy_cell(
     cell: &CellIteration<'_, '_>,
     default_fg: Rgb,
     default_bg: Rgb,
+    palette: &[Rgb; 256],
+    bold_color: BoldColor,
+    min_contrast: f32,
     dst: &mut Cell,
 ) -> Result<()> {
     let style = cell.style()?;
     let mut fg = cell.fg_color()?.map(rgb).unwrap_or(default_fg);
+    // The bold-color policy needs the *raw* style color (an explicit ANSI palette
+    // index is lost once `fg_color()` flattens it to RGB).
+    if style.bold && bold_color != BoldColor::None {
+        fg = apply_bold_color(style.fg_color, fg, default_fg, palette, bold_color);
+    }
     let mut bg = cell.bg_color()?.map(rgb).unwrap_or(default_bg);
     if style.inverse {
         std::mem::swap(&mut fg, &mut bg);
@@ -424,12 +783,31 @@ fn copy_cell(
     for ch in cell.graphemes()? {
         dst.text.push(ch);
     }
+    // Minimum-contrast runs on the final (post-inverse) colors, skipping graphics
+    // glyphs — matching where Ghostty's shader applies it.
+    let mut faint = style.faint;
+    if min_contrast > 1.0 && !is_graphics_element(&dst.text) {
+        let forced = enforce_contrast(fg, bg, min_contrast);
+        if forced != fg {
+            // Ghostty's `contrasted_color` returns a fully opaque white/black,
+            // discarding the premultiplied faint alpha. Drop faint so the forced
+            // color renders at full strength — otherwise dimming a color that was
+            // just forced for readability would defeat minimum-contrast.
+            faint = false;
+            fg = forced;
+        }
+    }
     dst.fg = fg;
     dst.bg = bg;
     dst.bold = style.bold;
     dst.italic = style.italic;
-    dst.underline = !matches!(style.underline, Underline::None);
+    dst.underline = map_underline(style.underline);
+    dst.underline_color = resolve_color(style.underline_color, palette);
     dst.strikethrough = style.strikethrough;
+    dst.overline = style.overline;
+    dst.faint = faint;
+    dst.blink = style.blink;
+    dst.invisible = style.invisible;
     Ok(())
 }
 
@@ -492,12 +870,16 @@ impl TerminalEngine for GhosttyVtEngine {
         // read its cells, then restore the viewport. The net Delta is zero, so
         // the caller's pin is unchanged.
         self.term.scroll_viewport(ScrollViewport::Delta(-1));
+        let bold_color = self.bold_color;
+        let min_contrast = self.min_contrast;
         let read = (|| -> Result<()> {
             let snapshot = self.render_state.update(&self.term)?;
             let colors = snapshot.colors()?;
             let cols = snapshot.cols()? as usize;
             let default_fg = rgb(colors.foreground);
             let default_bg = rgb(colors.background);
+            // Live palette (OSC-4-aware), as in `snapshot`.
+            let palette = colors.palette.map(rgb);
             out.clear();
             out.resize(cols, Cell::default());
             let mut rows_iter = self.rows_buf.update(&snapshot)?;
@@ -508,7 +890,15 @@ impl TerminalEngine for GhosttyVtEngine {
                     if x >= cols {
                         break;
                     }
-                    copy_cell(cell, default_fg, default_bg, &mut out[x])?;
+                    copy_cell(
+                        cell,
+                        default_fg,
+                        default_bg,
+                        &palette,
+                        bold_color,
+                        min_contrast,
+                        &mut out[x],
+                    )?;
                     x += 1;
                 }
             }
@@ -542,6 +932,16 @@ impl TerminalEngine for GhosttyVtEngine {
             b: c.b,
         });
         self.term.set_default_cursor_color(c)?;
+        Ok(())
+    }
+
+    fn set_bold_color(&mut self, bold: BoldColor) -> Result<()> {
+        self.bold_color = bold;
+        Ok(())
+    }
+
+    fn set_min_contrast(&mut self, ratio: f32) -> Result<()> {
+        self.min_contrast = ratio;
         Ok(())
     }
 
@@ -602,12 +1002,161 @@ impl TerminalEngine for GhosttyVtEngine {
         std::mem::take(&mut *self.responses.borrow_mut())
     }
 
+    fn take_bell(&mut self) -> bool {
+        self.bell.replace(false)
+    }
+
     fn title(&self) -> Option<String> {
         self.term
             .title()
             .ok()
             .map(str::to_string)
             .filter(|s| !s.is_empty())
+    }
+
+    fn hyperlink_at(&self, x: u16, y: u16) -> Option<String> {
+        // Resolve a grid reference for the viewport cell and read its OSC 8 URI.
+        // `hyperlink_uri` writes 0 bytes when the cell has no hyperlink, and the
+        // grid ref is read immediately (valid only until the next terminal write).
+        let gr = self
+            .term
+            .grid_ref(Point::Viewport(PointCoordinate { x, y: y as u32 }))
+            .ok()?;
+        let mut buf = [0u8; 2048];
+        let n = gr.hyperlink_uri(&mut buf).ok()?;
+        (n > 0).then(|| String::from_utf8_lossy(&buf[..n]).into_owned())
+    }
+
+    fn jump_to_prompt(&self, delta: isize) -> Option<usize> {
+        if delta == 0 {
+            return None;
+        }
+        let rows = self.term.rows().ok()? as u32;
+        // `scrollback_rows` = total rows minus the viewport height, i.e. the
+        // screen-space y of the viewport top when resting at the live bottom and
+        // the maximum lines the viewport can scroll up.
+        let bottom_top = self.term.scrollback_rows().unwrap_or(0) as u32;
+        let last = bottom_top + rows.saturating_sub(1);
+
+        // The current viewport top in absolute screen coordinates.
+        let vp_gr = self
+            .term
+            .grid_ref(Point::Viewport(PointCoordinate { x: 0, y: 0 }))
+            .ok()?;
+        let vp_top = self
+            .term
+            .point_from_grid_ref(&vp_gr, PointSpace::Screen)
+            .ok()??
+            .y;
+
+        // Is the screen row at `y` a (primary) semantic-prompt row?
+        let is_prompt = |y: u32| -> bool {
+            self.term
+                .grid_ref(Point::Screen(PointCoordinate { x: 0, y }))
+                .ok()
+                .and_then(|gr| gr.row().ok())
+                .and_then(|row| row.semantic_prompt().ok())
+                .is_some_and(|sp| sp == RowSemanticPrompt::Prompt)
+        };
+
+        // Walk outward from the current top (excluding it) until the |delta|-th
+        // prompt row, then report its offset above the live bottom.
+        let want = delta.unsigned_abs();
+        let mut found = 0usize;
+        if delta < 0 {
+            let mut y = vp_top;
+            while y > 0 {
+                y -= 1;
+                if is_prompt(y) {
+                    found += 1;
+                    if found == want {
+                        return Some(bottom_top.saturating_sub(y) as usize);
+                    }
+                }
+            }
+        } else {
+            let mut y = vp_top;
+            while y < last {
+                y += 1;
+                if is_prompt(y) {
+                    found += 1;
+                    if found == want {
+                        return Some(bottom_top.saturating_sub(y) as usize);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn screen_text(&self) -> Vec<super::RowText> {
+        let cols = self.term.cols().unwrap_or(0);
+        let rows = self.term.rows().unwrap_or(0) as u32;
+        let scrollback = self.term.scrollback_rows().unwrap_or(0) as u32;
+        let total = scrollback + rows;
+        let mut out = Vec::with_capacity(total as usize);
+        // Grapheme clusters are almost always 1 char; 8 covers base + combining.
+        // `big` is a heap fallback for the rare cluster that overflows `buf`.
+        let mut buf = ['\0'; 8];
+        let mut big: Vec<char> = Vec::new();
+        for y in 0..total {
+            let mut chars: Vec<char> = Vec::new();
+            let mut col_of = Vec::new();
+            // Chars up to and including the last non-blank cell, so trailing
+            // blanks (the spaces we emit for empty cells) are dropped.
+            let mut last_non_blank = 0usize;
+            for x in 0..cols {
+                let Ok(gr) = self.term.grid_ref(Point::Screen(PointCoordinate { x, y })) else {
+                    // Unreadable cell: keep the column alignment with a blank.
+                    chars.push(' ');
+                    col_of.push(x);
+                    continue;
+                };
+                // The tail half of a wide char is an empty spacer cell — skip it
+                // (emit nothing, don't advance a column) so the wide char's
+                // codepoint stays adjacent to its neighbor; a space here would
+                // defeat search/copy of e.g. "世界".
+                if matches!(
+                    gr.cell().ok().and_then(|c| c.wide().ok()),
+                    Some(CellWide::SpacerTail)
+                ) {
+                    continue;
+                }
+                // Read the grapheme, retrying on a heap buffer for clusters longer
+                // than `buf` (long ZWJ emoji) so they stay searchable, not blanked.
+                let cluster: &[char] = match gr.graphemes(&mut buf) {
+                    Ok(n) => &buf[..n],
+                    Err(libghostty_vt::error::Error::OutOfSpace { required }) => {
+                        big.clear();
+                        big.resize(required, '\0');
+                        match gr.graphemes(&mut big) {
+                            Ok(n) => &big[..n],
+                            Err(_) => &[],
+                        }
+                    }
+                    Err(_) => &[],
+                };
+                if cluster.is_empty() {
+                    // A genuine blank cell: a space keeps char→column alignment.
+                    chars.push(' ');
+                    col_of.push(x);
+                } else {
+                    for &ch in cluster {
+                        chars.push(ch);
+                        col_of.push(x);
+                    }
+                    last_non_blank = chars.len();
+                }
+            }
+            chars.truncate(last_non_blank);
+            col_of.truncate(last_non_blank);
+            out.push(super::RowText {
+                row: y,
+                chars,
+                cols: col_of,
+            });
+        }
+        out
     }
 
     fn snapshot(&mut self, out: &mut GridSnapshot) -> Result<()> {
@@ -667,10 +1216,25 @@ impl TerminalEngine for GhosttyVtEngine {
             cell.bg = Rgb::default();
             cell.bold = false;
             cell.italic = false;
-            cell.underline = false;
+            cell.underline = UnderlineStyle::None;
+            cell.underline_color = None;
             cell.strikethrough = false;
+            cell.overline = false;
+            cell.faint = false;
+            cell.blink = false;
+            cell.invisible = false;
         }
 
+        let default_fg = out.default_fg;
+        let default_bg = out.default_bg;
+        // Use the *live* palette from the render snapshot (it reflects OSC 4
+        // redefinitions), not the static config copy, so the bold-is-bright bump
+        // and palette-indexed underline colors track runtime changes — matching
+        // Ghostty's `Style.fg`, which reads the live terminal palette.
+        let palette = colors.palette.map(rgb);
+        let bold_color = self.bold_color;
+        let min_contrast = self.min_contrast;
+        let mut has_blink = false;
         let mut y: usize = 0;
         let mut rows_iter = self.rows_buf.update(&snapshot)?;
         while let Some(row) = rows_iter.next() {
@@ -684,12 +1248,22 @@ impl TerminalEngine for GhosttyVtEngine {
                     break;
                 }
                 // Fill in place, reusing the blanked cell's string buffer.
-                let dst = &mut out.cells[y * cols as usize + x];
-                copy_cell(cell, out.default_fg, out.default_bg, dst)?;
+                let idx = y * cols as usize + x;
+                copy_cell(
+                    cell,
+                    default_fg,
+                    default_bg,
+                    &palette,
+                    bold_color,
+                    min_contrast,
+                    &mut out.cells[idx],
+                )?;
+                has_blink |= out.cells[idx].blink;
                 x += 1;
             }
             y += 1;
         }
+        out.has_blink = has_blink;
 
         Ok(())
     }

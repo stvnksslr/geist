@@ -9,11 +9,14 @@ use anyhow::Result;
 use eframe::egui;
 
 use crate::config::Config;
+use crate::decscusr::DecscusrScanner;
 use crate::engine::{
-    GhosttyVtEngine, GridSnapshot, KeyCode, KeyInput, KeyMods, MouseAction, MouseButton,
-    MouseInput, TerminalEngine,
+    CursorShape, GhosttyVtEngine, GridSnapshot, KeyCode, KeyInput, KeyMods, MouseAction,
+    MouseButton, MouseInput, RowText, TerminalEngine,
 };
+use crate::keybind::{Chord, Keymap};
 use crate::osc7::Osc7Scanner;
+use crate::search::{SearchHighlight, SearchState};
 use crate::osc52::Osc52Scanner;
 use crate::profiles::Profile;
 use crate::pty::Pty;
@@ -59,6 +62,24 @@ pub struct Session {
     /// Side parser tracking the shell's OSC 7 working directory, so a new split
     /// can inherit it.
     osc7: Osc7Scanner,
+    /// Side parser tracking DECSCUSR, so the configured default cursor style is
+    /// substituted only while the program hasn't picked its own shape.
+    decscusr: DecscusrScanner,
+    /// Configured default cursor shape (`cursor-style`), applied via `decscusr`.
+    cursor_style: CursorShape,
+    /// Configured default cursor blink (`cursor-style-blink`); `None` follows the
+    /// program/terminal.
+    cursor_style_blink: Option<bool>,
+    /// One-shot flag set when a BEL rang during the last pump; consumed by
+    /// `bell_flash_alpha` to (re)start the visual bell flash.
+    bell_pending: bool,
+    /// egui-time deadline of the active visual bell flash, or `None` when idle.
+    bell_flash_until: Option<f64>,
+    /// Scrollback-search overlay state (query + matches + current) while open.
+    search: Option<SearchState>,
+    /// Screen text captured when the search opened. Re-searched on each keystroke
+    /// so matching doesn't re-walk the whole grid every frame. Empty when closed.
+    search_text: Vec<RowText>,
 }
 
 impl Session {
@@ -82,6 +103,8 @@ impl Session {
         let mut engine = GhosttyVtEngine::new(DEFAULT_COLS, DEFAULT_ROWS, config.scrollback_limit)?;
         engine.apply_theme(config.fg, config.bg, &config.palette)?;
         engine.set_cursor_color(config.cursor)?;
+        engine.set_bold_color(config.bold_color)?;
+        engine.set_min_contrast(config.min_contrast)?;
 
         Ok(Self {
             pty,
@@ -100,6 +123,13 @@ impl Session {
             alive: true,
             osc52: Osc52Scanner::new(),
             osc7: Osc7Scanner::new(),
+            decscusr: DecscusrScanner::new(),
+            cursor_style: config.cursor_style,
+            cursor_style_blink: config.cursor_style_blink,
+            bell_pending: false,
+            bell_flash_until: None,
+            search: None,
+            search_text: Vec::new(),
         })
     }
 
@@ -114,6 +144,7 @@ impl Session {
                     self.engine.write(&chunk);
                     self.osc52.feed(&chunk, &mut clipboard_sets);
                     self.osc7.feed(&chunk);
+                    self.decscusr.feed(&chunk);
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
@@ -134,6 +165,27 @@ impl Session {
         if !responses.is_empty() {
             let _ = self.pty.write(&responses);
         }
+        // A BEL during this pump arms the visual bell for the next frame.
+        if self.engine.take_bell() {
+            self.bell_pending = true;
+        }
+    }
+
+    /// Visual-bell flash intensity (1.0 → 0.0) for the frame at egui time `now`,
+    /// or `None` when no flash is active. Consumes the one-shot bell flag from the
+    /// last pump to (re)start the flash. The caller draws an overlay scaled by the
+    /// returned value and keeps repainting while it stays `Some`.
+    pub fn bell_flash_alpha(&mut self, now: f64) -> Option<f32> {
+        const FLASH_SECS: f64 = 0.2;
+        if std::mem::take(&mut self.bell_pending) {
+            self.bell_flash_until = Some(now + FLASH_SECS);
+        }
+        let until = self.bell_flash_until?;
+        if now >= until {
+            self.bell_flash_until = None;
+            return None;
+        }
+        Some((((until - now) / FLASH_SECS) as f32).clamp(0.0, 1.0))
     }
 
     /// Whether the shell backing this session is still running.
@@ -169,7 +221,26 @@ impl Session {
         } else {
             snap.over_row.clear();
         }
-        self.engine.snapshot(snap).is_ok()
+        if self.engine.snapshot(snap).is_err() {
+            return false;
+        }
+        // While the program is on its default cursor, substitute the configured
+        // `cursor-style` (the engine resets DECSCUSR-default to a hardcoded block
+        // and exposes no way to set the default shape). Re-applied each frame so
+        // it survives the engine's clean-frame fast path. The renderer still
+        // draws a hollow block for unfocused panes regardless of this shape.
+        //
+        // Blink mirrors Ghostty: an explicit `cursor-style-blink` wins (and, like
+        // Ghostty, that makes the program's DEC mode 12 a no-op); when unset, the
+        // default-cursor blink defaults on but follows the program's mode 12 —
+        // both tracked by the scanner.
+        if self.decscusr.is_default() {
+            snap.cursor_shape = self.cursor_style;
+            snap.cursor_blinking = self
+                .cursor_style_blink
+                .unwrap_or_else(|| self.decscusr.default_blink());
+        }
+        true
     }
 
     /// The sub-line vertical offset (device px) the renderer shifts this pane's
@@ -198,6 +269,16 @@ impl Session {
             self.scroll_offset_px = 0.0;
             self.engine_pin_lines = 0;
             self.engine.scroll_to_bottom();
+            // A reflow renumbers rows/columns, so an open search's captured text
+            // and matches are stale — recapture and re-run against the new grid.
+            if self.search.is_some() {
+                self.search_text = self.engine.screen_text();
+                let target = self.viewport_bottom_row();
+                if let Some(s) = self.search.as_mut() {
+                    s.run(&self.search_text);
+                    s.select_nearest(target);
+                }
+            }
         }
     }
 
@@ -277,12 +358,17 @@ impl Session {
     }
 
     /// Re-apply runtime-changeable config to the live engine (command palette's
-    /// "Reload Config"): the color theme and cursor color. The next frame's
-    /// snapshot picks up the new colors. `scrollback-limit` is fixed at engine
-    /// creation and is intentionally *not* changed here.
+    /// "Reload Config"): the color theme, cursor color/style, bold-color policy,
+    /// and minimum-contrast. The next frame's snapshot picks up the new values.
+    /// `scrollback-limit` is fixed at engine creation and is intentionally *not*
+    /// changed here.
     pub fn apply_config(&mut self, config: &Config) {
         let _ = self.engine.apply_theme(config.fg, config.bg, &config.palette);
         let _ = self.engine.set_cursor_color(config.cursor);
+        let _ = self.engine.set_bold_color(config.bold_color);
+        let _ = self.engine.set_min_contrast(config.min_contrast);
+        self.cursor_style = config.cursor_style;
+        self.cursor_style_blink = config.cursor_style_blink;
     }
 
     /// Scroll the viewport by `delta` lines (negative scrolls up into history),
@@ -302,15 +388,159 @@ impl Session {
         self.scroll_target_px = 0.0;
     }
 
+    /// Scroll so the `delta`-th OSC 133 prompt above (`delta < 0`) or below
+    /// (`delta > 0`) the viewport top sits at the top. A no-op if there is no
+    /// such prompt (e.g. the shell emits no semantic-prompt marks). The eased
+    /// `animate_scroll` carries the viewport there and clamps to scrollback.
+    pub fn jump_to_prompt(&mut self, delta: isize, cell_h: f32) {
+        if let Some(lines_up) = self.engine.jump_to_prompt(delta) {
+            self.scroll_target_px = lines_up as f32 * cell_h;
+        }
+    }
+
     /// One page of scrolling in lines (grid height minus one), matching the page
     /// size `decide_key` uses for `Shift+PageUp/Down`.
     pub fn page_lines(&self) -> isize {
         self.rows.saturating_sub(1).max(1) as isize
     }
 
-    /// The URL under `cell`, if any (for Ctrl+click to open).
+    // --- Scrollback search --------------------------------------------------
+
+    /// Open the search overlay: capture the current screen (scrollback + viewport)
+    /// as text so subsequent keystrokes re-search the snapshot rather than
+    /// re-walking the grid. Idempotent — re-opening recaptures.
+    pub fn open_search(&mut self) {
+        self.search_text = self.engine.screen_text();
+        self.search = Some(SearchState::new());
+    }
+
+    /// Close the search overlay and drop the captured text (highlights vanish).
+    pub fn close_search(&mut self) {
+        self.search = None;
+        self.search_text = Vec::new();
+    }
+
+    /// Whether the search overlay is open.
+    pub fn search_active(&self) -> bool {
+        self.search.is_some()
+    }
+
+    /// The open search state (query, matches, current), for the overlay UI.
+    pub fn search_state(&self) -> Option<&SearchState> {
+        self.search.as_ref()
+    }
+
+    /// One-shot: whether the overlay just opened, clearing the flag — so the UI
+    /// grabs keyboard focus exactly once.
+    pub fn take_search_just_opened(&mut self) -> bool {
+        match self.search.as_mut() {
+            Some(s) => std::mem::replace(&mut s.just_opened, false),
+            None => false,
+        }
+    }
+
+    /// Set the query, re-match the captured text, point at the occurrence nearest
+    /// the current viewport, and scroll there. No-op if the overlay is closed.
+    pub fn set_search_query(&mut self, query: String, cell_h: f32) {
+        let target = self.viewport_bottom_row();
+        let current = {
+            let Some(s) = self.search.as_mut() else {
+                return;
+            };
+            s.query = query;
+            s.run(&self.search_text);
+            s.select_nearest(target);
+            s.current_match()
+        };
+        if let Some(m) = current {
+            self.scroll_to_match(m, cell_h);
+        }
+    }
+
+    /// Step to the next (`forward`) / previous match and scroll to it.
+    pub fn step_search(&mut self, forward: bool, cell_h: f32) {
+        let current = {
+            let Some(s) = self.search.as_mut() else {
+                return;
+            };
+            s.step(forward);
+            s.current_match()
+        };
+        if let Some(m) = current {
+            self.scroll_to_match(m, cell_h);
+        }
+    }
+
+    /// Toggle case-sensitivity and re-match, keeping the view near the same place.
+    pub fn toggle_search_case(&mut self, cell_h: f32) {
+        let target = self.viewport_bottom_row();
+        let current = {
+            let Some(s) = self.search.as_mut() else {
+                return;
+            };
+            s.case_sensitive = !s.case_sensitive;
+            s.run(&self.search_text);
+            s.select_nearest(target);
+            s.current_match()
+        };
+        if let Some(m) = current {
+            self.scroll_to_match(m, cell_h);
+        }
+    }
+
+    /// The matches visible in the current viewport, mapped to viewport rows for
+    /// the renderer (the `current` one flagged). Empty when no search is open.
+    /// Computed against the live scroll position; matches are tracked in absolute
+    /// screen rows, which stay valid until scrollback eviction (heavy streaming
+    /// during a search) — re-typing the query recaptures.
+    pub fn search_highlights(&self) -> Vec<SearchHighlight> {
+        let Some(s) = &self.search else {
+            return Vec::new();
+        };
+        let vp_top = self.viewport_top_row();
+        let rows = self.rows as u32;
+        s.matches
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.row >= vp_top && m.row < vp_top + rows)
+            .map(|(i, m)| SearchHighlight {
+                row: (m.row - vp_top) as u16,
+                col_start: m.col_start,
+                col_end: m.col_end,
+                current: i == s.current,
+            })
+            .collect()
+    }
+
+    /// Absolute screen row of the viewport's top, given the current scroll pin.
+    fn viewport_top_row(&self) -> u32 {
+        let scrollback = self.engine.scrollback_rows() as u32;
+        scrollback.saturating_sub(self.engine_pin_lines.max(0) as u32)
+    }
+
+    /// Absolute screen row of the viewport's bottom-most line (search anchor).
+    fn viewport_bottom_row(&self) -> u32 {
+        self.viewport_top_row() + self.rows.saturating_sub(1) as u32
+    }
+
+    /// Scroll so match `m` sits about a third of the way down the viewport (for
+    /// surrounding context), clamped to the live scrollback by `animate_scroll`.
+    fn scroll_to_match(&mut self, m: crate::search::Match, cell_h: f32) {
+        let scrollback = self.engine.scrollback_rows() as u32;
+        let context = (self.rows / 3) as u32;
+        let target_top = m.row.saturating_sub(context);
+        let lines_above = scrollback.saturating_sub(target_top);
+        self.scroll_target_px = lines_above as f32 * cell_h;
+    }
+
+    /// The URL under `cell`, if any (for Ctrl+click to open). An explicit OSC 8
+    /// hyperlink (the program marked this cell clickable, possibly with display
+    /// text that differs from the target) takes priority; otherwise fall back to
+    /// detecting a bare URL in the rendered cell text.
     pub fn url_at(&self, cell: (u16, u16)) -> Option<String> {
-        find_url_at(&self.snapshot, cell.0, cell.1)
+        self.engine
+            .hyperlink_at(cell.0, cell.1)
+            .or_else(|| find_url_at(&self.snapshot, cell.0, cell.1))
     }
 
     /// Current selection as an inclusive linear (row-major) cell range.
@@ -335,7 +565,13 @@ impl Session {
     /// Translate keyboard/text/paste events into PTY bytes. `Ctrl+Shift` combos
     /// are reserved for the app (copy, tab management) and never sent to the
     /// shell, as is `Ctrl+Tab`.
-    pub fn handle_input(&mut self, ctx: &egui::Context, tracking: bool, cell_h: f32) {
+    pub fn handle_input(
+        &mut self,
+        ctx: &egui::Context,
+        tracking: bool,
+        cell_h: f32,
+        keymap: &Keymap,
+    ) {
         let (events, ppp) = ctx.input(|i| (i.events.clone(), i.pixels_per_point().max(1.0)));
         let cell_h_pts = (cell_h / ppp).max(1.0);
 
@@ -378,7 +614,7 @@ impl Session {
                     pressed: true,
                     modifiers,
                     ..
-                } => match decide_key(*key, modifiers, self.rows) {
+                } => match decide_key(*key, modifiers, self.rows, keymap) {
                     KeyAction::Encode(input) => {
                         bytes.extend_from_slice(&self.engine.encode_key(&input));
                     }
@@ -404,6 +640,14 @@ impl Session {
 
         // Ease the on-screen position toward the target and commit it to the
         // engine viewport + renderer, once per frame.
+        self.animate_scroll(ctx, cell_h);
+    }
+
+    /// Drive the scroll easing for one frame without processing input. Used while
+    /// a modal overlay (search) owns the keyboard so `handle_input` is skipped —
+    /// the search's `scroll_to_match` still needs the viewport to ease to the
+    /// match.
+    pub fn tick_scroll(&mut self, ctx: &egui::Context, cell_h: f32) {
         self.animate_scroll(ctx, cell_h);
     }
 
@@ -565,8 +809,10 @@ pub fn read_clipboard() -> Option<String> {
     arboard::Clipboard::new().ok()?.get_text().ok()
 }
 
-/// Translate egui modifiers to backend-neutral key modifiers.
-fn key_mods(m: &egui::Modifiers) -> KeyMods {
+/// Translate egui modifiers to backend-neutral key modifiers. `pub(crate)` so
+/// the app can build keybind chords from live key events with identical
+/// modifier semantics (notably `command` folding into `ctrl`).
+pub(crate) fn key_mods(m: &egui::Modifiers) -> KeyMods {
     KeyMods {
         shift: m.shift,
         ctrl: m.ctrl || m.command,
@@ -596,13 +842,32 @@ enum KeyAction {
     Suppress,
 }
 
-/// Decide what a pressed key does, given the live modifiers and the grid height
-/// (for page scrolling). Pure: no engine/PTY/egui state, so every gating branch
-/// is unit-testable. Mirrors the Windows-Terminal/Ghostty host bindings.
-fn decide_key(key: egui::Key, modifiers: &egui::Modifiers, rows: u16) -> KeyAction {
+/// Decide what a pressed key does, given the live modifiers, the grid height
+/// (for page scrolling), and the active `keymap`. Pure: depends only on its
+/// arguments (the keymap is config-derived data), so every gating branch is
+/// unit-testable. Mirrors the Windows-Terminal/Ghostty host bindings.
+fn decide_key(
+    key: egui::Key,
+    modifiers: &egui::Modifiers,
+    rows: u16,
+    keymap: &Keymap,
+) -> KeyAction {
     let Some(code) = map_egui_key(key) else {
         return KeyAction::Suppress;
     };
+    // Anything bound to an app action is handled by `App::handle_shortcuts`, so
+    // the shell must never see it — swallow it here. This covers custom keybinds
+    // that fall outside the structural namespaces below (e.g. `ctrl+a`); the
+    // default binds also match, redundantly with those namespaces.
+    if keymap
+        .lookup(&Chord {
+            mods: key_mods(modifiers),
+            code,
+        })
+        .is_some()
+    {
+        return KeyAction::Swallow;
+    }
     // Ctrl+Shift is the app's namespace; the shell never sees it. The clipboard
     // combos (Ctrl+Shift+C/V/X) arrive as Copy/Paste/Cut events handled
     // elsewhere, so here we swallow every other Ctrl+Shift combo (tab/split).
@@ -884,7 +1149,10 @@ fn extract_selection(snap: &GridSnapshot, range: (usize, usize)) -> String {
 }
 
 /// Map an egui key to our backend-neutral [`KeyCode`].
-fn map_egui_key(key: egui::Key) -> Option<KeyCode> {
+/// Map an egui logical key to a backend-neutral [`KeyCode`]. `pub(crate)` so the
+/// app can resolve keybind chords from live key events with the same mapping the
+/// PTY-encode path uses.
+pub(crate) fn map_egui_key(key: egui::Key) -> Option<KeyCode> {
     use KeyCode as C;
     use egui::Key as K;
     Some(match key {
@@ -1045,12 +1313,21 @@ fn is_text_producing(code: KeyCode) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        CopyAction, KeyAction, cell_from_pos, copy_or_interrupt, decide_key, extract_selection,
-        find_url_at, grid_dims, notch_split, osc7_to_path, px_offset, scroll_split, word_bounds,
+        CopyAction, KeyAction, cell_from_pos, copy_or_interrupt, extract_selection, find_url_at,
+        grid_dims, notch_split, osc7_to_path, px_offset, scroll_split, word_bounds,
     };
     use crate::engine::{Cell, GridSnapshot, KeyCode, KeyInput, KeyMods};
+    use crate::keybind::Keymap;
     use eframe::egui;
     use std::path::PathBuf;
+
+    /// Drive the real `decide_key` with the built-in default keymap, so the
+    /// existing 3-argument call sites stay unchanged. The default keymap binds
+    /// exactly the host shortcuts the namespace gating already reserves, so it
+    /// does not alter any of these assertions.
+    fn decide_key(key: egui::Key, modifiers: &egui::Modifiers, rows: u16) -> KeyAction {
+        super::decide_key(key, modifiers, rows, &Keymap::default())
+    }
 
     fn grid(rows: &[&str], cols: u16) -> GridSnapshot {
         let mut s = GridSnapshot {
@@ -1224,6 +1501,22 @@ mod tests {
         assert_eq!(
             decide_key(egui::Key::A, &mods(false, false, false), 24),
             KeyAction::Suppress
+        );
+    }
+
+    #[test]
+    fn keymap_reserves_custom_out_of_namespace_bind() {
+        // With the built-in keymap, Ctrl+A is encoded to the shell (^A).
+        assert!(matches!(
+            decide_key(egui::Key::A, &mods(true, false, false), 24),
+            KeyAction::Encode(_)
+        ));
+        // Binding Ctrl+A to an app action reserves it: decide_key now swallows it
+        // so the shell never sees the key (the app runs the action instead).
+        let km = Keymap::from_config(&[("ctrl+a".to_string(), "new_tab".to_string())]);
+        assert_eq!(
+            super::decide_key(egui::Key::A, &mods(true, false, false), 24, &km),
+            KeyAction::Swallow
         );
     }
 
