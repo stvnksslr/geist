@@ -986,6 +986,7 @@ dependencies = [
  "eframe",
  "libghostty-vt",
  "percent-encoding",
+ "png",
  "pollster",
  "portable-pty",
  "raw-window-handle",

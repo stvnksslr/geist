@@ -269,7 +269,7 @@ Effort: **S** <1d · **M** 1–3d · **L** ~1wk · **XL** multi-wk. Status: ✅ 
 |---|---|---|---|---|
 | Full configurable keybinds (tables/sequences) | `keybind.rs`, `config.rs` | ✅ | L | ◐ (single-chord done) |
 | Quick / dropdown terminal | new module + `app.rs`/`main.rs` | — | L | ⬜ (needs P2✅,P5) |
-| Kitty graphics (inline images) | `engine`, `GridSnapshot`, `render/mod.rs` | ✅ | L–XL | ⬜ |
+| Kitty graphics (inline images) | `engine`, `GridSnapshot`, `render/mod.rs` | ✅ | L–XL | ◐ **blocked on ConPTY** — engine + geometry done, see below |
 | Scrollback search overlay | `search.rs`, `session.rs`, `app.rs`, `engine`, `render` | ✋ | M–L | ✅ (single-row matches; pins deferred) |
 | Custom shaders | `render/mod.rs`, `config.rs` | — | L | ⬜ (needs P4) |
 | background-image / blur | `render/mod.rs`, `main.rs`, `config.rs` | — | M–L | ◐ (blur ✅ via Windows DWM acrylic/mica, `blur.rs`; background-image ⬜) |
@@ -306,6 +306,48 @@ With Phase 0 done, the remaining Tier-1 items are mostly small, registry-backed 
    big rocks are **kitty graphics**, **P5 multi-window** (→ quick terminal, session restore), the
    **real scrollbar**, **clipboard permissions / paste protection**, and **OSC 133 C/D → desktop
    notifications** (note cmd.exe has no preexec hook, so C/D would be pwsh-only).
+
+### Kitty graphics — ◐ blocked on ConPTY
+
+**The blocker: ConPTY strips APC sequences, so no kitty graphics command ever reaches the VT
+engine.** ConPTY does not pipe a child's output through — it *re-renders* it and emits its own VT
+stream, dropping sequences it doesn't understand. APC (`ESC _ G …`), which the kitty protocol uses,
+is one of them. Traced end to end: the shell emits correct bytes (`<27>_Ga=T,t=d,f=24,…<27>\`), and
+`TerminalEngine::write` never sees them.
+
+The fix exists but is not exposed: `PSEUDOCONSOLE_PASSTHROUGH_MODE` (`0x8`), which portable-pty
+declares at `src/win/psuedocon.rs:31` behind `#[allow(dead_code)]` and never passes —
+`CreatePseudoConsole` gets only `RESIZE_QUIRK | WIN32_INPUT_MODE` (`:83-90`). Enabling it means
+vendoring and patching portable-pty (the pattern already used for `libghostty-rs` and `egui-winit`),
+and it changes stream handling globally rather than just for APC, so input, resize and legacy-app
+behaviour would all need re-verifying. **This affects any Windows terminal, not just giest** — which
+is also why upstream Ghostty offers no Windows precedent here.
+
+**What is built, unit-tested and ready for the day the PTY can deliver APC** (C1–C4 of the plan):
+- `image-storage-limit` config (Ghostty's name/default), applied at session creation and on reload.
+- Engine plumbing: `ImageData`/`ImagePlacement` on `GridSnapshot`, a reusable `PlacementIterator`,
+  the placement walk, an `Arc` pixel cache copied once per image id with evict-by-absence, and the
+  `(z, image_id)` sort. Verified by tests driving **real escape sequences** into the engine — a 1×2
+  RGB image becomes a correctly sized placement, a delete clears it, and pixels are shared between
+  snapshots rather than re-copied.
+- PNG decoding (`f=100`, what `icat` sends) via a `DecodePng` impl over the `png` crate.
+- Renderer geometry: `image_layer`, `image_rect`, `image_uv`, `image_visible`, `split_draws`, the
+  three z-layer emission points, and per-image draw splitting in `paint`. Each placement currently
+  emits a magenta placeholder quad carrying its real rect and real source-crop UV, so finishing this
+  is a change of `mode`/`color` plus the texture bind group.
+
+**Corrections to earlier assumptions**, both now pinned by tests:
+- Kitty graphics were **not** disabled by default — libghostty's library default is a 10 MB storage
+  limit, so the protocol was already partly live. What `image-storage-limit` really controls is the
+  budget, and specifically that **zero** disables it and wipes stored images.
+- The kitty storage's dirty flag is not part of the render state's, so placements are refreshed on
+  every snapshot ahead of the dirty-skip; otherwise a deleted image would persist forever.
+
+**Deliberately out of scope even once unblocked:** unicode placeholders (`U=1`) — the binding
+exposes `is_virtual()` but not the diacritic decoding upstream does in its renderer, so virtual
+placements are skipped; animation (upstream doesn't implement it either); and the file / temp-file /
+shared-memory transmission mediums (`t=s` is unsupported on Windows upstream, and `t=f`/`t=t` resolve
+paths against a hardcoded `/tmp`).
 
 ### P5 — multi-window (done)
 

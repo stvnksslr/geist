@@ -5,10 +5,13 @@
 //! independent of the backend and leaves room for a pure-Rust fallback engine
 //! (see the project plan) without touching the rest of the app.
 
+use std::sync::Arc;
+
 use anyhow::Result;
 use compact_str::CompactString;
 
 pub mod ghostty_vt;
+pub mod png_decode;
 
 pub use ghostty_vt::GhosttyVtEngine;
 
@@ -138,6 +141,61 @@ pub struct GridSnapshot {
     /// knows to keep repainting for the blink animation (and can skip the timer
     /// when nothing blinks).
     pub has_blink: bool,
+    /// Kitty graphics placements visible in this viewport, sorted by
+    /// `(z, image_id)` — Ghostty's draw order. Rebuilt on **every** snapshot,
+    /// including ones that take the "nothing changed" fast path.
+    pub images: Vec<ImagePlacement>,
+}
+
+/// Decoded pixels for one kitty graphics image, always straight-alpha RGBA8.
+///
+/// The VT engine lends image data only until the next terminal write, while a
+/// [`GridSnapshot`] is an owned value cloned per pane and uploaded to the GPU
+/// from a *later* frame. So pixels are copied out during the borrow — once per
+/// image id, not per frame — and shared by [`Arc`] from there on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImageData {
+    pub width: u32,
+    pub height: u32,
+    /// `width * height * 4` bytes, straight (non-premultiplied) alpha.
+    pub rgba: Vec<u8>,
+}
+
+/// One kitty graphics placement, positioned relative to the **viewport**.
+#[derive(Clone, Debug)]
+pub struct ImagePlacement {
+    pub image_id: u32,
+    pub placement_id: u32,
+    /// Shared with every other placement and snapshot referencing this image id.
+    /// The renderer keys its texture cache on `Arc::ptr_eq` against this, which
+    /// is how it notices a *re-transmit* — the VT engine exposes no generation
+    /// counter or transmit timestamp.
+    pub data: Arc<ImageData>,
+    /// Viewport-relative top-left cell. `row` is signed because a placement's
+    /// origin can scroll above the viewport top while part of it is still shown.
+    pub col: i32,
+    pub row: i32,
+    /// Cells the placement spans.
+    pub grid_cols: u32,
+    pub grid_rows: u32,
+    /// Pixel offset within the origin cell (kitty `X=` / `Y=`).
+    pub x_offset: u32,
+    pub y_offset: u32,
+    /// Destination size in pixels, already resolved for the source rect, any
+    /// `c=`/`r=` cell span, and aspect ratio by the VT engine.
+    pub dest_w: u32,
+    pub dest_h: u32,
+    /// Source rectangle in image pixels, already clamped to the image bounds.
+    pub src_x: u32,
+    pub src_y: u32,
+    pub src_w: u32,
+    pub src_h: u32,
+    /// Kitty z-index: `< 0` draws under text, `>= 0` over it (see
+    /// `crate::render::image_layer`).
+    pub z: i32,
+    /// The engine's own visibility verdict, computed against the engine's
+    /// viewport. The renderer widens it by a row while smooth-scrolling.
+    pub visible: bool,
 }
 
 impl GridSnapshot {
@@ -354,6 +412,16 @@ pub trait TerminalEngine {
     /// Set the bold-text foreground policy (Ghostty `bold-color` /
     /// `bold-is-bright`). Applied while building each snapshot's cell colors.
     fn set_bold_color(&mut self, bold: BoldColor) -> Result<()>;
+
+    /// Set the kitty-graphics image storage limit in bytes (Ghostty
+    /// `image-storage-limit`).
+    ///
+    /// **Zero disables the protocol entirely and deletes every stored image** —
+    /// and zero is where libghostty starts, so inline images do not work at all
+    /// until this is called. Engines without image support ignore it.
+    fn set_image_storage_limit(&mut self, _bytes: u64) -> Result<()> {
+        Ok(())
+    }
 
     /// Set the minimum foreground/background contrast ratio (WCAG; Ghostty
     /// `minimum-contrast`, in `1.0..=21.0`; `1.0` disables it). When a cell's

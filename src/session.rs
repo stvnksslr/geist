@@ -144,6 +144,9 @@ impl Session {
         engine.set_cursor_color(config.cursor)?;
         engine.set_bold_color(config.bold_color)?;
         engine.set_min_contrast(config.min_contrast)?;
+        // Kitty graphics start disabled in libghostty, so this is what turns
+        // inline images on at all.
+        engine.set_image_storage_limit(config.image_storage_limit as u64)?;
 
         Ok(Self {
             pty,
@@ -504,12 +507,16 @@ impl Session {
     /// "Reload Config"): the color theme, cursor color/style, bold-color policy,
     /// and minimum-contrast. The next frame's snapshot picks up the new values.
     /// `scrollback-limit` is fixed at engine creation and is intentionally *not*
-    /// changed here.
+    /// changed here — but `image-storage-limit` genuinely is re-appliable, and
+    /// setting it to zero wipes every stored image live.
     pub fn apply_config(&mut self, config: &Config) {
         let _ = self.engine.apply_theme(config.fg, config.bg, &config.palette);
         let _ = self.engine.set_cursor_color(config.cursor);
         let _ = self.engine.set_bold_color(config.bold_color);
         let _ = self.engine.set_min_contrast(config.min_contrast);
+        let _ = self
+            .engine
+            .set_image_storage_limit(config.image_storage_limit as u64);
         self.cursor_style = config.cursor_style;
         self.cursor_style_blink = config.cursor_style_blink;
         // Consulted at pump/resize time rather than per frame, so these need an

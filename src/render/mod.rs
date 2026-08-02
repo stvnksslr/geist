@@ -13,7 +13,7 @@ use eframe::egui_wgpu::{self, CallbackTrait};
 use eframe::wgpu::{self, util::DeviceExt};
 use unicode_width::UnicodeWidthChar;
 
-use crate::engine::{CursorShape, GridSnapshot, Rgb, UnderlineStyle};
+use crate::engine::{CursorShape, GridSnapshot, ImagePlacement, Rgb, UnderlineStyle};
 
 /// The embedded primary (regular) monospace font bytes. Exposed for benches that
 /// measure shaping throughput against the real shaping path (rustybuzz over this
@@ -97,10 +97,15 @@ pub struct GpuResources {
     /// Passed to the shader as its reciprocal each frame.
     text_gamma: f32,
     num_instances: u32,
-    /// Per-pane instance ranges and their clip rect (device px `[x, y, w, h]`),
-    /// so `paint` can scissor each pane independently — needed because smooth
-    /// scrolling overdraws a partial row past the pane's top/bottom edge.
-    pane_ranges: Vec<(Range<u32>, [f32; 4])>,
+    /// Per pane: its clip rect (device px `[x, y, w, h]`) and the span of
+    /// [`Self::draws`] it owns. `paint` sets the scissor once per pane — needed
+    /// because smooth scrolling overdraws a partial row past the pane's edges —
+    /// then issues that pane's draws.
+    pane_ranges: Vec<([f32; 4], Range<usize>)>,
+    /// Flat draw list: an instance range plus the kitty image whose texture must
+    /// be bound for it (`None` = ordinary text/background quads). Flat and
+    /// retained so the per-frame cost is a `clear()` rather than N allocations.
+    draws: Vec<(Range<u32>, Option<u32>)>,
     /// Reusable per-frame scratch buffers. Retained across frames (cleared, not
     /// reallocated) so building the instance list does no per-frame growth
     /// allocation. `scratch_out` also holds the assembled instance list that
@@ -157,6 +162,106 @@ pub struct TermFrame {
     /// `cursor-opacity`: alpha for a *focused* pane's cursor. An unfocused pane's
     /// hollow cursor is always opaque, matching Ghostty.
     pub cursor_opacity: f32,
+}
+
+/// Where a kitty image sits relative to the text and cell backgrounds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ImageLayer {
+    /// Below even the cell backgrounds.
+    BelowBg,
+    /// Between the cell backgrounds and the text.
+    BelowText,
+    /// Over everything, including the cursor.
+    AboveText,
+}
+
+/// Ghostty's kitty z-layer split: `z < i32::MIN/2` draws below the cell
+/// backgrounds, any other negative `z` below the text, and `z >= 0` above it.
+pub(crate) fn image_layer(z: i32) -> ImageLayer {
+    const BG_LIMIT: i32 = i32::MIN / 2; // -1_073_741_824
+    if z < BG_LIMIT {
+        ImageLayer::BelowBg
+    } else if z < 0 {
+        ImageLayer::BelowText
+    } else {
+        ImageLayer::AboveText
+    }
+}
+
+/// Destination rect (device px) for a placement.
+///
+/// `row` is viewport-relative and may be negative when the placement's origin
+/// has scrolled above the viewport top. `shift` is the pane's sub-line
+/// smooth-scroll offset — the **same** term the cell loop adds — so an image and
+/// the text around it move as one unit through a scroll rather than the image
+/// lagging by a fraction of a line. Nothing is clamped here: the pane scissor
+/// does the cropping, which keeps the source mapping correct.
+pub(crate) fn image_rect(
+    origin: [f32; 2],
+    cell: (f32, f32),
+    p: &ImagePlacement,
+    shift: f32,
+) -> [f32; 4] {
+    [
+        origin[0] + p.col as f32 * cell.0 + p.x_offset as f32,
+        origin[1] + p.row as f32 * cell.1 + shift + p.y_offset as f32,
+        p.dest_w as f32,
+        p.dest_h as f32,
+    ]
+}
+
+/// Source rect as normalized UV (`[u_origin, v_origin, u_extent, v_extent]`,
+/// the convention the mode-agnostic vertex stage expects).
+///
+/// A zero source width/height means "the whole image", matching kitty. Crop and
+/// scale need no shader work at all: the crop is this window, and the scale is
+/// the mismatch between it and the destination rect, resolved by the sampler.
+pub(crate) fn image_uv(p: &ImagePlacement) -> [f32; 4] {
+    let (iw, ih) = (p.data.width.max(1) as f32, p.data.height.max(1) as f32);
+    let w = if p.src_w == 0 { iw } else { p.src_w as f32 };
+    let h = if p.src_h == 0 { ih } else { p.src_h as f32 };
+    [p.src_x as f32 / iw, p.src_y as f32 / ih, w / iw, h / ih]
+}
+
+/// Whether a placement should be emitted this frame.
+///
+/// The engine's own `visible` flag is computed against the *engine's* viewport,
+/// which during a smooth scroll sits one line above what's actually on screen.
+/// While `shift > 0` the row above the viewport is partly visible (it's where
+/// `over_row` is drawn), so a placement ending on that row must still be drawn
+/// or it pops out for the length of the animation.
+pub(crate) fn image_visible(row: i32, grid_rows: u32, rows: u16, over: bool) -> bool {
+    let top = if over { -1 } else { 0 };
+    let bottom = row + grid_rows.max(1) as i32;
+    bottom > top && row < rows as i32
+}
+
+/// Split a pane's contiguous instance range into draw calls at image
+/// boundaries. `images` is `(instance_index, image_id)` in ascending order.
+///
+/// Pure because this is the part that silently drops or double-draws instances
+/// when it's wrong, and that is invisible in a screenshot. The invariant its
+/// tests assert: the emitted ranges concatenate to exactly `pane`, with no gaps
+/// and no overlaps.
+pub(crate) fn split_draws(
+    pane: Range<u32>,
+    images: &[(u32, u32)],
+    out: &mut Vec<(Range<u32>, Option<u32>)>,
+) {
+    let mut at = pane.start;
+    for &(idx, id) in images {
+        if idx < at || idx >= pane.end {
+            continue;
+        }
+        if idx > at {
+            out.push((at..idx, None));
+        }
+        out.push((idx..idx + 1, Some(id)));
+        at = idx + 1;
+    }
+    if at < pane.end {
+        out.push((at..pane.end, None));
+    }
 }
 
 /// Background alpha for one cell, mirroring Ghostty's decision table
@@ -439,6 +544,7 @@ pub fn build_resources(
         text_gamma,
         num_instances: 0,
         pane_ranges: Vec::new(),
+        draws: Vec::new(),
         scratch_out: Vec::new(),
         scratch_glyphs: Vec::new(),
         scratch_cursors: Vec::new(),
@@ -530,8 +636,13 @@ impl GpuResources {
         let mut runs = std::mem::take(&mut self.scratch_runs);
         let mut shaped = std::mem::take(&mut self.scratch_shaped);
         let mut ranges = std::mem::take(&mut self.pane_ranges);
+        let mut draws = std::mem::take(&mut self.draws);
         out.clear();
         ranges.clear();
+        draws.clear();
+        // (instance index, image id) for this pane's image quads, in emission
+        // order — `split_draws` turns it into the pane's draw list.
+        let mut pane_images: Vec<(u32, u32)> = Vec::new();
 
         for pane in &frame.panes {
             // Per pane, emit background → glyphs/decorations → non-block cursor,
@@ -539,6 +650,7 @@ impl GpuResources {
             let pane_start = out.len() as u32;
             glyphs.clear();
             cursors.clear();
+            pane_images.clear();
 
             let snap = &pane.snapshot;
             let [ox, oy] = pane.origin_px;
@@ -556,6 +668,37 @@ impl GpuResources {
                     snap.cell(x, y as u16)
                 }
             };
+
+            // Kitty images for one z-layer. There is no depth buffer, so **draw
+            // order is z order** — emitting these at the right three points in
+            // the pane's instance stream is the entire z implementation.
+            // `snap.images` arrives sorted by (z, image_id), so each layer is a
+            // contiguous run and the within-layer order is already right.
+            let emit_images = |layer: ImageLayer,
+                                   out: &mut Vec<Instance>,
+                                   pane_images: &mut Vec<(u32, u32)>| {
+                for p in snap.images.iter().filter(|p| image_layer(p.z) == layer) {
+                    if !image_visible(p.row, p.grid_rows, snap.rows, has_over) {
+                        continue;
+                    }
+                    pane_images.push((out.len() as u32, p.image_id));
+                    // Placeholder geometry proving the placement math. The `uv`
+                    // is already the real source crop (mode 0 ignores it), so
+                    // adding image textures is a change of `mode` and `color`
+                    // only — the geometry below is what ships.
+                    out.push(Instance {
+                        rect: image_rect([ox, oy], (cw, ch), p, shift),
+                        uv: image_uv(p),
+                        color: [1.0, 0.0, 1.0, 0.5],
+                        mode: 0,
+                        param: 0,
+                        _pad: [0; 2],
+                    });
+                }
+            };
+
+            // Below the cell backgrounds (kitty z < i32::MIN/2).
+            emit_images(ImageLayer::BelowBg, &mut out, &mut pane_images);
 
             // A filled block inverts the cell under it; a hollow block (set by
             // DECSCUSR, or applied when the pane/window is unfocused) draws an
@@ -870,12 +1013,26 @@ impl GpuResources {
                 cursors.push(Instance::solid(rect, cur_color));
             }
 
-            // Append this pane's glyphs then cursors after its backgrounds, and
-            // record the contiguous range with its clip rect (the grid box).
+            // At this point `out` holds exactly this pane's cell backgrounds
+            // (decorations and glyphs went to the `glyphs` scratch), so this is
+            // where a kitty image with negative z belongs: over the backgrounds,
+            // under the text.
+            emit_images(ImageLayer::BelowText, &mut out, &mut pane_images);
+
+            // Append this pane's glyphs then cursors after its backgrounds.
             out.append(&mut glyphs);
             out.append(&mut cursors);
+
+            // Non-negative z draws over everything, the cursor included — which
+            // is also where Ghostty puts it.
+            emit_images(ImageLayer::AboveText, &mut out, &mut pane_images);
+
+            // Record the pane's clip rect (the grid box) and split its
+            // contiguous instance range into draws at the image boundaries.
             let clip = [ox, oy, snap.cols as f32 * cw, snap.rows as f32 * ch];
-            ranges.push((pane_start..out.len() as u32, clip));
+            let first_draw = draws.len();
+            split_draws(pane_start..out.len() as u32, &pane_images, &mut draws);
+            ranges.push((clip, first_draw..draws.len()));
         }
 
         // Return the scratch (now reusable, with retained capacity) to `self`.
@@ -886,6 +1043,7 @@ impl GpuResources {
         self.scratch_runs = runs;
         self.scratch_shaped = shaped;
         self.pane_ranges = ranges;
+        self.draws = draws;
     }
 }
 
@@ -953,7 +1111,7 @@ impl CallbackTrait for TermFrame {
         let (ex0, ey0) = (egui_clip.left_px, egui_clip.top_px);
         let (ex1, ey1) = (ex0 + egui_clip.width_px, ey0 + egui_clip.height_px);
 
-        for (range, clip) in &res.pane_ranges {
+        for (clip, span) in &res.pane_ranges {
             // Intersect the pane's grid box with egui's clip; skip if empty.
             let px0 = clip[0].round() as i32;
             let py0 = clip[1].round() as i32;
@@ -967,7 +1125,13 @@ impl CallbackTrait for TermFrame {
                 continue;
             }
             render_pass.set_scissor_rect(x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32);
-            render_pass.draw_indexed(0..QUAD_INDICES.len() as u32, 0, range.clone());
+            // One scissor per pane, then that pane's draws. A kitty image is its
+            // own single-instance draw so its texture can be bound for it alone;
+            // everything else batches as before. The scissor is what crops an
+            // image at the pane edge, for free and at pixel precision.
+            for (range, _image) in &res.draws[span.clone()] {
+                render_pass.draw_indexed(0..QUAD_INDICES.len() as u32, 0, range.clone());
+            }
         }
     }
 }
@@ -1046,8 +1210,129 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{bg_alpha, build_search_mask};
+    use super::{ImageLayer, bg_alpha, build_search_mask, image_layer, image_rect, image_uv, image_visible, split_draws};
+    use crate::engine::ImagePlacement;
     use crate::search::SearchHighlight;
+
+    fn placement(col: i32, row: i32) -> ImagePlacement {
+        ImagePlacement {
+            image_id: 1,
+            placement_id: 1,
+            data: std::sync::Arc::new(crate::engine::ImageData {
+                width: 100,
+                height: 50,
+                rgba: vec![0; 100 * 50 * 4],
+            }),
+            col,
+            row,
+            grid_cols: 4,
+            grid_rows: 2,
+            x_offset: 0,
+            y_offset: 0,
+            dest_w: 40,
+            dest_h: 40,
+            src_x: 0,
+            src_y: 0,
+            src_w: 0,
+            src_h: 0,
+            z: 0,
+            visible: true,
+        }
+    }
+
+    #[test]
+    fn image_layer_matches_ghostty_thresholds() {
+        assert_eq!(image_layer(i32::MIN), ImageLayer::BelowBg);
+        assert_eq!(image_layer(i32::MIN / 2 - 1), ImageLayer::BelowBg);
+        // The boundary itself is *not* below the background.
+        assert_eq!(image_layer(i32::MIN / 2), ImageLayer::BelowText);
+        assert_eq!(image_layer(-1), ImageLayer::BelowText);
+        assert_eq!(image_layer(0), ImageLayer::AboveText);
+        assert_eq!(image_layer(i32::MAX), ImageLayer::AboveText);
+    }
+
+    #[test]
+    fn image_rect_places_at_cell_plus_offset_and_scroll() {
+        let mut p = placement(3, 2);
+        let r = image_rect([100.0, 50.0], (10.0, 20.0), &p, 0.0);
+        assert_eq!(r, [130.0, 90.0, 40.0, 40.0]);
+
+        // Cell pixel offsets (kitty X=/Y=) shift within the origin cell.
+        p.x_offset = 4;
+        p.y_offset = 7;
+        assert_eq!(image_rect([100.0, 50.0], (10.0, 20.0), &p, 0.0), [134.0, 97.0, 40.0, 40.0]);
+
+        // The smooth-scroll shift moves images exactly like the text.
+        assert_eq!(image_rect([100.0, 50.0], (10.0, 20.0), &p, 6.0), [134.0, 103.0, 40.0, 40.0]);
+
+        // A negative row (origin scrolled above the viewport) is legal.
+        let p = placement(0, -1);
+        assert_eq!(image_rect([0.0, 0.0], (10.0, 20.0), &p, 0.0), [0.0, -20.0, 40.0, 40.0]);
+    }
+
+    #[test]
+    fn image_uv_is_the_source_rect_normalized() {
+        // A zero source size means "the whole image".
+        let p = placement(0, 0);
+        assert_eq!(image_uv(&p), [0.0, 0.0, 1.0, 1.0]);
+
+        let mut p = placement(0, 0);
+        p.src_x = 25;
+        p.src_y = 10;
+        p.src_w = 50;
+        p.src_h = 25;
+        assert_eq!(image_uv(&p), [0.25, 0.2, 0.5, 0.5]);
+    }
+
+    #[test]
+    fn image_visible_allows_one_row_of_overscroll() {
+        // Fully on screen.
+        assert!(image_visible(0, 2, 24, false));
+        // Fully above: the bottom edge is at row 0, i.e. off the top.
+        assert!(!image_visible(-2, 2, 24, false));
+        // …but while smooth-scrolling, that same row is partly on screen.
+        assert!(image_visible(-2, 2, 24, true));
+        // Fully below.
+        assert!(!image_visible(24, 2, 24, false));
+        assert!(image_visible(23, 2, 24, false));
+    }
+
+    #[test]
+    fn split_draws_covers_the_whole_pane_range() {
+        let check = |images: &[(u32, u32)]| {
+            let mut out = Vec::new();
+            split_draws(10..20, images, &mut out);
+            // The emitted ranges must tile the pane exactly.
+            let mut at = 10;
+            for (r, _) in &out {
+                assert_eq!(r.start, at, "gap or overlap in {out:?}");
+                assert!(r.end > r.start);
+                at = r.end;
+            }
+            assert_eq!(at, 20, "did not reach the end in {out:?}");
+            out
+        };
+
+        // No images: one plain draw.
+        assert_eq!(check(&[]), vec![(10..20, None)]);
+        // One in the middle: text, image, text.
+        assert_eq!(
+            check(&[(14, 7)]),
+            vec![(10..14, None), (14..15, Some(7)), (15..20, None)]
+        );
+        // At the very start and the very end — no empty leading/trailing range.
+        assert_eq!(
+            check(&[(10, 1), (19, 2)]),
+            vec![(10..11, Some(1)), (11..19, None), (19..20, Some(2))]
+        );
+        // Adjacent images produce no zero-length range between them.
+        assert_eq!(
+            check(&[(12, 1), (13, 2)]),
+            vec![(10..12, None), (12..13, Some(1)), (13..14, Some(2)), (14..20, None)]
+        );
+        // Out-of-range entries are ignored rather than corrupting the tiling.
+        assert_eq!(check(&[(3, 9), (99, 9)]), vec![(10..20, None)]);
+    }
 
     #[test]
     fn bg_alpha_matches_ghostty_table() {

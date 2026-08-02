@@ -37,6 +37,10 @@ percent-encoding = "2"
 # Unicode display width (1 or 2 cells) for a grapheme cluster's leading char, so
 # the renderer can size/centre wide glyphs (CJK, emoji) over their full cell span.
 unicode-width = "0.2"
+# PNG decoding for the kitty graphics protocol (`f=100`, what icat and most
+# tools send). libghostty parses the protocol but leaves decoding to a hook that
+# is unset by default; see src/engine/png_decode.rs.
+png = "0.18"
 # DWM window-composition APIs for `background-blur` (the Windows acrylic/mica
 # backdrop; see src/blur.rs). Already in the tree via winit/wgpu, so this unifies
 # with the existing pin rather than adding a build.

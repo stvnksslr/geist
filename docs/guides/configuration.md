@@ -60,6 +60,18 @@ palette = 8=#666a73
 | `middle-click-action` | enum | `primary-paste` (default) pastes the clipboard; `ignore` does nothing. Windows has no primary selection, so this reads the system clipboard. |
 | `palette` | repeated `<index>=#rrggbb` | Override individual 256-color palette entries; everything else keeps the bundled theme. |
 
+### Inline images (kitty graphics)
+
+| Key | Type | Notes |
+| --- | --- | --- |
+| `image-storage-limit` | int (default `320000000`) | Bytes of image data retained per terminal screen. **Zero disables the image protocols and deletes everything stored.** Per screen, so the effective budget per pane is double. |
+
+⚠️ **Inline images do not currently work on Windows.** ConPTY re-renders the shell's output rather
+than passing it through, and drops the APC escape sequences the kitty protocol uses, so no image
+command reaches the terminal. This affects every Windows terminal, not just giest. giest's engine
+and rendering support is built and tested and will work once the PTY layer can deliver APC — see
+GAP.md for the detail.
+
 ### Windows and working-directory inheritance
 
 | Key | Type | Notes |

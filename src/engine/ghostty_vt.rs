@@ -1,9 +1,12 @@
 //! [`TerminalEngine`] backed by libghostty-vt (the primary backend).
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use anyhow::Result;
+use libghostty_vt::kitty::graphics::{Compression, ImageFormat, PlacementIterator};
 use libghostty_vt::key::{Action, Encoder, Event, Key, Mods};
 use libghostty_vt::mouse;
 use libghostty_vt::paste;
@@ -14,8 +17,8 @@ use libghostty_vt::terminal::{Mode, Point, PointCoordinate, PointSpace, ScrollVi
 use libghostty_vt::{RenderState, Terminal, TerminalOptions};
 
 use super::{
-    BoldColor, Cell, CursorShape, GridSnapshot, KeyCode, KeyInput, MouseAction, MouseButton,
-    MouseInput, Rgb, TerminalEngine, UnderlineStyle,
+    BoldColor, Cell, CursorShape, GridSnapshot, ImageData, ImagePlacement, KeyCode, KeyInput,
+    MouseAction, MouseButton, MouseInput, Rgb, TerminalEngine, UnderlineStyle,
 };
 
 /// Shared sink for bytes libghostty wants written back to the PTY. The
@@ -47,10 +50,26 @@ pub struct GhosttyVtEngine {
     bold_color: BoldColor,
     /// Minimum fg/bg contrast ratio (Ghostty `minimum-contrast`); `1.0` = off.
     min_contrast: f32,
+    /// Reusable kitty-graphics placement iterator. Owned, with a `Drop` that
+    /// frees the FFI object, so it's allocated once like `rows_buf`/`cells_buf`
+    /// rather than per snapshot.
+    placements: PlacementIterator<'static>,
+    /// Copied image pixels, keyed by kitty image id. The copy out of the VT
+    /// engine's storage happens **once per id**, not per frame; later snapshots
+    /// just clone an `Arc`. Entries are evicted by *absence* from the placement
+    /// walk — the binding exposes neither image enumeration nor any delete
+    /// notification, so absence is the only signal available.
+    image_cache: HashMap<u32, Arc<ImageData>>,
+    /// Retained scratch: image ids seen during this frame's walk, for eviction.
+    image_ids_seen: Vec<u32>,
 }
 
 impl GhosttyVtEngine {
     pub fn new(cols: u16, rows: u16, max_scrollback: usize) -> Result<Self> {
+        // Kitty `f=100` (PNG) transmissions are rejected until a decoder is
+        // installed on *this* thread; see `png_decode::install`.
+        super::png_decode::install();
+
         let mut term = Terminal::new(TerminalOptions {
             cols,
             rows,
@@ -83,8 +102,179 @@ impl GhosttyVtEngine {
             viewport_moved: false,
             bold_color: BoldColor::None,
             min_contrast: 1.0,
+            placements: PlacementIterator::new()?,
+            image_cache: HashMap::new(),
+            image_ids_seen: Vec::new(),
         })
     }
+}
+
+/// Expand the VT engine's stored pixel data to straight-alpha RGBA8.
+///
+/// Only four formats can actually arrive here: libghostty decompresses zlib and
+/// decodes PNG at *load* time and rewrites the metadata accordingly
+/// (`compression = none`, `format = rgba`), and it validates `len == w*h*bpp`
+/// before storing. The length checks below are therefore belt-and-braces, and
+/// `Png`/compressed data are rejected rather than trusted. Both enums are
+/// `#[non_exhaustive]`, so the wildcard also future-proofs.
+fn to_rgba(fmt: ImageFormat, comp: Compression, w: u32, h: u32, src: &[u8]) -> Option<Vec<u8>> {
+    if comp != Compression::None {
+        return None;
+    }
+    // A 10000x10000 image is 400 MB; `u32` intermediates would wrap.
+    let px = (w as u64).checked_mul(h as u64)?;
+    let out_len = usize::try_from(px.checked_mul(4)?).ok()?;
+    let mut out = Vec::new();
+    match fmt {
+        ImageFormat::Rgba => {
+            if src.len() as u64 != px * 4 {
+                return None;
+            }
+            out.extend_from_slice(src);
+        }
+        ImageFormat::Rgb => {
+            if src.len() as u64 != px * 3 {
+                return None;
+            }
+            out.reserve_exact(out_len);
+            for c in src.chunks_exact(3) {
+                out.extend_from_slice(&[c[0], c[1], c[2], 0xff]);
+            }
+        }
+        ImageFormat::Gray => {
+            if src.len() as u64 != px {
+                return None;
+            }
+            out.reserve_exact(out_len);
+            for &g in src {
+                out.extend_from_slice(&[g, g, g, 0xff]);
+            }
+        }
+        ImageFormat::GrayAlpha => {
+            if src.len() as u64 != px * 2 {
+                return None;
+            }
+            out.reserve_exact(out_len);
+            for c in src.chunks_exact(2) {
+                out.extend_from_slice(&[c[0], c[0], c[0], c[1]]);
+            }
+        }
+        // `Png` never reaches storage (it's decoded to RGBA on load), and the
+        // enum is non-exhaustive.
+        _ => return None,
+    }
+    Some(out)
+}
+
+/// Drop cached image pixels for ids that no longer appear in any placement.
+///
+/// Eviction by absence is the only strategy the VT engine's API supports: it
+/// exposes no way to enumerate stored images and no delete notification.
+fn evict_absent(cache: &mut HashMap<u32, Arc<ImageData>>, seen: &[u32]) {
+    if cache.len() > seen.len() {
+        cache.retain(|id, _| seen.contains(id));
+    }
+}
+
+/// Rebuild `out` from the terminal's kitty image storage, copying any image
+/// pixels not already in `cache`.
+///
+/// Takes `term: &Terminal` **deliberately**. `PlacementIterator::update` returns
+/// an iteration whose lifetime is tied to the *iterator*, not to the `Graphics`
+/// handle — so nothing in the type system stops a `vt_write` mid-walk from
+/// invalidating every pointer the iteration holds, and `Image::data()` hands out
+/// a slice straight into that storage. Holding a shared borrow of the terminal
+/// across this whole body makes such a write a **compile error** instead of
+/// undefined behaviour. Do not "simplify" this into a `&mut self` method.
+fn walk_placements(
+    term: &Terminal<'static, 'static>,
+    iter: &mut PlacementIterator<'static>,
+    cache: &mut HashMap<u32, Arc<ImageData>>,
+    seen: &mut Vec<u32>,
+    out: &mut Vec<ImagePlacement>,
+) -> Result<()> {
+    out.clear();
+    seen.clear();
+    // Fails when the protocol is disabled (a zero storage limit); that must
+    // clear the placements rather than propagate.
+    let Ok(graphics) = term.kitty_graphics() else {
+        cache.clear();
+        return Ok(());
+    };
+
+    // One pass with the default `All` layer: filtering per layer would lose the
+    // intra-layer ordering, which comes from the (z, image_id) sort below.
+    let mut it = iter.update(&graphics)?;
+    while let Some(p) = it.next() {
+        // Virtual (unicode-placeholder) placements can't be resolved through the
+        // binding — `viewport_pos` returns `None` for them — so skip them.
+        if p.is_virtual().unwrap_or(false) {
+            continue;
+        }
+        let Ok(image_id) = p.image_id() else { continue };
+        let Some(image) = graphics.image(image_id) else {
+            continue;
+        };
+        let Ok(info) = p.placement_render_info(&image, term) else {
+            continue;
+        };
+        // A zero-size placement would later mean a zero-size texture, which is a
+        // wgpu validation error.
+        if info.pixel_width == 0 || info.pixel_height == 0 {
+            continue;
+        }
+
+        let (Ok(w), Ok(h)) = (image.width(), image.height()) else {
+            continue;
+        };
+        let expected = (w as u64).saturating_mul(h as u64).saturating_mul(4);
+        let data = match cache.get(&image_id) {
+            // Cheap fingerprint: the binding exposes no transmit timestamp, so a
+            // re-transmit at identical dimensions is indistinguishable.
+            Some(d) if d.width == w && d.height == h && d.rgba.len() as u64 == expected => {
+                d.clone()
+            }
+            _ => {
+                let (Ok(fmt), Ok(comp), Ok(bytes)) =
+                    (image.format(), image.compression(), image.data())
+                else {
+                    continue;
+                };
+                let Some(rgba) = to_rgba(fmt, comp, w, h, bytes) else {
+                    continue;
+                };
+                let d = Arc::new(ImageData { width: w, height: h, rgba });
+                cache.insert(image_id, d.clone());
+                d
+            }
+        };
+
+        seen.push(image_id);
+        out.push(ImagePlacement {
+            image_id,
+            placement_id: p.placement_id().unwrap_or(0),
+            data,
+            col: info.viewport_col,
+            row: info.viewport_row,
+            grid_cols: info.grid_cols,
+            grid_rows: info.grid_rows,
+            x_offset: p.x_offset().unwrap_or(0),
+            y_offset: p.y_offset().unwrap_or(0),
+            dest_w: info.pixel_width,
+            dest_h: info.pixel_height,
+            src_x: info.source_x,
+            src_y: info.source_y,
+            src_w: info.source_width,
+            src_h: info.source_height,
+            z: p.z().unwrap_or(0),
+            visible: info.viewport_visible,
+        });
+    }
+    drop(it);
+    // Ghostty's draw order: ascending z, ties broken by image id.
+    out.sort_by_key(|p| (p.z, p.image_id));
+    evict_absent(cache, seen);
+    Ok(())
 }
 
 fn map_key(code: KeyCode) -> Key {
@@ -169,11 +359,13 @@ fn map_key(code: KeyCode) -> Key {
 
 #[cfg(test)]
 mod tests {
-    use super::GhosttyVtEngine;
+    use super::{Compression, GhosttyVtEngine, ImageFormat, to_rgba};
     use crate::engine::{
         GridSnapshot, KeyCode, KeyInput, KeyMods, MouseAction, MouseButton, MouseInput, Rgb,
         TerminalEngine, UnderlineStyle,
     };
+    use std::collections::HashMap;
+    use std::sync::Arc;
 
     #[test]
     fn apply_theme_sets_default_colors() {
@@ -360,6 +552,163 @@ mod tests {
         eng.set_min_contrast(21.0).unwrap();
         eng.write(b"\x1b[2J\x1b[HX");
         assert_eq!(snap(&mut eng).cell(0, 0).unwrap().fg, Rgb::new(255, 255, 255));
+    }
+
+    /// An engine sized for kitty tests. `pixelSize` recovers the cell size by
+    /// dividing `width_px / cols`, so an engine that was never resized reports a
+    /// 0x0 cell and every `c=`/`r=` placement comes out zero-sized.
+    fn kitty_engine() -> GhosttyVtEngine {
+        let mut eng = GhosttyVtEngine::new(80, 24, 100).unwrap();
+        eng.set_image_storage_limit(64 * 1024 * 1024).unwrap();
+        eng.resize(80, 24, (10, 20)).unwrap();
+        eng
+    }
+
+    /// `a=T` transmit+display, `t=d` direct, `f=24` RGB, 1x2 px (6 bytes), shown
+    /// across 4x2 cells. The payload is base64 of six 0xFF bytes.
+    const KITTY_RGB_1X2: &[u8] = b"\x1b_Ga=T,t=d,f=24,i=1,p=1,s=1,v=2,c=4,r=2;////////\x1b\\";
+
+    #[test]
+    fn rgb_expands_to_opaque_rgba() {
+        let src = [1, 2, 3, 4, 5, 6];
+        let got = to_rgba(ImageFormat::Rgb, Compression::None, 2, 1, &src).unwrap();
+        assert_eq!(got, vec![1, 2, 3, 0xff, 4, 5, 6, 0xff]);
+    }
+
+    #[test]
+    fn gray_and_gray_alpha_expand_to_rgba() {
+        let got = to_rgba(ImageFormat::Gray, Compression::None, 2, 1, &[9, 200]).unwrap();
+        assert_eq!(got, vec![9, 9, 9, 0xff, 200, 200, 200, 0xff]);
+        let got = to_rgba(ImageFormat::GrayAlpha, Compression::None, 1, 1, &[9, 128]).unwrap();
+        assert_eq!(got, vec![9, 9, 9, 128]);
+    }
+
+    #[test]
+    fn rgba_is_copied_and_wrong_length_rejected() {
+        let src = [1, 2, 3, 4];
+        assert_eq!(
+            to_rgba(ImageFormat::Rgba, Compression::None, 1, 1, &src).unwrap(),
+            src.to_vec()
+        );
+        // One byte short for a 1x1 RGBA image.
+        assert!(to_rgba(ImageFormat::Rgba, Compression::None, 1, 1, &src[..3]).is_none());
+        // Dimensions that don't match the buffer at all.
+        assert!(to_rgba(ImageFormat::Rgb, Compression::None, 100, 100, &src).is_none());
+    }
+
+    #[test]
+    fn png_and_compressed_data_are_rejected() {
+        // Both are resolved by the VT engine before storage, so reaching here
+        // means something is wrong; refuse rather than misinterpret the bytes.
+        assert!(to_rgba(ImageFormat::Png, Compression::None, 1, 1, &[0; 4]).is_none());
+        assert!(
+            to_rgba(ImageFormat::Rgba, Compression::ZlibDeflate, 1, 1, &[0; 4]).is_none()
+        );
+    }
+
+    #[test]
+    fn image_storage_limit_of_zero_disables_the_protocol() {
+        // libghostty does NOT start at zero — the library default is a small
+        // non-zero limit (10 MB), so kitty graphics are live before giest sets
+        // anything. What `image-storage-limit` really controls is the budget,
+        // and specifically that **zero turns the protocol off and wipes stored
+        // images**, which is the behaviour worth pinning.
+        let mut eng = GhosttyVtEngine::new(80, 24, 100).unwrap();
+        eng.resize(80, 24, (10, 20)).unwrap();
+        assert!(
+            eng.term.kitty_image_storage_limit().unwrap() > 0,
+            "libghostty starts with a non-zero default limit"
+        );
+        eng.write(KITTY_RGB_1X2);
+        assert_eq!(snap(&mut eng).images.len(), 1);
+
+        // Zero disables the protocol and deletes everything already stored.
+        eng.set_image_storage_limit(0).unwrap();
+        assert!(snap(&mut eng).images.is_empty(), "zero wipes stored images");
+        eng.write(b"\x1b_Ga=T,t=d,f=24,i=2,p=1,s=1,v=2,c=4,r=2;////////\x1b\\");
+        assert!(snap(&mut eng).images.is_empty(), "zero refuses new images");
+
+        // …and raising it again accepts new transmissions.
+        eng.set_image_storage_limit(64 * 1024 * 1024).unwrap();
+        eng.write(b"\x1b_Ga=T,t=d,f=24,i=3,p=1,s=1,v=2,c=4,r=2;////////\x1b\\");
+        assert_eq!(snap(&mut eng).images.len(), 1, "re-enabled by a new limit");
+    }
+
+    #[test]
+    fn kitty_transmit_and_display_yields_a_placement() {
+        let mut eng = kitty_engine();
+        eng.write(KITTY_RGB_1X2);
+        let s = snap(&mut eng);
+        assert_eq!(s.images.len(), 1);
+        let p = &s.images[0];
+        assert_eq!((p.image_id, p.placement_id), (1, 1));
+        assert_eq!((p.data.width, p.data.height), (1, 2));
+        assert_eq!(p.data.rgba.len(), 1 * 2 * 4, "RGB expanded to RGBA");
+        assert_eq!((p.grid_cols, p.grid_rows), (4, 2));
+        // 4x2 cells at a 10x20 cell size.
+        assert_eq!((p.dest_w, p.dest_h), (40, 40));
+        assert_eq!((p.col, p.row), (0, 0));
+        assert!(p.visible);
+    }
+
+    #[test]
+    fn kitty_delete_clears_placements_without_a_dirty_frame() {
+        // A delete touches only the image storage, whose dirty flag is not part
+        // of the render state's. If placements were refreshed only on a dirty
+        // frame, the deleted image would stay on screen forever.
+        let mut eng = kitty_engine();
+        eng.write(KITTY_RGB_1X2);
+        assert_eq!(snap(&mut eng).images.len(), 1);
+        // Take a second snapshot first, so the dirty-skip fast path is armed.
+        assert_eq!(snap(&mut eng).images.len(), 1);
+
+        eng.write(b"\x1b_Ga=d,d=I,i=1\x1b\\");
+        assert!(snap(&mut eng).images.is_empty(), "delete must take effect");
+    }
+
+    #[test]
+    fn kitty_png_is_decoded_by_the_installed_decoder() {
+        // `f=100` is what icat and most tools send, and libghostty rejects it
+        // outright unless a decoder is installed **on this thread**. This is the
+        // only end-to-end proof that `png_decode::install` ran here — it would
+        // fail immediately if the guard were a `Once` instead of thread-local,
+        // since every test runs on its own thread.
+        let mut eng = kitty_engine();
+        eng.write(
+            b"\x1b_Ga=T,f=100,i=7,p=1,q=1;\
+              iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAA\
+              DUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==\
+              \x1b\\",
+        );
+        let s = snap(&mut eng);
+        assert_eq!(s.images.len(), 1, "PNG rejected — decoder not installed?");
+        let p = &s.images[0];
+        assert_eq!((p.data.width, p.data.height), (1, 1));
+        assert_eq!(p.data.rgba.len(), 4);
+    }
+
+    #[test]
+    fn evict_absent_drops_unseen_ids() {
+        use super::evict_absent;
+        let mk = || Arc::new(crate::engine::ImageData { width: 1, height: 1, rgba: vec![0; 4] });
+        let mut cache = HashMap::from([(1, mk()), (2, mk()), (3, mk())]);
+        evict_absent(&mut cache, &[1, 3]);
+        assert_eq!(cache.len(), 2);
+        assert!(cache.contains_key(&1) && cache.contains_key(&3));
+        // Nothing seen at all clears the cache — that's a deleted-everything frame.
+        evict_absent(&mut cache, &[]);
+        assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn kitty_image_pixels_are_shared_across_snapshots() {
+        // The copy out of the VT engine's storage must happen once per image id,
+        // not once per frame.
+        let mut eng = kitty_engine();
+        eng.write(KITTY_RGB_1X2);
+        let a = snap(&mut eng).images[0].data.clone();
+        let b = snap(&mut eng).images[0].data.clone();
+        assert!(Arc::ptr_eq(&a, &b), "pixels re-copied every frame");
     }
 
     #[test]
@@ -1078,6 +1427,20 @@ impl TerminalEngine for GhosttyVtEngine {
         Ok(())
     }
 
+    fn set_image_storage_limit(&mut self, bytes: u64) -> Result<()> {
+        self.term.set_kitty_image_storage_limit(bytes)?;
+        // Refuse every non-direct transmission medium. `t=s` (shared memory) is
+        // a hard `UnsupportedMedium` on Windows upstream, and `t=f`/`t=t` resolve
+        // paths with posix `realpath`/`unlink` against a hardcoded `/tmp` and
+        // `/dev/shm`. The binding already defaults these off; setting them
+        // explicitly documents the divergence and survives a change to those
+        // defaults.
+        self.term.set_kitty_image_from_file_allowed(false)?;
+        self.term.set_kitty_image_from_temp_file_allowed(false)?;
+        self.term.set_kitty_image_from_shared_mem_allowed(false)?;
+        Ok(())
+    }
+
     fn set_min_contrast(&mut self, ratio: f32) -> Result<()> {
         self.min_contrast = ratio;
         Ok(())
@@ -1307,6 +1670,23 @@ impl TerminalEngine for GhosttyVtEngine {
 
         let cols = snapshot.cols()?;
         let rows = snapshot.rows()?;
+
+        // Kitty placements are refreshed on EVERY snapshot, deliberately ahead
+        // of the dirty-skip below. libghostty's image storage keeps its own dirty
+        // flag that the C API doesn't expose and that isn't part of the render
+        // state's, so a kitty delete or a place-only command can leave the frame
+        // `Clean` — and an image that was just deleted would otherwise stay on
+        // screen forever. This is a handful of FFI reads over 1-10 placements;
+        // the expensive part (the pixel copy) is keyed on image id and skipped
+        // on a hit. Errors are swallowed: a malformed image must never blank the
+        // pane, which is what returning `Err` from here would do.
+        let _ = walk_placements(
+            &self.term,
+            &mut self.placements,
+            &mut self.image_cache,
+            &mut self.image_ids_seen,
+            &mut out.images,
+        );
 
         // Nothing changed since the last snapshot of this same-sized grid: keep
         // the previously-filled cells and skip the O(rows*cols) per-cell FFI

@@ -316,6 +316,15 @@ pub struct Config {
     /// is expressed in bytes; giest's underlying VT engine takes a line count, so
     /// the key name matches but the unit is lines.
     pub scrollback_limit: usize,
+    /// Total bytes of image data (kitty graphics) retained per terminal screen.
+    /// Ghostty `image-storage-limit`.
+    ///
+    /// **Zero disables the image protocols entirely** and deletes everything
+    /// already stored — that is Ghostty's documented behavior, and it is also
+    /// libghostty's starting state, so inline images do not work at all until
+    /// this is applied. The limit is per screen, so the effective budget per
+    /// pane is double (primary + alternate).
+    pub image_storage_limit: u32,
     /// Background color of selected cells. Ghostty `selection-background`.
     pub selection_bg: Rgb,
     /// Text color over a selection; `None` keeps each cell's own foreground.
@@ -395,6 +404,8 @@ impl Default for Config {
             faint_opacity: 0.5,
             background_blur: BackgroundBlur::Off,
             scrollback_limit: 10_000,
+            // Ghostty's default: 320 MB (decimal), per screen.
+            image_storage_limit: 320 * 1000 * 1000,
             selection_bg: Rgb::new(0x38, 0x5a, 0x9c),
             selection_fg: None,
             copy_on_select: false,
@@ -650,6 +661,13 @@ const SETTERS: &[(&str, Setter)] = &[
             c.scrollback_limit = d.scrollback_limit;
         } else if let Ok(n) = v.parse() {
             c.scrollback_limit = n;
+        }
+    }),
+    ("image-storage-limit", |c, v, d| {
+        if v.is_empty() {
+            c.image_storage_limit = d.image_storage_limit;
+        } else if let Ok(n) = v.parse() {
+            c.image_storage_limit = n;
         }
     }),
     ("selection-background", |c, v, d| {
@@ -1198,6 +1216,27 @@ mod tests {
         let c = Config::default();
         assert_eq!(c.scrollback_limit, 10_000);
         assert_eq!(parsed("scrollback-limit = 50000").scrollback_limit, 50_000);
+    }
+
+    #[test]
+    fn image_storage_limit_defaults_to_ghosttys_value() {
+        // Ghostty's default is 320 MB *decimal*, not 320 MiB.
+        assert_eq!(Config::default().image_storage_limit, 320_000_000);
+        assert_eq!(
+            parsed("image-storage-limit = 64000000").image_storage_limit,
+            64_000_000
+        );
+        // Zero is meaningful: it disables the image protocols entirely.
+        assert_eq!(parsed("image-storage-limit = 0").image_storage_limit, 0);
+        // Empty resets; garbage keeps the current value.
+        assert_eq!(
+            parsed("image-storage-limit = 0\nimage-storage-limit =").image_storage_limit,
+            320_000_000
+        );
+        assert_eq!(
+            parsed("image-storage-limit = 0\nimage-storage-limit = lots").image_storage_limit,
+            0
+        );
     }
 
     #[test]

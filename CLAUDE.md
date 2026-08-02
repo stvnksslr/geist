@@ -60,6 +60,10 @@ fallback engine without app changes:
   enabling large `windows-sys` feature modules for three functions.
 - **`osc_color.rs`** — side-scanner answering OSC 10/11/12 color *queries*. The engine already
   applies the set/reset forms; only `?` is dropped upstream.
+- **`engine/png_decode.rs`** — PNG decoding for kitty graphics (`f=100`). libghostty leaves this to a
+  hook that is unset by default. The install guard is **thread-local, not a `Once`**: the binding
+  stores the callback per-thread, so a `Once` would leave every thread but the first without PNG
+  support — including every `cargo test` after the first.
 - **`blur.rs`** — Windows DWM backdrop (acrylic/mica) for `background-blur`: the documented Win11
   `DWMWA_SYSTEMBACKDROP_TYPE`, falling back to the undocumented `SetWindowCompositionAttribute` accent
   policy (resolved via `GetProcAddress`, never linked) on Win10, then to nothing.
@@ -98,6 +102,26 @@ fallback engine without app changes:
   fall back to the default dir. The split's cwd is read in `App::split` and passed through `Session::new`
   → `Pty::spawn` → `CommandBuilder::cwd`.
 
+- **ConPTY silently strips APC sequences — and re-renders everything else.** ConPTY does not pipe a
+  child's output through; it parses the child's VT and emits its *own* stream, dropping sequences it
+  doesn't understand. `ESC _ … ESC \` (APC, used by kitty graphics) never reaches
+  `TerminalEngine::write` at all, while ordinary text and OSC pass fine — so the symptom is "the
+  feature does nothing" with no error anywhere. Before debugging any new escape-sequence support,
+  **confirm the bytes actually arrive** (a temporary probe in `GhosttyVtEngine::write` looking for
+  the prefix takes a minute and saves an afternoon). The fix is
+  `PSEUDOCONSOLE_PASSTHROUGH_MODE` (`0x8`), which portable-pty declares at
+  `src/win/psuedocon.rs:31` under `#[allow(dead_code)]` and never passes (`:83-90` sends only
+  `RESIZE_QUIRK | WIN32_INPUT_MODE`); using it means vendoring and patching portable-pty, and it
+  changes stream handling globally. See GAP.md's kitty-graphics section.
+- **Kitty graphics: the borrow the compiler won't catch for you.**
+  `PlacementIterator::update` returns an iteration whose lifetime is tied to the *iterator*, not to
+  the `Graphics` handle — so nothing stops a `vt_write` mid-walk from invalidating every pointer it
+  holds, and `Image::data()` hands out a slice straight into that storage.
+  `ghostty_vt::walk_placements` is therefore a **free function taking `term: &Terminal`**, which
+  makes such a write a compile error. Do not "simplify" it into a `&mut self` method.
+- **Images must never touch the glyph atlas.** The RGBA atlas is a fixed 2048² shelf that flushes the
+  *entire* cache on overflow, so one 1080p image would evict every cached emoji and stall on
+  re-rasterization. Kitty images get their own textures.
 - **Multi-window: one `RenderState`, immediate viewports, and one mandatory line.** eframe keeps a
   *single* `RenderState` (and so one wgpu device, one `callback_resources`, one glyph atlas) for
   every viewport — `render::init` is once-per-process and `TermFrame` resolves fine in a child
