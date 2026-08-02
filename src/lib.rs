@@ -11,6 +11,7 @@
 //! GUI binary.
 
 pub mod app;
+pub mod blur;
 pub mod command;
 pub mod config;
 pub mod decscusr;

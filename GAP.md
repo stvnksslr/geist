@@ -15,7 +15,7 @@ giest's single per-cell chokepoint (`engine/ghostty_vt.rs::copy_cell`) historica
 
 ---
 
-## Status (updated 2026-06-19)
+## Status (updated 2026-08-01)
 
 **Phase 0 — Foundations: ✅ complete**
 - **P1 — Config registry + themes** ✅ `config.rs` now uses a declarative `SETTERS` key→setter table
@@ -81,8 +81,40 @@ giest's single per-cell chokepoint (`engine/ghostty_vt.rs::copy_cell`) historica
   absolute screen rows so scrollback **eviction** during heavy streaming can drift them until the query is
   re-typed (Ghostty uses tracked pins — a follow-up).*
 
+- **fullscreen / split zoom / tab-inherit-cwd** ✅ (Tier-1 UX cluster) `toggle_fullscreen` (`ctrl+enter`)
+  flips the winit viewport, reading the live fullscreen state back so an OS-driven change doesn't desync.
+  `toggle_split_zoom` (`ctrl+shift+enter`) makes the focused split fill the tab (`Tab::zoomed` + a
+  `Node::collect_leaf` that lays out only that leaf full-area), drawn with a green accent border;
+  navigating to hidden siblings is suppressed and the zoom is dropped when the layout changes (split/close)
+  or the zoomed pane is reaped. `tab-inherit-working-directory` (default true, like Ghostty) makes a new tab
+  start in the focused pane's cwd; `window-inherit-working-directory` is recognized but inert (single-window).
+  All three triggers match Ghostty's defaults.
+
+- **P4 transparency + the opacity cluster** ✅ (the architectural prerequisite, plus everything it
+  unlocked at Tier 1) `background-opacity` / `-cells`, `unfocused-split-opacity` / `-fill`,
+  `cursor-opacity`, `faint-opacity` (0.55 → Ghostty's 0.5), and `background-blur` as a **real Windows
+  DWM acrylic/mica backdrop** (`blur.rs`) — beyond upstream, which has no Windows blur.
+  `engine::Cell` gained `bg_explicit`/`inverse`, so `render::bg_alpha` can mirror Ghostty's per-cell
+  decision table exactly: default-background cells emit **no quad**, letting one translucent window
+  fill show through, while selected / reverse-video / explicitly-colored cells stay opaque. Two silent
+  Windows traps had to be solved and are now recorded in CLAUDE.md: DX12 HWND swapchains are
+  opaque-only (needs `Dx12SwapchainKind::DxgiFromVisual`), and eframe's default clear alpha caps the
+  whole window's transparency. Unfocused-split dimming is an egui overlay at `1 - opacity`, matching
+  Ghostty's apprt rather than its renderer. Opacity values live-reload; *enabling* transparency needs a
+  restart (as on Ghostty/macOS).
+  *Known divergence: Ghostty's `isCovering` rule (full-block glyphs like `█` render opaque under
+  transparency) is not implemented. Deferred: background-image, custom shaders.*
+  A **third** Windows requirement turned up only by running it: the window must be created with
+  `WS_EX_NOREDIRECTIONBITMAP`, which upstream egui-winit never sets and which cannot be added after
+  creation — so `vendor/egui-winit` is now a second vendored-and-patched crate (one-line delta, see
+  CLAUDE.md). Without it the window is a solid grey wash. Transparency is **verified**: over a
+  full-screen green backdrop at `background-opacity = 0.5` the composite reads `R = 0x08`, `B = 0x0c`,
+  exactly `bg*0.5`. *Blur, dimming and the per-cell alpha details still want human eyeballing.*
+
 These ship with unit tests (engine capture, keymap, parser, scan, X11/contrast/blink, font
-feature/discovery, search match/nav/mask, wide-char read) — **155 lib + 24 conformance tests pass**. Adversarial
+feature/discovery, search match/nav/mask, wide-char read, zoom layout/reap, inherit-cwd,
+bg-alpha table/branch-order, opacity parse+clamp, blur grammar, dim alpha) —
+**174 lib + 24 conformance tests pass**. Adversarial
 Ghostty-source reviews confirmed
 parity across these feature areas; the only deliberate divergence is **RIS (`ESC c`)**: giest resets the
 cursor to the configured `cursor-style`, whereas Ghostty resets to a plain block until a config reload
@@ -98,15 +130,16 @@ and a configured `font-family` / `font-feature = -calt`; curly-underline thickne
 OSC 10/11/12 dynamic color set/query. *(OSC 8 hyperlinks, OSC 133 prompts, styled underlines — now done.)*
 
 **Rendering / fonts** — `font-family` fallback *chains* (multiple families) + synthetic bold/italic
-(`font-synthetic-style`); `font-variation`; **background-opacity / transparency**, blur,
-background-image, **custom shaders**; `faint-opacity`; `cursor-opacity`; `adjust-cell-*` metrics;
-box-drawing/powerline/braille sprite synthesis; COLRv1 emoji; unfocused-split dimming.
+(`font-synthetic-style`); `font-variation`; background-image, **custom shaders**; `adjust-cell-*`
+metrics; box-drawing/powerline/braille sprite synthesis; COLRv1 emoji; Ghostty's `isCovering` rule
+(full-block glyphs opaque under transparency).
 *(`font-family` (+bold/italic), `font-feature`/ligature toggle, `minimum-contrast`,
-`bold-is-bright`/`bold-color`, `cursor-style`/`-blink` — now done.)*
+`bold-is-bright`/`bold-color`, `cursor-style`/`-blink`, **transparency + background-opacity**,
+blur (Windows acrylic), `faint-opacity`, `cursor-opacity`, unfocused-split dimming — now done.)*
 
-**Window / UI** — quick (dropdown) terminal w/ global hotkey; fullscreen (native + non-native);
-**split zoom**, equalize, drag-reorder; multi-window; window/tab/split **state restore**; resize overlay;
-titlebar/decoration styles; real scrollbar; settings UI; inspector; about dialog; custom app icons.
+**Window / UI** — quick (dropdown) terminal w/ global hotkey; drag-reorder; multi-window;
+window/tab/split **state restore**; resize overlay; titlebar/decoration styles; real scrollbar;
+settings UI; inspector; about dialog; custom app icons. *(fullscreen toggle + split zoom — now done.)*
 
 **Input / keybinds** — key tables / leader sequences; the remaining ~60 keybind *actions* (write_*_file,
 set_*_title, toggle_*, send raw text/esc/csi, undo/redo, …). *(Config-driven binding + several actions
@@ -115,9 +148,10 @@ are now done.)*
 **Selection / scroll / search** — semantic selection; `adjust_selection`; binding-backed (reflow-correct)
 selection (would also give search cross-wrap matches + drift-free match tracking). *(scrollback search — now done.)*
 
-**Shell integration** — OSC 133 C/D (command output marks → duration, notify-on-command-finish);
-`window/tab/split-inherit-working-directory` for new tabs (today only splits inherit cwd). *(OSC 133 A/B
-prompt marks now injected.)*
+**Shell integration** — OSC 133 C/D (command output marks → duration, notify-on-command-finish).
+*(OSC 133 A/B prompt marks now injected; `tab-inherit-working-directory` now honored — new tabs inherit
+the focused pane's cwd, like splits. `window-inherit-working-directory` is recognized but inert until
+multi-window lands.)*
 
 **Clipboard / security** — `clipboard-read`/`-write` permission prompts, paste-protection confirmation,
 `clipboard-trim-trailing-spaces`; secure-input indicator; readonly mode.
@@ -158,9 +192,12 @@ upstream patch · — pure giest concern.
 - **P3 — Extend `Cell`/`GridSnapshot` (M).** ✅ Done — rich attrs threaded through `copy_cell` + renderer.
 - **P2 — Action/keybind registry (L).** ✅ Done — `keybind.rs` + `Action::name/from_name`, keymap feeds
   both `handle_shortcuts` and `decide_key`.
-- **P4 — Transparent surface + per-cell alpha (M).** ⬜ Pending — request a transparent framebuffer
-  (eframe/winit `with_transparent` + wgpu surface alpha) and add a background-opacity uniform / per-cell
-  alpha to the `fs` shader. *Prerequisite for opacity, blur, background-image, unfocused dimming.*
+- **P4 — Transparent surface + per-cell alpha (M).** ✅ Done — `main.rs` requests a transparent
+  framebuffer (`with_transparent` **+ `Dx12SwapchainKind::DxgiFromVisual`**, without which DX12 is
+  opaque-only) and `App::clear_color` clears to `[0,0,0,0]`; per-cell alpha comes from
+  `render::bg_alpha` on the CPU with the values riding `TermFrame` (so they live-reload), and the
+  emoji shader branch now honors the instance alpha. *Unlocked opacity, blur, unfocused dimming;
+  background-image and custom shaders remain.*
 - **P5 — Multi-window (L).** ⬜ Pending — separate per-window state from shared config + event loop.
   *Prerequisite for new_window, quick terminal, session restore.*
 
@@ -183,13 +220,14 @@ Effort: **S** <1d · **M** 1–3d · **L** ~1wk · **XL** multi-wk. Status: ✅ 
 | font-family/bold/italic | `config.rs`, `render/atlas.rs` | — | M | ✅ (chains/synthesis deferred) |
 | font-feature / ligature toggle | `render/atlas.rs`, `config.rs` | — | S | ✅ |
 | bold-is-bright / bold-color / minimum-contrast | `engine/ghostty_vt.rs`, `config.rs` | ✅ | S–M | ✅ |
-| cursor-style / -blink / -opacity config | `config.rs`, `engine`, `decscusr.rs` | ✅ | S | ◐ (style+blink; opacity needs P4) |
-| **background-opacity** | `main.rs`, `render/mod.rs`, `config.rs` | — | M | ⬜ (needs P4) |
-| Fullscreen toggle | `app.rs`, `command.rs` | — | S | ⬜ |
-| Split zoom + equalize | `app.rs`, `command.rs` | — | M | ⬜ |
+| cursor-style / -blink / -opacity config | `config.rs`, `engine`, `decscusr.rs` | ✅ | S | ✅ |
+| **background-opacity** (+ `-cells`) | `main.rs`, `render/mod.rs`, `config.rs` | — | M | ✅ |
+| faint-opacity | `config.rs`, `render/mod.rs` | ✅ | S | ✅ |
+| Fullscreen toggle | `app.rs`, `command.rs` | — | S | ✅ |
+| Split zoom + equalize | `app.rs`, `command.rs` | — | M | ◐ (zoom done; splits are always 50/50, so equalize is a no-op) |
 | Tab reorder / drag | `app.rs` | — | M | ⬜ |
-| tab/split inherit working-directory | `app.rs`, `session.rs` | ✅ | S | ⬜ |
-| unfocused-split dimming | `render/mod.rs` | — | S | ⬜ (needs P4) |
+| tab/split inherit working-directory | `app.rs`, `session.rs` | ✅ | S | ✅ |
+| unfocused-split dimming (`-opacity`/`-fill`) | `app.rs` | — | S | ✅ (egui overlay, like Ghostty's apprt) |
 | dynamic colors OSC 10/11/12 | side-scan + `apply_theme` | ✋ | S–M | ⬜ |
 | confirm-close-surface | `app.rs` | — | S | ⬜ |
 | resize overlay | `app.rs`/`render` | — | S | ⬜ |
@@ -203,7 +241,7 @@ Effort: **S** <1d · **M** 1–3d · **L** ~1wk · **XL** multi-wk. Status: ✅ 
 | Kitty graphics (inline images) | `engine`, `GridSnapshot`, `render/mod.rs` | ✅ | L–XL | ⬜ |
 | Scrollback search overlay | `search.rs`, `session.rs`, `app.rs`, `engine`, `render` | ✋ | M–L | ✅ (single-row matches; pins deferred) |
 | Custom shaders | `render/mod.rs`, `config.rs` | — | L | ⬜ (needs P4) |
-| background-image / blur | `render/mod.rs`, `main.rs`, `config.rs` | — | M–L | ⬜ (needs P4) |
+| background-image / blur | `render/mod.rs`, `main.rs`, `config.rs` | — | M–L | ◐ (blur ✅ via Windows DWM acrylic/mica, `blur.rs`; background-image ⬜) |
 | Multi-window | `main.rs`, `app.rs` | — | L | ⬜ |
 | Session / window state restore | `app.rs` + persistence module | ◐ | L | ⬜ (needs P5) |
 | Clipboard permission + paste protection | `session.rs`, `app.rs`, `config.rs` | ✋ | M | ⬜ |
@@ -226,9 +264,10 @@ scroll-multiplier · settings UI · inspector. *(all ⬜)*
 With Phase 0 done, the remaining Tier-1 items are mostly small, registry-backed one-liners. Suggested order:
 1. ✅ **cursor-style / bold-is-bright / minimum-contrast** config (binding ✅, rides P1) — *done* (needs eyeballing).
 2. ✅ **font-family / font-feature** (atlas multi-face) — *done* (needs eyeballing; chains/synthesis deferred).
-3. **P4 transparent surface** → **background-opacity** + **unfocused-split dimming** + **cursor-opacity**
-   (a cluster unlocked together).
-4. **fullscreen** + **split zoom** + **tab/split inherit-cwd** — small UX wins via the action registry.
+3. ✅ **P4 transparent surface** → **background-opacity** + **unfocused-split dimming** +
+   **cursor-opacity** + **faint-opacity** + **background-blur** (Windows acrylic) — *done; the whole
+   cluster still needs eyeballing, and transparency can't be self-captured (see CLAUDE.md).*
+4. ✅ **fullscreen** + **split zoom** + **tab inherit-cwd** — *done* (fullscreen/zoom need eyeballing).
 5. Then Tier-2 flagships: scrollback search, kitty graphics, multi-window → quick terminal.
 
 **Verification note (per CLAUDE.md):** `cargo test` covers parser/registry/engine logic; any `render/*`,

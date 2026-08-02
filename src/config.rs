@@ -41,6 +41,39 @@ pub enum MiddleClickAction {
     Ignore,
 }
 
+/// Window backdrop blur behind a translucent background. Ghostty
+/// `background-blur`, whose grammar is `false` | `true` (the default intensity,
+/// 20) | a nonnegative integer intensity | `macos-glass-regular` /
+/// `macos-glass-clear` (macOS 26 glass, which off macOS just implies `true` —
+/// Ghostty's own Linux path does the same).
+///
+/// giest maps this onto the Windows DWM backdrops, which have **no radius knob**,
+/// so the intensity is only a two-bucket selector (mica below 10, acrylic at or
+/// above it) rather than the true Gaussian sigma it is on macOS/KWin.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BackgroundBlur {
+    Off,
+    /// Ghostty's `true` — the default intensity of 20.
+    On,
+    /// An explicit intensity. `Radius(0)` is *disabled*, matching Ghostty.
+    Radius(u8),
+}
+
+impl BackgroundBlur {
+    /// Ghostty's `cval`: the numeric intensity (`true` is 20, `false` is 0).
+    pub fn intensity(self) -> u8 {
+        match self {
+            Self::Off => 0,
+            Self::On => 20,
+            Self::Radius(r) => r,
+        }
+    }
+
+    pub fn enabled(self) -> bool {
+        self.intensity() > 0
+    }
+}
+
 /// User-facing configuration applied at startup.
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -95,6 +128,36 @@ pub struct Config {
     /// Minimum fg/bg contrast ratio (WCAG, `1.0..=21.0`; `1.0` = off). Ghostty
     /// `minimum-contrast`.
     pub min_contrast: f32,
+    /// Window background opacity (`0.0` transparent … `1.0` opaque). Ghostty
+    /// `background-opacity`. Only cells left on the *default* background go
+    /// translucent; see [`Config::background_opacity_cells`].
+    ///
+    /// *Whether the window can be transparent at all is fixed at startup (the
+    /// framebuffer is requested opaque when this is `1.0`), so crossing the `1.0`
+    /// line needs a restart — as it does on Ghostty/macOS. The value itself
+    /// live-reloads.*
+    pub background_opacity: f32,
+    /// Extend `background-opacity` to cells that set their own background color.
+    /// Ghostty `background-opacity-cells` (default false, i.e. programs that
+    /// repaint their background — Neovim, tmux — stay opaque by design).
+    pub background_opacity_cells: bool,
+    /// Opacity of an *unfocused* split, dimmed so the focused one stands out.
+    /// `1.0` disables the effect. Ghostty `unfocused-split-opacity`, including its
+    /// unusual `0.15` floor (fully transparent looks broken, so it is disallowed).
+    pub unfocused_split_opacity: f32,
+    /// Color of the rectangle painted over an unfocused split to dim it; `None`
+    /// uses the pane's background. Ghostty `unfocused-split-fill`.
+    pub unfocused_split_fill: Option<Rgb>,
+    /// Cursor opacity (`0.0`…`1.0`). Ghostty `cursor-opacity`. Applies only to a
+    /// focused pane's solid cursor; an unfocused hollow cursor stays opaque.
+    pub cursor_opacity: f32,
+    /// Opacity of faint/dim (SGR 2) text. Ghostty `faint-opacity`.
+    pub faint_opacity: f32,
+    /// Backdrop blur behind a translucent window. Ghostty `background-blur`; on
+    /// Windows this drives the DWM acrylic/mica backdrop. Has no visible effect
+    /// unless `background-opacity` is below `1.0` — the blur shows *through* the
+    /// window, so there must be something to see through.
+    pub background_blur: BackgroundBlur,
     /// Maximum scrollback *lines* retained per pane. Ghostty's `scrollback-limit`
     /// is expressed in bytes; giest's underlying VT engine takes a line count, so
     /// the key name matches but the unit is lines.
@@ -123,6 +186,10 @@ pub struct Config {
     /// Ghostty `bell-features` — giest currently implements only the visual
     /// feature; the audible bell is a follow-up.
     pub bell_visual: bool,
+    /// Whether a new tab inherits the focused pane's working directory (via OSC
+    /// 7). Ghostty `tab-inherit-working-directory` (default true). Splits always
+    /// inherit (see `split-inherit-working-directory`, also true by default).
+    pub tab_inherit_working_directory: bool,
 }
 
 impl Default for Config {
@@ -145,6 +212,13 @@ impl Default for Config {
             cursor_style_blink: None,
             bold_color: BoldColor::None,
             min_contrast: 1.0,
+            background_opacity: 1.0,
+            background_opacity_cells: false,
+            unfocused_split_opacity: 0.7,
+            unfocused_split_fill: None,
+            cursor_opacity: 1.0,
+            faint_opacity: 0.5,
+            background_blur: BackgroundBlur::Off,
             scrollback_limit: 10_000,
             selection_bg: Rgb::new(0x38, 0x5a, 0x9c),
             selection_fg: None,
@@ -154,6 +228,7 @@ impl Default for Config {
             shell: None,
             keybinds: Vec::new(),
             bell_visual: true,
+            tab_inherit_working_directory: true,
         }
     }
 }
@@ -326,10 +401,46 @@ const SETTERS: &[(&str, Setter)] = &[
         }
     }),
     ("minimum-contrast", |c, v, d| {
-        if v.is_empty() {
-            c.min_contrast = d.min_contrast;
-        } else if let Ok(n) = v.parse::<f32>() {
-            c.min_contrast = n.clamp(1.0, 21.0);
+        c.min_contrast = ratio(v, d.min_contrast, c.min_contrast, 1.0, 21.0)
+    }),
+    ("background-opacity", |c, v, d| {
+        c.background_opacity = ratio(v, d.background_opacity, c.background_opacity, 0.0, 1.0)
+    }),
+    ("background-opacity-cells", |c, v, d| {
+        c.background_opacity_cells = if v.is_empty() {
+            d.background_opacity_cells
+        } else {
+            parse_bool(v, c.background_opacity_cells)
+        }
+    }),
+    ("unfocused-split-opacity", |c, v, d| {
+        // Ghostty's floor is 0.15, not 0: a fully transparent split "looks very
+        // weird", so it clamps up rather than allowing it.
+        c.unfocused_split_opacity =
+            ratio(v, d.unfocused_split_opacity, c.unfocused_split_opacity, 0.15, 1.0)
+    }),
+    ("unfocused-split-fill", |c, v, d| {
+        c.unfocused_split_fill = opt_color(v, d.unfocused_split_fill, c.unfocused_split_fill)
+    }),
+    ("cursor-opacity", |c, v, d| {
+        c.cursor_opacity = ratio(v, d.cursor_opacity, c.cursor_opacity, 0.0, 1.0)
+    }),
+    ("faint-opacity", |c, v, d| {
+        c.faint_opacity = ratio(v, d.faint_opacity, c.faint_opacity, 0.0, 1.0)
+    }),
+    ("background-blur", |c, v, d| {
+        // Ghostty's parse order — bool first, then the macOS glass names, then an
+        // integer intensity. Its `parseBool` accepts only `1`/`t`/`true` (and the
+        // `0`/`f`/`false` forms), so `1` means *true* (intensity 20) and only `2`
+        // and up reach the numeric branch.
+        c.background_blur = match v.to_ascii_lowercase().as_str() {
+            "" => d.background_blur,
+            "1" | "t" | "true" => BackgroundBlur::On,
+            "0" | "f" | "false" => BackgroundBlur::Off,
+            // macOS 26 glass effects: no Windows equivalent, and Ghostty itself
+            // treats them as plain `true` off macOS since both imply some blur.
+            "macos-glass-regular" | "macos-glass-clear" => BackgroundBlur::On,
+            _ => v.parse::<u8>().map(BackgroundBlur::Radius).unwrap_or(c.background_blur),
         }
     }),
     ("window-padding-x", |c, v, d| {
@@ -339,11 +450,7 @@ const SETTERS: &[(&str, Setter)] = &[
         c.padding_y = padding(v, d.padding_y, c.padding_y)
     }),
     ("text-gamma", |c, v, d| {
-        if v.is_empty() {
-            c.text_gamma = d.text_gamma;
-        } else if let Ok(g) = v.parse::<f32>() {
-            c.text_gamma = g.clamp(0.5, 3.0);
-        }
+        c.text_gamma = ratio(v, d.text_gamma, c.text_gamma, 0.5, 3.0)
     }),
     ("palette", |c, v, d| {
         if v.is_empty() {
@@ -422,7 +529,23 @@ const SETTERS: &[(&str, Setter)] = &[
             _ => true,
         };
     }),
+    ("tab-inherit-working-directory", |c, v, d| {
+        c.tab_inherit_working_directory = parse_bool(v, d.tab_inherit_working_directory);
+    }),
+    // giest is single-window, so window-level inheritance has nothing to act on
+    // yet; recognize the key (and validate it) so a Ghostty config doesn't warn.
+    ("window-inherit-working-directory", |_, _, _| {}),
 ];
+
+/// Parse a Ghostty-style boolean (`true`/`false`, `yes`/`no`, `on`/`off`, `1`/`0`),
+/// returning `default` for an empty or unrecognized value.
+fn parse_bool(v: &str, default: bool) -> bool {
+    match v.to_ascii_lowercase().as_str() {
+        "true" | "yes" | "on" | "1" => true,
+        "false" | "no" | "off" | "0" => false,
+        _ => default,
+    }
+}
 
 /// Resolve the config file path: `$GIEST_CONFIG` if set, else
 /// `%APPDATA%\giest\config` (Ghostty names its file `config`, no extension).
@@ -534,6 +657,18 @@ fn padding(value: &str, default: f32, current: f32) -> f32 {
         default
     } else {
         value.parse::<f32>().map(|p| p.max(0.0)).unwrap_or(current)
+    }
+}
+
+/// Resolve a clamped ratio field (the various opacities, contrast, gamma): empty
+/// resets to `default`, a valid number is clamped into `min..=max`, anything else
+/// keeps `current`. Ghostty clamps out-of-range ratios rather than rejecting
+/// them, so `background-opacity = 2` means fully opaque, not a parse error.
+fn ratio(value: &str, default: f32, current: f32, min: f32, max: f32) -> f32 {
+    if value.is_empty() {
+        default
+    } else {
+        value.parse::<f32>().map(|n| n.clamp(min, max)).unwrap_or(current)
     }
 }
 
@@ -787,6 +922,17 @@ mod tests {
     }
 
     #[test]
+    fn tab_inherit_working_directory_defaults_true_and_overrides() {
+        assert!(Config::default().tab_inherit_working_directory);
+        assert!(!parsed("tab-inherit-working-directory = false").tab_inherit_working_directory);
+        assert!(parsed("tab-inherit-working-directory = true").tab_inherit_working_directory);
+        // An empty value resets to the default (true).
+        assert!(parsed("tab-inherit-working-directory =").tab_inherit_working_directory);
+        // The single-window key is recognized (no "unsupported key") and harmless.
+        let _ = parsed("window-inherit-working-directory = true");
+    }
+
+    #[test]
     fn copy_on_select_accepts_ghostty_enum() {
         assert!(parsed("copy-on-select = clipboard").copy_on_select);
         assert!(parsed("copy-on-select = primary").copy_on_select);
@@ -906,6 +1052,99 @@ mod tests {
         // Out-of-range values clamp to [0.5, 3.0].
         assert_eq!(parsed("text-gamma = 10.0").text_gamma, 3.0);
         assert_eq!(parsed("text-gamma = 0.1").text_gamma, 0.5);
+    }
+
+    #[test]
+    fn background_opacity_parses_and_clamps() {
+        assert_eq!(Config::default().background_opacity, 1.0);
+        assert_eq!(parsed("background-opacity = 0.85").background_opacity, 0.85);
+        // Ghostty clamps out-of-range opacities instead of rejecting them.
+        assert_eq!(parsed("background-opacity = -1").background_opacity, 0.0);
+        assert_eq!(parsed("background-opacity = 2").background_opacity, 1.0);
+        // Empty resets; garbage keeps the current value.
+        assert_eq!(
+            parsed("background-opacity = 0.5\nbackground-opacity =").background_opacity,
+            1.0
+        );
+        assert_eq!(
+            parsed("background-opacity = 0.5\nbackground-opacity = nope").background_opacity,
+            0.5
+        );
+    }
+
+    #[test]
+    fn background_opacity_cells_parses() {
+        assert!(!Config::default().background_opacity_cells);
+        assert!(parsed("background-opacity-cells = true").background_opacity_cells);
+        assert!(!parsed("background-opacity-cells = false").background_opacity_cells);
+        assert!(
+            !parsed("background-opacity-cells = true\nbackground-opacity-cells =")
+                .background_opacity_cells
+        );
+    }
+
+    #[test]
+    fn unfocused_split_opacity_clamps_to_ghostty_range() {
+        assert_eq!(Config::default().unfocused_split_opacity, 0.7);
+        assert_eq!(parsed("unfocused-split-opacity = 0.4").unfocused_split_opacity, 0.4);
+        // The floor is 0.15, not 0 — Ghostty disallows a fully invisible split.
+        assert_eq!(parsed("unfocused-split-opacity = 0.0").unfocused_split_opacity, 0.15);
+        assert_eq!(parsed("unfocused-split-opacity = 2.0").unfocused_split_opacity, 1.0);
+    }
+
+    #[test]
+    fn unfocused_split_fill_defaults_none_and_parses_named_color() {
+        assert_eq!(Config::default().unfocused_split_fill, None);
+        assert_eq!(
+            parsed("unfocused-split-fill = #f80").unfocused_split_fill,
+            Some(Rgb::new(0xff, 0x88, 0x00))
+        );
+        assert_eq!(
+            parsed("unfocused-split-fill = rebeccapurple").unfocused_split_fill,
+            Some(Rgb::new(0x66, 0x33, 0x99))
+        );
+    }
+
+    #[test]
+    fn cursor_and_faint_opacity_parse_and_clamp() {
+        assert_eq!(Config::default().cursor_opacity, 1.0);
+        // giest's faint used to be a hardcoded 0.55; Ghostty's default is 0.5.
+        assert_eq!(Config::default().faint_opacity, 0.5);
+        assert_eq!(parsed("cursor-opacity = 0.4").cursor_opacity, 0.4);
+        assert_eq!(parsed("cursor-opacity = 5").cursor_opacity, 1.0);
+        assert_eq!(parsed("faint-opacity = 0.1").faint_opacity, 0.1);
+        assert_eq!(parsed("faint-opacity = -3").faint_opacity, 0.0);
+    }
+
+    #[test]
+    fn background_blur_parses_ghostty_grammar() {
+        use super::BackgroundBlur;
+        assert_eq!(Config::default().background_blur, BackgroundBlur::Off);
+        assert_eq!(parsed("background-blur = true").background_blur, BackgroundBlur::On);
+        assert_eq!(parsed("background-blur = false").background_blur, BackgroundBlur::Off);
+        // Ghostty's parseBool takes `0`/`1`, so those are bools — NOT radii.
+        assert_eq!(parsed("background-blur = 0").background_blur, BackgroundBlur::Off);
+        assert_eq!(parsed("background-blur = 1").background_blur, BackgroundBlur::On);
+        // Only 2 and up reach the numeric branch.
+        assert_eq!(
+            parsed("background-blur = 20").background_blur,
+            BackgroundBlur::Radius(20)
+        );
+        // Out of u8 range: keep the current value, like Ghostty's parseInt error.
+        assert_eq!(
+            parsed("background-blur = 20\nbackground-blur = 300").background_blur,
+            BackgroundBlur::Radius(20)
+        );
+        // macOS glass implies plain `true` off macOS.
+        assert_eq!(
+            parsed("background-blur = macos-glass-clear").background_blur,
+            BackgroundBlur::On
+        );
+
+        assert_eq!(BackgroundBlur::On.intensity(), 20);
+        // `Radius(0)` is disabled, matching Ghostty.
+        assert!(!BackgroundBlur::Radius(0).enabled());
+        assert!(BackgroundBlur::Radius(1).enabled());
     }
 
     #[test]

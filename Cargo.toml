@@ -37,6 +37,32 @@ percent-encoding = "2"
 # Unicode display width (1 or 2 cells) for a grapheme cluster's leading char, so
 # the renderer can size/centre wide glyphs (CJK, emoji) over their full cell span.
 unicode-width = "0.2"
+# DWM window-composition APIs for `background-blur` (the Windows acrylic/mica
+# backdrop; see src/blur.rs). Already in the tree via winit/wgpu, so this unifies
+# with the existing pin rather than adding a build.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",         # HRGN, a field of DWM_BLURBEHIND
+    "Win32_System_LibraryLoader", # GetProcAddress: SetWindowCompositionAttribute
+] }
+# Name the window handle traits on eframe's CreationContext/Frame — eframe
+# depends on raw-window-handle but does not re-export it.
+raw-window-handle = "0.6"
+
+# Vendored copy of egui-winit 0.34.3, depended on *specifically to apply one
+# patch*: a transparent window on Windows also needs `WS_EX_NOREDIRECTIONBITMAP`,
+# which upstream never sets. wgpu presents a transparent surface through
+# DirectComposition with `CreateTargetForHwnd(hwnd, topmost = false)`, so its
+# visual sits below the window's redirection surface — without the flag the
+# window composites over that opaque surface and `background-opacity` renders as
+# an opaque grey wash. The style is create-time only, so the app cannot add it
+# later. giest doesn't depend on egui-winit directly (eframe does), hence a patch
+# rather than a plain path dependency. Same shape as the libghostty-rs patch
+# above; don't "simplify" it away. Re-apply on every egui upgrade.
+[patch.crates-io]
+egui-winit = { path = "vendor/egui-winit" }
 
 [dev-dependencies]
 # Statistical benchmark harness for the host CPU-path benches (see benches/).

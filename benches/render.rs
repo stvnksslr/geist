@@ -89,6 +89,11 @@ fn term_frame(snap: GridSnapshot) -> TermFrame {
         }],
         selection_bg: Rgb::new(40, 60, 90),
         selection_fg: None,
+        // Fully opaque: the bench measures the default (no-transparency) path.
+        background_opacity: 1.0,
+        background_opacity_cells: false,
+        faint_opacity: 0.5,
+        cursor_opacity: 1.0,
     }
 }
 

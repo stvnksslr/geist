@@ -100,6 +100,9 @@ fn default_binds() -> Vec<(Chord, Action)> {
         ("ctrl+shift+d", Action::SplitRight),
         ("ctrl+shift+o", Action::SplitRight),
         ("ctrl+shift+e", Action::SplitDown),
+        // Ghostty defaults: ctrl+enter fullscreen, ctrl+shift+enter zoom split.
+        ("ctrl+enter", Action::ToggleFullscreen),
+        ("ctrl+shift+enter", Action::ToggleSplitZoom),
         ("ctrl+shift+[", Action::FocusSplitPrev),
         ("ctrl+shift+]", Action::FocusSplitNext),
         ("ctrl+shift+p", Action::TogglePalette),
@@ -288,8 +291,20 @@ mod tests {
             Action::LastTab,
             Action::TogglePalette,
             Action::ReloadConfig,
+            Action::ToggleSplitZoom,
+            Action::ToggleFullscreen,
         ] {
             assert_eq!(Action::from_name(&a.name()), Some(a), "roundtrip {a:?}");
         }
+    }
+
+    #[test]
+    fn default_keymap_binds_fullscreen_and_zoom() {
+        let km = Keymap::default();
+        assert_eq!(km.lookup(&chord("ctrl+enter")), Some(Action::ToggleFullscreen));
+        assert_eq!(
+            km.lookup(&chord("ctrl+shift+enter")),
+            Some(Action::ToggleSplitZoom)
+        );
     }
 }

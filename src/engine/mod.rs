@@ -85,6 +85,22 @@ pub struct Cell {
     pub blink: bool,
     /// Invisible / conceal (SGR 8): the glyph is not drawn (background remains).
     pub invisible: bool,
+    /// The style set an *explicit* background color, i.e. the cell's `bg` is not
+    /// the terminal default. Recorded before `inverse` is applied.
+    ///
+    /// Under `background-opacity` a cell whose background is the terminal default
+    /// draws no background quad at all, so the translucent window background shows
+    /// through it — Ghostty's `bg_style != null` test (`renderer/generic.zig`).
+    ///
+    /// NOTE the polarity: `false` (the [`Default`]) means "no quad". A cell the VT
+    /// iterators never yield is blanked to the default, and phrasing this the other
+    /// way round (`bg_is_default`) would make every one of those paint opaque black.
+    pub bg_explicit: bool,
+    /// Inverse / reverse video (SGR 7). Already applied to `fg`/`bg`; carried
+    /// separately because an inverse cell's background is always opaque regardless
+    /// of `background-opacity`, and that rule is checked before the
+    /// `background-opacity-cells` one.
+    pub inverse: bool,
 }
 
 /// Cursor shape reported by the terminal (DECSCUSR / app-set).

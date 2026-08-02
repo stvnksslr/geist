@@ -55,6 +55,9 @@ fallback engine without app changes:
   `CallbackTrait`. **`render/atlas.rs`** — rustybuzz shaping + ab_glyph rasterization (primary +
   system fallback faces) into an R8 atlas; COLR/CPAL color emoji composited into a separate RGBA atlas.
 - **`pty.rs`** — ConPTY shell via portable-pty with a reader thread that wakes the UI on output.
+- **`blur.rs`** — Windows DWM backdrop (acrylic/mica) for `background-blur`: the documented Win11
+  `DWMWA_SYSTEMBACKDROP_TYPE`, falling back to the undocumented `SetWindowCompositionAttribute` accent
+  policy (resolved via `GetProcAddress`, never linked) on Win10, then to nothing.
 - **`config.rs`** — Ghostty-format config (`key = value` lines, kebab-case keys, unquoted
   colors, repeatable `palette`) from `%APPDATA%\giest\config` (override with `GIEST_CONFIG`);
   defines the full ANSI 16 + 256-color palette. **`profiles.rs`** — shell profiles (pwsh/powershell/cmd/wsl).
@@ -90,6 +93,38 @@ fallback engine without app changes:
   fall back to the default dir. The split's cwd is read in `App::split` and passed through `Session::new`
   → `Pty::spawn` → `CommandBuilder::cwd`.
 
+- **Second vendored crate + Windows patch: `vendor/egui-winit`.** A transparent window on Windows also
+  needs `WS_EX_NOREDIRECTIONBITMAP`, which upstream egui-winit never sets (it sets only
+  `.with_transparent(...)`). wgpu presents a transparent surface through DirectComposition and builds
+  its target with `CreateTargetForHwnd(hwnd, topmost = false)` (`wgpu-hal` `dx12/dcomp.rs`), placing
+  the visual *below* the window's redirection surface — so without the flag the window composites over
+  that opaque surface and renders as a **solid grey wash** with `background-opacity` having no effect.
+  The ex-style is honored **only at window creation**, so the app cannot add it later
+  (`SetWindowLongPtrW` + `SWP_FRAMECHANGED` was tried and does nothing), and eframe's `window_builder`
+  hook hands you egui's `ViewportBuilder`, not winit's `WindowAttributes`. Hence a
+  `[patch.crates-io]` onto a vendored copy whose *only* delta is that one flag. **Re-apply on every
+  egui upgrade**; without it transparency silently regresses to grey.
+- **Window transparency needs two more non-obvious things, and fails *silently* without them.**
+  (1) `ViewportBuilder::with_transparent(true)` is **not enough on Windows**: wgpu's default DX12
+  presentation path builds the swapchain straight from the HWND, and such a surface advertises only
+  `CompositeAlphaMode::Opaque` (`wgpu-hal` `dx12/adapter.rs`; `Dx12SwapchainKind::DxgiFromHwnd` is
+  documented as "does not support transparency"). egui-wgpu then finds no premultiplied mode, logs one
+  `log::warn` giest never surfaces (no logger installed), and falls back to opaque — the window just
+  stays solid with no error. `main.rs` must also set `presentation_system = DxgiFromVisual` (the
+  DirectComposition path, which costs RenderDoc capture support, so it's opt-in when opacity < 1).
+  (2) `App::clear_color` must return `[0,0,0,0]`. eframe's default clear is
+  `rgba_unmultiplied(12,12,12,180)`, and egui's alpha blend (`src*OneMinusDstAlpha + dst*One`) can only
+  ever *raise* framebuffer alpha — so a non-zero clear alpha caps the whole window's transparency and
+  tints it. Both are startup-only, hence the documented restart requirement (Ghostty/macOS is the same).
+- **Exactly one layer may carry `background-opacity`.** The pane-area `rect_filled` in `render_active`
+  is it; the `CentralPanel` frame must stay `Frame::NONE`. Both used to paint the same rect in the same
+  color, which under transparency composites to `1-(1-a)²` (a=0.5 reads as 0.75). Cells on the *default*
+  background emit no quad at all (`render::bg_alpha`, mirroring Ghostty), so that one fill is what shows
+  through them — any second translucent fill over the same area is a bug.
+- **`Cell::bg_explicit` polarity is deliberate.** `false` (the `Default`) means "draw no background
+  quad". Cells the VT iterators never yield get blanked to the default, so inverting the flag's sense
+  (`bg_is_default`) would make every one of them paint opaque black over a translucent window.
+
 ## Verifying visual/rendering changes
 
 A passing `cargo build`/`cargo test` does **not** confirm a rendering change *looks* right — the
@@ -103,5 +138,13 @@ false "it works" conclusions on exactly these tasks.
 - If you do capture, the working method is: inject deterministic glyphs via a startup shell-wrapper
   (no synthetic keyboard) and grab the window with **PrintWindow** — not a generic screen grab.
   Treat the capture as a sanity check, not proof.
+- **Transparency *can* be checked by a full-screen grab — `PrintWindow` cannot.** `PrintWindow` only
+  captures the window's own bitmap, so it can never show what's behind. But
+  `Graphics.CopyFromScreen` does reproduce DWM composition faithfully; it was right when the window
+  was broken (grey) and right again once it was fixed. The reliable probe: put a **saturated
+  full-screen window behind** (e.g. pure green), set `background-opacity = 0.5`, and check that the
+  channels match `bg*0.5 + backdrop*0.5` — with `background = #101218` a correct composite reads
+  `R = 0x08`, `B = 0x0c` exactly. Sample away from the window's drop shadow, which darkens the
+  backdrop near the edges. Don't trust a single pixel's *appearance*; solve the blend.
 - Effect sizes can be below the visible threshold (e.g. 8px padding read as "flush"). When a change
   "should" be visible but isn't, suspect the magnitude before re-debugging the mechanism.

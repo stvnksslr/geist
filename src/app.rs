@@ -28,6 +28,10 @@ struct Tab<T> {
     name: Option<String>,
     /// User-set tab tint (via "Tab Color"); `None` uses the default chrome color.
     color: Option<egui::Color32>,
+    /// While `Some(id)`, that one leaf is "zoomed": it fills the whole tab area
+    /// and the other splits are hidden (Ghostty's `toggle_split_zoom`). Cleared
+    /// when the tree structure changes or the zoomed leaf goes away.
+    zoomed: Option<u64>,
 }
 
 impl<T> Tab<T> {
@@ -37,6 +41,7 @@ impl<T> Tab<T> {
             focus: id,
             name: None,
             color: None,
+            zoomed: None,
         }
     }
     fn focused_payload(&self) -> &T {
@@ -246,6 +251,27 @@ impl<T> Node<T> {
             Node::Empty => {}
         }
     }
+
+    /// Push only the leaf with `target` id, occupying the whole `area` (split
+    /// zoom: the focused pane fills the tab, the other splits are hidden).
+    /// Mutable like [`collect`](Self::collect) so the zoomed pane can be driven.
+    fn collect_leaf<'a>(&'a mut self, target: u64, area: egui::Rect, out: &mut Vec<Leaf<'a, T>>) {
+        match self {
+            Node::Leaf { id, payload } if *id == target => out.push(Leaf {
+                id: *id,
+                payload,
+                rect: area,
+            }),
+            Node::Leaf { .. } | Node::Empty => {}
+            Node::Split { first, second, .. } => {
+                if first.contains(target) {
+                    first.collect_leaf(target, area, out);
+                } else {
+                    second.collect_leaf(target, area, out);
+                }
+            }
+        }
+    }
 }
 
 /// Drop dead leaves/tabs across `tabs`, keeping the active tab selected (falling
@@ -266,6 +292,7 @@ fn reap_tabs<T>(
             focus,
             name,
             color,
+            zoomed,
         } = tab;
         if let Some(root) = root.prune(&mut *dead) {
             if i <= active {
@@ -276,11 +303,14 @@ fn reap_tabs<T>(
             } else {
                 root.first_leaf_id()
             };
+            // A zoom on a pruned-away pane is stale; only keep it if it survived.
+            let zoomed = zoomed.filter(|id| root.contains(*id));
             survivors.push(Tab {
                 root,
                 focus,
                 name,
                 color,
+                zoomed,
             });
         }
     }
@@ -354,6 +384,17 @@ pub struct App {
     /// Chord → action bindings (built-in defaults plus the config's `keybind`
     /// overrides). `handle_shortcuts` resolves each key event through this.
     keymap: Keymap,
+    /// Whether the window is currently fullscreen (`toggle_fullscreen`). Tracked
+    /// here because the viewport's fullscreen flag isn't readable back, so we flip
+    /// our own copy and command winit to match.
+    fullscreen: bool,
+    /// The window's `HWND`, captured at startup for the DWM backdrop
+    /// ([`crate::blur`]). `None` off Windows or if the handle wasn't available.
+    hwnd: Option<isize>,
+    /// Whether the surface was created transparent. Decided in `main.rs` from the
+    /// config *before* the window exists, so it can't change without a restart —
+    /// `reload_config` uses this to tell the user when a new opacity needs one.
+    transparent_surface: bool,
 }
 
 /// Runtime font-size bounds in logical points.
@@ -399,7 +440,33 @@ impl App {
 
         let keymap = Keymap::from_config(&config.keybinds);
 
-        Ok(Self {
+        // `main.rs` decides transparency from the same keys before the window is
+        // created; recompute it here rather than plumbing a flag through eframe.
+        let transparent_surface =
+            config.background_opacity < 1.0 || config.background_blur.enabled();
+        let hwnd = crate::blur::hwnd_of(cc);
+        if transparent_surface {
+            // Transparency fails *silently* if the surface didn't come from a
+            // DirectComposition visual (see main.rs): egui-wgpu logs one warning
+            // we don't surface and falls back to opaque. eframe exposes no way to
+            // read the chosen alpha mode back, so report the backend — anything
+            // other than Dx12 means the DComp path wasn't taken and the window
+            // will stay solid.
+            let backend = render_state.adapter.get_info().backend;
+            eprintln!(
+                "giest: transparency requested (background-opacity = {:.2}); \
+                 rendering on {backend:?}",
+                config.background_opacity
+            );
+        }
+        if config.background_blur.enabled() && config.background_opacity >= 1.0 {
+            eprintln!(
+                "giest: background-blur has no visible effect at background-opacity = 1 — \
+                 the blur shows *through* the window, so lower the opacity to see it."
+            );
+        }
+
+        let app = Self {
             tabs: vec![Tab::leaf(1, first)],
             active_tab: 0,
             next_id: 2,
@@ -415,7 +482,31 @@ impl App {
             renaming: None,
             palette: None,
             keymap,
-        })
+            fullscreen: false,
+            hwnd,
+            transparent_surface,
+        };
+        app.apply_backdrop();
+        Ok(app)
+    }
+
+    /// Apply the configured `background-blur` to the window (a no-op when the key
+    /// is off). Safe to call repeatedly — the DWM attributes are set on the live
+    /// window, so this is how a config reload takes effect.
+    fn apply_backdrop(&self) {
+        let Some(hwnd) = self.hwnd else {
+            return;
+        };
+        // A backdrop can only show through pixels we actually left transparent.
+        if !self.transparent_surface && !self.config.background_blur.enabled() {
+            return;
+        }
+        crate::blur::apply(
+            hwnd,
+            self.config.background_blur,
+            self.config.bg,
+            self.config.background_opacity,
+        );
     }
 
     /// Apply a new logical font size: re-rasterize the atlas and update the
@@ -484,9 +575,19 @@ impl App {
             .ok()
     }
 
-    /// Open a new tab running profile `idx`.
+    /// Open a new tab running profile `idx`. When
+    /// `tab-inherit-working-directory` is set (the default), the new tab starts in
+    /// the previously focused pane's working directory (reported via OSC 7),
+    /// matching Ghostty; otherwise it uses the profile's default directory.
     fn new_tab(&mut self, idx: usize) {
-        if let Some(s) = self.spawn_session(idx, None) {
+        let cwd = if self.config.tab_inherit_working_directory {
+            self.tabs
+                .get(self.active_tab)
+                .and_then(|tab| tab.root.payload(tab.focus).and_then(|s| s.pwd()))
+        } else {
+            None
+        };
+        if let Some(s) = self.spawn_session(idx, cwd.as_deref()) {
             let id = self.alloc_id();
             self.tabs.push(Tab::leaf(id, s));
             self.active_tab = self.tabs.len() - 1;
@@ -507,7 +608,37 @@ impl App {
             let focus = tab.focus;
             tab.root.split_leaf(focus, vertical, id, s);
             tab.focus = id;
+            // A new split changes the layout, so any zoom is no longer meaningful.
+            tab.zoomed = None;
         }
+    }
+
+    /// Toggle "split zoom": the focused pane fills the whole tab area, hiding the
+    /// other splits; toggling again restores the split layout (Ghostty's
+    /// `toggle_split_zoom`). A no-op in a tab with a single pane.
+    fn toggle_split_zoom(&mut self) {
+        let tab = &mut self.tabs[self.active_tab];
+        if tab.leaf_count() <= 1 {
+            tab.zoomed = None;
+            return;
+        }
+        tab.zoomed = if tab.zoomed == Some(tab.focus) {
+            None
+        } else {
+            Some(tab.focus)
+        };
+    }
+
+    /// Toggle the window between fullscreen and windowed (Ghostty
+    /// `toggle_fullscreen`). Reads the live viewport state when winit reports it
+    /// (so an OS-driven change — e.g. the title-bar button — doesn't desync our
+    /// flag), falling back to our own tracked flag, then commands the inverse.
+    fn toggle_fullscreen(&mut self, ctx: &egui::Context) {
+        let current = ctx
+            .input(|i| i.viewport().fullscreen)
+            .unwrap_or(self.fullscreen);
+        self.fullscreen = !current;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.fullscreen));
     }
 
     /// Close the focused pane; closing the last pane closes the tab, and the
@@ -519,6 +650,8 @@ impl App {
             let root = std::mem::replace(&mut tab.root, Node::Empty);
             tab.root = root.remove_leaf(focus).unwrap_or(Node::Empty);
             tab.focus = tab.root.first_leaf_id();
+            // Closing a pane changes the layout; drop any (now stale) zoom.
+            tab.zoomed = None;
         } else if self.tabs.len() > 1 {
             self.tabs.remove(self.active_tab);
             self.active_tab = self.active_tab.min(self.tabs.len() - 1);
@@ -553,6 +686,10 @@ impl App {
     /// Move focus to the spatially adjacent pane (`Ctrl+Alt+arrow`), using the
     /// previous frame's cached layout. A no-op if there is no neighbor that way.
     fn focus_dir(&mut self, dir: Dir) {
+        // While a split is zoomed the siblings are hidden; don't navigate to one.
+        if self.tabs[self.active_tab].zoomed.is_some() {
+            return;
+        }
         let focus = self.tabs[self.active_tab].focus;
         if let Some(id) = nav_dir(&self.last_layout, focus, dir) {
             self.tabs[self.active_tab].focus = id;
@@ -564,6 +701,10 @@ impl App {
     /// ascending recovers creation order (matching Ghostty's `goto_split:next`).
     fn focus_cycle(&mut self, forward: bool) {
         let tab = &mut self.tabs[self.active_tab];
+        // While a split is zoomed the siblings are hidden; don't cycle into one.
+        if tab.zoomed.is_some() {
+            return;
+        }
         let mut ids = Vec::new();
         tab.root.leaf_ids(&mut ids);
         ids.sort_unstable();
@@ -695,9 +836,10 @@ impl App {
 
     /// Reload the config file and re-apply what can change at runtime: the color
     /// theme/cursor (re-applied to every live engine) and the font size.
-    /// Selection colors, padding, and click actions are read fresh each frame, so
-    /// they take effect on the next frame from `self.config`. NOTE: the
-    /// scrollback limit is fixed at engine creation and is not changed here.
+    /// Selection colors, padding, click actions, and the opacities are read fresh
+    /// each frame, so they take effect on the next frame from `self.config`. NOTE:
+    /// the scrollback limit is fixed at engine creation and is not changed here,
+    /// and whether the *window* can be transparent at all is fixed at startup.
     fn reload_config(&mut self, render_state: Option<&egui_wgpu::RenderState>) {
         let cfg = Config::load();
         for tab in &mut self.tabs {
@@ -705,7 +847,19 @@ impl App {
         }
         let new_font = cfg.font_points;
         self.keymap = Keymap::from_config(&cfg.keybinds);
+        // Transparency is a property of the surface, requested once before the
+        // window exists (see `main.rs`). Opacity *values* apply live, but turning
+        // transparency on or off crosses that line and needs a restart — say so
+        // rather than leaving the user wondering why nothing happened.
+        let wants_transparent = cfg.background_opacity < 1.0 || cfg.background_blur.enabled();
+        if wants_transparent && !self.transparent_surface {
+            eprintln!(
+                "giest: background-opacity/background-blur need a transparent window, \
+                 which is set up at startup — restart giest to apply them."
+            );
+        }
         self.config = cfg;
+        self.apply_backdrop();
         if let Some(rs) = render_state {
             let ppp = self.egui_ctx.pixels_per_point().max(1.0);
             self.set_font_points(rs, new_font, ppp);
@@ -746,7 +900,9 @@ impl App {
             }
             Action::SplitRight => self.split(true),
             Action::SplitDown => self.split(false),
+            Action::ToggleSplitZoom => self.toggle_split_zoom(),
             Action::ClosePane => self.close_focused(ctx),
+            Action::ToggleFullscreen => self.toggle_fullscreen(ctx),
             Action::FocusSplitLeft => self.focus_dir(Dir::Left),
             Action::FocusSplitRight => self.focus_dir(Dir::Right),
             Action::FocusSplitUp => self.focus_dir(Dir::Up),
@@ -1380,6 +1536,14 @@ impl App {
         let middle_click_action = self.config.middle_click_action;
         let sel_bg = self.config.selection_bg;
         let sel_fg = self.config.selection_fg;
+        // Opacities are read fresh each frame (like the selection colors), so a
+        // config reload applies on the next frame with no explicit re-apply.
+        let faint_opacity = self.config.faint_opacity;
+        let cursor_opacity = self.config.cursor_opacity;
+        let background_opacity = self.config.background_opacity;
+        let background_opacity_cells = self.config.background_opacity_cells;
+        let unfocused_split_opacity = self.config.unfocused_split_opacity;
+        let unfocused_split_fill = self.config.unfocused_split_fill;
         // Snapshot the keymap so the focused pane's `handle_input` can consult it
         // without holding a borrow on `self` across the pane-tree mutation below.
         // Cheap: a couple dozen (Chord, Action) entries, both `Copy`.
@@ -1391,16 +1555,41 @@ impl App {
         // pane or let it grab keyboard focus (the palette owns both).
         let palette_open = self.palette.is_some();
 
+        // Fill the whole area (including the per-pane padding band and the split
+        // gutters) with the focused pane's background. This single rect is what
+        // carries `background-opacity`: cells left on the default background emit
+        // no quad at all (see `render::bg_alpha`), so this is the layer that shows
+        // through them. Nothing else may paint a translucent copy of it — two
+        // stacked translucent fills would composite to 1-(1-a)² and read as much
+        // darker than the configured opacity.
+        //
+        // Painted here, above the `leaves.is_empty()` early return below, so a tab
+        // caught mid-teardown doesn't flash an unpainted (fully transparent) hole.
+        let bg = self.tabs[active_tab].focused_payload().default_bg();
+        let bg_alpha8 = (self.config.background_opacity * 255.0).round() as u8;
+        ui.painter().rect_filled(
+            full_area,
+            0.0,
+            egui::Color32::from_rgba_unmultiplied(bg.r, bg.g, bg.b, bg_alpha8),
+        );
+
         let tab = &mut self.tabs[active_tab];
         let mut focus_id = tab.focus;
         // Right-click "Split" needs `&mut self`, which we can't take while
         // `leaves`/`tab` borrow `self.tabs`; defer it past the leaf loop.
         let mut want_split: Option<bool> = None;
 
+        // A zoom on a pane that no longer exists (closed/reaped) is stale; drop it.
+        tab.zoomed = tab.zoomed.filter(|id| tab.root.contains(*id));
+        let zoomed = tab.zoomed;
         // Lay the split tree out across the full area; each leaf gets its rect
-        // (padding is applied per-leaf below).
+        // (padding is applied per-leaf below). When a split is zoomed, that one
+        // leaf takes the whole area and the rest are hidden.
         let mut leaves: Vec<Leaf<Session>> = Vec::new();
-        tab.root.collect(full_area, &mut leaves);
+        match zoomed {
+            Some(id) => tab.root.collect_leaf(id, full_area, &mut leaves),
+            None => tab.root.collect(full_area, &mut leaves),
+        }
         if leaves.is_empty() {
             return;
         }
@@ -1458,6 +1647,11 @@ impl App {
         let mut frames: Vec<PaneFrame> = Vec::with_capacity(leaves.len());
         // (pane rect, flash intensity) for any pane ringing its visual bell.
         let mut bell_flashes: Vec<(egui::Rect, f32)> = Vec::new();
+        // (pane rect, fill color) for each unfocused split to dim. Collected here
+        // (where each leaf's own background is in scope) and painted over the
+        // terminal after the callback below.
+        let dimming = leaves.len() > 1 && unfocused_split_opacity < 1.0;
+        let mut dim_rects: Vec<(egui::Rect, egui::Color32)> = Vec::new();
         for leaf in leaves.iter_mut() {
             // The pane occupies `leaf.rect`; the grid is inset by the padding so
             // text clears the pane's edges (window border or split divider alike).
@@ -1473,6 +1667,22 @@ impl App {
                 if let Some(a) = flash {
                     bell_flashes.push((leaf_rect, a));
                 }
+            }
+            // Dim every split except the focused one. Deliberately keyed on
+            // `is_focus`, *not* on window focus: Ghostty leaves the last-focused
+            // surface undimmed when the window itself is inactive, so an
+            // unfocused giest window must not dim every one of its panes.
+            if dimming && !is_focus {
+                let fill = unfocused_split_fill.unwrap_or_else(|| session.default_bg());
+                dim_rects.push((
+                    leaf_rect,
+                    egui::Color32::from_rgba_unmultiplied(
+                        fill.r,
+                        fill.g,
+                        fill.b,
+                        dim_alpha(unfocused_split_opacity),
+                    ),
+                ));
             }
             session.fit_grid(prect, ppp, cw, ch);
             if !session.update_snapshot() {
@@ -1665,12 +1875,6 @@ impl App {
             });
         }
 
-        // Fill the whole area (including the padding band) with the focused
-        // pane's background first.
-        let bg = leaves[focus_idx].payload.default_bg();
-        ui.painter()
-            .rect_filled(full_area, 0.0, egui::Color32::from_rgb(bg.r, bg.g, bg.b));
-
         // One callback paints every pane (shared instance buffer).
         ui.painter().add(egui_wgpu::Callback::new_paint_callback(
             full_area,
@@ -1678,8 +1882,19 @@ impl App {
                 panes: frames,
                 selection_bg: sel_bg,
                 selection_fg: sel_fg,
+                background_opacity,
+                background_opacity_cells,
+                faint_opacity,
+                cursor_opacity,
             },
         ));
+
+        // Dim the unfocused splits by painting a semi-transparent rectangle over
+        // each — the same mechanism Ghostty uses (an overlay, not a renderer
+        // effect). Painter-only, so it never intercepts clicks.
+        for (rect, col) in &dim_rects {
+            ui.painter().rect_filled(*rect, 0.0, *col);
+        }
 
         // Outline the focused pane when the tab is split. Frame the *full* pane
         // rect (not the padded grid) so the padding band shows as a visible gap
@@ -1689,6 +1904,16 @@ impl App {
                 leaves[focus_idx].rect,
                 0.0,
                 egui::Stroke::new(2.0, egui::Color32::from_rgb(90, 130, 200)),
+                egui::StrokeKind::Inside,
+            );
+        } else if zoomed.is_some() {
+            // A zoomed split hides its siblings, so a "split tab" can look like a
+            // single pane. A green accent border signals the zoom is active
+            // (toggle off with the same chord). Matches Ghostty's zoom indicator.
+            ui.painter().rect_stroke(
+                full_area,
+                0.0,
+                egui::Stroke::new(2.0, egui::Color32::from_rgb(80, 200, 120)),
                 egui::StrokeKind::Inside,
             );
         }
@@ -1724,6 +1949,20 @@ impl App {
 }
 
 impl eframe::App for App {
+    /// Clear the framebuffer to *fully transparent*.
+    ///
+    /// This is a precondition for `background-opacity`, not a nicety: eframe's
+    /// default clear is `rgba_unmultiplied(12, 12, 12, 180)`, and egui's own alpha
+    /// blend (`src * OneMinusDstAlpha + dst * One`) can only ever *raise* the
+    /// framebuffer alpha. Starting at alpha 180/255 therefore caps the window at
+    /// ~71% opacity no matter what we paint, and tints everything toward (12,12,12).
+    /// It is also what lets the DWM acrylic backdrop show through (`crate::blur`).
+    ///
+    /// Harmless when opaque: the window-background fill covers every pixel.
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        [0.0, 0.0, 0.0, 0.0]
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
 
@@ -1763,11 +2002,25 @@ impl eframe::App for App {
 
         // Always show the tab strip so the new-tab profile picker (PowerShell /
         // cmd / WSL / …) is reachable even with a single tab.
-        egui::Panel::top("giest-tabs").show_inside(ui, |ui| self.tab_bar(ui));
+        // Its fill keeps the theme's panel color but takes `background-opacity`,
+        // so the strip is as translucent as the terminal below it. It occupies a
+        // rect disjoint from the central panel, so this does not stack with the
+        // window-background fill.
+        let strip = ctx.global_style().visuals.panel_fill;
+        let a8 = (self.config.background_opacity * 255.0).round() as u8;
+        egui::Panel::top("giest-tabs")
+            .frame(
+                egui::Frame::side_top_panel(&ctx.global_style()).fill(
+                    egui::Color32::from_rgba_unmultiplied(strip.r(), strip.g(), strip.b(), a8),
+                ),
+            )
+            .show_inside(ui, |ui| self.tab_bar(ui));
 
-        let bg = self.tabs[self.active_tab].focused_payload().default_bg();
+        // No fill here: `render_active` paints the window background across this
+        // whole area itself. Filling it here too would double-composite the
+        // translucent color (1-(1-a)²) and read far darker than configured.
         egui::CentralPanel::default()
-            .frame(egui::Frame::NONE.fill(egui::Color32::from_rgb(bg.r, bg.g, bg.b)))
+            .frame(egui::Frame::NONE)
             .show_inside(ui, |ui| self.render_active(ui, &ctx));
 
         // The command palette draws over everything; a chosen command runs after
@@ -1780,6 +2033,16 @@ impl eframe::App for App {
         // pane's search is open).
         self.render_search(&ctx);
     }
+}
+
+/// Alpha of the rectangle painted over an unfocused split to dim it, from the
+/// configured `unfocused-split-opacity`.
+///
+/// Note the inversion — the config names the split's *remaining* opacity, so the
+/// overlay covering it takes the complement. Ghostty's GTK apprt writes exactly
+/// this (`opacity: 1.0 - unfocused-split-opacity` in its generated CSS).
+fn dim_alpha(split_opacity: f32) -> u8 {
+    ((1.0 - split_opacity.clamp(0.0, 1.0)) * 255.0).round() as u8
 }
 
 /// Open a URL in the user's default handler (Windows). `explorer` routes
@@ -1959,10 +2222,26 @@ fn ellipsize(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Dir, Node, Tab, cycle_pick, ellipsize, keep_only_tab, nav_dir, reap_tabs, split_rect,
-        truncate_tabs_to_right,
+        Dir, Node, Tab, cycle_pick, dim_alpha, ellipsize, keep_only_tab, nav_dir, reap_tabs,
+        split_rect, truncate_tabs_to_right,
     };
     use eframe::egui;
+
+    #[test]
+    fn dim_overlay_alpha_is_one_minus_split_opacity() {
+        // Ghostty's default: a 0.7-opacity split is covered by a 30% overlay.
+        // (1.0 - 0.7) * 255.0 lands on exactly 76.5 in f32, so the result depends
+        // on the rounding mode — `round()` takes halves away from zero, giving 77
+        // where a truncating cast would give 76. Pin it.
+        assert_eq!(dim_alpha(0.7), 77);
+        // Fully opaque split ⇒ no overlay at all.
+        assert_eq!(dim_alpha(1.0), 0);
+        // The config floor (0.15) is the strongest dim reachable.
+        assert_eq!(dim_alpha(0.15), 217);
+        // Out-of-range input can't produce a wrapped/garbage alpha.
+        assert_eq!(dim_alpha(-1.0), 255);
+        assert_eq!(dim_alpha(2.0), 0);
+    }
 
     fn rect(x: f32, y: f32, w: f32, h: f32) -> egui::Rect {
         egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, h))
@@ -1979,6 +2258,52 @@ mod tests {
             first: Box::new(first),
             second: Box::new(second),
         }
+    }
+
+    #[test]
+    fn collect_leaf_yields_only_the_zoomed_pane_full_area() {
+        // A 3-pane tree; zooming pane 2 should lay out only pane 2 at full area.
+        let mut root = split(true, leaf(1, 1), split(false, leaf(2, 1), leaf(3, 1)));
+        let area = rect(0.0, 0.0, 100.0, 80.0);
+        let mut leaves = Vec::new();
+        root.collect_leaf(2, area, &mut leaves);
+        assert_eq!(leaves.len(), 1);
+        assert_eq!(leaves[0].id, 2);
+        assert_eq!(leaves[0].rect, area);
+        // An absent id collects nothing (the render path then falls back to all).
+        let mut none = Vec::new();
+        root.collect_leaf(99, area, &mut none);
+        assert!(none.is_empty());
+    }
+
+    #[test]
+    fn reap_tabs_clears_zoom_when_zoomed_pane_dies() {
+        // Tab zoomed on pane 2; pane 2's shell exits → zoom must drop, not dangle.
+        let root = split(true, leaf(1, 1), leaf(2, 0));
+        let tabs = vec![Tab {
+            root,
+            focus: 1,
+            name: None,
+            color: None,
+            zoomed: Some(2),
+        }];
+        let (survivors, _active) = reap_tabs(tabs, 0, &mut |p: &u32| *p == 0);
+        assert_eq!(survivors.len(), 1);
+        assert_eq!(survivors[0].zoomed, None);
+    }
+
+    #[test]
+    fn reap_tabs_keeps_zoom_when_zoomed_pane_survives() {
+        let root = split(true, leaf(1, 1), leaf(2, 0));
+        let tabs = vec![Tab {
+            root,
+            focus: 1,
+            name: None,
+            color: None,
+            zoomed: Some(1),
+        }];
+        let (survivors, _active) = reap_tabs(tabs, 0, &mut |p: &u32| *p == 0);
+        assert_eq!(survivors[0].zoomed, Some(1));
     }
 
     #[test]
@@ -2150,6 +2475,7 @@ mod tests {
             focus: 2,
             name: None,
             color: None,
+            zoomed: None,
         }];
         let (survivors, _active) = reap_tabs(tabs, 0, &mut |p: &u32| *p == 0);
         assert_eq!(survivors.len(), 1);

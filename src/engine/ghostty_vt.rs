@@ -363,6 +363,46 @@ mod tests {
     }
 
     #[test]
+    fn default_background_cells_are_flagged() {
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        let bg = Rgb::new(0x1d, 0x1f, 0x21);
+        let mut pal = [Rgb::new(0, 0, 0); 256];
+        pal[1] = Rgb::new(200, 0, 0); // ANSI red
+        eng.apply_theme(Rgb::new(200, 200, 200), bg, &pal).unwrap();
+
+        // 'a' default bg, 'b' on ANSI red, then back to default for ' ' and 'c'.
+        eng.write(b"a\x1b[41mb\x1b[m c");
+        let s = snap(&mut eng);
+
+        assert!(!s.cell(0, 0).unwrap().bg_explicit, "default bg is not explicit");
+        assert!(s.cell(1, 0).unwrap().bg_explicit, "SGR 41 sets an explicit bg");
+        assert_eq!(s.cell(1, 0).unwrap().bg, pal[1]);
+        assert!(!s.cell(2, 0).unwrap().bg_explicit, "SGR 0 resets to default bg");
+        assert!(!s.cell(3, 0).unwrap().bg_explicit);
+        // A cell the row iterator never yields is blanked, and a blank cell must
+        // read as default-bg — otherwise it would paint an opaque quad and punch
+        // a hole in a translucent background.
+        assert!(!s.cell(19, 2).unwrap().bg_explicit, "untouched cells stay default");
+    }
+
+    #[test]
+    fn inverse_cell_is_flagged_and_colors_swapped() {
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        let fg = Rgb::new(200, 200, 200);
+        let bg = Rgb::new(0x1d, 0x1f, 0x21);
+        eng.apply_theme(fg, bg, &[Rgb::new(0, 0, 0); 256]).unwrap();
+
+        eng.write(b"\x1b[7mX");
+        let c = snap(&mut eng).cell(0, 0).unwrap().clone();
+        assert!(c.inverse, "SGR 7 is carried through to the renderer");
+        assert_eq!(c.fg, bg, "inverse swaps fg/bg");
+        assert_eq!(c.bg, fg);
+        // The swap does not invent an explicit background: the flag reports what
+        // the *style* set, so `inverse` alone is what forces the cell opaque.
+        assert!(!c.bg_explicit);
+    }
+
+    #[test]
     fn newline_advances_cursor_row() {
         let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
         eng.write(b"hi\r\n");
@@ -775,7 +815,11 @@ fn copy_cell(
     if style.bold && bold_color != BoldColor::None {
         fg = apply_bold_color(style.fg_color, fg, default_fg, palette, bold_color);
     }
-    let mut bg = cell.bg_color()?.map(rgb).unwrap_or(default_bg);
+    // Keep the *raw* option: once flattened to the default there is no way back,
+    // and the renderer needs to know whether this background is the terminal
+    // default (such a cell draws no background quad under `background-opacity`).
+    let bg_raw = cell.bg_color()?;
+    let mut bg = bg_raw.map(rgb).unwrap_or(default_bg);
     if style.inverse {
         std::mem::swap(&mut fg, &mut bg);
     }
@@ -808,6 +852,8 @@ fn copy_cell(
     dst.faint = faint;
     dst.blink = style.blink;
     dst.invisible = style.invisible;
+    dst.bg_explicit = bg_raw.is_some();
+    dst.inverse = style.inverse;
     Ok(())
 }
 
@@ -1223,6 +1269,10 @@ impl TerminalEngine for GhosttyVtEngine {
             cell.faint = false;
             cell.blink = false;
             cell.invisible = false;
+            // `bg` above is a placeholder the renderer never paints: a blank cell
+            // has no explicit background, so it emits no background quad at all.
+            cell.bg_explicit = false;
+            cell.inverse = false;
         }
 
         let default_fg = out.default_fg;

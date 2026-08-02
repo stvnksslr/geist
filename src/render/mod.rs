@@ -44,10 +44,6 @@ const DECO_DOTTED: u32 = 0;
 const DECO_DASHED: u32 = 1;
 const DECO_CURLY: u32 = 2;
 
-/// Alpha applied to faint/dim (SGR 2) glyphs and decorations — a partial
-/// opacity over the background, matching Ghostty's default faint look.
-const FAINT_ALPHA: f32 = 0.55;
-
 /// Background tint for scrollback-search matches; the *current* (navigated) match
 /// uses the brighter shade so it stands out among the others.
 const SEARCH_MATCH_BG: Rgb = Rgb::new(0x53, 0x49, 0x1a);
@@ -149,6 +145,47 @@ pub struct TermFrame {
     pub selection_bg: Rgb,
     /// Text color over a selection; `None` keeps each cell's own foreground.
     pub selection_fg: Option<Rgb>,
+    /// `background-opacity`. Cells on the *default* background emit no quad, so
+    /// the translucent window fill painted behind the grid is what actually
+    /// carries this; the renderer needs the value only for
+    /// [`Self::background_opacity_cells`]. See [`bg_alpha`].
+    pub background_opacity: f32,
+    /// `background-opacity-cells`: extend the opacity to explicitly-colored cells.
+    pub background_opacity_cells: bool,
+    /// `faint-opacity`: alpha for faint/dim (SGR 2) glyphs and decorations.
+    pub faint_opacity: f32,
+    /// `cursor-opacity`: alpha for a *focused* pane's cursor. An unfocused pane's
+    /// hollow cursor is always opaque, matching Ghostty.
+    pub cursor_opacity: f32,
+}
+
+/// Background alpha for one cell, mirroring Ghostty's decision table
+/// (`renderer/generic.zig`, the `bg_alpha` block). **A return of `0.0` means emit
+/// no quad at all** — the translucent window background painted behind the grid
+/// shows through, which is how `background-opacity` reaches the screen.
+///
+/// The branch order is load-bearing: `inverse` must be tested before
+/// `opacity_cells`, or reverse-video text would go translucent; `selected` beats
+/// everything, so a selection stays readable at any opacity. `selected` folds in
+/// search highlights, which Ghostty treats the same way.
+pub(crate) fn bg_alpha(
+    selected: bool,
+    inverse: bool,
+    bg_explicit: bool,
+    opacity: f32,
+    opacity_cells: bool,
+) -> f32 {
+    if selected || inverse {
+        return 1.0;
+    }
+    if bg_explicit {
+        // `background-opacity-cells` extends the opacity to cells that set their
+        // own background (Neovim/tmux repaint theirs, so they'd otherwise stay
+        // opaque). Like Ghostty this composites over the already-translucent
+        // window fill, so the effective result is 1-(1-opacity)².
+        return if opacity_cells { opacity } else { 1.0 };
+    }
+    0.0
 }
 
 /// Build the per-cell search-highlight mask for a viewport (`0` none, `1` match,
@@ -533,6 +570,10 @@ impl GpuResources {
             // or underline cursor must not fall through to its filled form here.
             let hollow_block = cursor_visible
                 && (pane.cursor_hollow || snap.cursor_shape == CursorShape::HollowBlock);
+            // `cursor-opacity` applies only to a focused pane's cursor; an
+            // unfocused one stays fully opaque (Ghostty's cursor.zig does the
+            // same). `cursor_hollow` is exactly "this pane isn't focused".
+            let cursor_alpha = if pane.cursor_hollow { 1.0 } else { frame.cursor_opacity };
 
             // Per-cell search-highlight mask (0 = none, 1 = match, 2 = current),
             // built only when a search is active so the common path pays nothing.
@@ -568,24 +609,47 @@ impl GpuResources {
                     // Search highlights tint the cell background (over a selection,
                     // since you're actively navigating matches); the cursor cell
                     // keeps its cursor color.
+                    let mut searched = false;
                     if !is_cursor_cell && y >= 0 && !search_mask.is_empty() {
                         let idx = y as usize * snap.cols as usize + x as usize;
                         match search_mask.get(idx).copied().unwrap_or(0) {
-                            2 => bg = SEARCH_CURRENT_BG,
-                            1 => bg = SEARCH_MATCH_BG,
+                            2 => {
+                                bg = SEARCH_CURRENT_BG;
+                                searched = true;
+                            }
+                            1 => {
+                                bg = SEARCH_MATCH_BG;
+                                searched = true;
+                            }
                             _ => {}
                         }
                     }
 
-                    out.push(Instance::solid(
-                        [cell_left, cell_top, cw, ch],
-                        self.color(bg, 1.0),
-                    ));
+                    // Under `background-opacity` most cells emit nothing at all so
+                    // the translucent window fill shows through — see `bg_alpha`.
+                    // A search highlight counts as "selected": it must stay legible.
+                    let a = if is_cursor_cell {
+                        cursor_alpha
+                    } else {
+                        bg_alpha(
+                            selected || searched,
+                            cell.inverse,
+                            cell.bg_explicit,
+                            frame.background_opacity,
+                            frame.background_opacity_cells,
+                        )
+                    };
+                    if a > 0.0 {
+                        out.push(Instance::solid(
+                            [cell_left, cell_top, cw, ch],
+                            self.color(bg, a),
+                        ));
+                    }
 
                     // Decorations (drawn in the glyph pass so they layer over the
                     // background but under nothing). Faint dims them like glyphs;
                     // a blink-off cell hides them with its glyph.
-                    let deco_alpha = if cell.faint { FAINT_ALPHA } else { 1.0 };
+                    let deco_alpha = if cell.faint { frame.faint_opacity } else { 1.0 };
                     let deco_hidden = cell.blink && pane.blink_hidden;
                     if !deco_hidden && cell.underline != UnderlineStyle::None {
                         // Top of the underline line, just below the baseline.
@@ -726,7 +790,7 @@ impl GpuResources {
                 for r in &runs[..run_count] {
                     shaped.clear();
                     self.atlas.shape_run(&r.text, r.style, &mut shaped);
-                    let color = self.color(r.fg, if r.faint { FAINT_ALPHA } else { 1.0 });
+                    let color = self.color(r.fg, if r.faint { frame.faint_opacity } else { 1.0 });
                     for sg in &shaped {
                         // The cluster's leading char drives cell-fit classification
                         // and display width (1 or 2 cells), so icons/box-drawing/
@@ -784,7 +848,7 @@ impl GpuResources {
 
             let cur_left = ox + snap.cursor_x as f32 * cw;
             let cur_top = oy + snap.cursor_y as f32 * ch + shift;
-            let cur_color = self.color(snap.cursor_color, 1.0);
+            let cur_color = self.color(snap.cursor_color, cursor_alpha);
             if hollow_block {
                 // Four 1px edges forming an outline around the cursor cell.
                 let t = 1.0_f32;
@@ -949,8 +1013,12 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     return in.color;
   }
   if (in.mode == 2u) {
-    // Color emoji: straight-alpha RGBA sampled from the color atlas.
-    return textureSample(color_tex, atlas_smp, in.uv);
+    // Color emoji: straight-alpha RGBA sampled from the color atlas, modulated
+    // by the instance alpha so emoji dim with faint (SGR 2) like every other
+    // glyph. The atlas is straight-alpha, so this multiply is correct as-is —
+    // do not premultiply it, the pipeline blends with SrcAlpha.
+    let c = textureSample(color_tex, atlas_smp, in.uv);
+    return vec4<f32>(c.rgb, c.a * in.color.a);
   }
   if (in.mode == 3u) {
     // Procedural underline decoration. uv.x is an absolute-pixel phase divided
@@ -978,8 +1046,55 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 
 #[cfg(test)]
 mod tests {
-    use super::build_search_mask;
+    use super::{bg_alpha, build_search_mask};
     use crate::search::SearchHighlight;
+
+    #[test]
+    fn bg_alpha_matches_ghostty_table() {
+        let o = 0.8;
+        // (selected, inverse, bg_explicit) -> alpha, with opacity-cells off.
+        for (sel, inv, expl, want) in [
+            (true, false, false, 1.0),  // selection is always opaque
+            (true, false, true, 1.0),
+            (false, true, false, 1.0),  // reverse video is always opaque
+            (false, true, true, 1.0),
+            (false, false, true, 1.0),  // explicit bg is opaque by default
+            (false, false, false, 0.0), // default bg draws nothing
+        ] {
+            assert_eq!(bg_alpha(sel, inv, expl, o, false), want, "{sel} {inv} {expl}");
+        }
+
+        // With `background-opacity-cells`, only the explicit-bg branch changes.
+        assert_eq!(bg_alpha(false, false, true, o, true), o);
+        assert_eq!(bg_alpha(false, false, false, o, true), 0.0);
+    }
+
+    #[test]
+    fn bg_alpha_branch_order_is_ghostty_s() {
+        // Both rules that force opacity must be tested *before* opacity-cells,
+        // otherwise selected/reverse-video cells would go translucent.
+        assert_eq!(bg_alpha(true, false, true, 0.3, true), 1.0, "selected beats cells");
+        assert_eq!(bg_alpha(false, true, true, 0.3, true), 1.0, "inverse beats cells");
+    }
+
+    #[test]
+    fn bg_alpha_is_opaque_or_absent_at_full_opacity() {
+        // At opacity 1.0 every combination is either a fully opaque quad or no
+        // quad over an opaque fill — so the default config renders exactly as it
+        // did before transparency existed.
+        for cells in [false, true] {
+            for sel in [false, true] {
+                for inv in [false, true] {
+                    for expl in [false, true] {
+                        let a = bg_alpha(sel, inv, expl, 1.0, cells);
+                        assert!(a == 1.0 || a == 0.0, "{sel} {inv} {expl} {cells} -> {a}");
+                        // Only a default-background cell may be skipped.
+                        assert_eq!(a == 0.0, !sel && !inv && !expl);
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn search_mask_marks_match_and_current_spans() {
