@@ -60,6 +60,22 @@ palette = 8=#666a73
 | `middle-click-action` | enum | `primary-paste` (default) pastes the clipboard; `ignore` does nothing. Windows has no primary selection, so this reads the system clipboard. |
 | `palette` | repeated `<index>=#rrggbb` | Override individual 256-color palette entries; everything else keeps the bundled theme. |
 
+### Windows and working-directory inheritance
+
+| Key | Type | Notes |
+| --- | --- | --- |
+| `window-inherit-working-directory` | bool (default `true`) | A new window (`Ctrl+Shift+N`) starts in the focused pane's directory, reported via OSC 7. |
+| `tab-inherit-working-directory` | bool (default `true`) | Same for a new tab. |
+| `split-inherit-working-directory` | bool (default `true`) | Same for a new split. |
+
+Secondary windows share the first window's glyph atlas, so **font size is application-wide** — a
+zoom in one window resizes them all (Ghostty's is per-surface). They also don't get the DWM acrylic
+backdrop or the taskbar attention flash, which need a window handle only the first window has.
+
+`close_window` has no default binding: Windows already delivers Alt+F4 to the window, which giest
+answers with the close confirmation. Bind it explicitly with `keybind = alt+f4=close_window` if you
+want the action as well.
+
 ### Bell, resize overlay, close confirmation
 
 | Key | Type | Notes |

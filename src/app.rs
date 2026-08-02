@@ -353,7 +353,16 @@ struct Leaf<'a, T> {
     rect: egui::Rect,
 }
 
-pub struct App {
+/// One OS window: its tab list plus every piece of UI state that is per-window.
+///
+/// `Config`, `Keymap` and the profile list are held **per window rather than in
+/// a shared cell**. They're cheap to clone, it keeps every method body free of
+/// borrow plumbing, and it mirrors Ghostty, which clones the config per surface
+/// (`shallowClone` in `newConfig`). The price is that anything which must stay
+/// uniform across windows has to be fanned out explicitly by [`App`] — namely a
+/// config reload and the font metrics, which are pinned together by the single
+/// shared glyph atlas (see [`App::sync_font`]).
+pub struct Window {
     tabs: Vec<Tab<Session>>,
     active_tab: usize,
     /// Monotonic source of unique pane (leaf) ids, used to track focus across
@@ -410,6 +419,70 @@ pub struct App {
     /// Previous frame's window focus, so a bell marker can be cleared on the
     /// unfocused→focused *edge* rather than every focused frame.
     was_focused: bool,
+    /// Stable, slot-independent identity. Drives this window's child
+    /// `ViewportId` and its egui-`Id` namespace, so a window keeps both across
+    /// any reshuffle of the window list.
+    window_id: u64,
+    /// Whether this window occupies the root viewport. Owned by [`App`].
+    is_root: bool,
+    /// A BEL rang in one of this window's panes during the app-level pump;
+    /// consumed by this window's own pass, which is where its focus state (and
+    /// so the `attention` feature) is meaningful.
+    pending_bell: bool,
+    /// Last observed outer position and inner size, recorded each pass. Used
+    /// when the root-slot window is retired: the survivor that inherits the root
+    /// viewport is moved onto the geometry it already occupied, so the window
+    /// that visually disappears is the one the user closed.
+    geom: Option<(egui::Pos2, egui::Vec2)>,
+    /// App-scoped intents raised anywhere in this window's pass, drained by
+    /// [`Window::run_pass`] and applied by [`App`] once nothing is borrowed.
+    /// The same deferred-intent idiom as `want_split` / `want_close`.
+    requests: Vec<AppRequest>,
+}
+
+/// Something only [`App`] can do, raised from inside a window's pass.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum AppRequest {
+    /// Open a window, with the working directory already resolved from the
+    /// raising window's focused pane (Ghostty resolves it from the previously
+    /// focused surface, not from the new one's parent).
+    NewWindow(Option<std::path::PathBuf>),
+    /// Retire the raising window. Quits giest when it's the last one.
+    CloseWindow,
+}
+
+/// The whole application: every open window, plus the little state that has to
+/// be coordinated between them.
+pub struct App {
+    /// `windows[0]` is always the one drawn into [`egui::ViewportId::ROOT`].
+    windows: Vec<Window>,
+    /// Index of the window that most recently reported focus. Recomputed every
+    /// pass — never held across frames, since a retire can invalidate it.
+    focused: usize,
+    next_window_id: u64,
+}
+
+/// The kind of surface being created, for the working-directory inheritance
+/// decision. Mirrors Ghostty's `apprt.surface.NewSurfaceContext`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NewSurface {
+    Window,
+    Tab,
+    Split,
+}
+
+/// Whether a new surface of this kind inherits the previously focused pane's
+/// working directory (reported via OSC 7).
+///
+/// One table for all three kinds, exactly as Ghostty gates them in
+/// `shouldInheritWorkingDirectory` — so the three call sites can't drift from
+/// each other or from upstream. All three default to `true`.
+pub fn should_inherit_cwd(what: NewSurface, cfg: &Config) -> bool {
+    match what {
+        NewSurface::Window => cfg.window_inherit_working_directory,
+        NewSurface::Tab => cfg.tab_inherit_working_directory,
+        NewSurface::Split => cfg.split_inherit_working_directory,
+    }
 }
 
 /// What a confirmed close should do. One enum so the confirmation modal is a
@@ -458,8 +531,12 @@ const TAB_COLORS: &[(&str, egui::Color32)] = &[
     ("Graphite", egui::Color32::from_rgb(0x60, 0x6a, 0x76)),
 ];
 
-impl App {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Result<Self> {
+impl Window {
+    /// Build the first window, doing the once-per-process setup on the way:
+    /// the egui context options, the UI fallback font, the glyph atlas
+    /// (`render::init`) and shell-profile detection. [`App::spawn_window`]
+    /// builds every later window from an existing one instead.
+    fn first(cc: &eframe::CreationContext<'_>, window_id: u64) -> Result<Self> {
         let render_state = cc
             .wgpu_render_state
             .as_ref()
@@ -533,9 +610,33 @@ impl App {
             closing: false,
             bell_title: false,
             was_focused: true,
+            window_id,
+            is_root: true,
+            pending_bell: false,
+            geom: None,
+            requests: Vec::new(),
         };
         app.apply_backdrop();
         Ok(app)
+    }
+
+    /// Whether this window is the one drawn into [`egui::ViewportId::ROOT`].
+    /// Maintained by [`App`], which keeps the root at slot 0 and re-stamps it on
+    /// a rehost — closing the root is the only close that can end the process.
+    fn is_root(&self) -> bool {
+        self.is_root
+    }
+
+    /// Namespace an egui `Id` to this window.
+    ///
+    /// egui keys `Memory::areas`, `focus` and `interactions` by viewport, but
+    /// **not `Memory::data`** — which is where `TextEditState`, `ScrollArea`
+    /// offsets and `PanelState` live. Two windows reusing a literal id would
+    /// therefore share a text cursor (palette, search, tab rename) and a tab-strip
+    /// height. Keyed on the stable `window_id` rather than the slot, so a
+    /// rehost can't shuffle widget state between windows.
+    fn id(&self, what: impl std::hash::Hash) -> egui::Id {
+        egui::Id::new(("giest-window", self.window_id, what))
     }
 
     /// Fire the out-of-band bell effects for the configured `bell-features`.
@@ -575,7 +676,7 @@ impl App {
             return;
         };
         let mut decision: Option<bool> = None;
-        let modal = egui::Modal::new(egui::Id::new("giest-confirm-close")).show(ctx, |ui| {
+        let modal = egui::Modal::new(self.id("confirm-close")).show(ctx, |ui| {
             ui.set_width(320.0);
             ui.heading("Close terminal?");
             ui.add_space(6.0);
@@ -600,7 +701,7 @@ impl App {
         match decision {
             Some(true) => {
                 self.confirm = None;
-                self.apply_close(ctx, what);
+                self.apply_close(what);
             }
             Some(false) => self.confirm = None,
             None => {}
@@ -673,6 +774,70 @@ impl App {
         }
     }
 
+    /// Build a sibling window from this one: same config/profiles/keymap/font
+    /// metrics, a fresh session, and none of the per-window UI state.
+    ///
+    /// Returns `None` if the shell couldn't be spawned — a window with no tabs
+    /// would panic in `render_active`, which indexes `tabs[active_tab]`.
+    fn sibling(&self, window_id: u64, cwd: Option<&std::path::Path>) -> Option<Self> {
+        let session = self.spawn_session(self.default_profile, cwd)?;
+        Some(Self {
+            tabs: vec![Tab::leaf(1, session)],
+            active_tab: 0,
+            next_id: 2,
+            cell_w: self.cell_w,
+            cell_h: self.cell_h,
+            font_points: self.font_points,
+            config: self.config.clone(),
+            profiles: self.profiles.clone(),
+            default_profile: self.default_profile,
+            egui_ctx: self.egui_ctx.clone(),
+            last_window_title: None,
+            last_layout: Vec::new(),
+            renaming: None,
+            palette: None,
+            keymap: self.keymap.clone(),
+            fullscreen: false,
+            // Only the root viewport has a reachable window handle, so a
+            // secondary window gets no DWM backdrop and no taskbar flash.
+            hwnd: None,
+            transparent_surface: self.transparent_surface,
+            tab_drag: None,
+            confirm: None,
+            closing: false,
+            bell_title: false,
+            was_focused: true,
+            window_id,
+            is_root: false,
+            pending_bell: false,
+            geom: None,
+            requests: Vec::new(),
+        })
+    }
+
+    /// The `ViewportBuilder` for this window as a child viewport.
+    ///
+    /// Built once and cloned verbatim every pass. Several `ViewportBuilder`
+    /// fields force a full window recreation when patched, and eframe's recreate
+    /// path clears **every** viewport's surface (not just this one) — a visible
+    /// hitch on the root too. Anything dynamic goes through `ViewportCommand`.
+    fn child_builder(&self) -> egui::ViewportBuilder {
+        egui::ViewportBuilder::default()
+            .with_title("giest")
+            .with_inner_size([960.0, 600.0])
+            // NOT optional. The vendored egui-winit patch reads `transparent` to
+            // set WS_EX_NOREDIRECTIONBITMAP at creation, and children go through
+            // the same `create_window`. Omit it and a secondary window renders as
+            // the solid grey wash CLAUDE.md documents.
+            .with_transparent(self.transparent_surface)
+    }
+
+    /// This window's child viewport id. Derived from the stable `window_id`, not
+    /// the slot, so a window keeps its native window across a list reshuffle.
+    fn viewport_id(&self) -> egui::ViewportId {
+        egui::ViewportId(egui::Id::new(("giest-viewport", self.window_id)))
+    }
+
     /// Allocate a fresh unique pane id.
     fn alloc_id(&mut self) -> u64 {
         let id = self.next_id;
@@ -696,14 +861,19 @@ impl App {
     /// `tab-inherit-working-directory` is set (the default), the new tab starts in
     /// the previously focused pane's working directory (reported via OSC 7),
     /// matching Ghostty; otherwise it uses the profile's default directory.
+    /// The focused pane's working directory (reported via OSC 7), or `None` if
+    /// this shell never reported one. The single source for every
+    /// inherit-working-directory path — Ghostty likewise resolves it from the
+    /// previously focused surface rather than from the new surface's parent.
+    fn focused_pwd(&self) -> Option<std::path::PathBuf> {
+        let tab = self.tabs.get(self.active_tab)?;
+        tab.root.payload(tab.focus).and_then(|s| s.pwd())
+    }
+
     fn new_tab(&mut self, idx: usize) {
-        let cwd = if self.config.tab_inherit_working_directory {
-            self.tabs
-                .get(self.active_tab)
-                .and_then(|tab| tab.root.payload(tab.focus).and_then(|s| s.pwd()))
-        } else {
-            None
-        };
+        let cwd = should_inherit_cwd(NewSurface::Tab, &self.config)
+            .then(|| self.focused_pwd())
+            .flatten();
         if let Some(s) = self.spawn_session(idx, cwd.as_deref()) {
             let id = self.alloc_id();
             self.tabs.push(Tab::leaf(id, s));
@@ -715,10 +885,9 @@ impl App {
     /// The rest of the tab's split layout is untouched (splits nest). The new
     /// pane inherits the focused pane's working directory (via OSC 7).
     fn split(&mut self, vertical: bool) {
-        let cwd = {
-            let tab = &self.tabs[self.active_tab];
-            tab.root.payload(tab.focus).and_then(|s| s.pwd())
-        };
+        let cwd = should_inherit_cwd(NewSurface::Split, &self.config)
+            .then(|| self.focused_pwd())
+            .flatten();
         if let Some(s) = self.spawn_session(self.default_profile, cwd.as_deref()) {
             let id = self.alloc_id();
             let tab = &mut self.tabs[self.active_tab];
@@ -810,7 +979,7 @@ impl App {
     /// NOTE: this is only for *user-initiated* closes. A pane whose shell exited
     /// is reaped by `reap_dead` without ever coming through here — there is
     /// nothing to confirm once the process is gone.
-    fn request_close(&mut self, ctx: &egui::Context, what: PendingClose) {
+    fn request_close(&mut self, what: PendingClose) {
         let mode = self.config.confirm_close;
         // Confirm if *any* affected pane is (or might be) busy.
         let busy = self
@@ -825,27 +994,30 @@ impl App {
         if crate::config::needs_confirm(mode, busy) {
             self.confirm = Some(what);
         } else {
-            self.apply_close(ctx, what);
+            self.apply_close(what);
         }
     }
 
     /// Perform a close that has been confirmed (or didn't need confirming).
-    fn apply_close(&mut self, ctx: &egui::Context, what: PendingClose) {
+    fn apply_close(&mut self, what: PendingClose) {
         match what {
-            PendingClose::Pane => self.close_focused(ctx),
-            PendingClose::Tab(i) => self.close_tab(i, ctx),
+            PendingClose::Pane => self.close_focused(),
+            PendingClose::Tab(i) => self.close_tab(i),
             PendingClose::OtherTabs(i) => self.close_other_tabs(i),
             PendingClose::TabsToRight(i) => self.close_tabs_to_right(i),
             PendingClose::Window => {
+                // Latch so the `Close` that `App` issues for the root doesn't
+                // come straight back as another `close_requested()` and re-open
+                // this dialog forever.
                 self.closing = true;
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                self.requests.push(AppRequest::CloseWindow);
             }
         }
     }
 
     /// Close the focused pane; closing the last pane closes the tab, and the
     /// last tab closes the window.
-    fn close_focused(&mut self, ctx: &egui::Context) {
+    fn close_focused(&mut self) {
         let tab = &mut self.tabs[self.active_tab];
         if tab.leaf_count() > 1 {
             let focus = tab.focus;
@@ -858,7 +1030,7 @@ impl App {
             self.tabs.remove(self.active_tab);
             self.active_tab = self.active_tab.min(self.tabs.len() - 1);
         } else {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            self.requests.push(AppRequest::CloseWindow);
         }
     }
 
@@ -928,7 +1100,7 @@ impl App {
     }
 
     /// Close tab `idx`; closing the last tab closes the window.
-    fn close_tab(&mut self, idx: usize, ctx: &egui::Context) {
+    fn close_tab(&mut self, idx: usize) {
         if idx >= self.tabs.len() {
             return;
         }
@@ -937,7 +1109,7 @@ impl App {
             self.active_tab -= 1;
         }
         if self.tabs.is_empty() {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            self.requests.push(AppRequest::CloseWindow);
         } else {
             self.active_tab = self.active_tab.min(self.tabs.len() - 1);
         }
@@ -964,14 +1136,14 @@ impl App {
     /// Remove panes whose shell has exited; drop tabs that become empty and
     /// close the window when the last tab is gone. Returns `false` if the
     /// window is closing (caller should skip rendering this frame).
-    fn reap_dead(&mut self, ctx: &egui::Context) -> bool {
+    fn reap_dead(&mut self) -> bool {
         let before = self.tabs.len();
         let tabs = std::mem::take(&mut self.tabs);
         let (survivors, active) =
             reap_tabs(tabs, self.active_tab, &mut |s: &Session| !s.is_alive());
         self.tabs = survivors;
         if self.tabs.is_empty() {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            self.requests.push(AppRequest::CloseWindow);
             return false;
         }
         if self.tabs.len() != before {
@@ -1099,13 +1271,23 @@ impl App {
     ) {
         match action {
             Action::NewTab => self.new_tab(self.default_profile),
+            Action::NewWindow => {
+                // Resolve the cwd here, from *this* window's focused pane —
+                // Ghostty likewise reads it from the previously focused surface
+                // rather than from the new window.
+                let cwd = should_inherit_cwd(NewSurface::Window, &self.config)
+                    .then(|| self.focused_pwd())
+                    .flatten();
+                self.requests.push(AppRequest::NewWindow(cwd));
+            }
+            Action::CloseWindow => self.request_close(PendingClose::Window),
             Action::NewTabWithProfile(i) => self.new_tab(i),
-            Action::CloseTab => self.request_close(ctx, PendingClose::Tab(self.active_tab)),
+            Action::CloseTab => self.request_close(PendingClose::Tab(self.active_tab)),
             Action::CloseOtherTabs => {
-                self.request_close(ctx, PendingClose::OtherTabs(self.active_tab))
+                self.request_close(PendingClose::OtherTabs(self.active_tab))
             }
             Action::CloseTabsToRight => {
-                self.request_close(ctx, PendingClose::TabsToRight(self.active_tab))
+                self.request_close(PendingClose::TabsToRight(self.active_tab))
             }
             Action::NextTab => self.next_tab(),
             Action::PrevTab => self.prev_tab(),
@@ -1126,7 +1308,7 @@ impl App {
             Action::SplitRight => self.split(true),
             Action::SplitDown => self.split(false),
             Action::ToggleSplitZoom => self.toggle_split_zoom(),
-            Action::ClosePane => self.request_close(ctx, PendingClose::Pane),
+            Action::ClosePane => self.request_close(PendingClose::Pane),
             Action::ToggleFullscreen => self.toggle_fullscreen(ctx),
             Action::FocusSplitLeft => self.focus_dir(Dir::Left),
             Action::FocusSplitRight => self.focus_dir(Dir::Right),
@@ -1219,7 +1401,7 @@ impl App {
 
         // Dimmed backdrop: above the panes (Middle), below the modal (Foreground);
         // a click anywhere on it closes the palette.
-        egui::Area::new(egui::Id::new("giest-palette-backdrop"))
+        egui::Area::new(self.id("palette-backdrop"))
             .order(egui::Order::Middle)
             .fixed_pos(egui::Pos2::ZERO)
             .show(ctx, |ui| {
@@ -1232,7 +1414,7 @@ impl App {
             });
 
         let width = (screen.width() * 0.6).clamp(560.0, 900.0).min(screen.width() - 40.0);
-        egui::Area::new(egui::Id::new("giest-palette"))
+        egui::Area::new(self.id("palette"))
             .order(egui::Order::Foreground)
             .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, screen.height() * 0.12))
             .show(ctx, |ui| {
@@ -1423,7 +1605,7 @@ impl App {
         let mut prev = false;
         let mut toggle_case = false;
 
-        egui::Area::new(egui::Id::new("giest-search"))
+        egui::Area::new(self.id("search"))
             .order(egui::Order::Foreground)
             .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-16.0, 8.0))
             .show(ctx, |ui| {
@@ -1642,7 +1824,7 @@ impl App {
                 if !editing {
                     let drag = ui.interact(
                         title_resp.rect,
-                        egui::Id::new(("giest-tab-drag", i)),
+                        self.id(("tab-drag", i)),
                         egui::Sense::drag(),
                     );
                     // Primary only: egui starts drags on *any* held button, so a
@@ -1801,15 +1983,14 @@ impl App {
         // Every close route (the × button, middle-click, and the context menu)
         // funnels through `request_close`, so the confirmation gate is applied
         // once here rather than at each of them.
-        let ctx = ui.ctx().clone();
         if let Some(i) = want_close_others {
-            self.request_close(&ctx, PendingClose::OtherTabs(i));
+            self.request_close(PendingClose::OtherTabs(i));
         }
         if let Some(i) = want_close_right {
-            self.request_close(&ctx, PendingClose::TabsToRight(i));
+            self.request_close(PendingClose::TabsToRight(i));
         }
         if let Some(i) = want_close {
-            self.request_close(&ctx, PendingClose::Tab(i));
+            self.request_close(PendingClose::Tab(i));
         }
     }
 
@@ -1846,6 +2027,9 @@ impl App {
         let bell_border = self.config.bell.border;
         let now = ctx.input(|i| i.time);
         let active_tab = self.active_tab;
+        // Hoisted so the per-pane widget id can be namespaced to this window
+        // from inside the leaf loop, which borrows `self.tabs`.
+        let win_id = self.window_id;
         // While a modal overlay is up it owns input: don't feed keys to the
         // focused pane or let it grab keyboard focus. `egui::Modal` blocks
         // *pointer* interaction and tab traversal on its own, but
@@ -2006,7 +2190,7 @@ impl App {
                 // button got focus — switching/closing tabs unexpectedly.
                 let resp = ui.interact(
                     prect,
-                    egui::Id::new(("giest-pane", active_tab, leaf_id)),
+                    egui::Id::new(("giest-window", win_id, "pane", active_tab, leaf_id)),
                     egui::Sense::click_and_drag(),
                 );
                 resp.request_focus();
@@ -2289,35 +2473,15 @@ impl App {
     }
 }
 
-impl eframe::App for App {
-    /// Clear the framebuffer to *fully transparent*.
+impl Window {
+    /// Drain this window's PTYs and latch any bell. Runs for **every** window
+    /// from the root pass, not inside `run_pass`, so a background window's
+    /// shells keep flowing and its shell-exit is still noticed while it isn't
+    /// the one being drawn.
     ///
-    /// This is a precondition for `background-opacity`, not a nicety: eframe's
-    /// default clear is `rgba_unmultiplied(12, 12, 12, 180)`, and egui's own alpha
-    /// blend (`src * OneMinusDstAlpha + dst * One`) can only ever *raise* the
-    /// framebuffer alpha. Starting at alpha 180/255 therefore caps the window at
-    /// ~71% opacity no matter what we paint, and tints everything toward (12,12,12).
-    /// It is also what lets the DWM acrylic backdrop show through (`crate::blur`).
-    ///
-    /// Harmless when opaque: the window-background fill covers every pixel.
-    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        [0.0, 0.0, 0.0, 0.0]
-    }
-
-    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
-        let ctx = ui.ctx().clone();
-
-        // Poll for shell exit even when idle (a shell that exits produces no
-        // output, so nothing else would wake us to reap it).
-        ctx.request_repaint_after(Duration::from_millis(500));
-
-        // Pump every pane in every tab so background sessions keep flowing.
-        let now = ctx.input(|i| i.time);
-        // Drain the out-of-band bell effects here rather than in `render_active`:
-        // that only walks the *active* tab's leaves, so a BEL in a background tab
-        // would never ring. The visual border flash stays per-pane (it needs the
-        // leaf rect). Each session rate-limits itself, so a BEL storm in one pane
-        // can't machine-gun the speaker.
+    /// The bell *effects* are only latched here: firing them needs this window's
+    /// own focus state, which is only meaningful inside its own pass.
+    fn pump_all(&mut self, now: f64) {
         let mut rang = false;
         for tab in &mut self.tabs {
             tab.root.for_each_mut(&mut |pane| {
@@ -2325,20 +2489,47 @@ impl eframe::App for App {
                 rang |= pane.take_bell_effect(now);
             });
         }
-        if rang {
-            self.ring_bell(&ctx);
-        }
+        self.pending_bell |= rang;
+    }
+
+    /// Run one UI pass for this window, into whichever viewport is current.
+    /// Returns the app-scoped intents it raised.
+    ///
+    /// Every viewport-scoped call below (`send_viewport_cmd`, `i.focused`,
+    /// `i.viewport()`, `ctx.content_rect()`) resolves against the *running*
+    /// pass, so this body is correct for the root window and for a child
+    /// viewport without a single branch on which one it is.
+    fn run_pass(
+        &mut self,
+        ui: &mut egui::Ui,
+        render_state: Option<&egui_wgpu::RenderState>,
+    ) -> Vec<AppRequest> {
+        let ctx = ui.ctx().clone();
+
+        // Record where this window is, for the root-slot rehost on retire.
+        self.geom = ctx.input(|i| {
+            let vp = i.viewport();
+            Some((vp.outer_rect?.min, vp.inner_rect?.size()))
+        });
+
         // Close panes/tabs whose shell exited; bail if that closed the window.
         // NOTE: this path is deliberately never confirmed — the process is
         // already gone, so there is nothing left to save.
-        if !self.reap_dead(&ctx) {
-            return;
+        if !self.reap_dead() {
+            return std::mem::take(&mut self.requests);
+        }
+        if std::mem::take(&mut self.pending_bell) {
+            self.ring_bell(&ctx);
         }
 
         // The titlebar ×, Alt+F4 or the taskbar. eframe reads `close_requested`
         // from *this pass's* raw input and exits after the pass unless
         // `CancelClose` is sent within the same pass — so this must run every
         // frame, before anything can early-return.
+        //
+        // `CancelClose` is honoured for the **root** viewport only; a child's
+        // close request is inert until the app stops rendering it, so a child
+        // needs no cancel at all. Hence the `is_root()` guards below.
         if ctx.input(|i| i.viewport().close_requested()) && !self.closing {
             if self.confirm.is_none()
                 && crate::config::needs_confirm(
@@ -2353,11 +2544,20 @@ impl eframe::App for App {
                         .flatten(),
                 )
             {
-                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                if self.is_root() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                }
                 self.confirm = Some(PendingClose::Window);
             } else if self.confirm.is_some() {
                 // A dialog is already up; don't let a second close request race it.
-                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                if self.is_root() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                }
+            } else {
+                // No confirmation wanted: close now. For the root this is the
+                // path eframe would have taken anyway; for a child it's what
+                // actually retires the window.
+                self.requests.push(AppRequest::CloseWindow);
             }
         }
 
@@ -2366,9 +2566,8 @@ impl eframe::App for App {
         // is open; each overlay handles its own keys, including its toggle-close.
         if !self.modal_open() {
             self.handle_shortcuts(&ctx);
-            if let Some(render_state) = frame.wgpu_render_state() {
-                let render_state = render_state.clone();
-                self.handle_font_zoom(&ctx, &render_state);
+            if let Some(render_state) = render_state {
+                self.handle_font_zoom(&ctx, render_state);
             }
         }
 
@@ -2410,7 +2609,7 @@ impl eframe::App for App {
         // window-background fill.
         let strip = ctx.global_style().visuals.panel_fill;
         let a8 = (self.config.background_opacity * 255.0).round() as u8;
-        egui::Panel::top("giest-tabs")
+        egui::Panel::top(self.id("tabs"))
             .frame(
                 egui::Frame::side_top_panel(&ctx.global_style()).fill(
                     egui::Color32::from_rgba_unmultiplied(strip.r(), strip.g(), strip.b(), a8),
@@ -2427,16 +2626,200 @@ impl eframe::App for App {
 
         // The command palette draws over everything; a chosen command runs after
         // the modal closes, so it mutates `self` with no outstanding borrow.
-        let render_state = frame.wgpu_render_state().cloned();
         if let Some(action) = self.render_palette(&ctx) {
-            self.execute_action(&ctx, render_state.as_ref(), action);
+            self.execute_action(&ctx, render_state, action);
         }
         // The scrollback-search overlay (self-gating: a no-op unless the focused
         // pane's search is open).
         self.render_search(&ctx);
         // The close confirmation draws over everything else.
         self.render_confirm_close(&ctx);
+
+        std::mem::take(&mut self.requests)
     }
+}
+
+impl App {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Result<Self> {
+        Ok(Self {
+            windows: vec![Window::first(cc, 0)?],
+            focused: 0,
+            next_window_id: 1,
+        })
+    }
+
+    /// Apply the app-scoped intents raised by this pass's windows. Runs after
+    /// every window pass, so nothing is borrowed and the window list is free to
+    /// grow or shrink.
+    ///
+    /// Requests are keyed by [`Window::window_id`], not by slot: retiring one
+    /// window renumbers the rest, so an index captured during the pass would
+    /// point at the wrong window by the time we got here.
+    fn apply_requests(&mut self, ctx: &egui::Context, requests: Vec<(u64, AppRequest)>) {
+        for (id, req) in requests {
+            match req {
+                AppRequest::CloseWindow => self.retire(ctx, id),
+                AppRequest::NewWindow(cwd) => self.spawn_window(ctx, cwd.as_deref()),
+            }
+        }
+    }
+
+    /// Open a new window, cloned from the focused one (falling back to the root)
+    /// so it inherits the live config, profiles and font metrics.
+    fn spawn_window(&mut self, ctx: &egui::Context, cwd: Option<&std::path::Path>) {
+        let from = self.focused.min(self.windows.len().saturating_sub(1));
+        let Some(src) = self.windows.get(from) else {
+            return;
+        };
+        let id = self.next_window_id;
+        // Only bump the counter on success, so a failed spawn doesn't burn an id.
+        if let Some(w) = src.sibling(id, cwd) {
+            self.next_window_id += 1;
+            self.windows.push(w);
+            ctx.request_repaint();
+        }
+    }
+
+    /// Close the window with `id`, quitting giest when it was the last one.
+    fn retire(&mut self, ctx: &egui::Context, id: u64) {
+        let Some(idx) = self.windows.iter().position(|w| w.window_id == id) else {
+            return;
+        };
+        // Remember where the surviving root-slot window is on screen *before*
+        // the move, so a rehost can put the root native window there.
+        let rehost_to = (idx == 0).then(|| self.windows.get(1).and_then(|w| w.geom)).flatten();
+
+        let windows = std::mem::take(&mut self.windows);
+        let (windows, focused) = retire_window(windows, idx, self.focused);
+        self.windows = windows;
+        self.focused = focused;
+
+        if self.windows.is_empty() {
+            // The last window went: closing the root viewport ends the process.
+            ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Close);
+            return;
+        }
+        // Slot 0 is by definition the root viewport. If the old root was the one
+        // retired, a survivor has just slid into that slot — move the native root
+        // window onto the geometry that survivor used to occupy, so on screen the
+        // window the user actually closed is the one that disappears.
+        if idx == 0 {
+            self.windows[0].is_root = true;
+            if let Some(g) = rehost_to {
+                ctx.send_viewport_cmd_to(
+                    egui::ViewportId::ROOT,
+                    egui::ViewportCommand::OuterPosition(g.0),
+                );
+                ctx.send_viewport_cmd_to(
+                    egui::ViewportId::ROOT,
+                    egui::ViewportCommand::InnerSize(g.1),
+                );
+            }
+        }
+        ctx.request_repaint();
+    }
+}
+
+impl eframe::App for App {
+    /// Clear the framebuffer to *fully transparent*.
+    ///
+    /// This is a precondition for `background-opacity`, not a nicety: eframe's
+    /// default clear is `rgba_unmultiplied(12, 12, 12, 180)`, and egui's own alpha
+    /// blend (`src * OneMinusDstAlpha + dst * One`) can only ever *raise* the
+    /// framebuffer alpha. Starting at alpha 180/255 therefore caps the window at
+    /// ~71% opacity no matter what we paint, and tints everything toward (12,12,12).
+    /// It is also what lets the DWM acrylic backdrop show through (`crate::blur`).
+    ///
+    /// Harmless when opaque: the window-background fill covers every pixel.
+    ///
+    /// NOTE: eframe consults this for the **root** viewport only — it hardcodes
+    /// `[0,0,0,0]` for immediate child viewports. Same value, so no divergence
+    /// today; a future non-zero clear would silently not reach other windows.
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        [0.0, 0.0, 0.0, 0.0]
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        // One `RenderState` serves every viewport (egui-wgpu keeps a single
+        // painter), so the root's is valid for all windows.
+        let render_state = frame.wgpu_render_state().cloned();
+
+        // Poll for shell exit even when idle (a shell that exits produces no
+        // output, so nothing else would wake us to reap it). Issued on the root
+        // only: children repaint via the root anyway, so a per-window timer would
+        // just multiply into N root repaints.
+        ctx.request_repaint_after(Duration::from_millis(500));
+
+        // Pump every window's PTYs before drawing any of them, so background
+        // windows keep flowing and their shell exits are noticed.
+        let now = ctx.input(|i| i.time);
+        for w in &mut self.windows {
+            w.pump_all(now);
+        }
+
+        let mut requests: Vec<(u64, AppRequest)> = Vec::new();
+        // The root window draws into the `Ui` eframe handed us.
+        if let Some(w) = self.windows.first_mut() {
+            let id = w.window_id;
+            requests.extend(
+                w.run_pass(ui, render_state.as_ref())
+                    .into_iter()
+                    .map(|r| (id, r)),
+            );
+        }
+
+        // Every other window gets its own native window, via an *immediate*
+        // viewport. Deferred viewports would repaint independently (cheaper),
+        // but their callback must be `Send + Sync + 'static` and `Session` is
+        // neither — it holds `Rc`s and an FFI terminal. Immediate viewports take
+        // a plain `FnMut`, so the closure can borrow the window directly.
+        for i in 1..self.windows.len() {
+            // Split borrows: `windows` and the rest of `self` are disjoint
+            // fields, so the closure can hold `&mut Window` while we read the
+            // render state. Nothing here touches `self.windows` as a whole.
+            let App { windows, .. } = self;
+            let w = &mut windows[i];
+            let (id, vp, builder) = (w.window_id, w.viewport_id(), w.child_builder());
+            let out = ctx.show_viewport_immediate(vp, builder, |cui, _class| {
+                w.run_pass(cui, render_state.as_ref())
+            });
+            requests.extend(out.into_iter().map(|r| (id, r)));
+        }
+
+        // Track which window has focus, for `new_window`'s cwd inheritance.
+        // Recomputed every pass — a retire renumbers the slots.
+        if let Some(i) = self
+            .windows
+            .iter()
+            .position(|w| w.was_focused)
+        {
+            self.focused = i;
+        }
+
+        self.apply_requests(&ctx, requests);
+    }
+}
+
+/// Drop window `idx`, returning the surviving list and the remapped focused
+/// index so the *same* window stays focused where possible.
+///
+/// Split out from [`App`] — like `reap_tabs` and `reorder_tabs` — so the
+/// reselection logic is testable without spawning a shell. Out-of-range `idx` is
+/// a no-op rather than a panic, matching the other window/tab helpers.
+fn retire_window<W>(mut windows: Vec<W>, idx: usize, focused: usize) -> (Vec<W>, usize) {
+    if idx >= windows.len() {
+        return (windows, focused);
+    }
+    windows.remove(idx);
+    if windows.is_empty() {
+        return (windows, 0);
+    }
+    // A focus past the removed slot shifts down; a focus *on* it lands on the
+    // window that took its place (clamped at the end).
+    let focused = if focused > idx { focused - 1 } else { focused };
+    let last = windows.len() - 1;
+    (windows, focused.min(last))
 }
 
 /// Which slot a tab dragged to pointer-x `x` should land in, given this frame's
@@ -2706,11 +3089,80 @@ fn ellipsize(s: &str, max: usize) -> String {
 mod tests {
     use super::{
         Dir, Node, Tab, cycle_pick, dim_alpha, drop_index, ellipsize, keep_only_tab, nav_dir,
-        overlay_anchor, reap_tabs, reorder_tabs, split_rect, truncate_tabs_to_right,
+        overlay_anchor, reap_tabs, reorder_tabs, retire_window, split_rect, truncate_tabs_to_right,
     };
     use crate::config::ResizeOverlayPosition as P;
     use eframe::egui;
     use eframe::egui::Align2;
+
+    #[test]
+    fn retire_window_drops_it_and_remaps_focus() {
+        let w = || vec![10, 11, 12, 13];
+        // Dropping a window before the focused one shifts focus down by one, so
+        // the *same* window stays focused.
+        let (v, f) = retire_window(w(), 0, 2);
+        assert_eq!(v, vec![11, 12, 13]);
+        assert_eq!(v[f], 12);
+        // Dropping one after it leaves focus alone.
+        let (v, f) = retire_window(w(), 3, 1);
+        assert_eq!(v, vec![10, 11, 12]);
+        assert_eq!(v[f], 11);
+        // Dropping the focused window lands on whatever took its slot.
+        let (v, f) = retire_window(w(), 1, 1);
+        assert_eq!(v, vec![10, 12, 13]);
+        assert_eq!(v[f], 12);
+        // Dropping the focused *last* window clamps back onto the new last.
+        let (v, f) = retire_window(w(), 3, 3);
+        assert_eq!(v, vec![10, 11, 12]);
+        assert_eq!(v[f], 12);
+    }
+
+    #[test]
+    fn retire_window_on_the_last_one_empties_the_list() {
+        // An empty list is how `App` knows to quit giest.
+        let (v, f) = retire_window(vec![10], 0, 0);
+        assert!(v.is_empty());
+        assert_eq!(f, 0);
+    }
+
+    #[test]
+    fn retire_window_ignores_out_of_range() {
+        let (v, f) = retire_window(vec![10, 11], 9, 1);
+        assert_eq!(v, vec![10, 11]);
+        assert_eq!(f, 1);
+    }
+
+    #[test]
+    fn inherit_cwd_follows_the_per_context_config_key() {
+        use super::{NewSurface, should_inherit_cwd};
+        use crate::config::Config;
+
+        // All three default on.
+        let d = Config::default();
+        for what in [NewSurface::Window, NewSurface::Tab, NewSurface::Split] {
+            assert!(should_inherit_cwd(what, &d), "{what:?} defaults on");
+        }
+
+        // Each context reads its *own* key — a swapped arm is exactly the bug
+        // this table exists to prevent, so check every off-by-one pairing.
+        let cases = [
+            (NewSurface::Window, "window"),
+            (NewSurface::Tab, "tab"),
+            (NewSurface::Split, "split"),
+        ];
+        for (what, key) in cases {
+            let cfg = Config::from_ghostty_config(&format!("{key}-inherit-working-directory = false"));
+            assert!(!should_inherit_cwd(what, &cfg), "{what:?} reads {key}-*");
+            for (other, other_key) in cases {
+                if other != what {
+                    assert!(
+                        should_inherit_cwd(other, &cfg),
+                        "{other:?} must not read {key}-* (it has {other_key}-*)"
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn drop_index_uses_tab_centres() {

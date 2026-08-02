@@ -359,9 +359,12 @@ pub struct Config {
     /// nor silently loses the value.
     pub bell_audio_volume: f32,
     /// Whether a new tab inherits the focused pane's working directory (via OSC
-    /// 7). Ghostty `tab-inherit-working-directory` (default true). Splits always
-    /// inherit (see `split-inherit-working-directory`, also true by default).
+    /// 7). Ghostty `tab-inherit-working-directory`.
     pub tab_inherit_working_directory: bool,
+    /// Same, for a new split. Ghostty `split-inherit-working-directory`.
+    pub split_inherit_working_directory: bool,
+    /// Same, for a new window. Ghostty `window-inherit-working-directory`.
+    pub window_inherit_working_directory: bool,
 }
 
 impl Default for Config {
@@ -408,6 +411,8 @@ impl Default for Config {
             bell_audio_path: None,
             bell_audio_volume: 0.5,
             tab_inherit_working_directory: true,
+            split_inherit_working_directory: true,
+            window_inherit_working_directory: true,
         }
     }
 }
@@ -759,12 +764,17 @@ const SETTERS: &[(&str, Setter)] = &[
     ("bell-audio-volume", |c, v, d| {
         c.bell_audio_volume = ratio(v, d.bell_audio_volume, c.bell_audio_volume, 0.0, 1.0)
     }),
+    // The three inheritance keys are separate in Ghostty and read by one shared
+    // decision table (`crate::app::should_inherit_cwd`), so they can't drift.
     ("tab-inherit-working-directory", |c, v, d| {
         c.tab_inherit_working_directory = parse_bool(v, d.tab_inherit_working_directory);
     }),
-    // giest is single-window, so window-level inheritance has nothing to act on
-    // yet; recognize the key (and validate it) so a Ghostty config doesn't warn.
-    ("window-inherit-working-directory", |_, _, _| {}),
+    ("split-inherit-working-directory", |c, v, d| {
+        c.split_inherit_working_directory = parse_bool(v, d.split_inherit_working_directory);
+    }),
+    ("window-inherit-working-directory", |c, v, d| {
+        c.window_inherit_working_directory = parse_bool(v, d.window_inherit_working_directory);
+    }),
 ];
 
 /// Parse a Ghostty-style boolean (`true`/`false`, `yes`/`no`, `on`/`off`, `1`/`0`),
@@ -1201,14 +1211,25 @@ mod tests {
     }
 
     #[test]
-    fn tab_inherit_working_directory_defaults_true_and_overrides() {
-        assert!(Config::default().tab_inherit_working_directory);
+    fn inherit_working_directory_keys_default_true_and_override() {
+        let d = Config::default();
+        assert!(d.tab_inherit_working_directory);
+        assert!(d.split_inherit_working_directory);
+        assert!(d.window_inherit_working_directory);
+
         assert!(!parsed("tab-inherit-working-directory = false").tab_inherit_working_directory);
-        assert!(parsed("tab-inherit-working-directory = true").tab_inherit_working_directory);
+        assert!(!parsed("split-inherit-working-directory = false").split_inherit_working_directory);
+        assert!(
+            !parsed("window-inherit-working-directory = false").window_inherit_working_directory
+        );
+
         // An empty value resets to the default (true).
         assert!(parsed("tab-inherit-working-directory =").tab_inherit_working_directory);
-        // The single-window key is recognized (no "unsupported key") and harmless.
-        let _ = parsed("window-inherit-working-directory = true");
+        assert!(parsed("split-inherit-working-directory =").split_inherit_working_directory);
+
+        // Each key is independent — turning one off must not disturb the others.
+        let c = parsed("split-inherit-working-directory = false");
+        assert!(c.tab_inherit_working_directory && c.window_inherit_working_directory);
     }
 
     #[test]

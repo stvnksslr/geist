@@ -128,7 +128,16 @@ impl Session {
             cwd,
             DEFAULT_COLS,
             DEFAULT_ROWS,
-            move || wake_ctx.request_repaint(),
+            // Wake the **root** viewport, explicitly.
+            //
+            // A PTY reader thread has no egui pass in flight, so a bare
+            // `request_repaint()` already resolves to the root — naming it is
+            // documentation, not a change. It matters because secondary windows
+            // are *immediate* viewports: only a root pass re-runs each window's
+            // `show_viewport_immediate`, so this is what wakes a background
+            // window too. Retargeting it at the owning child would look more
+            // correct and would silently stop that window updating.
+            move || wake_ctx.request_repaint_of(egui::ViewportId::ROOT),
         )?;
         let mut engine = GhosttyVtEngine::new(DEFAULT_COLS, DEFAULT_ROWS, config.scrollback_limit)?;
         engine.apply_theme(config.fg, config.bg, &config.palette)?;

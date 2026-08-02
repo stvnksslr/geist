@@ -162,10 +162,10 @@ metrics; box-drawing/powerline/braille sprite synthesis; COLRv1 emoji; Ghostty's
 `bold-is-bright`/`bold-color`, `cursor-style`/`-blink`, **transparency + background-opacity**,
 blur (Windows acrylic), `faint-opacity`, `cursor-opacity`, unfocused-split dimming — now done.)*
 
-**Window / UI** — quick (dropdown) terminal w/ global hotkey; multi-window; window/tab/split
-**state restore**; titlebar/decoration styles; real scrollbar; settings UI; inspector; about dialog;
-custom app icons. *(fullscreen toggle, split zoom, tab drag-reorder, resize overlay,
-confirm-close-surface — now done.)*
+**Window / UI** — quick (dropdown) terminal w/ global hotkey; window/tab/split **state restore**;
+titlebar/decoration styles; real scrollbar; settings UI; inspector; about dialog; custom app icons.
+*(fullscreen toggle, split zoom, tab drag-reorder, resize overlay, confirm-close-surface,
+**multi-window** — now done.)*
 
 **Input / keybinds** — key tables / leader sequences; the remaining ~60 keybind *actions* (write_*_file,
 set_*_title, toggle_*, send raw text/esc/csi, undo/redo, …). *(Config-driven binding + several actions
@@ -225,8 +225,12 @@ upstream patch · — pure giest concern.
   `render::bg_alpha` on the CPU with the values riding `TermFrame` (so they live-reload), and the
   emoji shader branch now honors the instance alpha. *Unlocked opacity, blur, unfocused dimming;
   background-image and custom shaders remain.*
-- **P5 — Multi-window (L).** ⬜ Pending — separate per-window state from shared config + event loop.
-  *Prerequisite for new_window, quick terminal, session restore.*
+- **P5 — Multi-window (L).** ✅ Done — `App` now owns `Vec<Window>`; `windows[0]` draws into
+  `ViewportId::ROOT` and the rest are **immediate** child viewports. Deferred viewports were
+  impossible (`Fn + Send + Sync + 'static` vs a `!Send` `Session`), and immediate ones turn out to
+  make the PTY wake path work unchanged: a reader thread wakes the root, and a root pass re-runs
+  every window. **No renderer changes** — eframe keeps one `RenderState` for all viewports, so the
+  pipeline and glyph atlas are shared. *Unblocks the quick terminal and session restore.*
 
 ---
 
@@ -269,7 +273,7 @@ Effort: **S** <1d · **M** 1–3d · **L** ~1wk · **XL** multi-wk. Status: ✅ 
 | Scrollback search overlay | `search.rs`, `session.rs`, `app.rs`, `engine`, `render` | ✋ | M–L | ✅ (single-row matches; pins deferred) |
 | Custom shaders | `render/mod.rs`, `config.rs` | — | L | ⬜ (needs P4) |
 | background-image / blur | `render/mod.rs`, `main.rs`, `config.rs` | — | M–L | ◐ (blur ✅ via Windows DWM acrylic/mica, `blur.rs`; background-image ⬜) |
-| Multi-window | `main.rs`, `app.rs` | — | L | ⬜ |
+| Multi-window (`new_window` / `close_window`) | `app.rs`, `command.rs`, `keybind.rs` | — | L | ✅ |
 | Session / window state restore | `app.rs` + persistence module | ◐ | L | ⬜ (needs P5) |
 | Clipboard permission + paste protection | `session.rs`, `app.rs`, `config.rs` | ✋ | M | ⬜ |
 | Desktop notifications + notify-on-command-finish | side-scan + OSC 133 C/D + Win toast | ✋/✅ | M | ⬜ |
@@ -302,6 +306,28 @@ With Phase 0 done, the remaining Tier-1 items are mostly small, registry-backed 
    big rocks are **kitty graphics**, **P5 multi-window** (→ quick terminal, session restore), the
    **real scrollbar**, **clipboard permissions / paste protection**, and **OSC 133 C/D → desktop
    notifications** (note cmd.exe has no preexec hook, so C/D would be pwsh-only).
+
+### P5 — multi-window (done)
+
+`ctrl+shift+n` opens a window (Ghostty's non-Darwin default); `close_window` is in the palette and
+bindable but **deliberately not bound to alt+f4**, because Windows already delivers that as WM_CLOSE
+→ the close-confirmation flow. All three `*-inherit-working-directory` keys are now honored by one
+shared decision table — `split-inherit-working-directory` was previously hardcoded on, and
+`window-inherit-working-directory` was parsed but inert.
+
+**Divergences and limits:**
+- **No acrylic backdrop or taskbar attention flash on secondary windows.** eframe exposes a window
+  handle only for the root viewport, so `blur.rs`/`bell.rs` have no HWND for the others.
+  `Window::hwnd` is the single seam a follow-up would fix (correlate by a unique creation title +
+  `EnumThreadWindows`).
+- **Font size is app-global**, where Ghostty's is per-surface: `callback_resources` is type-keyed, so
+  only one `GpuResources`/`Atlas` can exist. Same cause means two windows on different-DPI monitors
+  can't both be right (`px = points × ppp`).
+- **Immediate viewports repaint in lockstep** — each animation tick costs one full pass per window.
+  Realistic ceiling is 2–3 windows.
+- **Root-slot rehosting**: closing the first window while others are open moves a survivor into the
+  root slot and repositions the native root window onto the closed window's geometry, so the window
+  the user closed is the one that visually disappears. Perceptual — needs eyeballing.
 
 ### Divergences recorded in this batch
 - `bell-features` `border` now defaults **false** (Ghostty parity), changing giest's previous

@@ -98,6 +98,25 @@ fallback engine without app changes:
   fall back to the default dir. The split's cwd is read in `App::split` and passed through `Session::new`
   → `Pty::spawn` → `CommandBuilder::cwd`.
 
+- **Multi-window: one `RenderState`, immediate viewports, and one mandatory line.** eframe keeps a
+  *single* `RenderState` (and so one wgpu device, one `callback_resources`, one glyph atlas) for
+  every viewport — `render::init` is once-per-process and `TermFrame` resolves fine in a child
+  window. Consequences: (1) secondary windows must be **immediate** viewports, because
+  `show_viewport_deferred` needs `Fn + Send + Sync + 'static` and `Session` is `!Send` (`Rc`s + an
+  FFI terminal); (2) a child's `ViewportBuilder` **must** set `.with_transparent(...)` — the vendored
+  egui-winit patch reads it to set `WS_EX_NOREDIRECTIONBITMAP` at creation, so omitting it renders
+  that window as the grey wash below; (3) build the child builder **once** and clone it verbatim —
+  patching a recreate-class field makes eframe clear *every* viewport's surface, root included;
+  (4) font size is app-global, since only one `GpuResources` can live in the type-keyed
+  `callback_resources`.
+- **`CancelClose` is honoured for the ROOT viewport only.** A child's `ViewportCommand::Close` just
+  re-arms `close_requested`; a child window is destroyed by *ceasing to call*
+  `show_viewport_immediate` for it. And the PTY wake deliberately targets `ViewportId::ROOT`: only a
+  root pass re-runs every window, so "fixing" it to wake the owning child would stop background
+  windows updating.
+- **`Memory::data` is not viewport-keyed** (unlike `areas`/`focus`/`interactions`), and it holds
+  `TextEditState`, `ScrollArea` offsets and `PanelState`. Every egui `Id` must therefore be
+  namespaced per window (`Window::id`), or two windows share a text cursor and a tab-strip height.
 - **Second vendored crate + Windows patch: `vendor/egui-winit`.** A transparent window on Windows also
   needs `WS_EX_NOREDIRECTIONBITMAP`, which upstream egui-winit never sets (it sets only
   `.with_transparent(...)`). wgpu presents a transparent surface through DirectComposition and builds

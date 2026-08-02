@@ -16,6 +16,10 @@ pub enum Action {
     NewTab,
     /// Open a new tab running the shell profile at this index.
     NewTabWithProfile(usize),
+    /// Open a new OS window.
+    NewWindow,
+    /// Close the current window and everything in it.
+    CloseWindow,
     CloseTab,
     CloseOtherTabs,
     CloseTabsToRight,
@@ -72,6 +76,8 @@ impl Action {
         match self {
             Action::NewTab => "New Tab",
             Action::NewTabWithProfile(_) => "New Tab with Shell",
+            Action::NewWindow => "New Window",
+            Action::CloseWindow => "Close Window",
             Action::CloseTab => "Close Tab",
             Action::CloseOtherTabs => "Close Other Tabs",
             Action::CloseTabsToRight => "Close Tabs to the Right",
@@ -122,6 +128,7 @@ impl Action {
     fn keybind(self) -> Option<&'static str> {
         Some(match self {
             Action::NewTab => "Ctrl+Shift+T",
+            Action::NewWindow => "Ctrl+Shift+N",
             Action::NextTab => "Ctrl+Tab",
             Action::PrevTab => "Ctrl+Shift+Tab",
             Action::LastTab => "Alt+9",
@@ -152,6 +159,9 @@ impl Action {
             // No default binding (or per-index, shown elsewhere).
             Action::NewTabWithProfile(_)
             | Action::GotoTab(_)
+            // Deliberately unbound: Windows already delivers Alt+F4 as WM_CLOSE,
+            // which giest answers with the close-confirmation flow. See keybind.rs.
+            | Action::CloseWindow
             | Action::CloseTab
             | Action::CloseOtherTabs
             | Action::CloseTabsToRight
@@ -171,6 +181,8 @@ impl Action {
         match self {
             Action::NewTab => "new_tab".into(),
             Action::NewTabWithProfile(i) => format!("new_tab_with_profile:{i}"),
+            Action::NewWindow => "new_window".into(),
+            Action::CloseWindow => "close_window".into(),
             Action::CloseTab => "close_tab".into(),
             Action::CloseOtherTabs => "close_other_tabs".into(),
             Action::CloseTabsToRight => "close_tabs_to_right".into(),
@@ -246,6 +258,8 @@ impl Action {
         }
         Some(match s {
             "new_tab" => Action::NewTab,
+            "new_window" => Action::NewWindow,
+            "close_window" => Action::CloseWindow,
             "close_tab" => Action::CloseTab,
             "close_other_tabs" => Action::CloseOtherTabs,
             "close_tabs_to_right" => Action::CloseTabsToRight,
@@ -282,6 +296,8 @@ impl Action {
 /// catches a forgotten title/binding at compile time.
 const BASE_ACTIONS: &[Action] = &[
     Action::NewTab,
+    Action::NewWindow,
+    Action::CloseWindow,
     Action::CloseTab,
     Action::CloseOtherTabs,
     Action::CloseTabsToRight,

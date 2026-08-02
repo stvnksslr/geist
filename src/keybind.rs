@@ -95,6 +95,14 @@ impl Keymap {
 fn default_binds() -> Vec<(Chord, Action)> {
     const DEFAULTS: &[(&str, Action)] = &[
         ("ctrl+shift+t", Action::NewTab),
+        // Ghostty's non-Darwin default for `new_window`.
+        ("ctrl+shift+n", Action::NewWindow),
+        // NOTE: `close_window` is deliberately left unbound. Ghostty binds it to
+        // alt+f4, but on Windows the OS already delivers Alt+F4 as WM_CLOSE →
+        // `close_requested`, which giest answers with the confirmation flow.
+        // Binding it too would raise an action *and* a close request in the same
+        // pass. Users who want the explicit action can add
+        // `keybind = alt+f4=close_window`.
         ("ctrl+shift+w", Action::ClosePane),
         // D mirrors macOS Ghostty's Cmd+D; O matches the GTK default. Both split right.
         ("ctrl+shift+d", Action::SplitRight),
@@ -257,6 +265,25 @@ mod tests {
         assert_eq!(km.lookup(&chord("ctrl+tab")), Some(Action::NextTab));
         // An unbound chord resolves to nothing.
         assert_eq!(km.lookup(&chord("ctrl+shift+z")), None);
+    }
+
+    #[test]
+    fn default_keymap_binds_new_window() {
+        let km = Keymap::default();
+        assert_eq!(km.lookup(&chord("ctrl+shift+n")), Some(Action::NewWindow));
+    }
+
+    #[test]
+    fn default_keymap_leaves_alt_f4_unbound() {
+        // Deliberate divergence from Ghostty: Windows already delivers Alt+F4 as
+        // WM_CLOSE, which giest answers with the close-confirmation flow. Binding
+        // `close_window` here too would raise an action *and* a close request in
+        // the same pass.
+        let km = Keymap::default();
+        assert_eq!(km.lookup(&chord("alt+f4")), None);
+        // …but a user can still opt in explicitly.
+        let km = Keymap::from_config(&[("alt+f4".to_string(), "close_window".to_string())]);
+        assert_eq!(km.lookup(&chord("alt+f4")), Some(Action::CloseWindow));
     }
 
     #[test]
