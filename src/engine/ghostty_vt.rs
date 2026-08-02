@@ -363,6 +363,66 @@ mod tests {
     }
 
     #[test]
+    fn osc_dynamic_color_sets_apply_without_a_scanner() {
+        // libghostty applies OSC 10/11/12 *sets* internally and the snapshot
+        // reads the effective colors, so giest needs no scanner for them — only
+        // for the `?` queries, which the vt library drops. This test is the
+        // safety net for that claim.
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        let fg = Rgb::new(0xc5, 0xc8, 0xc6);
+        let bg = Rgb::new(0x10, 0x12, 0x18);
+        eng.apply_theme(fg, bg, &[Rgb::new(0, 0, 0); 256]).unwrap();
+
+        eng.write(b"\x1b]11;rgb:00/ff/00\x07");
+        assert_eq!(snap(&mut eng).default_bg, Rgb::new(0, 255, 0));
+        eng.write(b"\x1b]10;rgb:ff/00/00\x07");
+        assert_eq!(snap(&mut eng).default_fg, Rgb::new(255, 0, 0));
+
+        // OSC 110/111 reset to the configured defaults.
+        eng.write(b"\x1b]111\x07\x1b]110\x07");
+        let s = snap(&mut eng);
+        assert_eq!(s.default_bg, bg);
+        assert_eq!(s.default_fg, fg);
+    }
+
+    #[test]
+    fn dynamic_colors_reports_effective_values() {
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        eng.apply_theme(
+            Rgb::new(0xc5, 0xc8, 0xc6),
+            Rgb::new(0x10, 0x12, 0x18),
+            &[Rgb::new(0, 0, 0); 256],
+        )
+        .unwrap();
+        eng.set_cursor_color(None).unwrap();
+
+        let (fg, bg, cursor) = eng.dynamic_colors();
+        assert_eq!(fg, Rgb::new(0xc5, 0xc8, 0xc6));
+        assert_eq!(bg, Rgb::new(0x10, 0x12, 0x18));
+        assert_eq!(cursor, None, "no cursor color set");
+
+        // An OSC 11 override is reflected without any snapshot in between.
+        eng.write(b"\x1b]11;rgb:00/00/ff\x07");
+        assert_eq!(eng.dynamic_colors().1, Rgb::new(0, 0, 255));
+
+        eng.set_cursor_color(Some(Rgb::new(1, 2, 3))).unwrap();
+        assert_eq!(eng.dynamic_colors().2, Some(Rgb::new(1, 2, 3)));
+    }
+
+    #[test]
+    fn dynamic_colors_does_not_break_the_dirty_skip() {
+        // `dynamic_colors` must not consume the terminal's dirty state — doing so
+        // would make the following snapshot take the "nothing changed" fast path
+        // and render an empty grid.
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        eng.write(b"hello");
+        let _ = eng.dynamic_colors();
+        let s = snap(&mut eng);
+        assert_eq!(s.cell(0, 0).unwrap().text.as_str(), "h");
+        assert_eq!(s.cell(4, 0).unwrap().text.as_str(), "o");
+    }
+
+    #[test]
     fn default_background_cells_are_flagged() {
         let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
         let bg = Rgb::new(0x1d, 0x1f, 0x21);
@@ -979,6 +1039,38 @@ impl TerminalEngine for GhosttyVtEngine {
         });
         self.term.set_default_cursor_color(c)?;
         Ok(())
+    }
+
+    fn cursor_at_prompt(&self) -> Option<bool> {
+        // The row-level semantic-prompt enum only has None/Prompt/Continuation —
+        // there is no Command/Output variant — so "not a prompt row" is ambiguous
+        // between "a command is running" and "this shell emits no OSC 133 marks".
+        // Report `Some(false)` for it and let the session's latch disambiguate.
+        let y = self.term.cursor_y().ok()?;
+        let gr = self
+            .term
+            .grid_ref(Point::Viewport(PointCoordinate { x: 0, y: y as u32 }))
+            .ok()?;
+        let sp = gr.row().ok()?.semantic_prompt().ok()?;
+        Some(matches!(
+            sp,
+            RowSemanticPrompt::Prompt | RowSemanticPrompt::Continuation
+        ))
+    }
+
+    fn dynamic_colors(&self) -> (Rgb, Rgb, Option<Rgb>) {
+        // Read straight off the terminal, NOT through `RenderState::update` (the
+        // path `snapshot` uses). That call consumes the terminal's dirty state,
+        // so routing this through it would make the next real snapshot see
+        // `Dirty::Clean`, take the skip fast path, and freeze the grid.
+        let fg = self.term.fg_color().ok().flatten().map(rgb);
+        let bg = self.term.bg_color().ok().flatten().map(rgb);
+        let cursor = self.term.cursor_color().ok().flatten().map(rgb);
+        (
+            fg.unwrap_or(Rgb::new(0xc5, 0xc8, 0xc6)),
+            bg.unwrap_or(Rgb::new(0x10, 0x12, 0x18)),
+            cursor,
+        )
     }
 
     fn set_bold_color(&mut self, bold: BoldColor) -> Result<()> {

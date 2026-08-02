@@ -111,10 +111,34 @@ giest's single per-cell chokepoint (`engine/ghostty_vt.rs::copy_cell`) historica
   full-screen green backdrop at `background-opacity = 0.5` the composite reads `R = 0x08`, `B = 0x0c`,
   exactly `bg*0.5`. *Blur, dimming and the per-cell alpha details still want human eyeballing.*
 
+- **Tier 1 complete** ✅ the last five items:
+  - **`bell-features`** is now a real bitfield with Ghostty's packed-struct semantics (bare bool sets
+    all; a feature list starts from *defaults* so it replaces rather than accumulates; one unknown
+    token rejects the whole value). `system` → `MessageBeep`, `audio` → `PlaySoundW`, `attention` →
+    taskbar `FlashWindowEx` while unfocused, `title` → 🔔 until refocus, `border` → the existing pane
+    flash. New `src/bell.rs` declares user32 directly and resolves winmm lazily, adding **no**
+    windows-sys features. Fixed a latent double-consume: `bell_flash_alpha` *takes* the pending flag,
+    so the audible path needed its own, plus a 0.25 s rate limit against BEL storms.
+  - **OSC 10/11/12 queries** ✅ new `src/osc_color.rs` scanner (the osc7/osc52 pattern) recording the
+    caller's terminator, since the reply echoes it. Engine tests first **proved the *sets* already
+    worked** — libghostty applies them and the snapshot reads effective colors — so only the `?` form
+    needed building. Replies are built *after* the whole drain loop and merged into `take_responses`,
+    so a set-then-query in one batch reports the new value. `osc-color-report-format`
+    (`none`/`8-bit`/`16-bit`, ×257 scaling on the default).
+  - **Resize overlay** ✅ `resize-overlay` / `-position` / `-duration`, with a reusable Ghostty
+    `Duration` parser (additive number+unit pairs). Reuses the visual-bell transient pattern.
+  - **confirm-close-surface** ✅ `false`/`true`/`always` with `needs_confirm` as a pure decision, an
+    `egui::Modal` dialog, and — the real gap — **the OS/titlebar close is now honored at all**
+    (`close_requested` + `CancelClose` in the same pass; nothing in giest handled it before).
+  - **Tab drag-reorder** ✅ pure `drop_index` (centre-crossing) + `reorder_tabs`, an insertion caret,
+    and two latent bugs fixed along the way (`renaming` and the drag latch both hold tab *indices*
+    that a reorder or a reap invalidates).
+
 These ship with unit tests (engine capture, keymap, parser, scan, X11/contrast/blink, font
 feature/discovery, search match/nav/mask, wide-char read, zoom layout/reap, inherit-cwd,
-bg-alpha table/branch-order, opacity parse+clamp, blur grammar, dim alpha) —
-**174 lib + 24 conformance tests pass**. Adversarial
+bg-alpha table/branch-order, opacity parse+clamp, blur grammar, dim alpha, bell-features grammar +
+rate limit, OSC color scan/report/fallback, duration grammar, resize gating + anchors, close
+decision table, drop-index + reorder) — **208 lib + 24 conformance tests pass**. Adversarial
 Ghostty-source reviews confirmed
 parity across these feature areas; the only deliberate divergence is **RIS (`ESC c`)**: giest resets the
 cursor to the configured `cursor-style`, whereas Ghostty resets to a plain block until a config reload
@@ -127,7 +151,8 @@ and a configured `font-family` / `font-feature = -calt`; curly-underline thickne
 ## 1. The gap, by category (what Ghostty macOS has that giest still lacks)
 
 **VT / protocols** — kitty graphics (inline images); OSC 9/777/99 desktop notifications; OSC 9;4 progress;
-OSC 10/11/12 dynamic color set/query. *(OSC 8 hyperlinks, OSC 133 prompts, styled underlines — now done.)*
+OSC 4/5/13-19 color *queries*. *(OSC 8 hyperlinks, OSC 133 prompts, styled underlines, OSC 10/11/12
+dynamic colors incl. query replies — now done.)*
 
 **Rendering / fonts** — `font-family` fallback *chains* (multiple families) + synthetic bold/italic
 (`font-synthetic-style`); `font-variation`; background-image, **custom shaders**; `adjust-cell-*`
@@ -137,9 +162,10 @@ metrics; box-drawing/powerline/braille sprite synthesis; COLRv1 emoji; Ghostty's
 `bold-is-bright`/`bold-color`, `cursor-style`/`-blink`, **transparency + background-opacity**,
 blur (Windows acrylic), `faint-opacity`, `cursor-opacity`, unfocused-split dimming — now done.)*
 
-**Window / UI** — quick (dropdown) terminal w/ global hotkey; drag-reorder; multi-window;
-window/tab/split **state restore**; resize overlay; titlebar/decoration styles; real scrollbar;
-settings UI; inspector; about dialog; custom app icons. *(fullscreen toggle + split zoom — now done.)*
+**Window / UI** — quick (dropdown) terminal w/ global hotkey; multi-window; window/tab/split
+**state restore**; titlebar/decoration styles; real scrollbar; settings UI; inspector; about dialog;
+custom app icons. *(fullscreen toggle, split zoom, tab drag-reorder, resize overlay,
+confirm-close-surface — now done.)*
 
 **Input / keybinds** — key tables / leader sequences; the remaining ~60 keybind *actions* (write_*_file,
 set_*_title, toggle_*, send raw text/esc/csi, undo/redo, …). *(Config-driven binding + several actions
@@ -159,8 +185,9 @@ multi-window lands.)*
 **Config / theming** — `palette-generate`/`harmonious`, config `include`/conditional, the ~230 remaining
 options. *(theme/theme-file now done.)*
 
-**Notifications / bell** — **audible** bell; desktop notifications; Win taskbar progress (OSC 9;4).
-*(visual bell now done.)*
+**Notifications / bell** — desktop notifications (OSC 9/777/99); Win taskbar progress (OSC 9;4);
+`bell-audio-volume` (needs a real audio backend — `PlaySoundW` has no volume knob).
+*(full `bell-features`: visual border, audible, taskbar attention, title marker — now done.)*
 
 **Automation / platform** — AppleScript / App Intents / Services equivalents (Windows IPC), auto-update.
 
@@ -225,13 +252,13 @@ Effort: **S** <1d · **M** 1–3d · **L** ~1wk · **XL** multi-wk. Status: ✅ 
 | faint-opacity | `config.rs`, `render/mod.rs` | ✅ | S | ✅ |
 | Fullscreen toggle | `app.rs`, `command.rs` | — | S | ✅ |
 | Split zoom + equalize | `app.rs`, `command.rs` | — | M | ◐ (zoom done; splits are always 50/50, so equalize is a no-op) |
-| Tab reorder / drag | `app.rs` | — | M | ⬜ |
+| Tab reorder / drag | `app.rs` | — | M | ✅ |
 | tab/split inherit working-directory | `app.rs`, `session.rs` | ✅ | S | ✅ |
 | unfocused-split dimming (`-opacity`/`-fill`) | `app.rs` | — | S | ✅ (egui overlay, like Ghostty's apprt) |
-| dynamic colors OSC 10/11/12 | side-scan + `apply_theme` | ✋ | S–M | ⬜ |
-| confirm-close-surface | `app.rs` | — | S | ⬜ |
-| resize overlay | `app.rs`/`render` | — | S | ⬜ |
-| audible bell | `app.rs`/`config.rs` (needs a beep API) | — | S | ⬜ |
+| dynamic colors OSC 10/11/12 | `osc_color.rs`, `session.rs` | ✋ | S–M | ✅ (sets already worked; queries added. OSC 4/5/13-19 queries deferred) |
+| confirm-close-surface | `app.rs`, `config.rs` | — | S | ✅ (+ the OS close, previously unhandled) |
+| resize overlay | `app.rs`, `session.rs`, `config.rs` | — | S | ✅ |
+| audible bell (+ full `bell-features`) | `bell.rs`, `app.rs`, `config.rs` | — | S | ✅ |
 
 ### Tier 2 — high impact, higher effort (flagships)
 | Gap | Files | Binding | Effort | Status |
@@ -268,7 +295,24 @@ With Phase 0 done, the remaining Tier-1 items are mostly small, registry-backed 
    **cursor-opacity** + **faint-opacity** + **background-blur** (Windows acrylic) — *done; the whole
    cluster still needs eyeballing, and transparency can't be self-captured (see CLAUDE.md).*
 4. ✅ **fullscreen** + **split zoom** + **tab inherit-cwd** — *done* (fullscreen/zoom need eyeballing).
-5. Then Tier-2 flagships: scrollback search, kitty graphics, multi-window → quick terminal.
+5. ✅ **Finish Tier 1** — `bell-features` + audible/attention/title bell, OSC 10/11/12 query replies,
+   resize overlay, confirm-close-surface (+ the previously-unhandled OS close), tab drag-reorder.
+   **Tier 1 is now complete.**
+6. Next: Tier-2 flagships. P4 unblocked **background-image** and **custom shaders**; the remaining
+   big rocks are **kitty graphics**, **P5 multi-window** (→ quick terminal, session restore), the
+   **real scrollbar**, **clipboard permissions / paste protection**, and **OSC 133 C/D → desktop
+   notifications** (note cmd.exe has no preexec hook, so C/D would be pwsh-only).
+
+### Divergences recorded in this batch
+- `bell-features` `border` now defaults **false** (Ghostty parity), changing giest's previous
+  always-flash behavior — `bell-features = border` restores it.
+- `bell-audio-volume` is parsed, clamped and stored but **not honored**.
+- `confirm-close-surface = true` uses an **OSC 133 prompt heuristic**, not a real process check;
+  "can't tell" confirms, so WSL/custom shells effectively behave as `always`.
+- `resize-overlay = after-first` genuinely suppresses the first layout, unlike Ghostty's GTK apprt
+  which treats it as `always`; the overlay also has a 150 ms fade tail where Ghostty's is a hard hide.
+- OSC 4 palette and 5/13-19 queries deferred; OSC 4/10/11/12 **sets** and 104/110-112 **resets**
+  already work inside libghostty and are now pinned by tests.
 
 **Verification note (per CLAUDE.md):** `cargo test` covers parser/registry/engine logic; any `render/*`,
 transparency, font, or opacity change needs **human visual confirmation** in the running app

@@ -84,24 +84,32 @@ pub fn utf8(len: usize, seed: u64) -> Vec<u8> {
     out
 }
 
-/// A stream of `count` OSC sequences (alternating window-title set and a color
-/// query), interleaved with a little printable text. Exercises the OSC side
-/// paths (title parsing, the OSC 52 scanner) at the host boundary.
+/// A stream of `count` OSC sequences (rotating window-title set, clipboard set
+/// and background-color query), interleaved with a little printable text.
+/// Exercises the OSC side paths (title parsing, the OSC 52 and color scanners)
+/// at the host boundary.
 pub fn osc(count: usize, seed: u64) -> Vec<u8> {
     let mut rng = Lcg::new(seed);
     let mut out = Vec::new();
     for i in 0..count {
-        if i % 2 == 0 {
-            // OSC 0 ; <title> BEL
-            out.extend_from_slice(b"\x1b]0;");
-            let n = 4 + rng.below(20);
-            for _ in 0..n {
-                out.push(0x41 + rng.below(26) as u8);
+        match i % 3 {
+            0 => {
+                // OSC 0 ; <title> BEL
+                out.extend_from_slice(b"\x1b]0;");
+                let n = 4 + rng.below(20);
+                for _ in 0..n {
+                    out.push(0x41 + rng.below(26) as u8);
+                }
+                out.push(0x07);
             }
-            out.push(0x07);
-        } else {
-            // OSC 52 ; c ; <base64> ST  (clipboard set — drives the scanner)
-            out.extend_from_slice(b"\x1b]52;c;aGVsbG8=\x1b\\");
+            1 => {
+                // OSC 52 ; c ; <base64> ST  (clipboard set — drives that scanner)
+                out.extend_from_slice(b"\x1b]52;c;aGVsbG8=\x1b\\");
+            }
+            _ => {
+                // OSC 11 ; ? BEL  (background query — drives the color scanner)
+                out.extend_from_slice(b"\x1b]11;?\x07");
+            }
         }
         out.extend_from_slice(b"x\r\n");
     }

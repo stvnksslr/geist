@@ -74,6 +74,160 @@ impl BackgroundBlur {
     }
 }
 
+/// Which effects fire when a program rings the bell (BEL, `0x07`). Ghostty
+/// `bell-features`, a packed-struct bitfield.
+///
+/// Note the defaults: `attention` and `title` are **on**, `border` is **off**.
+/// giest historically flashed the pane border by default; matching Ghostty turns
+/// that off, and `bell-features = border` restores it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BellFeatures {
+    /// Play the OS alert sound (`MessageBeep`).
+    pub system: bool,
+    /// Play the sound file at [`Config::bell_audio_path`].
+    pub audio: bool,
+    /// Request the user's attention while the window is unfocused — a taskbar
+    /// flash on Windows.
+    pub attention: bool,
+    /// Prefix the window title with 🔔 until the window is refocused.
+    pub title: bool,
+    /// Flash a border around the pane that rang.
+    pub border: bool,
+}
+
+impl Default for BellFeatures {
+    fn default() -> Self {
+        Self { system: false, audio: false, attention: true, title: true, border: false }
+    }
+}
+
+impl BellFeatures {
+    /// Every feature set to `on` — Ghostty's bare-boolean shorthand.
+    fn all(on: bool) -> Self {
+        Self { system: on, audio: on, attention: on, title: on, border: on }
+    }
+}
+
+/// Parse a `bell-features` value the way Ghostty's `parsePackedStruct`
+/// (`cli/args.zig`) does. Returns `None` for an invalid value, which the setter
+/// turns into "keep the current value".
+///
+/// Three rules that are easy to get wrong, and all deliberate:
+///  - a bare boolean sets **every** field. Ghostty's packed-struct parser uses a
+///    *stricter* boolean set than its ordinary one — only `1/t/true/0/f/false`,
+///    so `on`/`yes` are feature-name errors here, not booleans. Hence this does
+///    not call [`parse_bool`].
+///  - otherwise the result starts from the struct **defaults**, not from the
+///    current config. So `bell-features = audio` still leaves `attention` and
+///    `title` on, and a second `bell-features` line *replaces* the first rather
+///    than accumulating onto it.
+///  - one unrecognized token rejects the **whole** value (Ghostty returns
+///    `InvalidValue` for the entry); we don't keep the features parsed so far.
+fn parse_bell_features(value: &str) -> Option<BellFeatures> {
+    let v = value.trim();
+    match v {
+        "1" | "t" | "true" => return Some(BellFeatures::all(true)),
+        "0" | "f" | "false" => return Some(BellFeatures::all(false)),
+        _ => {}
+    }
+    let mut out = BellFeatures::default();
+    for tok in v.split(',') {
+        let tok = tok.trim();
+        if tok.is_empty() {
+            continue;
+        }
+        let (name, on) = match tok.strip_prefix("no-") {
+            Some(rest) => (rest, false),
+            None => (tok, true),
+        };
+        match name.to_ascii_lowercase().as_str() {
+            "system" => out.system = on,
+            "audio" => out.audio = on,
+            "attention" => out.attention = on,
+            "title" => out.title = on,
+            "border" => out.border = on,
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
+/// When to confirm before closing a surface. Ghostty `confirm-close-surface`,
+/// whose values are `false` / `true` / `always`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConfirmClose {
+    /// Never confirm (`false`).
+    Never,
+    /// Confirm only when something looks like it's running (`true`, the default).
+    WhenBusy,
+    /// Always confirm, even at an idle prompt (`always`).
+    Always,
+}
+
+/// Whether closing needs confirmation.
+///
+/// `busy` is `None` when giest can't tell — a shell that emits no OSC 133 prompt
+/// marks — and that resolves to **confirm**, the conservative side: better an
+/// extra prompt than a silently discarded running command.
+pub fn needs_confirm(mode: ConfirmClose, busy: Option<bool>) -> bool {
+    match mode {
+        ConfirmClose::Never => false,
+        ConfirmClose::Always => true,
+        ConfirmClose::WhenBusy => busy.unwrap_or(true),
+    }
+}
+
+/// When to show the grid-size overlay on resize. Ghostty `resize-overlay`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResizeOverlay {
+    Always,
+    Never,
+    /// Show on every resize *except* a surface's first sizing. The default.
+    AfterFirst,
+}
+
+/// Where the resize overlay sits within the pane. Ghostty
+/// `resize-overlay-position`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResizeOverlayPosition {
+    Center,
+    TopLeft,
+    TopCenter,
+    TopRight,
+    BottomLeft,
+    BottomCenter,
+    BottomRight,
+}
+
+/// Whether a grid-size change should raise the overlay, given the configured
+/// mode and whether this is the surface's *first* sizing.
+///
+/// `after-first` has to be honored explicitly here: a session is created at a
+/// default size and immediately re-fit to the real window, so the resize edge
+/// always fires once on the first frame and every new tab or split would flash a
+/// spurious size. (Ghostty's GTK apprt happens to treat `after-first` the same as
+/// `always`, because its scheduler only ever runs from a resize signal — giest
+/// matches the *documented* behavior instead.)
+pub fn show_resize_overlay(mode: ResizeOverlay, first: bool) -> bool {
+    match mode {
+        ResizeOverlay::Never => false,
+        ResizeOverlay::Always => true,
+        ResizeOverlay::AfterFirst => !first,
+    }
+}
+
+/// Precision of an OSC color *report* (the reply to `OSC 10/11/12 ; ?`).
+/// Ghostty `osc-color-report-format`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OscColorReportFormat {
+    /// Don't answer color queries at all.
+    None,
+    /// `rgb:rr/gg/bb` — the raw 8-bit channels.
+    Bits8,
+    /// `rgb:rrrr/gggg/bbbb`, each channel scaled by 257. The default.
+    Bits16,
+}
+
 /// User-facing configuration applied at startup.
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -182,10 +336,28 @@ pub struct Config {
     /// built-in keymap by the app (`crate::keybind::Keymap::from_config`).
     /// Ghostty `keybind` (repeatable).
     pub keybinds: Vec<(String, String)>,
-    /// Whether the visual bell (a brief flash on the pane that rang) is enabled.
-    /// Ghostty `bell-features` — giest currently implements only the visual
-    /// feature; the audible bell is a follow-up.
-    pub bell_visual: bool,
+    /// Precision of OSC color-query replies. Ghostty `osc-color-report-format`.
+    pub osc_color_report_format: OscColorReportFormat,
+    /// When to confirm before closing a pane/tab/window. Ghostty
+    /// `confirm-close-surface`.
+    pub confirm_close: ConfirmClose,
+    /// When to show the grid-size overlay on resize. Ghostty `resize-overlay`.
+    pub resize_overlay: ResizeOverlay,
+    /// Where that overlay sits in the pane. Ghostty `resize-overlay-position`.
+    pub resize_overlay_position: ResizeOverlayPosition,
+    /// How long the overlay stays up, in milliseconds. Ghostty
+    /// `resize-overlay-duration`; clamped to a range that's actually perceivable.
+    pub resize_overlay_duration_ms: u64,
+    /// Which bell effects fire on BEL. Ghostty `bell-features`.
+    pub bell: BellFeatures,
+    /// Sound file played when `bell-features` includes `audio`. Ghostty
+    /// `bell-audio-path`; a relative path resolves against the config directory.
+    pub bell_audio_path: Option<String>,
+    /// Ghostty `bell-audio-volume`. **Parsed and stored but not honored**: the
+    /// Windows playback path (`PlaySoundW`) has no volume parameter, so honoring
+    /// this needs a real audio backend. Kept so a Ghostty config neither warns
+    /// nor silently loses the value.
+    pub bell_audio_volume: f32,
     /// Whether a new tab inherits the focused pane's working directory (via OSC
     /// 7). Ghostty `tab-inherit-working-directory` (default true). Splits always
     /// inherit (see `split-inherit-working-directory`, also true by default).
@@ -227,7 +399,14 @@ impl Default for Config {
             middle_click_action: MiddleClickAction::PrimaryPaste,
             shell: None,
             keybinds: Vec::new(),
-            bell_visual: true,
+            osc_color_report_format: OscColorReportFormat::Bits16,
+            confirm_close: ConfirmClose::WhenBusy,
+            resize_overlay: ResizeOverlay::AfterFirst,
+            resize_overlay_position: ResizeOverlayPosition::Center,
+            resize_overlay_duration_ms: 750,
+            bell: BellFeatures::default(),
+            bell_audio_path: None,
+            bell_audio_volume: 0.5,
             tab_inherit_working_directory: true,
         }
     }
@@ -520,14 +699,65 @@ const SETTERS: &[(&str, Setter)] = &[
             eprintln!("giest: ignoring malformed keybind (expected 'trigger=action'): {v}");
         }
     }),
+    ("confirm-close-surface", |c, v, d| {
+        c.confirm_close = match v.to_ascii_lowercase().as_str() {
+            "" => d.confirm_close,
+            "false" | "no" | "off" | "0" => ConfirmClose::Never,
+            "true" | "yes" | "on" | "1" => ConfirmClose::WhenBusy,
+            "always" => ConfirmClose::Always,
+            _ => c.confirm_close,
+        }
+    }),
+    ("resize-overlay", |c, v, d| {
+        c.resize_overlay = match v.to_ascii_lowercase().as_str() {
+            "" => d.resize_overlay,
+            "always" => ResizeOverlay::Always,
+            "never" => ResizeOverlay::Never,
+            "after-first" => ResizeOverlay::AfterFirst,
+            _ => c.resize_overlay,
+        }
+    }),
+    ("resize-overlay-position", |c, v, d| {
+        c.resize_overlay_position = match v.to_ascii_lowercase().as_str() {
+            "" => d.resize_overlay_position,
+            "center" => ResizeOverlayPosition::Center,
+            "top-left" => ResizeOverlayPosition::TopLeft,
+            "top-center" => ResizeOverlayPosition::TopCenter,
+            "top-right" => ResizeOverlayPosition::TopRight,
+            "bottom-left" => ResizeOverlayPosition::BottomLeft,
+            "bottom-center" => ResizeOverlayPosition::BottomCenter,
+            "bottom-right" => ResizeOverlayPosition::BottomRight,
+            _ => c.resize_overlay_position,
+        }
+    }),
+    ("resize-overlay-duration", |c, v, d| {
+        c.resize_overlay_duration_ms = if v.is_empty() {
+            d.resize_overlay_duration_ms
+        } else {
+            // Clamped: below ~250 ms the overlay is gone before it registers, and
+            // an unbounded value would pin it on screen indefinitely.
+            parse_duration_ms(v)
+                .map(|ms| ms.clamp(250, 60_000))
+                .unwrap_or(c.resize_overlay_duration_ms)
+        }
+    }),
+    ("osc-color-report-format", |c, v, d| {
+        c.osc_color_report_format = match v.to_ascii_lowercase().as_str() {
+            "" => d.osc_color_report_format,
+            "none" => OscColorReportFormat::None,
+            "8-bit" => OscColorReportFormat::Bits8,
+            "16-bit" => OscColorReportFormat::Bits16,
+            _ => c.osc_color_report_format,
+        }
+    }),
     ("bell-features", |c, v, d| {
-        // giest implements the visual bell; an explicit off-value disables it,
-        // any feature list (or unset) leaves it on.
-        c.bell_visual = match v.to_ascii_lowercase().as_str() {
-            "" => d.bell_visual,
-            "no" | "false" | "off" | "none" | "0" => false,
-            _ => true,
-        };
+        c.bell = if v.is_empty() { d.bell } else { parse_bell_features(v).unwrap_or(c.bell) }
+    }),
+    ("bell-audio-path", |c, v, d| {
+        c.bell_audio_path = opt_string(v, &d.bell_audio_path)
+    }),
+    ("bell-audio-volume", |c, v, d| {
+        c.bell_audio_volume = ratio(v, d.bell_audio_volume, c.bell_audio_volume, 0.0, 1.0)
     }),
     ("tab-inherit-working-directory", |c, v, d| {
         c.tab_inherit_working_directory = parse_bool(v, d.tab_inherit_working_directory);
@@ -670,6 +900,55 @@ fn ratio(value: &str, default: f32, current: f32, min: f32, max: f32) -> f32 {
     } else {
         value.parse::<f32>().map(|n| n.clamp(min, max)).unwrap_or(current)
     }
+}
+
+/// Parse Ghostty's `Duration` grammar into milliseconds.
+///
+/// A duration is a series of number+unit pairs which **add**, so `1h30m` is 90
+/// minutes and even `1h1h` is 2 hours. Units: `y d w h m s ms us`/`µs` `ns`.
+/// giest additionally accepts a bare integer as milliseconds — a superset that
+/// can't collide, since Ghostty requires a unit on every component.
+///
+/// Sub-millisecond components are parsed and contribute 0 ms rather than being
+/// rejected, so a valid Ghostty config doesn't warn.
+fn parse_duration_ms(s: &str) -> Option<u64> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    // Bare integer → milliseconds.
+    if let Ok(n) = s.parse::<u64>() {
+        return Some(n);
+    }
+    let mut total_ns: u128 = 0;
+    let mut rest = s;
+    while !rest.is_empty() {
+        let digits = rest.find(|c: char| !c.is_ascii_digit())?;
+        if digits == 0 {
+            return None; // a unit with no number
+        }
+        let (num, tail) = rest.split_at(digits);
+        let n: u128 = num.parse().ok()?;
+        let unit_len = tail
+            .find(|c: char| c.is_ascii_digit())
+            .unwrap_or(tail.len());
+        let (unit, tail) = tail.split_at(unit_len);
+        let ns_per: u128 = match unit {
+            "y" => 365 * 24 * 60 * 60 * 1_000_000_000,
+            "d" => 24 * 60 * 60 * 1_000_000_000,
+            "w" => 7 * 24 * 60 * 60 * 1_000_000_000,
+            "h" => 60 * 60 * 1_000_000_000,
+            "m" => 60 * 1_000_000_000,
+            "s" => 1_000_000_000,
+            "ms" => 1_000_000,
+            "us" | "µs" => 1_000,
+            "ns" => 1,
+            _ => return None,
+        };
+        total_ns = total_ns.saturating_add(n.saturating_mul(ns_per));
+        rest = tail;
+    }
+    Some((total_ns / 1_000_000).min(u64::MAX as u128) as u64)
 }
 
 /// Parse a palette override entry of the form `<index>=#rrggbb` into its 0–255
@@ -1052,6 +1331,197 @@ mod tests {
         // Out-of-range values clamp to [0.5, 3.0].
         assert_eq!(parsed("text-gamma = 10.0").text_gamma, 3.0);
         assert_eq!(parsed("text-gamma = 0.1").text_gamma, 0.5);
+    }
+
+    #[test]
+    fn confirm_close_surface_parses_ghostty_enum() {
+        assert_eq!(Config::default().confirm_close, ConfirmClose::WhenBusy);
+        assert_eq!(parsed("confirm-close-surface = false").confirm_close, ConfirmClose::Never);
+        assert_eq!(parsed("confirm-close-surface = true").confirm_close, ConfirmClose::WhenBusy);
+        assert_eq!(parsed("confirm-close-surface = always").confirm_close, ConfirmClose::Always);
+        assert_eq!(
+            parsed("confirm-close-surface = false\nconfirm-close-surface = bogus").confirm_close,
+            ConfirmClose::Never
+        );
+        assert_eq!(
+            parsed("confirm-close-surface = false\nconfirm-close-surface =").confirm_close,
+            ConfirmClose::WhenBusy
+        );
+    }
+
+    #[test]
+    fn confirm_close_decision_table() {
+        use super::needs_confirm as nc;
+        // `false` never asks, whatever the pane is doing.
+        for busy in [None, Some(true), Some(false)] {
+            assert!(!nc(ConfirmClose::Never, busy), "{busy:?}");
+            assert!(nc(ConfirmClose::Always, busy), "{busy:?}");
+        }
+        // `true` asks only when something is (or might be) running.
+        assert!(nc(ConfirmClose::WhenBusy, Some(true)));
+        assert!(!nc(ConfirmClose::WhenBusy, Some(false)));
+        // Unknown → confirm: a shell with no OSC 133 marks must not lose work.
+        assert!(nc(ConfirmClose::WhenBusy, None));
+    }
+
+    #[test]
+    fn resize_overlay_keys_parse_ghostty_values() {
+        let d = Config::default();
+        assert_eq!(d.resize_overlay, ResizeOverlay::AfterFirst);
+        assert_eq!(d.resize_overlay_position, ResizeOverlayPosition::Center);
+        assert_eq!(d.resize_overlay_duration_ms, 750);
+
+        assert_eq!(parsed("resize-overlay = always").resize_overlay, ResizeOverlay::Always);
+        assert_eq!(parsed("resize-overlay = never").resize_overlay, ResizeOverlay::Never);
+        assert_eq!(
+            parsed("resize-overlay-position = bottom-right").resize_overlay_position,
+            ResizeOverlayPosition::BottomRight
+        );
+        // Garbage keeps the current value; empty resets.
+        assert_eq!(
+            parsed("resize-overlay = never\nresize-overlay = bogus").resize_overlay,
+            ResizeOverlay::Never
+        );
+        assert_eq!(
+            parsed("resize-overlay = never\nresize-overlay =").resize_overlay,
+            ResizeOverlay::AfterFirst
+        );
+    }
+
+    #[test]
+    fn resize_overlay_duration_parses_ghostty_grammar() {
+        let ms = |s: &str| parsed(&format!("resize-overlay-duration = {s}")).resize_overlay_duration_ms;
+        assert_eq!(ms("750ms"), 750);
+        assert_eq!(ms("45s"), 45_000);
+        // Components add…
+        assert_eq!(ms("1h30m"), 5_400_000_u64.min(60_000));
+        // …and repeat rather than overwrite (1h1h == 2h), though both clamp here.
+        assert_eq!(ms("2s500ms"), 2_500);
+        // A bare integer is milliseconds (a giest superset).
+        assert_eq!(ms("300"), 300);
+        // Clamped at both ends.
+        assert_eq!(ms("10ms"), 250);
+        assert_eq!(ms("999y"), 60_000);
+        // Sub-millisecond parses but contributes nothing, then clamps up.
+        assert_eq!(ms("500us"), 250);
+        // Garbage keeps the current value.
+        assert_eq!(
+            parsed("resize-overlay-duration = 2s\nresize-overlay-duration = soon")
+                .resize_overlay_duration_ms,
+            2_000
+        );
+    }
+
+    #[test]
+    fn show_resize_overlay_gates_the_first_layout() {
+        use super::show_resize_overlay as show;
+        // The whole point of `after-first`: a session's initial sizing is not a
+        // "resize" the user did, so it must not flash.
+        assert!(!show(ResizeOverlay::AfterFirst, true));
+        assert!(show(ResizeOverlay::AfterFirst, false));
+        assert!(show(ResizeOverlay::Always, true));
+        assert!(show(ResizeOverlay::Always, false));
+        assert!(!show(ResizeOverlay::Never, true));
+        assert!(!show(ResizeOverlay::Never, false));
+    }
+
+    #[test]
+    fn osc_color_report_format_parses_each_value() {
+        assert_eq!(Config::default().osc_color_report_format, OscColorReportFormat::Bits16);
+        assert_eq!(
+            parsed("osc-color-report-format = none").osc_color_report_format,
+            OscColorReportFormat::None
+        );
+        assert_eq!(
+            parsed("osc-color-report-format = 8-bit").osc_color_report_format,
+            OscColorReportFormat::Bits8
+        );
+        // Garbage keeps the current value; empty resets.
+        assert_eq!(
+            parsed("osc-color-report-format = none\nosc-color-report-format = bogus")
+                .osc_color_report_format,
+            OscColorReportFormat::None
+        );
+        assert_eq!(
+            parsed("osc-color-report-format = none\nosc-color-report-format =")
+                .osc_color_report_format,
+            OscColorReportFormat::Bits16
+        );
+    }
+
+    #[test]
+    fn bell_features_defaults_match_ghostty() {
+        let b = Config::default().bell;
+        // attention/title on, everything else off — note `border` is OFF, which
+        // differs from giest's pre-parity default of always flashing the pane.
+        assert!(b.attention && b.title);
+        assert!(!b.system && !b.audio && !b.border);
+    }
+
+    #[test]
+    fn bell_features_parses_feature_list() {
+        // A feature list starts from the *defaults*, so attention/title survive.
+        let b = parsed("bell-features = audio").bell;
+        assert!(b.audio && b.attention && b.title);
+        assert!(!b.system && !b.border);
+
+        // `no-` disables one feature and leaves the rest at their defaults.
+        let b = parsed("bell-features = no-title").bell;
+        assert!(!b.title && b.attention);
+
+        let b = parsed("bell-features = system,border,no-attention").bell;
+        assert!(b.system && b.border && b.title);
+        assert!(!b.attention && !b.audio);
+    }
+
+    #[test]
+    fn bell_features_bool_shorthand_sets_all() {
+        for v in ["true", "t", "1"] {
+            let b = parsed(&format!("bell-features = {v}")).bell;
+            assert!(b.system && b.audio && b.attention && b.title && b.border, "{v}");
+        }
+        for v in ["false", "f", "0"] {
+            let b = parsed(&format!("bell-features = {v}")).bell;
+            assert!(!b.system && !b.audio && !b.attention && !b.title && !b.border, "{v}");
+        }
+        // Ghostty's packed-struct parser takes a *stricter* bool set than its
+        // ordinary one, so these are unknown feature names, not booleans — and an
+        // unknown name keeps the current value (see the wholesale-reject test).
+        let b = parsed("bell-features = border\nbell-features = on").bell;
+        assert!(b.border, "'on' is not a packed-struct boolean");
+    }
+
+    #[test]
+    fn bell_features_rejects_unknown_token_wholesale() {
+        // The valid `audio` before the bad token must NOT be kept.
+        let c = parsed("bell-features = audio,bogus");
+        assert_eq!(c.bell, BellFeatures::default());
+    }
+
+    #[test]
+    fn bell_features_replaces_rather_than_accumulates() {
+        // The second line wins outright: `system` is dropped, not merged.
+        let b = parsed("bell-features = system\nbell-features = border").bell;
+        assert!(b.border && !b.system);
+    }
+
+    #[test]
+    fn bell_features_empty_resets_to_default() {
+        let b = parsed("bell-features = true\nbell-features =").bell;
+        assert_eq!(b, BellFeatures::default());
+    }
+
+    #[test]
+    fn bell_audio_keys_parse() {
+        assert_eq!(Config::default().bell_audio_path, None);
+        assert_eq!(Config::default().bell_audio_volume, 0.5);
+        assert_eq!(
+            parsed(r"bell-audio-path = C:\sounds\ding.wav").bell_audio_path.as_deref(),
+            Some(r"C:\sounds\ding.wav")
+        );
+        // Parsed and clamped even though playback can't honor it yet.
+        assert_eq!(parsed("bell-audio-volume = 0.25").bell_audio_volume, 0.25);
+        assert_eq!(parsed("bell-audio-volume = 9").bell_audio_volume, 1.0);
     }
 
     #[test]

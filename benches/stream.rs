@@ -19,6 +19,7 @@ use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use giest::engine::{GhosttyVtEngine, TerminalEngine};
 use giest::osc7::Osc7Scanner;
 use giest::osc52::Osc52Scanner;
+use giest::osc_color::OscColorScanner;
 use giest::synthetic;
 
 /// Roughly how many bytes of stream to push per timed iteration. A few MiB keeps
@@ -70,6 +71,15 @@ fn bench_stream(c: &mut Criterion) {
         b.iter(|| {
             s.feed(&osc_data);
             std::hint::black_box(s.pwd().map(str::len))
+        })
+    });
+    scan.bench_function("osc_color_scan", |b| {
+        let mut s = OscColorScanner::new();
+        let mut out = Vec::new();
+        b.iter(|| {
+            out.clear();
+            s.feed(&osc_data, &mut out);
+            std::hint::black_box(out.len())
         })
     });
     scan.finish();

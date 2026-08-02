@@ -8,7 +8,7 @@ use eframe::egui;
 use eframe::egui_wgpu;
 
 use crate::command::{self, Action, PaletteState};
-use crate::config::{Config, MiddleClickAction, RightClickAction};
+use crate::config::{Config, MiddleClickAction, ResizeOverlayPosition, RightClickAction};
 use crate::profiles::{self, Profile};
 use crate::keybind::{Chord, Keymap};
 use crate::render::{self, PaneFrame, TermFrame};
@@ -395,6 +395,49 @@ pub struct App {
     /// config *before* the window exists, so it can't change without a restart —
     /// `reload_config` uses this to tell the user when a new opacity needs one.
     transparent_surface: bool,
+    /// The tab index a drag-reorder started on, or `None`. All the persistent
+    /// state a reorder needs — the rects and pointer-x are per-frame locals.
+    tab_drag: Option<usize>,
+    /// A close waiting on the confirmation modal. While `Some`, the modal is
+    /// drawn and owns the keyboard — like `palette` and the search overlay.
+    confirm: Option<PendingClose>,
+    /// True once a confirmed *window* close has been issued. Without it the
+    /// `ViewportCommand::Close` we send would come straight back as another
+    /// `close_requested()` with nothing pending, re-opening the dialog forever.
+    closing: bool,
+    /// Whether a bell has marked the title with 🔔, pending a refocus.
+    bell_title: bool,
+    /// Previous frame's window focus, so a bell marker can be cleared on the
+    /// unfocused→focused *edge* rather than every focused frame.
+    was_focused: bool,
+}
+
+/// What a confirmed close should do. One enum so the confirmation modal is a
+/// single widget rather than one per close path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PendingClose {
+    /// The focused pane (falling through to the tab, then the window).
+    Pane,
+    Tab(usize),
+    /// Every tab except this one.
+    OtherTabs(usize),
+    /// Every tab after this one.
+    TabsToRight(usize),
+    /// The whole window — the titlebar `×` / Alt+F4.
+    Window,
+}
+
+impl PendingClose {
+    /// Wording for the confirmation dialog.
+    fn description(self) -> &'static str {
+        match self {
+            Self::Pane => "This terminal will be closed.",
+            Self::Tab(_) => "This tab and its terminals will be closed.",
+            Self::OtherTabs(_) => "All other tabs and their terminals will be closed.",
+            Self::TabsToRight(_) => "All tabs to the right will be closed.",
+            Self::Window => "All tabs and terminals will be closed.",
+        }
+    }
 }
 
 /// Runtime font-size bounds in logical points.
@@ -485,9 +528,83 @@ impl App {
             fullscreen: false,
             hwnd,
             transparent_surface,
+            tab_drag: None,
+            confirm: None,
+            closing: false,
+            bell_title: false,
+            was_focused: true,
         };
         app.apply_backdrop();
         Ok(app)
+    }
+
+    /// Fire the out-of-band bell effects for the configured `bell-features`.
+    /// Called once per frame when any pane rang, so several simultaneous bells
+    /// produce one beep rather than one per pane.
+    fn ring_bell(&mut self, ctx: &egui::Context) {
+        let bell = self.config.bell;
+        if bell.system {
+            crate::bell::system_alert();
+        }
+        if bell.audio {
+            if let Some(raw) = self.config.bell_audio_path.as_deref() {
+                let dir = crate::config::config_path();
+                let dir = dir.as_deref().and_then(|p| p.parent());
+                if let Some(path) = crate::bell::resolve_audio_path(raw, dir) {
+                    crate::bell::play_audio(&path);
+                }
+            }
+        }
+        // Ghostty requests attention only when the window is *unfocused* — a
+        // taskbar flash on the window you're already looking at is just noise.
+        if bell.attention && !ctx.input(|i| i.focused) {
+            if let Some(hwnd) = self.hwnd {
+                crate::bell::request_attention(hwnd);
+            }
+        }
+        if bell.title {
+            self.bell_title = true;
+        }
+    }
+
+    /// Draw the close-confirmation modal, if one is pending, and act on the
+    /// answer. Deferred intent like `render_palette`: the pending close is taken
+    /// out and either put back, dropped (Cancel), or executed (Close).
+    fn render_confirm_close(&mut self, ctx: &egui::Context) {
+        let Some(what) = self.confirm else {
+            return;
+        };
+        let mut decision: Option<bool> = None;
+        let modal = egui::Modal::new(egui::Id::new("giest-confirm-close")).show(ctx, |ui| {
+            ui.set_width(320.0);
+            ui.heading("Close terminal?");
+            ui.add_space(6.0);
+            ui.label(what.description());
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                if ui.button("Cancel").clicked() {
+                    decision = Some(false);
+                }
+                if ui.button("Close").clicked() {
+                    decision = Some(true);
+                }
+            });
+        });
+        // Esc or a backdrop click cancels, like the palette.
+        if modal.should_close() {
+            decision = Some(false);
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+            decision = Some(true);
+        }
+        match decision {
+            Some(true) => {
+                self.confirm = None;
+                self.apply_close(ctx, what);
+            }
+            Some(false) => self.confirm = None,
+            None => {}
+        }
     }
 
     /// Apply the configured `background-blur` to the window (a no-op when the key
@@ -641,6 +758,91 @@ impl App {
         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.fullscreen));
     }
 
+    /// Whether any modal overlay owns input this frame. The palette, the search
+    /// bar and the close-confirmation dialog all suppress terminal keys, pane
+    /// mouse handling and app shortcuts.
+    fn modal_open(&self) -> bool {
+        self.palette.is_some() || self.confirm.is_some() || self.focused_search_open()
+    }
+
+    /// Sessions affected by a pending close, for the busy check.
+    fn close_targets(&mut self, what: PendingClose) -> Vec<Option<bool>> {
+        let active = self.active_tab;
+        let mut out = Vec::new();
+        match what {
+            PendingClose::Pane => {
+                // Only the focused pane dies (or, if it's the last one, the tab
+                // it's alone in — same session either way).
+                let tab = &mut self.tabs[active];
+                let focus = tab.focus;
+                if let Some(s) = tab.root.payload_mut(focus) {
+                    out.push(s.looks_busy());
+                }
+            }
+            PendingClose::Tab(i) => {
+                if let Some(tab) = self.tabs.get_mut(i) {
+                    tab.root.for_each_mut(&mut |s: &mut Session| out.push(s.looks_busy()));
+                }
+            }
+            PendingClose::OtherTabs(keep) => {
+                for (i, tab) in self.tabs.iter_mut().enumerate() {
+                    if i != keep {
+                        tab.root.for_each_mut(&mut |s: &mut Session| out.push(s.looks_busy()));
+                    }
+                }
+            }
+            PendingClose::TabsToRight(from) => {
+                for tab in self.tabs.iter_mut().skip(from + 1) {
+                    tab.root.for_each_mut(&mut |s: &mut Session| out.push(s.looks_busy()));
+                }
+            }
+            PendingClose::Window => {
+                for tab in &mut self.tabs {
+                    tab.root.for_each_mut(&mut |s: &mut Session| out.push(s.looks_busy()));
+                }
+            }
+        }
+        out
+    }
+
+    /// Ask for confirmation before `what`, or just do it.
+    ///
+    /// NOTE: this is only for *user-initiated* closes. A pane whose shell exited
+    /// is reaped by `reap_dead` without ever coming through here — there is
+    /// nothing to confirm once the process is gone.
+    fn request_close(&mut self, ctx: &egui::Context, what: PendingClose) {
+        let mode = self.config.confirm_close;
+        // Confirm if *any* affected pane is (or might be) busy.
+        let busy = self
+            .close_targets(what)
+            .into_iter()
+            .reduce(|a, b| match (a, b) {
+                (Some(true), _) | (_, Some(true)) => Some(true),
+                (None, _) | (_, None) => None,
+                _ => Some(false),
+            })
+            .flatten();
+        if crate::config::needs_confirm(mode, busy) {
+            self.confirm = Some(what);
+        } else {
+            self.apply_close(ctx, what);
+        }
+    }
+
+    /// Perform a close that has been confirmed (or didn't need confirming).
+    fn apply_close(&mut self, ctx: &egui::Context, what: PendingClose) {
+        match what {
+            PendingClose::Pane => self.close_focused(ctx),
+            PendingClose::Tab(i) => self.close_tab(i, ctx),
+            PendingClose::OtherTabs(i) => self.close_other_tabs(i),
+            PendingClose::TabsToRight(i) => self.close_tabs_to_right(i),
+            PendingClose::Window => {
+                self.closing = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
+    }
+
     /// Close the focused pane; closing the last pane closes the tab, and the
     /// last tab closes the window.
     fn close_focused(&mut self, ctx: &egui::Context) {
@@ -713,6 +915,18 @@ impl App {
         }
     }
 
+    /// Move tab `from` to insertion slot `to` (a drag reorder), keeping the same
+    /// tab selected.
+    fn move_tab(&mut self, from: usize, to: usize) {
+        let tabs = std::mem::take(&mut self.tabs);
+        let (tabs, active) = reorder_tabs(tabs, from, to, self.active_tab);
+        self.tabs = tabs;
+        self.active_tab = active;
+        // `renaming` holds a tab *index*, which the move just invalidated —
+        // leaving it would rename whichever tab slid into that slot.
+        self.renaming = None;
+    }
+
     /// Close tab `idx`; closing the last tab closes the window.
     fn close_tab(&mut self, idx: usize, ctx: &egui::Context) {
         if idx >= self.tabs.len() {
@@ -751,6 +965,7 @@ impl App {
     /// close the window when the last tab is gone. Returns `false` if the
     /// window is closing (caller should skip rendering this frame).
     fn reap_dead(&mut self, ctx: &egui::Context) -> bool {
+        let before = self.tabs.len();
         let tabs = std::mem::take(&mut self.tabs);
         let (survivors, active) =
             reap_tabs(tabs, self.active_tab, &mut |s: &Session| !s.is_alive());
@@ -758,6 +973,12 @@ impl App {
         if self.tabs.is_empty() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return false;
+        }
+        if self.tabs.len() != before {
+            // `PendingClose::Tab(i)` and the tab-drag latch both hold indices a
+            // reap can invalidate; drop them rather than act on the wrong tab.
+            self.confirm = None;
+            self.tab_drag = None;
         }
         self.active_tab = active;
         true
@@ -879,9 +1100,13 @@ impl App {
         match action {
             Action::NewTab => self.new_tab(self.default_profile),
             Action::NewTabWithProfile(i) => self.new_tab(i),
-            Action::CloseTab => self.close_tab(self.active_tab, ctx),
-            Action::CloseOtherTabs => self.close_other_tabs(self.active_tab),
-            Action::CloseTabsToRight => self.close_tabs_to_right(self.active_tab),
+            Action::CloseTab => self.request_close(ctx, PendingClose::Tab(self.active_tab)),
+            Action::CloseOtherTabs => {
+                self.request_close(ctx, PendingClose::OtherTabs(self.active_tab))
+            }
+            Action::CloseTabsToRight => {
+                self.request_close(ctx, PendingClose::TabsToRight(self.active_tab))
+            }
             Action::NextTab => self.next_tab(),
             Action::PrevTab => self.prev_tab(),
             Action::GotoTab(i) => self.goto_tab(i as usize),
@@ -901,7 +1126,7 @@ impl App {
             Action::SplitRight => self.split(true),
             Action::SplitDown => self.split(false),
             Action::ToggleSplitZoom => self.toggle_split_zoom(),
-            Action::ClosePane => self.close_focused(ctx),
+            Action::ClosePane => self.request_close(ctx, PendingClose::Pane),
             Action::ToggleFullscreen => self.toggle_fullscreen(ctx),
             Action::FocusSplitLeft => self.focus_dir(Dir::Left),
             Action::FocusSplitRight => self.focus_dir(Dir::Right),
@@ -1321,6 +1546,11 @@ impl App {
         let mut want_color: Option<(usize, Option<egui::Color32>)> = None;
         let mut commit_rename: Option<(usize, Option<String>)> = None;
         let mut stop_rename = false;
+        // Drag-to-reorder: this frame's tab rects, the tab a drag just started
+        // on, and the resulting move.
+        let mut tab_rects: Vec<egui::Rect> = Vec::with_capacity(self.tabs.len());
+        let mut drag_from: Option<usize> = None;
+        let mut want_move: Option<(usize, usize)> = None;
         // Pull the in-progress rename out so its buffer can be edited as a local
         // (it can't stay borrowed from `self` while we iterate `self.tabs`).
         let mut renaming = std::mem::take(&mut self.renaming);
@@ -1403,6 +1633,26 @@ impl App {
                     })
                     .inner;
 
+                tab_rects.push(title_resp.rect);
+                // Drag to reorder. A separate drag-sensing widget over the
+                // *title* rect (not the whole frame, so the `×` stays clickable).
+                // egui resolves click-hits and drag-hits independently, so the
+                // label's click-to-switch and middle-click-to-close still fire.
+                // Skipped while renaming, where a drag is text selection.
+                if !editing {
+                    let drag = ui.interact(
+                        title_resp.rect,
+                        egui::Id::new(("giest-tab-drag", i)),
+                        egui::Sense::drag(),
+                    );
+                    // Primary only: egui starts drags on *any* held button, so a
+                    // middle-press-and-jiggle would otherwise begin a reorder
+                    // instead of closing the tab.
+                    if drag.drag_started_by(egui::PointerButton::Primary) {
+                        drag_from = Some(i);
+                    }
+                }
+
                 if !editing {
                     title_resp.context_menu(|ui| {
                         if ui.button("New Tab").clicked() {
@@ -1478,6 +1728,43 @@ impl App {
             .on_hover_text("New tab (pick a shell)");
         });
 
+        // Resolve an in-progress tab drag. The tabs stay put while dragging; an
+        // insertion caret shows where the drop would land.
+        if let Some(from) = drag_from {
+            self.tab_drag = Some(from);
+        }
+        if let Some(from) = self.tab_drag {
+            let pointer = ui.ctx().input(|i| i.pointer.clone());
+            let held = pointer.any_down();
+            if let (Some(x), Some(&r0)) = (pointer.latest_pos().map(|p| p.x), tab_rects.first()) {
+                let to = drop_index(&tab_rects, x);
+                if held {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                    // Caret at the drop slot: the left edge of the tab we'd land
+                    // before, or the right edge of the strip when dropping last.
+                    let cx = match tab_rects.get(to) {
+                        Some(r) => r.left(),
+                        None => tab_rects.last().map_or(r0.right(), |r| r.right()),
+                    };
+                    ui.painter().rect_filled(
+                        egui::Rect::from_min_max(
+                            egui::pos2(cx - 1.5, r0.top() - 2.0),
+                            egui::pos2(cx + 1.5, r0.bottom() + 2.0),
+                        ),
+                        1.0,
+                        egui::Color32::from_rgb(0x5a, 0x82, 0xc8),
+                    );
+                } else {
+                    want_move = Some((from, to));
+                }
+            }
+            // Clear the latch once no button is held — covers a drop outside the
+            // strip and an Escape-aborted drag as well as a normal release.
+            if !held {
+                self.tab_drag = None;
+            }
+        }
+
         // Apply collected intents. Index-stable edits first; tab-removing actions
         // last so earlier intents still refer to valid indices.
         if stop_rename {
@@ -1505,17 +1792,24 @@ impl App {
                 .unwrap_or_default();
             self.renaming = Some((i, cur));
         }
+        if let Some((from, to)) = want_move {
+            self.move_tab(from, to);
+        }
         if let Some(idx) = want_new {
             self.new_tab(idx);
         }
+        // Every close route (the × button, middle-click, and the context menu)
+        // funnels through `request_close`, so the confirmation gate is applied
+        // once here rather than at each of them.
+        let ctx = ui.ctx().clone();
         if let Some(i) = want_close_others {
-            self.close_other_tabs(i);
+            self.request_close(&ctx, PendingClose::OtherTabs(i));
         }
         if let Some(i) = want_close_right {
-            self.close_tabs_to_right(i);
+            self.request_close(&ctx, PendingClose::TabsToRight(i));
         }
         if let Some(i) = want_close {
-            self.close_tab(i, &ui.ctx().clone());
+            self.request_close(&ctx, PendingClose::Tab(i));
         }
     }
 
@@ -1544,16 +1838,21 @@ impl App {
         let background_opacity_cells = self.config.background_opacity_cells;
         let unfocused_split_opacity = self.config.unfocused_split_opacity;
         let unfocused_split_fill = self.config.unfocused_split_fill;
+        let resize_overlay_position = self.config.resize_overlay_position;
         // Snapshot the keymap so the focused pane's `handle_input` can consult it
         // without holding a borrow on `self` across the pane-tree mutation below.
         // Cheap: a couple dozen (Chord, Action) entries, both `Copy`.
         let keymap = self.keymap.clone();
-        let bell_visual = self.config.bell_visual;
+        let bell_border = self.config.bell.border;
         let now = ctx.input(|i| i.time);
         let active_tab = self.active_tab;
-        // When the palette is open it's modal: don't feed keys to the focused
-        // pane or let it grab keyboard focus (the palette owns both).
-        let palette_open = self.palette.is_some();
+        // While a modal overlay is up it owns input: don't feed keys to the
+        // focused pane or let it grab keyboard focus. `egui::Modal` blocks
+        // *pointer* interaction and tab traversal on its own, but
+        // `Ui::request_focus` is unconditional — so the pane's per-frame focus
+        // grab has to be suppressed explicitly, or typing would still reach the
+        // shell behind the confirmation dialog.
+        let palette_open = self.palette.is_some() || self.confirm.is_some();
 
         // Fill the whole area (including the per-pane padding band and the split
         // gutters) with the focused pane's background. This single rect is what
@@ -1652,6 +1951,9 @@ impl App {
         // terminal after the callback below.
         let dimming = leaves.len() > 1 && unfocused_split_opacity < 1.0;
         let mut dim_rects: Vec<(egui::Rect, egui::Color32)> = Vec::new();
+        // (pane rect, "COLS x ROWS", fade alpha) for any pane showing the
+        // grid-size overlay after a resize.
+        let mut resize_overlays: Vec<(egui::Rect, String, f32)> = Vec::new();
         for leaf in leaves.iter_mut() {
             // The pane occupies `leaf.rect`; the grid is inset by the padding so
             // text clears the pane's edges (window border or split divider alike).
@@ -1663,7 +1965,7 @@ impl App {
             // Visual bell: advance/drain this pane's flash every frame (so a BEL
             // isn't lost even if its snapshot transiently fails below).
             let flash = session.bell_flash_alpha(now);
-            if bell_visual {
+            if bell_border {
                 if let Some(a) = flash {
                     bell_flashes.push((leaf_rect, a));
                 }
@@ -1684,7 +1986,12 @@ impl App {
                     ),
                 ));
             }
-            session.fit_grid(prect, ppp, cw, ch);
+            session.fit_grid(prect, ppp, cw, ch, now);
+            if let Some(a) = session.resize_overlay_alpha(now) {
+                let (cols, rows) = session.grid_size();
+                // Label format matches Ghostty's overlay exactly.
+                resize_overlays.push((leaf_rect, format!("{cols} x {rows}"), a));
+            }
             if !session.update_snapshot() {
                 continue;
             }
@@ -1903,7 +2210,7 @@ impl App {
             ui.painter().rect_stroke(
                 leaves[focus_idx].rect,
                 0.0,
-                egui::Stroke::new(2.0, egui::Color32::from_rgb(90, 130, 200)),
+                egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(90, 130, 200)),
                 egui::StrokeKind::Inside,
             );
         } else if zoomed.is_some() {
@@ -1913,7 +2220,7 @@ impl App {
             ui.painter().rect_stroke(
                 full_area,
                 0.0,
-                egui::Stroke::new(2.0, egui::Color32::from_rgb(80, 200, 120)),
+                egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(80, 200, 120)),
                 egui::StrokeKind::Inside,
             );
         }
@@ -1929,9 +2236,43 @@ impl App {
                 ui.painter().rect_stroke(
                     *rect,
                     0.0,
-                    egui::Stroke::new(3.0, col),
+                    egui::Stroke::new(3.0_f32, col),
                     egui::StrokeKind::Inside,
                 );
+            }
+        }
+
+        // Grid-size overlay after a resize. Drawn last so it reads as a HUD above
+        // the dim rects and the focus border; painter-only, so it never
+        // intercepts clicks. Must keep requesting repaints or the fade freezes on
+        // an idle terminal.
+        if !resize_overlays.is_empty() {
+            ctx.request_repaint();
+            for (rect, label, a) in &resize_overlays {
+                let (anchor, align) = overlay_anchor(*rect, resize_overlay_position, 12.0);
+                let font = egui::FontId::proportional(14.0);
+                let galley = ui.painter().layout_no_wrap(
+                    label.clone(),
+                    font,
+                    egui::Color32::from_rgba_unmultiplied(0xf0, 0xf0, 0xf0, (a * 255.0) as u8),
+                );
+                let text_rect = align.anchor_size(anchor, galley.size());
+                let pill = text_rect.expand2(egui::vec2(10.0, 6.0));
+                ui.painter().rect_filled(
+                    pill,
+                    6.0,
+                    egui::Color32::from_rgba_unmultiplied(0x20, 0x22, 0x28, (a * 230.0) as u8),
+                );
+                ui.painter().rect_stroke(
+                    pill,
+                    6.0,
+                    egui::Stroke::new(
+                        1.0_f32,
+                        egui::Color32::from_rgba_unmultiplied(0x60, 0x66, 0x78, (a * 220.0) as u8),
+                    ),
+                    egui::StrokeKind::Inside,
+                );
+                ui.painter().galley(text_rect.min, galley, egui::Color32::WHITE);
             }
         }
 
@@ -1971,17 +2312,59 @@ impl eframe::App for App {
         ctx.request_repaint_after(Duration::from_millis(500));
 
         // Pump every pane in every tab so background sessions keep flowing.
+        let now = ctx.input(|i| i.time);
+        // Drain the out-of-band bell effects here rather than in `render_active`:
+        // that only walks the *active* tab's leaves, so a BEL in a background tab
+        // would never ring. The visual border flash stays per-pane (it needs the
+        // leaf rect). Each session rate-limits itself, so a BEL storm in one pane
+        // can't machine-gun the speaker.
+        let mut rang = false;
         for tab in &mut self.tabs {
-            tab.root.for_each_mut(&mut |pane| pane.pump_pty());
+            tab.root.for_each_mut(&mut |pane| {
+                pane.pump_pty();
+                rang |= pane.take_bell_effect(now);
+            });
+        }
+        if rang {
+            self.ring_bell(&ctx);
         }
         // Close panes/tabs whose shell exited; bail if that closed the window.
+        // NOTE: this path is deliberately never confirmed — the process is
+        // already gone, so there is nothing left to save.
         if !self.reap_dead(&ctx) {
             return;
         }
+
+        // The titlebar ×, Alt+F4 or the taskbar. eframe reads `close_requested`
+        // from *this pass's* raw input and exits after the pass unless
+        // `CancelClose` is sent within the same pass — so this must run every
+        // frame, before anything can early-return.
+        if ctx.input(|i| i.viewport().close_requested()) && !self.closing {
+            if self.confirm.is_none()
+                && crate::config::needs_confirm(
+                    self.config.confirm_close,
+                    self.close_targets(PendingClose::Window)
+                        .into_iter()
+                        .reduce(|a, b| match (a, b) {
+                            (Some(true), _) | (_, Some(true)) => Some(true),
+                            (None, _) | (_, None) => None,
+                            _ => Some(false),
+                        })
+                        .flatten(),
+                )
+            {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.confirm = Some(PendingClose::Window);
+            } else if self.confirm.is_some() {
+                // A dialog is already up; don't let a second close request race it.
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            }
+        }
+
         // App shortcuts and font zoom are suppressed while a modal overlay (the
-        // command palette or the scrollback-search bar) is open; each overlay
-        // handles its own keys, including its toggle-close.
-        if self.palette.is_none() && !self.focused_search_open() {
+        // command palette, the scrollback-search bar or the close confirmation)
+        // is open; each overlay handles its own keys, including its toggle-close.
+        if !self.modal_open() {
             self.handle_shortcuts(&ctx);
             if let Some(render_state) = frame.wgpu_render_state() {
                 let render_state = render_state.clone();
@@ -1989,15 +2372,34 @@ impl eframe::App for App {
             }
         }
 
-        // Window title from the active tab's focused pane.
-        let title = self
-            .tabs
-            .get(self.active_tab)
-            .and_then(|t| t.focused_payload().title());
-        if title != self.last_window_title {
-            let shown = title.clone().unwrap_or_else(|| "giest".to_string());
-            ctx.send_viewport_cmd(egui::ViewportCommand::Title(shown));
-            self.last_window_title = title;
+        // A bell's 🔔 marker clears once the window is focused again — Ghostty
+        // holds it "until the terminal is re-focused". Also stop the taskbar
+        // flash ourselves rather than relying on FLASHW_TIMERNOFG, so the two
+        // effects clear together.
+        let focused = ctx.input(|i| i.focused);
+        if focused && !self.was_focused {
+            self.bell_title = false;
+            if let Some(hwnd) = self.hwnd {
+                crate::bell::clear_attention(hwnd);
+            }
+        }
+        self.was_focused = focused;
+
+        // Window title from the active tab's focused pane, with the bell marker.
+        // `last_window_title` holds the **decorated** string: comparing against
+        // the undecorated one would make clearing the 🔔 look like "no change"
+        // and never re-send the title.
+        let shown = {
+            let base = self
+                .tabs
+                .get(self.active_tab)
+                .and_then(|t| t.focused_payload().title())
+                .unwrap_or_else(|| "giest".to_string());
+            if self.bell_title { format!("🔔 {base}") } else { base }
+        };
+        if Some(&shown) != self.last_window_title.as_ref() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(shown.clone()));
+            self.last_window_title = Some(shown);
         }
 
         // Always show the tab strip so the new-tab profile picker (PowerShell /
@@ -2032,6 +2434,87 @@ impl eframe::App for App {
         // The scrollback-search overlay (self-gating: a no-op unless the focused
         // pane's search is open).
         self.render_search(&ctx);
+        // The close confirmation draws over everything else.
+        self.render_confirm_close(&ctx);
+    }
+}
+
+/// Which slot a tab dragged to pointer-x `x` should land in, given this frame's
+/// tab rects: the number of tabs whose horizontal **centre** is left of `x`.
+///
+/// Centre-crossing (rather than edge-crossing) is what makes the swap happen at
+/// the halfway point, which is what a drag reorder is expected to feel like.
+/// Returns an insertion index in `0..=rects.len()`.
+fn drop_index(rects: &[egui::Rect], x: f32) -> usize {
+    rects.iter().filter(|r| r.center().x < x).count()
+}
+
+/// Move `tabs[from]` to insertion index `to`, returning the reordered list and
+/// the remapped active index so the *same* tab stays selected.
+///
+/// `to` is an index into the **pre-removal** list (what [`drop_index`] computes),
+/// so the real insert point shifts left by one when moving rightwards. Split out
+/// from `App` — like `reap_tabs` and `keep_only_tab` — so the reselection logic
+/// is testable without a shell.
+fn reorder_tabs<T>(
+    mut tabs: Vec<Tab<T>>,
+    from: usize,
+    to: usize,
+    active: usize,
+) -> (Vec<Tab<T>>, usize) {
+    if from >= tabs.len() || to > tabs.len() {
+        return (tabs, active);
+    }
+    let insert = to - usize::from(to > from);
+    if insert == from {
+        return (tabs, active);
+    }
+    // Track the active tab by identity across the move.
+    let active_is_moving = active == from;
+    let tab = tabs.remove(from);
+    // After removal, an active index past `from` shifts down by one.
+    let mut act = if active > from { active - 1 } else { active };
+    tabs.insert(insert, tab);
+    if active_is_moving {
+        act = insert;
+    } else if insert <= act {
+        // The insert landed at or before it, pushing it back up.
+        act += 1;
+    }
+    let last = tabs.len().saturating_sub(1);
+    (tabs, act.min(last))
+}
+
+/// Anchor point and alignment for the resize overlay inside `pane`.
+///
+/// Returns an `Align2` rather than a final rect so the caller can let egui
+/// measure the text — which keeps this independent of font metrics and therefore
+/// testable on its own.
+fn overlay_anchor(
+    pane: egui::Rect,
+    pos: ResizeOverlayPosition,
+    margin: f32,
+) -> (egui::Pos2, egui::Align2) {
+    use ResizeOverlayPosition as P;
+    use egui::Align2;
+    let m = margin;
+    match pos {
+        P::Center => (pane.center(), Align2::CENTER_CENTER),
+        P::TopLeft => (pane.left_top() + egui::vec2(m, m), Align2::LEFT_TOP),
+        P::TopCenter => (
+            egui::pos2(pane.center().x, pane.top() + m),
+            Align2::CENTER_TOP,
+        ),
+        P::TopRight => (pane.right_top() + egui::vec2(-m, m), Align2::RIGHT_TOP),
+        P::BottomLeft => (pane.left_bottom() + egui::vec2(m, -m), Align2::LEFT_BOTTOM),
+        P::BottomCenter => (
+            egui::pos2(pane.center().x, pane.bottom() - m),
+            Align2::CENTER_BOTTOM,
+        ),
+        P::BottomRight => (
+            pane.right_bottom() + egui::vec2(-m, -m),
+            Align2::RIGHT_BOTTOM,
+        ),
     }
 }
 
@@ -2222,10 +2705,113 @@ fn ellipsize(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Dir, Node, Tab, cycle_pick, dim_alpha, ellipsize, keep_only_tab, nav_dir, reap_tabs,
-        split_rect, truncate_tabs_to_right,
+        Dir, Node, Tab, cycle_pick, dim_alpha, drop_index, ellipsize, keep_only_tab, nav_dir,
+        overlay_anchor, reap_tabs, reorder_tabs, split_rect, truncate_tabs_to_right,
     };
+    use crate::config::ResizeOverlayPosition as P;
     use eframe::egui;
+    use eframe::egui::Align2;
+
+    #[test]
+    fn drop_index_uses_tab_centres() {
+        // Three 100pt tabs: [0,100) [100,200) [200,300), centres at 50/150/250.
+        let rects: Vec<egui::Rect> = (0..3)
+            .map(|i| {
+                egui::Rect::from_min_size(
+                    egui::pos2(i as f32 * 100.0, 0.0),
+                    egui::vec2(100.0, 20.0),
+                )
+            })
+            .collect();
+        assert_eq!(drop_index(&rects, 10.0), 0);
+        // Still left of the first centre.
+        assert_eq!(drop_index(&rects, 49.0), 0);
+        // Past it — the swap happens at the halfway point, not the edge.
+        assert_eq!(drop_index(&rects, 51.0), 1);
+        assert_eq!(drop_index(&rects, 140.0), 1);
+        assert_eq!(drop_index(&rects, 160.0), 2);
+        assert_eq!(drop_index(&rects, 1000.0), 3);
+        assert_eq!(drop_index(&rects, -50.0), 0);
+    }
+
+    /// Tabs carrying an identifying payload, for the reorder tests.
+    fn tabs_named(n: usize) -> Vec<Tab<usize>> {
+        (0..n).map(|i| Tab::leaf(i as u64 + 1, i)).collect()
+    }
+
+    fn order(tabs: &[Tab<usize>]) -> Vec<usize> {
+        tabs.iter().map(|t| *t.focused_payload()).collect()
+    }
+
+    #[test]
+    fn reorder_tabs_moves_and_keeps_the_same_tab_active() {
+        // Drag the first tab to the far right; it stays selected.
+        let (tabs, act) = reorder_tabs(tabs_named(4), 0, 4, 0);
+        assert_eq!(order(&tabs), vec![1, 2, 3, 0]);
+        assert_eq!(act, 3);
+
+        // …and back again.
+        let (tabs, act) = reorder_tabs(tabs_named(4), 3, 0, 3);
+        assert_eq!(order(&tabs), vec![3, 0, 1, 2]);
+        assert_eq!(act, 0);
+    }
+
+    #[test]
+    fn reorder_tabs_shifts_an_unmoved_active_index() {
+        // Moving tab 0 rightwards past the active tab pulls the active index down.
+        let (tabs, act) = reorder_tabs(tabs_named(4), 0, 3, 1);
+        assert_eq!(order(&tabs), vec![1, 2, 0, 3]);
+        assert_eq!(act, 0, "still tab 1");
+
+        // Moving a later tab to the front pushes the active index up.
+        let (tabs, act) = reorder_tabs(tabs_named(4), 2, 0, 1);
+        assert_eq!(order(&tabs), vec![2, 0, 1, 3]);
+        assert_eq!(act, 2, "still tab 1");
+    }
+
+    #[test]
+    fn reorder_tabs_is_a_noop_for_an_unchanged_position() {
+        // Dropping a tab on itself…
+        let (tabs, act) = reorder_tabs(tabs_named(3), 1, 1, 1);
+        assert_eq!(order(&tabs), vec![0, 1, 2]);
+        assert_eq!(act, 1);
+        // …and the classic off-by-one: inserting "just after itself" is the same
+        // list, and must not shuffle anything.
+        let (tabs, act) = reorder_tabs(tabs_named(3), 1, 2, 1);
+        assert_eq!(order(&tabs), vec![0, 1, 2]);
+        assert_eq!(act, 1);
+    }
+
+    #[test]
+    fn reorder_tabs_ignores_out_of_range() {
+        let (tabs, act) = reorder_tabs(tabs_named(3), 9, 0, 1);
+        assert_eq!(order(&tabs), vec![0, 1, 2]);
+        assert_eq!(act, 1);
+        let (tabs, act) = reorder_tabs(tabs_named(3), 0, 9, 1);
+        assert_eq!(order(&tabs), vec![0, 1, 2]);
+        assert_eq!(act, 1);
+    }
+
+    #[test]
+    fn overlay_anchor_places_each_position() {
+        // A 200x100 pane at the origin, 10pt margin.
+        let pane = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(200.0, 100.0));
+        let m = 10.0;
+        let cases = [
+            (P::Center, egui::pos2(100.0, 50.0), Align2::CENTER_CENTER),
+            (P::TopLeft, egui::pos2(10.0, 10.0), Align2::LEFT_TOP),
+            (P::TopCenter, egui::pos2(100.0, 10.0), Align2::CENTER_TOP),
+            (P::TopRight, egui::pos2(190.0, 10.0), Align2::RIGHT_TOP),
+            (P::BottomLeft, egui::pos2(10.0, 90.0), Align2::LEFT_BOTTOM),
+            (P::BottomCenter, egui::pos2(100.0, 90.0), Align2::CENTER_BOTTOM),
+            (P::BottomRight, egui::pos2(190.0, 90.0), Align2::RIGHT_BOTTOM),
+        ];
+        for (pos, want_at, want_align) in cases {
+            let (at, align) = overlay_anchor(pane, pos, m);
+            assert_eq!(at, want_at, "{pos:?} anchor");
+            assert_eq!(align, want_align, "{pos:?} align");
+        }
+    }
 
     #[test]
     fn dim_overlay_alpha_is_one_minus_split_opacity() {

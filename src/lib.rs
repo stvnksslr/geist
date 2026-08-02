@@ -11,6 +11,7 @@
 //! GUI binary.
 
 pub mod app;
+pub mod bell;
 pub mod blur;
 pub mod command;
 pub mod config;
@@ -19,6 +20,7 @@ pub mod engine;
 pub mod keybind;
 pub mod osc52;
 pub mod osc7;
+pub mod osc_color;
 pub mod profiles;
 pub mod pty;
 pub mod render;

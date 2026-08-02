@@ -8,7 +8,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use eframe::egui;
 
-use crate::config::Config;
+use crate::config::{Config, OscColorReportFormat, ResizeOverlay};
 use crate::decscusr::DecscusrScanner;
 use crate::engine::{
     CursorShape, GhosttyVtEngine, GridSnapshot, KeyCode, KeyInput, KeyMods, MouseAction,
@@ -18,6 +18,7 @@ use crate::keybind::{Chord, Keymap};
 use crate::osc7::Osc7Scanner;
 use crate::search::{SearchHighlight, SearchState};
 use crate::osc52::Osc52Scanner;
+use crate::osc_color::{ColorQuery, OscColorScanner, Terminator};
 use crate::profiles::Profile;
 use crate::pty::Pty;
 
@@ -65,6 +66,11 @@ pub struct Session {
     /// Side parser tracking DECSCUSR, so the configured default cursor style is
     /// substituted only while the program hasn't picked its own shape.
     decscusr: DecscusrScanner,
+    /// Side parser for OSC color *queries*, which the VT engine drops.
+    osc_color: OscColorScanner,
+    /// Precision of OSC color-query replies. Read at pump time rather than per
+    /// frame, so a config reload must push it (see `apply_config`).
+    osc_color_report_format: OscColorReportFormat,
     /// Configured default cursor shape (`cursor-style`), applied via `decscusr`.
     cursor_style: CursorShape,
     /// Configured default cursor blink (`cursor-style-blink`); `None` follows the
@@ -72,9 +78,33 @@ pub struct Session {
     cursor_style_blink: Option<bool>,
     /// One-shot flag set when a BEL rang during the last pump; consumed by
     /// `bell_flash_alpha` to (re)start the visual bell flash.
+    ///
+    /// Deliberately separate from `bell_effect_pending`: `bell_flash_alpha`
+    /// *consumes* this flag, so a single flag shared with the audible path would
+    /// silently drop either the beep or the flash depending on call order.
     bell_pending: bool,
     /// egui-time deadline of the active visual bell flash, or `None` when idle.
     bell_flash_until: Option<f64>,
+    /// One-shot flag for the out-of-band bell effects (audible / attention /
+    /// title), consumed by `take_bell_effect`.
+    bell_effect_pending: bool,
+    /// egui time the last out-of-band bell effect fired, for rate limiting.
+    bell_effect_last: Option<f64>,
+    /// True once this shell has ever emitted an OSC 133 prompt mark. Without it,
+    /// "the cursor isn't on a prompt row" can't be told apart from "this shell
+    /// never marks its prompts", and every close would look busy.
+    saw_prompt_mark: bool,
+    /// egui-time deadline of the grid-size overlay, or `None` when idle.
+    resize_overlay_until: Option<f64>,
+    /// False until this session's grid has been sized once. `resize-overlay =
+    /// after-first` suppresses the overlay for that first layout, which matters
+    /// because a session is created at a default size and immediately re-fit, so
+    /// the resize edge always fires on the first frame.
+    sized_once: bool,
+    /// Configured resize-overlay mode and duration. Consulted inside `fit_grid`
+    /// rather than per frame, so a config reload must push them (`apply_config`).
+    resize_overlay: ResizeOverlay,
+    resize_overlay_duration_ms: u64,
     /// Scrollback-search overlay state (query + matches + current) while open.
     search: Option<SearchState>,
     /// Screen text captured when the search opened. Re-searched on each keystroke
@@ -124,10 +154,19 @@ impl Session {
             osc52: Osc52Scanner::new(),
             osc7: Osc7Scanner::new(),
             decscusr: DecscusrScanner::new(),
+            osc_color: OscColorScanner::new(),
+            osc_color_report_format: config.osc_color_report_format,
             cursor_style: config.cursor_style,
             cursor_style_blink: config.cursor_style_blink,
             bell_pending: false,
             bell_flash_until: None,
+            bell_effect_pending: false,
+            bell_effect_last: None,
+            saw_prompt_mark: false,
+            resize_overlay_until: None,
+            sized_once: false,
+            resize_overlay: config.resize_overlay,
+            resize_overlay_duration_ms: config.resize_overlay_duration_ms,
             search: None,
             search_text: Vec::new(),
         })
@@ -138,6 +177,7 @@ impl Session {
     pub fn pump_pty(&mut self) {
         use std::sync::mpsc::TryRecvError;
         let mut clipboard_sets: Vec<String> = Vec::new();
+        let mut color_queries: Vec<(ColorQuery, Terminator)> = Vec::new();
         loop {
             match self.pty.output.try_recv() {
                 Ok(chunk) => {
@@ -145,6 +185,7 @@ impl Session {
                     self.osc52.feed(&chunk, &mut clipboard_sets);
                     self.osc7.feed(&chunk);
                     self.decscusr.feed(&chunk);
+                    self.osc_color.feed(&chunk, &mut color_queries);
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
@@ -161,13 +202,34 @@ impl Session {
         if self.alive && !self.pty.is_running() {
             self.alive = false;
         }
-        let responses = self.engine.take_responses();
+        let mut responses = self.engine.take_responses();
+        // Answer the color queries the VT engine drops. Built *after* the whole
+        // drain loop, so a set-then-query in one batch reports the new value, and
+        // appended to the engine's own responses so everything we owe the program
+        // leaves in one ordered write.
+        if !color_queries.is_empty() {
+            let (fg, bg, cursor) = self.engine.dynamic_colors();
+            for (q, term) in color_queries.drain(..) {
+                if let Some(color) = crate::osc_color::query_color(q, fg, bg, cursor) {
+                    responses.extend_from_slice(&crate::osc_color::color_report(
+                        q,
+                        color,
+                        self.osc_color_report_format,
+                        term,
+                    ));
+                }
+            }
+        }
         if !responses.is_empty() {
             let _ = self.pty.write(&responses);
         }
-        // A BEL during this pump arms the visual bell for the next frame.
+        // A BEL during this pump arms both bell paths for the next frame. Two
+        // flags, not one: each is consumed by a different caller (see the field
+        // docs), and the visual flash is drawn per-pane while the audible /
+        // attention / title effects fire once for the whole app.
         if self.engine.take_bell() {
             self.bell_pending = true;
+            self.bell_effect_pending = true;
         }
     }
 
@@ -186,6 +248,72 @@ impl Session {
             return None;
         }
         Some((((until - now) / FLASH_SECS) as f32).clamp(0.0, 1.0))
+    }
+
+    /// The current grid size in cells — the resize overlay's label.
+    pub fn grid_size(&self) -> (u16, u16) {
+        (self.cols, self.rows)
+    }
+
+    /// Whether this pane looks like it's running something, for
+    /// `confirm-close-surface = true`.
+    ///
+    /// `None` means "can't tell" — the shell emits no OSC 133 prompt marks, so
+    /// there's no signal either way — which the caller treats as "confirm". A
+    /// dead shell is never busy.
+    pub fn looks_busy(&mut self) -> Option<bool> {
+        if !self.alive {
+            return Some(false);
+        }
+        let at_prompt = self.engine.cursor_at_prompt();
+        if at_prompt == Some(true) {
+            self.saw_prompt_mark = true;
+        }
+        match at_prompt {
+            // Sitting on a prompt row: idle.
+            Some(true) => Some(false),
+            // Not on a prompt row. Only meaningful once we know this shell marks
+            // its prompts at all; otherwise every pane would look busy forever.
+            Some(false) if self.saw_prompt_mark => Some(true),
+            _ => None,
+        }
+    }
+
+    /// Opacity of the grid-size overlay at egui time `now` (1.0, then fading over
+    /// the last stretch), or `None` when idle. Self-clearing, like
+    /// [`Self::bell_flash_alpha`].
+    ///
+    /// *The fade tail is a giest nicety — Ghostty's overlay is a hard show/hide.*
+    pub fn resize_overlay_alpha(&mut self, now: f64) -> Option<f32> {
+        const FADE_SECS: f64 = 0.15;
+        let until = self.resize_overlay_until?;
+        if now >= until {
+            self.resize_overlay_until = None;
+            return None;
+        }
+        let left = until - now;
+        Some(if left >= FADE_SECS {
+            1.0
+        } else {
+            (left / FADE_SECS) as f32
+        })
+    }
+
+    /// Whether an out-of-band bell effect (audible / attention / title) should
+    /// fire at egui time `now`, consuming the one-shot flag from the last pump.
+    ///
+    /// Rate-limited, unlike the visual flash: a BEL storm (`yes $'\a'`) merely
+    /// restarts the flash fade, but `MessageBeep` / `PlaySoundW` /
+    /// `FlashWindowEx` are system-wide effects that would machine-gun.
+    pub fn take_bell_effect(&mut self, now: f64) -> bool {
+        if !std::mem::take(&mut self.bell_effect_pending) {
+            return false;
+        }
+        if !bell_effect_due(self.bell_effect_last, now) {
+            return false;
+        }
+        self.bell_effect_last = Some(now);
+        true
     }
 
     /// Whether the shell backing this session is still running.
@@ -253,10 +381,16 @@ impl Session {
         self.snapshot.default_bg
     }
 
-    /// Resize the grid (and PTY) to fit `area` (points) at scale `ppp`.
-    pub fn fit_grid(&mut self, area: egui::Rect, ppp: f32, cell_w: f32, cell_h: f32) {
+    /// Resize the grid (and PTY) to fit `area` (points) at scale `ppp`. `now` is
+    /// egui time, used to schedule the grid-size overlay.
+    pub fn fit_grid(&mut self, area: egui::Rect, ppp: f32, cell_w: f32, cell_h: f32, now: f64) {
         let (cols, rows) = grid_dims(area.width(), area.height(), ppp, cell_w, cell_h);
         if cols != self.cols || rows != self.rows {
+            if crate::config::show_resize_overlay(self.resize_overlay, !self.sized_once) {
+                self.resize_overlay_until =
+                    Some(now + self.resize_overlay_duration_ms as f64 / 1000.0);
+            }
+            self.sized_once = true;
             self.cols = cols;
             self.rows = rows;
             let _ = self
@@ -369,6 +503,11 @@ impl Session {
         let _ = self.engine.set_min_contrast(config.min_contrast);
         self.cursor_style = config.cursor_style;
         self.cursor_style_blink = config.cursor_style_blink;
+        // Consulted at pump/resize time rather than per frame, so these need an
+        // explicit push here.
+        self.osc_color_report_format = config.osc_color_report_format;
+        self.resize_overlay = config.resize_overlay;
+        self.resize_overlay_duration_ms = config.resize_overlay_duration_ms;
     }
 
     /// Scroll the viewport by `delta` lines (negative scrolls up into history),
@@ -962,6 +1101,20 @@ fn copy_or_interrupt(selection: Option<String>) -> CopyAction {
 
 /// Compute the grid dimensions (cols, rows) that fit `width`×`height` points at
 /// scale `ppp` given the cell size in pixels. Always at least 1×1.
+/// Minimum spacing between out-of-band bell effects. Long enough that a BEL
+/// storm can't machine-gun the speaker or the taskbar, short enough that
+/// deliberate bells a moment apart are each heard.
+const BELL_RATE_LIMIT_SECS: f64 = 0.25;
+
+/// Whether a bell effect that last fired at `last` may fire again at `now`.
+/// `None` (never fired) always passes.
+fn bell_effect_due(last: Option<f64>, now: f64) -> bool {
+    match last {
+        None => true,
+        Some(prev) => now - prev >= BELL_RATE_LIMIT_SECS,
+    }
+}
+
 fn grid_dims(width_pts: f32, height_pts: f32, ppp: f32, cell_w: f32, cell_h: f32) -> (u16, u16) {
     let cols = ((width_pts * ppp / cell_w).floor() as u16).max(1);
     let rows = ((height_pts * ppp / cell_h).floor() as u16).max(1);
@@ -1313,8 +1466,9 @@ fn is_text_producing(code: KeyCode) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        CopyAction, KeyAction, cell_from_pos, copy_or_interrupt, extract_selection, find_url_at,
-        grid_dims, notch_split, osc7_to_path, px_offset, scroll_split, word_bounds,
+        CopyAction, KeyAction, bell_effect_due, cell_from_pos, copy_or_interrupt,
+        extract_selection, find_url_at, grid_dims, notch_split, osc7_to_path, px_offset,
+        scroll_split, word_bounds,
     };
     use crate::engine::{Cell, GridSnapshot, KeyCode, KeyInput, KeyMods};
     use crate::keybind::Keymap;
@@ -1327,6 +1481,18 @@ mod tests {
     /// does not alter any of these assertions.
     fn decide_key(key: egui::Key, modifiers: &egui::Modifiers, rows: u16) -> KeyAction {
         super::decide_key(key, modifiers, rows, &Keymap::default())
+    }
+
+    #[test]
+    fn bell_effect_due_rate_limits_a_storm() {
+        // The first bell always rings.
+        assert!(bell_effect_due(None, 10.0));
+        // A second one a frame later is swallowed…
+        assert!(!bell_effect_due(Some(10.0), 10.016));
+        assert!(!bell_effect_due(Some(10.0), 10.2));
+        // …but one past the limit rings again.
+        assert!(bell_effect_due(Some(10.0), 10.25));
+        assert!(bell_effect_due(Some(10.0), 11.0));
     }
 
     fn grid(rows: &[&str], cols: u16) -> GridSnapshot {

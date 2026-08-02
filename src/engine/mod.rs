@@ -331,6 +331,26 @@ pub trait TerminalEngine {
     /// against this.
     fn set_cursor_color(&mut self, color: Option<Rgb>) -> Result<()>;
 
+    /// Whether the cursor sits on an OSC 133 semantic-prompt row, i.e. the shell
+    /// is waiting at a prompt rather than running a command. `None` when the
+    /// engine can't tell.
+    ///
+    /// Used by `confirm-close-surface` to decide whether a pane is busy. Note
+    /// that `Some(false)` is ambiguous — the shell may simply not emit prompt
+    /// marks — so the caller latches "we have ever seen a mark" to disambiguate.
+    fn cursor_at_prompt(&self) -> Option<bool> {
+        None
+    }
+
+    /// The *effective* default foreground / background / cursor colors: the
+    /// configured values as overridden by OSC 10/11/12, which the VT engine
+    /// applies internally. `cursor` is `None` when no cursor color is set.
+    ///
+    /// Needed to answer an OSC color **query**, which libghostty-vt's read-only
+    /// stream parses and then discards, so giest side-scans and replies itself
+    /// (see [`crate::osc_color`]).
+    fn dynamic_colors(&self) -> (Rgb, Rgb, Option<Rgb>);
+
     /// Set the bold-text foreground policy (Ghostty `bold-color` /
     /// `bold-is-bright`). Applied while building each snapshot's cell colors.
     fn set_bold_color(&mut self, bold: BoldColor) -> Result<()>;

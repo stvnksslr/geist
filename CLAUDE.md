@@ -55,6 +55,11 @@ fallback engine without app changes:
   `CallbackTrait`. **`render/atlas.rs`** — rustybuzz shaping + ab_glyph rasterization (primary +
   system fallback faces) into an R8 atlas; COLR/CPAL color emoji composited into a separate RGBA atlas.
 - **`pty.rs`** — ConPTY shell via portable-pty with a reader thread that wakes the UI on output.
+- **`bell.rs`** — the non-visual `bell-features`: `MessageBeep` (system), `PlaySoundW` (audio),
+  `FlashWindowEx` (attention). Declares user32 directly and resolves winmm lazily rather than
+  enabling large `windows-sys` feature modules for three functions.
+- **`osc_color.rs`** — side-scanner answering OSC 10/11/12 color *queries*. The engine already
+  applies the set/reset forms; only `?` is dropped upstream.
 - **`blur.rs`** — Windows DWM backdrop (acrylic/mica) for `background-blur`: the documented Win11
   `DWMWA_SYSTEMBACKDROP_TYPE`, falling back to the undocumented `SetWindowCompositionAttribute` accent
   policy (resolved via `GetProcAddress`, never linked) on Win10, then to nothing.
@@ -124,6 +129,22 @@ fallback engine without app changes:
 - **`Cell::bg_explicit` polarity is deliberate.** `false` (the `Default`) means "draw no background
   quad". Cells the VT iterators never yield get blanked to the default, so inverting the flag's sense
   (`bg_is_default`) would make every one of them paint opaque black over a translucent window.
+
+- **`egui::Modal` does not stop the terminal grabbing the keyboard.** It blocks pointer interaction
+  and tab-traversal focus, but `Memory::request_focus` is unconditional and the pane calls
+  `resp.request_focus()` every frame — so any new modal must also be added to the *manual* gate in
+  `render_active` (the `palette_open` local) or typing goes straight to the shell behind the dialog.
+- **`close_requested` must be answered in the same pass.** eframe reads it from that pass's raw input
+  and exits afterwards unless `ViewportCommand::CancelClose` appears in the same pass's output. And
+  once a confirmed close sends `ViewportCommand::Close`, the resulting pass sees `close_requested`
+  again — without the `closing` latch that re-opens the dialog forever, i.e. an unclosable window.
+  `reap_dead` (shell exited) deliberately bypasses all of this: there's nothing left to confirm.
+- **Indices held across frames go stale.** `App::renaming`, `tab_drag` and `PendingClose::Tab` all
+  store a tab *index*; a reorder or a `reap_dead` invalidates them, and acting on a stale one edits
+  the wrong tab. Clear them at both mutation points.
+- **After `cargo test`, the *binary* is still stale.** `cargo test --lib` builds only the test
+  harness, so launching `target\debug\giest.exe` to check a change runs the previous build — which
+  looks exactly like the feature not working. Run `cargo build` before any manual/screenshot check.
 
 ## Verifying visual/rendering changes
 

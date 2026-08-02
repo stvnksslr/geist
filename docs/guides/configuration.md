@@ -60,6 +60,22 @@ palette = 8=#666a73
 | `middle-click-action` | enum | `primary-paste` (default) pastes the clipboard; `ignore` does nothing. Windows has no primary selection, so this reads the system clipboard. |
 | `palette` | repeated `<index>=#rrggbb` | Override individual 256-color palette entries; everything else keeps the bundled theme. |
 
+### Bell, resize overlay, close confirmation
+
+| Key | Type | Notes |
+| --- | --- | --- |
+| `bell-features` | list | Comma-separated `system`, `audio`, `attention`, `title`, `border`, each negatable with `no-`. Defaults to `attention,title` — **note `border` is off**, so the pane-border flash giest used to show by default now needs `bell-features = border`. A bare `true`/`false` sets every feature. A feature list starts from the defaults, so a second `bell-features` line *replaces* the first, and one unknown name rejects the whole value. |
+| `bell-audio-path` | path | Sound file for `audio` (`.wav`); relative paths resolve against the config directory. |
+| `bell-audio-volume` | float 0–1 | Parsed and stored but **not honored** — the Windows playback API has no volume parameter. |
+| `resize-overlay` | enum | `after-first` (default), `always`, `never`. `after-first` suppresses the overlay on a surface's very first sizing, so new tabs and splits don't flash a size. |
+| `resize-overlay-position` | enum | `center` (default), `top-left`, `top-center`, `top-right`, `bottom-left`, `bottom-center`, `bottom-right`. |
+| `resize-overlay-duration` | duration | Default `750ms`. Accepts Ghostty's additive grammar (`1h30m`, `2s500ms`) and a bare integer as milliseconds; clamped to 250 ms – 60 s. |
+| `confirm-close-surface` | enum | `true` (default) confirms only when a pane looks busy, `always` always confirms, `false` never does. Also guards the titlebar close / Alt+F4. "Busy" is inferred from OSC 133 prompt marks, which giest injects for PowerShell and cmd; a shell that doesn't mark its prompts can't be judged, so it always confirms. |
+| `osc-color-report-format` | enum | Precision of replies to `OSC 10/11/12 ; ?` colour queries: `16-bit` (default), `8-bit`, or `none` to not answer. |
+
+Note the bell's `attention` feature flashes the taskbar button only while the window is unfocused,
+and `title` prefixes the window title with 🔔 until you focus it again.
+
 ### Transparency and opacity
 
 | Key | Type | Notes |
