@@ -448,6 +448,14 @@ pub trait TerminalEngine {
     /// the app enabled mode 2004, otherwise with newlines normalized to CR.
     fn encode_paste(&mut self, text: &str) -> Vec<u8>;
 
+    /// Whether the running app has enabled bracketed paste (DECSET 2004) — i.e.
+    /// whether it has promised to treat pasted text as data rather than input.
+    ///
+    /// [`Self::encode_paste`] consults the same mode, but swallows the answer;
+    /// paste protection has to know it *before* deciding whether to encode at
+    /// all (see [`crate::config::paste_is_unsafe`]).
+    fn bracketed_paste(&self) -> bool;
+
     /// Drain any bytes the terminal wants written back to the PTY (responses to
     /// device queries, status reports, etc.). Returns empty when there's none.
     fn take_responses(&mut self) -> Vec<u8>;

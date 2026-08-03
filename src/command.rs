@@ -31,6 +31,43 @@ pub enum Action {
     LastTab,
     /// Open the command palette (Ghostty `toggle_command_palette`).
     TogglePalette,
+    /// Write terminal text to a temp file and act on its **path** (Ghostty
+    /// `write_scrollback_file` / `write_screen_file` / `write_selection_file`).
+    WriteFile(crate::writefile::WriteScope, crate::writefile::WriteAction),
+    /// Clear the screen **and** the scrollback. Ghostty `clear_screen`.
+    ClearScreen,
+    /// Copy the shell-set window/tab title. Ghostty `copy_title_to_clipboard`.
+    CopyTitle,
+    /// Refuse keyboard input to the shell until toggled back. Ghostty
+    /// `toggle_readonly`.
+    ToggleReadonly,
+    /// Move the current tab by this many positions, clamped at the ends
+    /// (Ghostty `move_tab:N`).
+    MoveTab(i8),
+    /// Set the font size to this many points (Ghostty `set_font_size:N`).
+    SetFontSize(u8),
+    /// Scroll by this many lines (Ghostty `scroll_page_lines:N`).
+    ScrollLines(i16),
+    /// Scroll by this fraction of a page (Ghostty `scroll_page_fractional:N`,
+    /// scaled by 100 so the action stays `Copy` without a float).
+    ScrollPageFraction(i16),
+    /// Close every window, quitting giest. Ghostty `close_all_windows` / `quit`.
+    Quit,
+    /// Open the inline tab-rename box. Ghostty `prompt_tab_title`.
+    PromptTabTitle,
+    /// Maximize or restore the window. Ghostty `toggle_maximize` — which it
+    /// notes has no effect on macOS; Windows has real maximize, so this does.
+    ToggleMaximize,
+    /// Keep the window above others even when unfocused. Ghostty
+    /// `toggle_window_float_on_top` (macOS-only upstream).
+    ToggleFloatOnTop,
+    /// Flip between the configured `background-opacity` and fully opaque.
+    /// Ghostty `toggle_background_opacity` (macOS-only upstream).
+    ToggleBackgroundOpacity,
+    /// Turn mouse reporting on/off for the focused pane, so a full-screen app
+    /// that captured the pointer can be escaped without quitting it.
+    /// Ghostty `toggle_mouse_reporting`.
+    ToggleMouseReporting,
     /// Toggle the scrollback-search overlay on the focused pane.
     ToggleSearch,
     /// Jump to the previous (`delta < 0`) or next (`delta > 0`) OSC 133 prompt
@@ -63,6 +100,10 @@ pub enum Action {
     ScrollPageDown,
     ScrollToTop,
     ScrollToBottom,
+    /// Scroll so this absolute row (from the top of scrollback) is at the
+    /// viewport top. Ghostty `scroll_to_row:N`, which upstream leaves unbound —
+    /// it exists so the scrollbar can drive the core.
+    ScrollToRow(u32),
     OpenConfig,
     ReloadConfig,
 }
@@ -86,6 +127,24 @@ impl Action {
             Action::GotoTab(_) => "Go to Tab",
             Action::LastTab => "Go to Last Tab",
             Action::TogglePalette => "Command Palette",
+            Action::WriteFile(scope, _) => match scope {
+                crate::writefile::WriteScope::Scrollback => "Write Scrollback to File",
+                crate::writefile::WriteScope::Screen => "Write Screen to File",
+                crate::writefile::WriteScope::Selection => "Write Selection to File",
+            },
+            Action::ClearScreen => "Clear Screen",
+            Action::CopyTitle => "Copy Title",
+            Action::ToggleReadonly => "Toggle Read-Only",
+            Action::MoveTab(_) => "Move Tab",
+            Action::SetFontSize(_) => "Set Font Size",
+            Action::ScrollLines(_) => "Scroll Lines",
+            Action::ScrollPageFraction(_) => "Scroll Page",
+            Action::Quit => "Quit",
+            Action::PromptTabTitle => "Rename Tab",
+            Action::ToggleMaximize => "Toggle Maximize",
+            Action::ToggleFloatOnTop => "Toggle Always on Top",
+            Action::ToggleBackgroundOpacity => "Toggle Background Opacity",
+            Action::ToggleMouseReporting => "Toggle Mouse Reporting",
             Action::ToggleSearch => "Search Scrollback",
             Action::JumpToPrompt(d) => {
                 if d < 0 {
@@ -117,6 +176,7 @@ impl Action {
             Action::ScrollPageDown => "Scroll Page Down",
             Action::ScrollToTop => "Scroll to Top",
             Action::ScrollToBottom => "Scroll to Bottom",
+            Action::ScrollToRow(_) => "Scroll to Row",
             Action::OpenConfig => "Open Config",
             Action::ReloadConfig => "Reload Config",
         }
@@ -133,6 +193,20 @@ impl Action {
             Action::PrevTab => "Ctrl+Shift+Tab",
             Action::LastTab => "Alt+9",
             Action::TogglePalette => "Ctrl+Shift+P",
+            Action::WriteFile(..)
+            | Action::ClearScreen
+            | Action::CopyTitle
+            | Action::ToggleReadonly
+            | Action::MoveTab(_)
+            | Action::SetFontSize(_)
+            | Action::ScrollLines(_)
+            | Action::ScrollPageFraction(_)
+            | Action::Quit
+            | Action::PromptTabTitle
+            | Action::ToggleMaximize
+            | Action::ToggleFloatOnTop
+            | Action::ToggleBackgroundOpacity
+            | Action::ToggleMouseReporting => return None,
             Action::ToggleSearch => "Ctrl+Shift+F",
             Action::JumpToPrompt(d) if d < 0 => "Ctrl+Shift+\u{2191}",
             Action::JumpToPrompt(_) => "Ctrl+Shift+\u{2193}",
@@ -159,6 +233,7 @@ impl Action {
             // No default binding (or per-index, shown elsewhere).
             Action::NewTabWithProfile(_)
             | Action::GotoTab(_)
+            | Action::ScrollToRow(_)
             // Deliberately unbound: Windows already delivers Alt+F4 as WM_CLOSE,
             // which giest answers with the close-confirmation flow. See keybind.rs.
             | Action::CloseWindow
@@ -213,9 +288,28 @@ impl Action {
             Action::ScrollPageDown => "scroll_page_down".into(),
             Action::ScrollToTop => "scroll_to_top".into(),
             Action::ScrollToBottom => "scroll_to_bottom".into(),
+            Action::ScrollToRow(n) => format!("scroll_to_row:{n}"),
             Action::OpenConfig => "open_config".into(),
             Action::ReloadConfig => "reload_config".into(),
             Action::TogglePalette => "toggle_command_palette".into(),
+            Action::WriteFile(scope, act) => {
+                format!("write_{}_file:{}", scope.name(), act.name())
+            }
+            Action::ClearScreen => "clear_screen".into(),
+            Action::CopyTitle => "copy_title_to_clipboard".into(),
+            Action::ToggleReadonly => "toggle_readonly".into(),
+            Action::MoveTab(n) => format!("move_tab:{n}"),
+            Action::SetFontSize(n) => format!("set_font_size:{n}"),
+            Action::ScrollLines(n) => format!("scroll_page_lines:{n}"),
+            Action::ScrollPageFraction(n) => {
+                format!("scroll_page_fractional:{}", f32::from(n) / 100.0)
+            }
+            Action::Quit => "quit".into(),
+            Action::PromptTabTitle => "prompt_tab_title".into(),
+            Action::ToggleMaximize => "toggle_maximize".into(),
+            Action::ToggleFloatOnTop => "toggle_window_float_on_top".into(),
+            Action::ToggleBackgroundOpacity => "toggle_background_opacity".into(),
+            Action::ToggleMouseReporting => "toggle_mouse_reporting".into(),
             Action::ToggleSearch => "toggle_search".into(),
             Action::JumpToPrompt(d) => format!("jump_to_prompt:{d}"),
         }
@@ -232,6 +326,33 @@ impl Action {
             // Ghostty's goto_tab is 1-based; giest indexes tabs from 0.
             let n: u16 = rest.trim().parse().ok()?;
             return n.checked_sub(1).map(|i| Action::GotoTab(i.min(u8::MAX as u16) as u8));
+        }
+        if let Some(rest) = s.strip_prefix("scroll_to_row:") {
+            return rest.trim().parse().ok().map(Action::ScrollToRow);
+        }
+        if let Some(rest) = s.strip_prefix("move_tab:") {
+            return rest.parse::<i8>().ok().map(Action::MoveTab);
+        }
+        if let Some(rest) = s.strip_prefix("set_font_size:") {
+            // Ghostty takes a float; giest's font size is whole points, so round
+            // rather than reject — `set_font_size:13.5` asking for 14 is closer
+            // to the intent than doing nothing.
+            return rest
+                .parse::<f32>()
+                .ok()
+                .filter(|n| *n >= 1.0 && *n <= 255.0)
+                .map(|n| Action::SetFontSize(n.round() as u8));
+        }
+        if let Some(rest) = s.strip_prefix("scroll_page_lines:") {
+            return rest.parse::<i16>().ok().map(Action::ScrollLines);
+        }
+        if let Some(rest) = s.strip_prefix("scroll_page_fractional:") {
+            // Stored ×100 so `Action` stays `Copy`-and-`Eq` without a float.
+            return rest
+                .parse::<f32>()
+                .ok()
+                .filter(|n| n.is_finite())
+                .map(|n| Action::ScrollPageFraction((n * 100.0).round() as i16));
         }
         if let Some(rest) = s.strip_prefix("jump_to_prompt:") {
             let n: i8 = rest.trim().parse().ok()?;
@@ -284,6 +405,32 @@ impl Action {
             "open_config" => Action::OpenConfig,
             "reload_config" => Action::ReloadConfig,
             "toggle_command_palette" => Action::TogglePalette,
+            "clear_screen" => Action::ClearScreen,
+            "copy_title_to_clipboard" => Action::CopyTitle,
+            "toggle_readonly" => Action::ToggleReadonly,
+            "quit" | "close_all_windows" => Action::Quit,
+            "prompt_tab_title" => Action::PromptTabTitle,
+            // giest splits are always 50/50, so there is nothing to equalize.
+            // Accepted as a no-op so a Ghostty config binds without an error
+            // rather than logging an "unknown action" the user cannot act on.
+            "equalize_splits" => Action::ClearSelection,
+            "toggle_maximize" => Action::ToggleMaximize,
+            "toggle_window_float_on_top" => Action::ToggleFloatOnTop,
+            "toggle_background_opacity" => Action::ToggleBackgroundOpacity,
+            "toggle_mouse_reporting" => Action::ToggleMouseReporting,
+            // `write_<scope>_file:<action>`. The parameter is required — Ghostty
+            // has no default, and silently picking one would mean a typo does
+            // something other than what was written.
+            _ if s.starts_with("write_") => {
+                let (name, param) = s.split_once(':')?;
+                let scope = match name {
+                    "write_scrollback_file" => crate::writefile::WriteScope::Scrollback,
+                    "write_screen_file" => crate::writefile::WriteScope::Screen,
+                    "write_selection_file" => crate::writefile::WriteScope::Selection,
+                    _ => return None,
+                };
+                Action::WriteFile(scope, crate::writefile::WriteAction::from_name(param)?)
+            }
             "toggle_search" | "search" => Action::ToggleSearch,
             _ => return None,
         })
@@ -329,6 +476,10 @@ const BASE_ACTIONS: &[Action] = &[
     Action::JumpToPrompt(-1),
     Action::JumpToPrompt(1),
     Action::ToggleSearch,
+    Action::ToggleMouseReporting,
+    Action::ToggleMaximize,
+    Action::ToggleFloatOnTop,
+    Action::ToggleBackgroundOpacity,
     Action::OpenConfig,
     Action::ReloadConfig,
 ];

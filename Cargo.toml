@@ -41,6 +41,18 @@ unicode-width = "0.2"
 # tools send). libghostty parses the protocol but leaves decoding to a hook that
 # is unset by default; see src/engine/png_decode.rs.
 png = "0.18"
+# JPEG decoding for `background-image`. Ghostty accepts PNG *and* JPEG there, and
+# `png` obviously cannot cover the second half; this is the same project
+# (image-rs) and the same shape of pure-Rust decoder, so it adds a decoder rather
+# than the whole `image` crate's format matrix. See src/bgimage.rs.
+jpeg-decoder = "0.3"
+# GLSL -> WGSL translation for `custom-shader` (Shadertoy-format shaders, which
+# Ghostty also accepts). This is the *same* naga wgpu already vendors, so it
+# dedupes; we take it as a direct dependency only to reach its GLSL frontend,
+# which wgpu doesn't re-export. Deliberately routed through `wgsl-out` rather
+# than handing wgpu a `naga::Module` directly: the text output keeps us
+# independent of whatever naga version a future wgpu pins. See src/shader.rs.
+naga = { version = "29", features = ["glsl-in", "wgsl-out"] }
 # DWM window-composition APIs for `background-blur` (the Windows acrylic/mica
 # backdrop; see src/blur.rs). Already in the tree via winit/wgpu, so this unifies
 # with the existing pin rather than adding a build.

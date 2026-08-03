@@ -12,18 +12,26 @@
 
 pub mod app;
 pub mod bell;
+pub mod bgimage;
 pub mod blur;
 pub mod command;
 pub mod config;
 pub mod decscusr;
 pub mod engine;
 pub mod keybind;
+pub mod notify;
+pub mod osc133;
 pub mod osc52;
 pub mod osc7;
 pub mod osc_color;
+pub mod osc_notify;
 pub mod profiles;
 pub mod pty;
 pub mod render;
+pub mod scrollbar;
 pub mod search;
 pub mod session;
+pub mod shader;
 pub mod synthetic;
+pub mod taskbar;
+pub mod writefile;

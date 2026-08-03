@@ -8,7 +8,9 @@ use std::sync::Arc;
 use anyhow::Result;
 use eframe::egui;
 
-use crate::config::{Config, OscColorReportFormat, ResizeOverlay};
+use crate::config::{
+    self, ClipboardAccess, ClipboardPolicy, Config, OscColorReportFormat, ResizeOverlay,
+};
 use crate::decscusr::DecscusrScanner;
 use crate::engine::{
     CursorShape, GhosttyVtEngine, GridSnapshot, KeyCode, KeyInput, KeyMods, MouseAction,
@@ -17,8 +19,10 @@ use crate::engine::{
 use crate::keybind::{Chord, Keymap};
 use crate::osc7::Osc7Scanner;
 use crate::search::{SearchHighlight, SearchState};
-use crate::osc52::Osc52Scanner;
+use crate::osc52::{Osc52, Osc52Scanner};
 use crate::osc_color::{ColorQuery, OscColorScanner, Terminator};
+use crate::osc_notify::{Notification, Osc9, OscNotifyScanner};
+use crate::osc133::{Mark, Osc133Scanner};
 use crate::profiles::Profile;
 use crate::pty::Pty;
 
@@ -68,6 +72,45 @@ pub struct Session {
     decscusr: DecscusrScanner,
     /// Side parser for OSC color *queries*, which the VT engine drops.
     osc_color: OscColorScanner,
+    /// Side parser for OSC 9 / OSC 777 desktop-notification requests.
+    osc_notify: OscNotifyScanner,
+    /// Side parser for OSC 133 `C`/`D` command marks. The engine applies the
+    /// `A`/`B` prompt marks to the screen, but `D`'s exit code never lands on a
+    /// cell, so it has to be read off the stream.
+    osc133: Osc133Scanner,
+    /// When the running command started, if one is running. Set by a `C` mark or
+    /// — since neither of giest's shell hooks can emit one — by the Enter that
+    /// submitted it. `Instant`, not egui time: `pump_pty` has no `Context`, and a
+    /// duration wants a monotonic clock anyway.
+    command_started: Option<std::time::Instant>,
+    /// Commands that finished since the app last drained them.
+    pending_command_finish: Vec<CommandFinish>,
+    /// Notifications requested since the app last drained them. Held on the
+    /// session (like `pending_clipboard`) rather than pushed straight out: the
+    /// pump has no `Context`, no window handle, and no idea whether the window
+    /// is focused — all of which the app-level drain needs.
+    pending_notifications: Vec<Notification>,
+    /// This pane's latest `OSC 9;4` progress state, or `None` if it has never
+    /// reported one. **Latest wins rather than queued**: a build emits hundreds
+    /// of these and only the current one means anything.
+    progress: Option<crate::taskbar::Progress>,
+    /// Whether [`Self::progress`] changed since the app last read it.
+    progress_dirty: bool,
+    /// `desktop-notifications`. Checked at pump time so a disabled config costs
+    /// nothing per chunk; a reload must push it (see `apply_config`).
+    desktop_notifications: bool,
+    /// `progress-style`. Same reasoning as above.
+    progress_style: bool,
+    /// `mouse-reporting`, plus whatever `toggle_mouse_reporting` has done to it
+    /// since. Per-pane, because the toggle is a per-surface escape hatch.
+    mouse_reporting: bool,
+    /// `mouse-scroll-multiplier`, read in the wheel path.
+    mouse_scroll_multiplier: crate::config::MouseScrollMultiplier,
+    /// `toggle_readonly`: refuse to send keyboard input to the shell. Per-pane
+    /// and runtime-only — there is no config key for it upstream either.
+    readonly: bool,
+    /// `scroll-to-bottom`, read on keystroke and on new output.
+    scroll_to_bottom: crate::config::ScrollToBottom,
     /// Precision of OSC color-query replies. Read at pump time rather than per
     /// frame, so a config reload must push it (see `apply_config`).
     osc_color_report_format: OscColorReportFormat,
@@ -105,6 +148,27 @@ pub struct Session {
     /// rather than per frame, so a config reload must push them (`apply_config`).
     resize_overlay: ResizeOverlay,
     resize_overlay_duration_ms: u64,
+    /// Clipboard permissions and paste protection. Consulted at paste and pump
+    /// time rather than per frame, so a config reload must push it
+    /// (see `apply_config`).
+    clipboard: ClipboardPolicy,
+    /// A clipboard operation waiting on the user's answer. At most one at a
+    /// time: a second request while one is pending is dropped, so a program
+    /// spamming OSC 52 can't queue up a stack of dialogs.
+    pending_clipboard: Option<ClipboardRequest>,
+    /// egui-time deadline of the auto-hiding scrollbar (hold, then fade), or
+    /// `None` when it's hidden. Same transient shape as `resize_overlay_until`.
+    scrollbar_shown_until: Option<f64>,
+    /// While `Some`, the thumb is grabbed; the value is where inside the thumb
+    /// (points from its top) the pointer went down, so the thumb doesn't jump
+    /// under the cursor on the first drag frame. Also gates the pane's
+    /// raw-input mouse reporting, which reads `ctx.input` rather than a
+    /// `Response` and so isn't covered by egui's widget arbitration.
+    scrollbar_grab: Option<f32>,
+    /// Last frame's `scroll_px`, so `animate_scroll` can raise the scrollbar on
+    /// *any* movement — wheel, keys, thumb drag, search jump, prompt jump —
+    /// from one place instead of every caller remembering to.
+    scrollbar_last_px: f32,
     /// Scrollback-search overlay state (query + matches + current) while open.
     search: Option<SearchState>,
     /// Screen text captured when the search opened. Re-searched on each keystroke
@@ -167,6 +231,19 @@ impl Session {
             osc7: Osc7Scanner::new(),
             decscusr: DecscusrScanner::new(),
             osc_color: OscColorScanner::new(),
+            osc_notify: OscNotifyScanner::new(),
+            osc133: Osc133Scanner::new(),
+            command_started: None,
+            pending_command_finish: Vec::new(),
+            pending_notifications: Vec::new(),
+            progress: None,
+            progress_dirty: false,
+            desktop_notifications: config.desktop_notifications,
+            progress_style: config.progress_style,
+            mouse_reporting: config.mouse_reporting,
+            mouse_scroll_multiplier: config.mouse_scroll_multiplier,
+            readonly: false,
+            scroll_to_bottom: config.scroll_to_bottom,
             osc_color_report_format: config.osc_color_report_format,
             cursor_style: config.cursor_style,
             cursor_style_blink: config.cursor_style_blink,
@@ -179,6 +256,11 @@ impl Session {
             sized_once: false,
             resize_overlay: config.resize_overlay,
             resize_overlay_duration_ms: config.resize_overlay_duration_ms,
+            clipboard: config.clipboard,
+            pending_clipboard: None,
+            scrollbar_shown_until: None,
+            scrollbar_grab: None,
+            scrollbar_last_px: 0.0,
             search: None,
             search_text: Vec::new(),
         })
@@ -188,16 +270,27 @@ impl Session {
     /// Marks the session dead when the shell has exited (channel disconnected).
     pub fn pump_pty(&mut self) {
         use std::sync::mpsc::TryRecvError;
-        let mut clipboard_sets: Vec<String> = Vec::new();
+        let mut clipboard_requests: Vec<Osc52> = Vec::new();
         let mut color_queries: Vec<(ColorQuery, Terminator)> = Vec::new();
+        let mut marks: Vec<Mark> = Vec::new();
+        let mut osc9: Vec<Osc9> = Vec::new();
         loop {
             match self.pty.output.try_recv() {
                 Ok(chunk) => {
+                    // `scroll-to-bottom = output` (off by default): new data
+                    // yanks the viewport to the live edge. Off by default in
+                    // Ghostty too, because it fights you while you're reading
+                    // scrollback of a command that is still producing output.
+                    if self.scroll_to_bottom.output {
+                        self.scroll_target_px = 0.0;
+                    }
                     self.engine.write(&chunk);
-                    self.osc52.feed(&chunk, &mut clipboard_sets);
+                    self.osc52.feed(&chunk, &mut clipboard_requests);
                     self.osc7.feed(&chunk);
                     self.decscusr.feed(&chunk);
                     self.osc_color.feed(&chunk, &mut color_queries);
+                    self.osc_notify.feed(&chunk, &mut osc9);
+                    self.osc133.feed(&chunk, &mut marks);
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
@@ -206,10 +299,9 @@ impl Session {
                 }
             }
         }
-        // A program copied to the clipboard via OSC 52 (last write wins).
-        if let Some(text) = clipboard_sets.pop() {
-            write_clipboard(&text);
-        }
+        self.handle_osc52(&mut clipboard_requests);
+        self.handle_command_marks(&marks);
+        self.handle_osc9(osc9);
         // Primary exit signal on Windows: poll the shell process itself.
         if self.alive && !self.pty.is_running() {
             self.alive = false;
@@ -242,6 +334,54 @@ impl Session {
         if self.engine.take_bell() {
             self.bell_pending = true;
             self.bell_effect_pending = true;
+        }
+    }
+
+    /// Apply `clipboard-write` / `clipboard-read` to the OSC 52 requests seen in
+    /// this pump.
+    ///
+    /// Only the **last** set is considered (last write wins — a program that
+    /// copies repeatedly shouldn't stack prompts), and a query is answered from
+    /// the *current* clipboard, so a set-then-query in one batch reports the
+    /// value just written.
+    fn handle_osc52(&mut self, requests: &mut Vec<Osc52>) {
+        if requests.is_empty() {
+            return;
+        }
+        let (set, query) = osc52_reduce(requests);
+        let last_set = set.map(str::to_string);
+        let last_query = query.map(str::to_string);
+        requests.clear();
+
+        if let Some(text) = last_set {
+            match self.clipboard.write {
+                ClipboardAccess::Allow => write_clipboard(&text),
+                ClipboardAccess::Deny => {}
+                ClipboardAccess::Ask => self.queue_clipboard(ClipboardRequest::Write(text)),
+            }
+        }
+        if let Some(targets) = last_query {
+            match self.clipboard.read {
+                ClipboardAccess::Allow => self.reply_to_clipboard_query(&targets),
+                ClipboardAccess::Deny => {}
+                ClipboardAccess::Ask => self.queue_clipboard(ClipboardRequest::Read(targets)),
+            }
+        }
+    }
+
+    /// Raise a request for confirmation, unless one is already waiting.
+    fn queue_clipboard(&mut self, req: ClipboardRequest) {
+        if self.pending_clipboard.is_none() {
+            self.pending_clipboard = Some(req);
+        }
+    }
+
+    /// Send the clipboard back to the program, echoing `targets`. An empty or
+    /// unreadable clipboard is silently not answered, which is what xterm does
+    /// and avoids telling the program anything it didn't already know.
+    fn reply_to_clipboard_query(&mut self, targets: &str) {
+        if let Some(text) = read_clipboard() {
+            let _ = self.pty.write(&crate::osc52::query_reply(targets, &text));
         }
     }
 
@@ -297,18 +437,96 @@ impl Session {
     ///
     /// *The fade tail is a giest nicety — Ghostty's overlay is a hard show/hide.*
     pub fn resize_overlay_alpha(&mut self, now: f64) -> Option<f32> {
-        const FADE_SECS: f64 = 0.15;
-        let until = self.resize_overlay_until?;
-        if now >= until {
-            self.resize_overlay_until = None;
+        transient_alpha(&mut self.resize_overlay_until, now, 0.15)
+    }
+
+    // --- Scrollbar ----------------------------------------------------------
+
+    /// Raise the scrollbar (or hold it up) as of egui time `now`.
+    ///
+    /// Called every frame while the pointer is over the bar or the thumb is
+    /// grabbed, which is what makes the whole auto-hide behaviour fall out with
+    /// no extra state: a repeated call keeps pushing the deadline forward so
+    /// alpha pins at 1.0, and it fades on its own the moment the calls stop.
+    pub fn mark_scrollbar_active(&mut self, now: f64) {
+        self.scrollbar_shown_until = Some(now + SCROLLBAR_SHOW_SECS + SCROLLBAR_FADE_SECS);
+    }
+
+    /// Opacity of the auto-hiding scrollbar at egui time `now`, or `None` when
+    /// it's hidden (in which case the caller draws nothing and interacts only
+    /// with the narrow wake-up band).
+    pub fn scrollbar_alpha(&mut self, now: f64) -> Option<f32> {
+        transient_alpha(
+            &mut self.scrollbar_shown_until,
+            now,
+            SCROLLBAR_FADE_SECS,
+        )
+    }
+
+    /// Whether the scrollbar thumb is currently being dragged.
+    pub fn scrollbar_grabbed(&self) -> bool {
+        self.scrollbar_grab.is_some()
+    }
+
+    /// The pointer's offset inside the thumb at grab time, or `None` when the
+    /// thumb isn't held.
+    pub fn scrollbar_grab(&self) -> Option<f32> {
+        self.scrollbar_grab
+    }
+
+    pub fn set_scrollbar_grab(&mut self, grab: Option<f32>) {
+        self.scrollbar_grab = grab;
+    }
+
+    /// How many rows have scrolled off the top into scrollback.
+    pub fn scrollback_rows(&self) -> usize {
+        self.engine.scrollback_rows()
+    }
+
+    /// The scrollbar's `{ total, offset, len }` state in rows, or `None` when
+    /// nothing has scrolled off yet.
+    ///
+    /// Deliberately reconstructed from giest's own scroll state rather than the
+    /// binding's `Terminal::scrollbar()`. That call is documented as expensive
+    /// when the viewport sits at an arbitrary pin — which is exactly whenever a
+    /// scrollbar is on screen, and in a split you'd pay it per pane per frame.
+    /// And its `offset` is the whole-line engine pin, so a thumb driven from it
+    /// would step a full cell at a time during a smooth scroll; `scroll_px` is
+    /// the only continuous position giest has. The three numbers cost nothing
+    /// here: `scrollback_rows()` is already read every frame by `animate_scroll`.
+    pub fn scrollbar_state(&self, cell_h: f32) -> Option<ScrollbarState> {
+        let scrollback = self.engine.scrollback_rows();
+        if scrollback == 0 {
             return None;
         }
-        let left = until - now;
-        Some(if left >= FADE_SECS {
-            1.0
-        } else {
-            (left / FADE_SECS) as f32
-        })
+        Some(scrollbar_rows(scrollback, self.rows, self.scroll_px, cell_h))
+    }
+
+    /// Scroll so screen row `offset_rows` (rows from the top of scrollback)
+    /// sits at the viewport's top — Ghostty's `scroll_to_row`, and what a
+    /// dragged thumb drives.
+    ///
+    /// `immediate` writes `scroll_px` as well as the target, bypassing the ease.
+    /// A drag needs that: the thumb is painted *from* `scroll_px`, so easing
+    /// would leave it trailing the cursor and the user would over-correct
+    /// chasing it. Writing both makes "thumb position for the pointer I'm at"
+    /// an identity — giest's stand-in for the live-scroll suppression both of
+    /// Ghostty's apprts need. Keyboard and click-to-page seeks pass `false` and
+    /// animate.
+    ///
+    /// Safe for `engine_pin_lines` either way: `animate_scroll` always issues a
+    /// *relative* `base - engine_pin_lines`, so the pin reconciles next tick
+    /// whatever `scroll_px` becomes.
+    pub fn scroll_to_row(&mut self, offset_rows: f32, cell_h: f32, immediate: bool) {
+        let ch = cell_h.max(1.0);
+        let scrollback = self.engine.scrollback_rows() as f32;
+        // Never `f32::INFINITY` here (unlike `scroll_to_top`): `immediate` puts
+        // this straight into `scroll_px`, which `animate_scroll` does not clamp.
+        let px = ((scrollback - offset_rows) * ch).max(0.0);
+        self.scroll_target_px = px;
+        if immediate {
+            self.scroll_px = px;
+        }
     }
 
     /// Whether an out-of-band bell effect (audible / attention / title) should
@@ -333,8 +551,21 @@ impl Session {
         self.alive
     }
 
+    /// Whether the program is receiving mouse events right now.
+    ///
+    /// Gated by `mouse-reporting`: with it off the program may still *ask* for
+    /// tracking, but nothing is sent and the mouse keeps selecting. That's the
+    /// point of the key — and of `toggle_mouse_reporting`, which is how you
+    /// escape a full-screen app that has captured the pointer.
     pub fn is_mouse_tracking(&self) -> bool {
-        self.engine.is_mouse_tracking()
+        self.mouse_reporting && self.engine.is_mouse_tracking()
+    }
+
+    /// Toggle `mouse-reporting` for this pane (Ghostty's
+    /// `toggle_mouse_reporting`). Returns the new state.
+    pub fn toggle_mouse_reporting(&mut self) -> bool {
+        self.mouse_reporting = !self.mouse_reporting;
+        self.mouse_reporting
     }
 
     /// The shell-set window/tab title, if any.
@@ -491,11 +722,57 @@ impl Session {
         self.sel_head = Some((self.cols.saturating_sub(1), self.rows.saturating_sub(1)));
     }
 
-    /// Paste `text` into the shell, honoring bracketed-paste mode (menu Paste /
-    /// middle-click). Mirrors the `Event::Paste` arm in `handle_input`.
+    /// Paste `text` into the shell — **the single gated entry point** for every
+    /// paste (keyboard, menu, middle-click, `paste_from_clipboard`).
+    ///
+    /// Text that looks unsafe is not written; it becomes a pending
+    /// [`ClipboardRequest`] for the app to confirm, exactly as Ghostty's
+    /// `completeClipboardPaste` returns `error.UnsafePaste` for the apprt to
+    /// turn into a dialog. Nothing reaches the PTY until the user says yes.
     pub fn paste_str(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        let bracketed = self.engine.bracketed_paste();
+        if config::paste_is_unsafe(self.clipboard, bracketed, text) {
+            // Drop rather than queue if a dialog is already up (see the field).
+            if self.pending_clipboard.is_none() {
+                self.pending_clipboard = Some(ClipboardRequest::Paste(text.to_string()));
+            }
+            return;
+        }
+        self.write_paste(text);
+    }
+
+    /// Encode and write a paste that has passed (or been excused from) the
+    /// safety check. Scrolls to the live bottom, like Ghostty and like typing.
+    fn write_paste(&mut self, text: &str) {
         let encoded = self.engine.encode_paste(text);
         let _ = self.pty.write(&encoded);
+        self.scroll_target_px = 0.0;
+    }
+
+    /// The clipboard operation awaiting the user's answer, if any.
+    pub fn pending_clipboard(&self) -> Option<&ClipboardRequest> {
+        self.pending_clipboard.as_ref()
+    }
+
+    /// Answer the pending clipboard request. `allow` performs it; anything else
+    /// discards it. A no-op when nothing is pending.
+    pub fn resolve_clipboard(&mut self, allow: bool) {
+        let Some(req) = self.pending_clipboard.take() else {
+            return;
+        };
+        if !allow {
+            return;
+        }
+        match req {
+            // Deliberately *not* re-checked: the user has just been shown what
+            // makes it unsafe and said yes. This is Ghostty's `allow_unsafe`.
+            ClipboardRequest::Paste(text) => self.write_paste(&text),
+            ClipboardRequest::Write(text) => write_clipboard(&text),
+            ClipboardRequest::Read(targets) => self.reply_to_clipboard_query(&targets),
+        }
     }
 
     /// Send a full terminal reset (RIS) to the shell (menu "Reset Terminal").
@@ -524,11 +801,202 @@ impl Session {
         self.osc_color_report_format = config.osc_color_report_format;
         self.resize_overlay = config.resize_overlay;
         self.resize_overlay_duration_ms = config.resize_overlay_duration_ms;
+        self.clipboard = config.clipboard;
+        self.desktop_notifications = config.desktop_notifications;
+        self.progress_style = config.progress_style;
+        // NOTE: `mouse_reporting` is deliberately re-seeded from the config on
+        // reload, discarding any `toggle_mouse_reporting` — a reload is an
+        // explicit "apply what I wrote", and a sticky runtime toggle surviving it
+        // would be indistinguishable from the key not working.
+        self.mouse_reporting = config.mouse_reporting;
+        self.mouse_scroll_multiplier = config.mouse_scroll_multiplier;
+        self.scroll_to_bottom = config.scroll_to_bottom;
     }
 
-    /// Scroll the viewport by `delta` lines (negative scrolls up into history),
-    /// mirroring the `KeyAction::Scroll` arm in `handle_input`. The eased
-    /// `animate_scroll` chases this target on the next frame.
+    /// Route the OSC 9 / OSC 777 requests seen in this pump.
+    ///
+    /// Notifications queue (each one is an event the user should see), but
+    /// progress reports **collapse to the latest** — a build emits hundreds and
+    /// only the current one means anything. The two config gates are applied
+    /// here rather than at scan time so one disabled feature can't suppress the
+    /// other: they share a parser precisely because they share a namespace.
+    fn handle_osc9(&mut self, events: Vec<Osc9>) {
+        for e in events {
+            match e {
+                Osc9::Notify(n) => {
+                    if self.desktop_notifications {
+                        self.pending_notifications.push(n);
+                    }
+                }
+                Osc9::Progress(r) => {
+                    if !self.progress_style {
+                        continue;
+                    }
+                    // Carry the displayed percentage forward: `9;4;2` (failed)
+                    // usually arrives with no value of its own, and the useful
+                    // reading is "it stopped *here*", not "it stopped at 0".
+                    let last = self.progress.and_then(|p| p.value()).unwrap_or(0);
+                    let next = crate::taskbar::Progress::from_report(r, last);
+                    if self.progress != Some(next) {
+                        self.progress = Some(next);
+                        self.progress_dirty = true;
+                    }
+                }
+            }
+        }
+    }
+
+    /// This pane's progress state, if it changed since the last call.
+    pub fn take_progress(&mut self) -> Option<crate::taskbar::Progress> {
+        if std::mem::take(&mut self.progress_dirty) {
+            self.progress
+        } else {
+            None
+        }
+    }
+
+    /// This pane's current progress state, whether or not it just changed.
+    pub fn progress(&self) -> Option<crate::taskbar::Progress> {
+        self.progress
+    }
+
+    /// Pair up the OSC 133 command marks seen in this pump.
+    ///
+    /// An **unmatched `D` is ignored**, which is load-bearing rather than
+    /// defensive: neither shell hook has a post-execution hook, so both emit `D`
+    /// from the *prompt* — meaning every session opens with a `D` for a command
+    /// that never ran, and pressing Enter on an empty prompt produces another.
+    /// Requiring a start to have been recorded is what filters those out.
+    fn handle_command_marks(&mut self, marks: &[Mark]) {
+        for mark in marks {
+            match *mark {
+                // A real `C` from a shell that emits one wins over the Enter
+                // heuristic — it's the actual moment execution began.
+                Mark::CommandStart => self.command_started = Some(std::time::Instant::now()),
+                Mark::CommandEnd { exit_code } => {
+                    if let Some(started) = self.command_started.take() {
+                        self.pending_command_finish.push(CommandFinish {
+                            duration: started.elapsed(),
+                            exit_code,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    /// Note that the user just submitted a command, so its duration can be
+    /// measured from here.
+    ///
+    /// This is giest's stand-in for the OSC 133 `C` mark. Emitting a real one
+    /// needs a *pre-execution* hook: PowerShell has none short of overriding a
+    /// PSReadLine key handler (and PSReadLine isn't always loaded), and cmd has
+    /// none at all — so on Windows the shells simply can't tell us. giest can,
+    /// because it is the thing that sent the Enter: `at_prompt` confirms the
+    /// cursor was on a prompt row, so this fires for a submitted command and not
+    /// for a newline typed into `vim` or at a continuation prompt.
+    ///
+    /// A `C` mark from a shell that does emit one still takes precedence — it
+    /// simply overwrites this timestamp microseconds later.
+    fn note_command_submitted(&mut self) {
+        if self.engine.cursor_at_prompt() == Some(true) {
+            self.saw_prompt_mark = true;
+            self.command_started = Some(std::time::Instant::now());
+        }
+    }
+
+    /// Clear the screen **and** the scrollback (Ghostty `clear_screen`).
+    ///
+    /// Sent as escape sequences rather than poked into the engine directly, so
+    /// the terminal's own state machine does the work and stays consistent:
+    /// `ESC [ 2J` erases the display, `ESC [ 3J` drops the scrollback, and
+    /// `ESC [ H` puts the cursor home.
+    pub fn clear_screen(&mut self) {
+        self.engine.write(b"\x1b[2J\x1b[3J\x1b[H");
+        self.scroll_target_px = 0.0;
+        self.scroll_px = 0.0;
+    }
+
+    /// Toggle read-only for this pane (Ghostty `toggle_readonly`). Returns the
+    /// new state.
+    pub fn toggle_readonly(&mut self) -> bool {
+        self.readonly = !self.readonly;
+        self.readonly
+    }
+
+    /// Whether this pane refuses to send keyboard input to the shell.
+    pub fn readonly(&self) -> bool {
+        self.readonly
+    }
+
+    /// Capture this pane's text for `write_*_file`.
+    ///
+    /// Returns `None` when there is nothing to write — notably for
+    /// `Selection` with no selection, which Ghostty documents as a no-op rather
+    /// than an empty file.
+    pub fn capture_text(&mut self, scope: crate::writefile::WriteScope) -> Option<String> {
+        use crate::writefile::{WriteScope, tidy};
+        let text = match scope {
+            WriteScope::Selection => self.selected_text()?,
+            // `screen_text` walks scrollback *and* viewport, so the viewport-only
+            // capture is its tail: the last `rows` rows.
+            WriteScope::Scrollback | WriteScope::Screen => {
+                let rows = self.engine.screen_text();
+                let start = if scope == WriteScope::Screen {
+                    rows.len().saturating_sub(self.rows as usize)
+                } else {
+                    0
+                };
+                let lines: Vec<String> = rows[start..]
+                    .iter()
+                    .map(|r| r.chars.iter().collect())
+                    .collect();
+                tidy(&lines)
+            }
+        };
+        if text.trim().is_empty() {
+            return None;
+        }
+        Some(text)
+    }
+
+    /// Send a run of key chords straight to the shell.
+    ///
+    /// Used to flush a key sequence that turned out not to match: the leaders
+    /// were swallowed as they were typed, so if the sequence dies they have to
+    /// be delivered late, in order, or `ctrl+a` followed by an unbound key would
+    /// silently vanish. Ghostty flushes the same way.
+    pub fn send_chords(&mut self, chords: &[crate::keybind::Chord]) {
+        let mut bytes = Vec::new();
+        for c in chords {
+            bytes.extend_from_slice(&self.engine.encode_key(&KeyInput {
+                code: c.code,
+                mods: c.mods,
+                text: None,
+                press: true,
+            }));
+        }
+        if !bytes.is_empty() {
+            self.scroll_target_px = 0.0;
+            let _ = self.pty.write(&bytes);
+        }
+    }
+
+    /// Take the commands that finished since the last call.
+    pub fn take_command_finishes(&mut self) -> Vec<CommandFinish> {
+        std::mem::take(&mut self.pending_command_finish)
+    }
+
+    /// Take the desktop notifications requested since the last call.
+    ///
+    /// Returned rather than raised here because the pump knows none of what the
+    /// decision needs: the window handle, and whether the window is focused.
+    pub fn take_notifications(&mut self) -> Vec<Notification> {
+        std::mem::take(&mut self.pending_notifications)
+    }
+
+    /// Scroll the viewport by `delta` lines (negative scrolls up into history).
+    /// The eased `animate_scroll` chases this target on the next frame.
     pub fn scroll_lines(&mut self, delta: isize, cell_h: f32) {
         self.scroll_target_px -= delta as f32 * cell_h;
     }
@@ -709,7 +1177,11 @@ impl Session {
 
     fn selected_text(&self) -> Option<String> {
         let range = self.selection_range()?;
-        Some(extract_selection(&self.snapshot, range))
+        Some(extract_selection(
+            &self.snapshot,
+            range,
+            self.clipboard.trim_trailing_spaces,
+        ))
     }
 
     /// The current selection's text, if any (for copy-on-select).
@@ -739,17 +1211,32 @@ impl Session {
                 // only drive the local viewport when not tracking. Positive
                 // `delta.y` moves content down = scroll up into history.
                 egui::Event::MouseWheel { unit, delta, .. } if !tracking => {
+                    // `mouse-scroll-multiplier` splits by device because a
+                    // notched wheel and a trackpad emit very different deltas:
+                    // egui's `Line`/`Page` are the discrete kinds, `Point` the
+                    // precision one.
+                    let m = self.mouse_scroll_multiplier;
                     let pts = match unit {
-                        egui::MouseWheelUnit::Line => delta.y * LINE_SCROLL_PTS,
-                        egui::MouseWheelUnit::Point => delta.y,
-                        egui::MouseWheelUnit::Page => delta.y * self.rows as f32 * cell_h_pts,
+                        egui::MouseWheelUnit::Line => delta.y * LINE_SCROLL_PTS * m.discrete,
+                        egui::MouseWheelUnit::Point => delta.y * m.precision,
+                        egui::MouseWheelUnit::Page => {
+                            delta.y * self.rows as f32 * cell_h_pts * m.discrete
+                        }
                     };
                     self.scroll_target_px += pts * ppp;
                 }
                 egui::Event::Text(text) => bytes.extend_from_slice(text.as_bytes()),
+                // Routed through `paste_str` like every other paste path, so
+                // protection can't be bypassed by using the keyboard. It writes
+                // to the PTY itself (or raises a confirmation and writes
+                // nothing), so flush anything typed earlier this frame first —
+                // otherwise the paste would overtake it.
                 egui::Event::Paste(text) => {
-                    let encoded = self.engine.encode_paste(text);
-                    bytes.extend_from_slice(&encoded);
+                    if !bytes.is_empty() {
+                        let _ = self.pty.write(&bytes);
+                        bytes.clear();
+                    }
+                    self.paste_str(text);
                 }
                 // egui delivers Ctrl+C, Ctrl+Shift+C and Ctrl+Insert (and Cut)
                 // as these events — `command+C` matches whether or not Shift is
@@ -769,17 +1256,13 @@ impl Session {
                     pressed: true,
                     modifiers,
                     ..
-                } => match decide_key(*key, modifiers, self.rows, keymap) {
+                } => match decide_key(*key, modifiers, keymap) {
                     KeyAction::Encode(input) => {
                         bytes.extend_from_slice(&self.engine.encode_key(&input));
                     }
-                    // Keyboard scrolling feeds the same target. `delta` is in
-                    // lines with the engine's sign (negative = up), so moving up
-                    // adds to the target.
-                    KeyAction::Scroll(delta) => self.scroll_target_px -= delta as f32 * cell_h,
-                    KeyAction::ScrollTop => self.scroll_target_px = f32::INFINITY,
-                    KeyAction::ScrollBottom => self.scroll_target_px = 0.0,
-                    // Reserved app combos (Ctrl+Shift/Ctrl+Tab/Ctrl-zoom) and
+                    // Reserved app combos (Ctrl+Shift/Ctrl+Tab/Ctrl-zoom, and
+                    // anything bound in the keymap — including the scrollback
+                    // keys, which `App::handle_shortcuts` runs as actions) and
                     // text-producing keys (handled by the `Text` event) emit no
                     // bytes here.
                     KeyAction::Swallow | KeyAction::Suppress => {}
@@ -787,9 +1270,25 @@ impl Session {
                 _ => {}
             }
         }
+        // Read-only drops everything bound for the shell, but *after* the loop
+        // above so scrolling, selection and copy still work — the point is a
+        // pane you can read and search without disturbing, not a frozen one.
+        if self.readonly {
+            bytes.clear();
+        }
         if !bytes.is_empty() {
-            // Typing returns the viewport to the bottom (Ghostty behavior).
-            self.scroll_target_px = 0.0;
+            // A carriage return submits whatever is on the line. Checked
+            // *before* the write, so `cursor_at_prompt` still describes the
+            // prompt the user is submitting from rather than whatever the shell
+            // does next.
+            if bytes.contains(&b'\r') {
+                self.note_command_submitted();
+            }
+            // `scroll-to-bottom = keystroke` (on by default): typing returns the
+            // viewport to the live edge.
+            if self.scroll_to_bottom.keystroke {
+                self.scroll_target_px = 0.0;
+            }
             let _ = self.pty.write(&bytes);
         }
 
@@ -831,6 +1330,17 @@ impl Session {
             let dt = ctx.input(|i| i.stable_dt).clamp(1.0e-4, 1.0 / 30.0);
             self.scroll_px += diff * exp_smooth_factor(0.9, 0.06, dt);
             ctx.request_repaint();
+        }
+
+        // Raise the auto-hiding scrollbar on *any* movement. Doing it here — the
+        // one place every scroll path converges on — means the wheel, the keys,
+        // a thumb drag, a search jump and a prompt jump all light the bar up
+        // without each caller having to remember to. The early return above is
+        // why this can't miss: it only fires when nothing moved.
+        if self.scroll_px != self.scrollbar_last_px {
+            self.scrollbar_last_px = self.scroll_px;
+            let now = ctx.input(|i| i.time);
+            self.mark_scrollbar_active(now);
         }
 
         let (base, frac) = scroll_split(self.scroll_px, ch, scrollback);
@@ -976,6 +1486,104 @@ pub(crate) fn key_mods(m: &egui::Modifiers) -> KeyMods {
     }
 }
 
+/// A command that finished, for `notify-on-command-finish`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CommandFinish {
+    /// How long it ran. Compared against `notify-on-command-finish-after`.
+    pub duration: std::time::Duration,
+    /// Its exit code, when the shell reported one. `None` for cmd, whose
+    /// `prompt` can't interpolate `%ERRORLEVEL%` at render time.
+    pub exit_code: Option<i32>,
+}
+
+impl CommandFinish {
+    /// Notification title: whether it worked, at a glance.
+    pub fn title(&self) -> &'static str {
+        match self.exit_code {
+            Some(0) | None => "Command finished",
+            Some(_) => "Command failed",
+        }
+    }
+
+    /// Notification body: how long it took, and the exit code when there is one.
+    pub fn body(&self) -> String {
+        let d = format_duration(self.duration);
+        match self.exit_code {
+            Some(0) | None => format!("took {d}"),
+            Some(c) => format!("exit {c}, took {d}"),
+        }
+    }
+}
+
+/// Render a command duration the way a person reads a stopwatch: seconds under
+/// a minute, `m s` under an hour, `h m` beyond. Never more than two units — the
+/// point is "was that quick?", not precision.
+fn format_duration(d: std::time::Duration) -> String {
+    let secs = d.as_secs();
+    if secs < 60 {
+        // Sub-minute is where the tenth actually tells you something.
+        return format!("{:.1}s", d.as_secs_f64());
+    }
+    if secs < 3600 {
+        return format!("{}m {}s", secs / 60, secs % 60);
+    }
+    format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
+}
+
+/// A clipboard operation that needs the user's approval before it happens.
+///
+/// Mirrors Ghostty's `ClipboardRequestType`. Held on the [`Session`] that
+/// raised it (rather than on the app) so the answer routes back without any
+/// pane-index bookkeeping — indices go stale, sessions don't.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ClipboardRequest {
+    /// A paste whose contents look unsafe (see [`config::paste_is_unsafe`]).
+    Paste(String),
+    /// The program asked to *set* the clipboard, under `clipboard-write = ask`.
+    Write(String),
+    /// The program asked to *read* the clipboard, under `clipboard-read = ask`.
+    /// Carries the OSC 52 target selection to echo in the reply.
+    Read(String),
+}
+
+impl ClipboardRequest {
+    /// The dialog's title.
+    pub fn title(&self) -> &'static str {
+        match self {
+            Self::Paste(_) => "Paste this text?",
+            Self::Write(_) => "Let the program set your clipboard?",
+            Self::Read(_) => "Let the program read your clipboard?",
+        }
+    }
+
+    /// Why the user is being asked — the part that actually decides the answer.
+    pub fn detail(&self) -> &'static str {
+        match self {
+            Self::Paste(_) => {
+                "This text contains line breaks or a paste-end marker, so the shell may run \
+                 part of it as a command as soon as it arrives."
+            }
+            Self::Write(_) => {
+                "A program running in this pane wants to replace the contents of your \
+                 system clipboard."
+            }
+            Self::Read(_) => {
+                "A program running in this pane wants to read your system clipboard. \
+                 Anything you have copied would be sent to it."
+            }
+        }
+    }
+
+    /// The text at stake, for the dialog's preview. `None` for a read, where
+    /// there is nothing to show *yet* — that's the point of asking.
+    pub fn preview(&self) -> Option<&str> {
+        match self {
+            Self::Paste(t) | Self::Write(t) => Some(t),
+            Self::Read(_) => None,
+        }
+    }
+}
+
 /// What a key event resolves to once the host's reserved combos and viewport
 /// shortcuts are applied. The byte encoding itself is left to libghostty's
 /// encoder (the `Encode` arm); everything else is giest's own gating.
@@ -983,14 +1591,8 @@ pub(crate) fn key_mods(m: &egui::Modifiers) -> KeyMods {
 enum KeyAction {
     /// Hand this neutral key event to the engine's encoder for the PTY.
     Encode(KeyInput),
-    /// Scroll the viewport by `delta` lines (Shift+PageUp/PageDown).
-    Scroll(isize),
-    /// Jump the viewport to the top of scrollback (Shift+Home).
-    ScrollTop,
-    /// Jump the viewport to the bottom (Shift+End).
-    ScrollBottom,
     /// A combo reserved by the app (Ctrl+Shift namespace, Ctrl+Tab, Ctrl +/-/0
-    /// font zoom): the shell never sees it.
+    /// font zoom, and everything in the keymap): the shell never sees it.
     Swallow,
     /// A text-producing key (or one we don't map): no bytes here — the matching
     /// egui `Text` event carries the character.
@@ -1001,12 +1603,7 @@ enum KeyAction {
 /// (for page scrolling), and the active `keymap`. Pure: depends only on its
 /// arguments (the keymap is config-derived data), so every gating branch is
 /// unit-testable. Mirrors the Windows-Terminal/Ghostty host bindings.
-fn decide_key(
-    key: egui::Key,
-    modifiers: &egui::Modifiers,
-    rows: u16,
-    keymap: &Keymap,
-) -> KeyAction {
+fn decide_key(key: egui::Key, modifiers: &egui::Modifiers, keymap: &Keymap) -> KeyAction {
     let Some(code) = map_egui_key(key) else {
         return KeyAction::Suppress;
     };
@@ -1014,13 +1611,14 @@ fn decide_key(
     // the shell must never see it — swallow it here. This covers custom keybinds
     // that fall outside the structural namespaces below (e.g. `ctrl+a`); the
     // default binds also match, redundantly with those namespaces.
-    if keymap
-        .lookup(&Chord {
-            mods: key_mods(modifiers),
-            code,
-        })
-        .is_some()
-    {
+    //
+    // `starts_binding`, not `lookup`: the *leader* of a sequence (`ctrl+a` in
+    // `ctrl+a>n`) is bound to no action of its own, so a plain lookup would let
+    // it straight through to the shell and the sequence would never start.
+    if keymap.starts_binding(&Chord {
+        mods: key_mods(modifiers),
+        code,
+    }) {
         return KeyAction::Swallow;
     }
     // Ctrl+Shift is the app's namespace; the shell never sees it. The clipboard
@@ -1062,23 +1660,11 @@ fn decide_key(
     {
         return KeyAction::Swallow;
     }
-    // Shift+PageUp/Down scroll by a page; Shift+Home/End jump to the top/bottom
-    // of scrollback. These drive the viewport instead of going to the shell.
-    if modifiers.shift
-        && matches!(
-            code,
-            KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End
-        )
-    {
-        let page = rows.saturating_sub(1).max(1) as isize;
-        return match code {
-            KeyCode::PageUp => KeyAction::Scroll(-page),
-            KeyCode::PageDown => KeyAction::Scroll(page),
-            KeyCode::Home => KeyAction::ScrollTop,
-            KeyCode::End => KeyAction::ScrollBottom,
-            _ => unreachable!(),
-        };
-    }
+    // NOTE: Shift+PageUp/Down/Home/End used to be handled right here. They now
+    // live in `Keymap::default_binds`, so the lookup above swallows them and
+    // `App::handle_shortcuts` runs the matching `Action::Scroll*` — which is
+    // what makes `keybind = shift+home=unbind` work, since an unbind can only
+    // remove a keymap entry.
     // Ctrl +/-/0 are reserved by the app for font zoom.
     if modifiers.ctrl
         && !modifiers.shift
@@ -1169,6 +1755,79 @@ const LINE_SCROLL_PTS: f32 = 40.0;
 /// egui's `exponential_smooth_factor`; frame-rate independent.
 fn exp_smooth_factor(reach: f32, secs: f32, dt: f32) -> f32 {
     1.0 - (1.0 - reach).powf(dt / secs.max(1.0e-4))
+}
+
+/// How long the scrollbar stays fully opaque after the last activity, and how
+/// long it then takes to fade out.
+const SCROLLBAR_SHOW_SECS: f64 = 1.0;
+const SCROLLBAR_FADE_SECS: f64 = 0.35;
+
+/// Opacity of a transient overlay whose deadline is `until`: 1.0 until the last
+/// `fade` seconds, then linear to 0. Returns `None` — and clears the deadline —
+/// once it has expired, so the caller stops drawing and stops repainting.
+///
+/// Shared by the resize overlay and the scrollbar. (`bell_flash_alpha` looks
+/// similar but isn't: it fades across its *whole* duration and consumes a
+/// one-shot flag, so folding it in here would change how the bell looks.)
+fn transient_alpha(until: &mut Option<f64>, now: f64, fade: f64) -> Option<f32> {
+    let deadline = (*until)?;
+    if now >= deadline {
+        *until = None;
+        return None;
+    }
+    let left = deadline - now;
+    Some(if left >= fade {
+        1.0
+    } else {
+        (left / fade.max(1.0e-6)) as f32
+    })
+}
+
+/// Ghostty's `{ total, offset, len }` scrollbar state, in rows.
+///
+/// `offset` is fractional on purpose — it carries the sub-line position of a
+/// smooth scroll, which the engine's whole-line viewport pin cannot express.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScrollbarState {
+    pub total: f32,
+    pub offset: f32,
+    pub len: f32,
+}
+
+/// Map giest's scroll state onto that contract.
+///
+/// `scroll_px` counts device pixels *above the live bottom*, so it runs the
+/// opposite way to `offset`: at `scroll_px == 0` the viewport is at the bottom
+/// and `offset` is at its maximum (`total - len`); fully scrolled up,
+/// `offset` is 0.
+fn scrollbar_rows(scrollback: usize, rows: u16, scroll_px: f32, cell_h: f32) -> ScrollbarState {
+    let len = rows as f32;
+    let scrollback = scrollback as f32;
+    let up = (scroll_px / cell_h.max(1.0)).clamp(0.0, scrollback);
+    ScrollbarState {
+        total: scrollback + len,
+        offset: scrollback - up,
+        len,
+    }
+}
+
+/// Reduce a pump's worth of OSC 52 requests to the one set and the one query
+/// worth acting on: `(last set payload, last query targets)`.
+///
+/// Only the last of each survives. A program that copies in a loop should
+/// leave one value on the clipboard, not raise a stack of prompts — and since
+/// the set is applied before the query is answered, a set-then-query in the
+/// same batch correctly reports the value just written.
+fn osc52_reduce(requests: &[Osc52]) -> (Option<&str>, Option<&str>) {
+    let mut set = None;
+    let mut query = None;
+    for r in requests {
+        match r {
+            Osc52::Set(text) => set = Some(text.as_str()),
+            Osc52::Query(targets) => query = Some(targets.as_str()),
+        }
+    }
+    (set, query)
 }
 
 /// Split a continuous pixel scroll position into a whole-line engine viewport
@@ -1291,8 +1950,13 @@ fn find_url_at(snap: &GridSnapshot, x: u16, y: u16) -> Option<String> {
 }
 
 /// Extract text from a snapshot over an inclusive linear cell range, following
-/// text flow and trimming trailing blanks per line.
-fn extract_selection(snap: &GridSnapshot, range: (usize, usize)) -> String {
+/// text flow.
+///
+/// `trim` drops the trailing blanks each line is padded out to
+/// (Ghostty `clipboard-trim-trailing-spaces`). Off, a selection carries the
+/// grid's own padding — which is what you want when copying ASCII art or
+/// column-aligned output, and noise the rest of the time, hence the default on.
+fn extract_selection(snap: &GridSnapshot, range: (usize, usize), trim: bool) -> String {
     let (a, b) = range;
     let cols = snap.cols as usize;
     if cols == 0 {
@@ -1310,11 +1974,10 @@ fn extract_selection(snap: &GridSnapshot, range: (usize, usize)) -> String {
         }
     }
     lines.push(cur);
-    lines
-        .iter()
-        .map(|l| l.trim_end())
-        .collect::<Vec<_>>()
-        .join("\n")
+    if trim {
+        lines.iter_mut().for_each(|l| l.truncate(l.trim_end().len()));
+    }
+    lines.join("\n")
 }
 
 /// Map an egui key to our backend-neutral [`KeyCode`].
@@ -1482,21 +2145,89 @@ fn is_text_producing(code: KeyCode) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        CopyAction, KeyAction, bell_effect_due, cell_from_pos, copy_or_interrupt,
-        extract_selection, find_url_at, grid_dims, notch_split, osc7_to_path, px_offset,
-        scroll_split, word_bounds,
+        CommandFinish, CopyAction, KeyAction, bell_effect_due, cell_from_pos, copy_or_interrupt,
+        extract_selection, find_url_at, format_duration, grid_dims, notch_split, osc7_to_path,
+        px_offset, osc52_reduce, scroll_split, scrollbar_rows, transient_alpha, word_bounds,
     };
+    use crate::osc52::Osc52;
     use crate::engine::{Cell, GridSnapshot, KeyCode, KeyInput, KeyMods};
     use crate::keybind::Keymap;
     use eframe::egui;
     use std::path::PathBuf;
+    use std::time::Duration;
+
+    fn finish(secs: f64, exit_code: Option<i32>) -> CommandFinish {
+        CommandFinish {
+            duration: Duration::from_secs_f64(secs),
+            exit_code,
+        }
+    }
+
+    #[test]
+    fn command_finish_text_reflects_the_exit_code() {
+        assert_eq!(finish(1.0, Some(0)).title(), "Command finished");
+        assert_eq!(finish(1.0, Some(1)).title(), "Command failed");
+        assert_eq!(finish(1.0, Some(-1)).title(), "Command failed");
+        // cmd can't report a code; "finished" is the honest reading, since
+        // "failed" would be a claim we can't support.
+        assert_eq!(finish(1.0, None).title(), "Command finished");
+
+        assert_eq!(finish(3.25, Some(0)).body(), "took 3.2s");
+        assert_eq!(finish(3.25, None).body(), "took 3.2s");
+        assert_eq!(finish(3.25, Some(2)).body(), "exit 2, took 3.2s");
+    }
+
+    #[test]
+    fn durations_read_like_a_stopwatch() {
+        let d = |s| format_duration(Duration::from_secs_f64(s));
+        assert_eq!(d(0.0), "0.0s");
+        assert_eq!(d(7.5), "7.5s");
+        assert_eq!(d(59.9), "59.9s");
+        // At a minute it switches to whole units — a tenth stops being useful.
+        assert_eq!(d(60.0), "1m 0s");
+        assert_eq!(d(95.0), "1m 35s");
+        assert_eq!(d(3599.0), "59m 59s");
+        assert_eq!(d(3600.0), "1h 0m");
+        assert_eq!(d(9000.0), "2h 30m");
+        // Never more than two units, at any magnitude.
+        for secs in [0.0, 1.0, 61.0, 3661.0, 90_000.0] {
+            assert!(d(secs).split(' ').count() <= 2, "{secs}");
+        }
+    }
 
     /// Drive the real `decide_key` with the built-in default keymap, so the
     /// existing 3-argument call sites stay unchanged. The default keymap binds
     /// exactly the host shortcuts the namespace gating already reserves, so it
     /// does not alter any of these assertions.
-    fn decide_key(key: egui::Key, modifiers: &egui::Modifiers, rows: u16) -> KeyAction {
-        super::decide_key(key, modifiers, rows, &Keymap::default())
+    fn decide_key(key: egui::Key, modifiers: &egui::Modifiers, _rows: u16) -> KeyAction {
+        super::decide_key(key, modifiers, &Keymap::default())
+    }
+
+    #[test]
+    fn a_sequence_leader_is_swallowed_from_the_shell() {
+        // `ctrl+a` is bound to no *action* — it only leads to one — and it sits
+        // in no reserved modifier namespace, so nothing else here would stop it.
+        // If it reached the shell the sequence could never start, and `ctrl+a`
+        // is precisely the key a tmux user binds.
+        let km = Keymap::from_config(&[("ctrl+a>n".into(), "new_tab".into())]);
+        let ctrl = egui::Modifiers {
+            ctrl: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            super::decide_key(egui::Key::A, &ctrl, &km),
+            KeyAction::Swallow
+        );
+        // An unrelated ctrl chord is still the shell's.
+        assert!(matches!(
+            super::decide_key(egui::Key::Q, &ctrl, &km),
+            KeyAction::Encode(_)
+        ));
+        // …and with no sequence bound, ctrl+a goes to the shell as before.
+        assert!(matches!(
+            super::decide_key(egui::Key::A, &ctrl, &Keymap::default()),
+            KeyAction::Encode(_)
+        ));
     }
 
     #[test]
@@ -1565,10 +2296,44 @@ mod tests {
     #[test]
     fn selection_follows_text_flow() {
         let s = grid(&["hello", "world"], 5);
-        assert_eq!(extract_selection(&s, (0, 6)), "hello\nwo");
-        assert_eq!(extract_selection(&s, (0, 4)), "hello");
+        assert_eq!(extract_selection(&s, (0, 6), true), "hello\nwo");
+        assert_eq!(extract_selection(&s, (0, 4), true), "hello");
         let s2 = grid(&["hi   ", "bye  "], 5);
-        assert_eq!(extract_selection(&s2, (0, 9)), "hi\nbye");
+        assert_eq!(extract_selection(&s2, (0, 9), true), "hi\nbye");
+    }
+
+    #[test]
+    fn osc52_batch_keeps_only_the_last_set_and_query() {
+        let set = |s: &str| Osc52::Set(s.to_string());
+        let query = |s: &str| Osc52::Query(s.to_string());
+
+        assert_eq!(osc52_reduce(&[]), (None, None));
+        // A program copying in a loop leaves one value, not a stack of prompts.
+        assert_eq!(
+            osc52_reduce(&[set("one"), set("two"), set("three")]),
+            (Some("three"), None)
+        );
+        // Sets and queries are tracked independently…
+        assert_eq!(
+            osc52_reduce(&[set("a"), query("c"), set("b")]),
+            (Some("b"), Some("c"))
+        );
+        // …and the caller applies the set first, so a set-then-query in one
+        // batch reports the value just written.
+        assert_eq!(osc52_reduce(&[query("p"), query("c")]), (None, Some("c")));
+    }
+
+    #[test]
+    fn trailing_space_trim_is_configurable() {
+        // Every grid row is padded out to `cols`, so without trimming a
+        // selection carries that padding — which is exactly what you want for
+        // column-aligned output and noise otherwise.
+        let s = grid(&["hi   ", "bye  "], 5);
+        assert_eq!(extract_selection(&s, (0, 9), false), "hi   \nbye  ");
+        assert_eq!(extract_selection(&s, (0, 9), true), "hi\nbye");
+        // Interior spacing is never touched either way.
+        let s2 = grid(&["a b  "], 5);
+        assert_eq!(extract_selection(&s2, (0, 4), true), "a b");
     }
 
     #[test]
@@ -1647,23 +2412,25 @@ mod tests {
 
     #[test]
     fn shift_scrollback_keys_drive_viewport_not_shell() {
-        // rows=25 → a page is rows-1 = 24 lines.
-        assert_eq!(
-            decide_key(egui::Key::PageUp, &mods(false, true, false), 25),
-            KeyAction::Scroll(-24)
-        );
-        assert_eq!(
-            decide_key(egui::Key::PageDown, &mods(false, true, false), 25),
-            KeyAction::Scroll(24)
-        );
-        assert_eq!(
-            decide_key(egui::Key::Home, &mods(false, true, false), 25),
-            KeyAction::ScrollTop
-        );
-        assert_eq!(
-            decide_key(egui::Key::End, &mods(false, true, false), 25),
-            KeyAction::ScrollBottom
-        );
+        // These are keymap entries now, not a hardcoded branch, so `decide_key`
+        // keeps them from the shell and `App::handle_shortcuts` runs the action.
+        for key in [
+            egui::Key::PageUp,
+            egui::Key::PageDown,
+            egui::Key::Home,
+            egui::Key::End,
+        ] {
+            assert_eq!(
+                decide_key(key, &mods(false, true, false), 25),
+                KeyAction::Swallow,
+                "shift+{key:?} must never reach the shell"
+            );
+        }
+        // Unshifted, they're ordinary keys the program gets to handle.
+        assert!(matches!(
+            decide_key(egui::Key::Home, &mods(false, false, false), 25),
+            KeyAction::Encode(_)
+        ));
     }
 
     #[test]
@@ -1697,7 +2464,7 @@ mod tests {
         // so the shell never sees the key (the app runs the action instead).
         let km = Keymap::from_config(&[("ctrl+a".to_string(), "new_tab".to_string())]);
         assert_eq!(
-            super::decide_key(egui::Key::A, &mods(true, false, false), 24, &km),
+            super::decide_key(egui::Key::A, &mods(true, false, false), &km),
             KeyAction::Swallow
         );
     }
@@ -1759,6 +2526,49 @@ mod tests {
             cell_from_pos(1.0e6, 1.0e6, 1.0, 10.0, 20.0, 80, 24),
             (79, 23)
         );
+    }
+
+    #[test]
+    fn transient_alpha_holds_then_fades_then_clears() {
+        // Deadline at t=10 with a 0.5s fade tail.
+        let mut until = Some(10.0_f64);
+        assert_eq!(transient_alpha(&mut until, 0.0, 0.5), Some(1.0));
+        assert_eq!(transient_alpha(&mut until, 9.5, 0.5), Some(1.0));
+        // Into the tail: linear down to zero.
+        let mid = transient_alpha(&mut until, 9.75, 0.5).unwrap();
+        assert!((mid - 0.5).abs() < 1.0e-6, "{mid}");
+        assert!(until.is_some(), "still live inside the fade");
+        // Past the deadline it reports nothing *and* clears itself, so the
+        // caller stops both drawing and requesting repaints.
+        assert_eq!(transient_alpha(&mut until, 10.0, 0.5), None);
+        assert_eq!(until, None);
+        // Idle stays idle.
+        assert_eq!(transient_alpha(&mut until, 11.0, 0.5), None);
+    }
+
+    #[test]
+    fn scrollbar_state_maps_scroll_px_to_rows() {
+        // 100 rows of scrollback under a 24-row viewport, 14px cells.
+        let st = |px| scrollbar_rows(100, 24, px, 14.0);
+
+        // `total`/`len` don't depend on the position.
+        assert_eq!(st(0.0).total, 124.0);
+        assert_eq!(st(0.0).len, 24.0);
+
+        // At the live bottom the viewport sits at the very end: offset is at
+        // its maximum, `total - len`.
+        assert_eq!(st(0.0).offset, 100.0);
+        // Fully scrolled up: the top of scrollback.
+        assert_eq!(st(100.0 * 14.0).offset, 0.0);
+        // Ten lines up.
+        assert_eq!(st(10.0 * 14.0).offset, 90.0);
+        // Half a cell: fractional, which is the entire reason `offset` is f32
+        // rather than the engine's whole-line pin.
+        assert_eq!(st(7.0).offset, 99.5);
+
+        // Over-scroll in either direction clamps rather than escaping the range.
+        assert_eq!(st(-50.0).offset, 100.0);
+        assert_eq!(st(1.0e9).offset, 0.0);
     }
 
     #[test]

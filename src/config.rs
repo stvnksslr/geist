@@ -11,7 +11,7 @@
 //! dropped in and the supported subset applies.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use crate::engine::{BoldColor, CursorShape, Rgb};
@@ -152,6 +152,203 @@ fn parse_bell_features(value: &str) -> Option<BellFeatures> {
     Some(out)
 }
 
+/// Wheel-distance multipliers. Ghostty `mouse-scroll-multiplier`.
+///
+/// Two numbers because the devices are different animals: a wheel emits chunky
+/// notches, a trackpad emits a stream of small deltas, and one multiplier that
+/// suits either ruins the other. Ghostty defaults to `3` for discrete and `1`
+/// for precision.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MouseScrollMultiplier {
+    /// Trackpads and other smooth-scroll devices.
+    pub precision: f32,
+    /// Notched mouse wheels.
+    pub discrete: f32,
+}
+
+impl Default for MouseScrollMultiplier {
+    fn default() -> Self {
+        Self {
+            precision: 1.0,
+            discrete: 3.0,
+        }
+    }
+}
+
+/// Parse `mouse-scroll-multiplier`: a bare number sets **both**, or a
+/// comma-separated list of `precision:`/`discrete:` prefixes sets them
+/// individually (`precision:0.1,discrete:3`).
+///
+/// Values are clamped to Ghostty's `0.01..=10_000`, which it calls extreme at
+/// both ends — the clamp only stops a typo turning the wheel into a no-op or a
+/// teleport.
+fn parse_scroll_multiplier(
+    v: &str,
+    current: MouseScrollMultiplier,
+) -> Option<MouseScrollMultiplier> {
+    let clamp = |n: f32| n.clamp(0.01, 10_000.0);
+    if let Ok(n) = v.trim().parse::<f32>() {
+        return Some(MouseScrollMultiplier {
+            precision: clamp(n),
+            discrete: clamp(n),
+        });
+    }
+    let mut out = current;
+    for tok in v.split(',') {
+        let (name, value) = tok.trim().split_once(':')?;
+        let n = clamp(value.trim().parse::<f32>().ok()?);
+        match name.trim().to_ascii_lowercase().as_str() {
+            "precision" => out.precision = n,
+            "discrete" => out.discrete = n,
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
+/// When the viewport jumps back to the live edge. Ghostty `scroll-to-bottom`,
+/// whose default is `keystroke, no-output`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScrollToBottom {
+    /// On a key press that sends data to the shell.
+    pub keystroke: bool,
+    /// On new output arriving — off by default, because it fights you while
+    /// you're reading scrollback of a still-running command.
+    pub output: bool,
+}
+
+impl Default for ScrollToBottom {
+    fn default() -> Self {
+        Self {
+            keystroke: true,
+            output: false,
+        }
+    }
+}
+
+/// Parse `scroll-to-bottom`'s flag list, same grammar as `bell-features`.
+fn parse_scroll_to_bottom(v: &str) -> Option<ScrollToBottom> {
+    let mut out = ScrollToBottom::default();
+    for tok in v.split(',') {
+        let tok = tok.trim();
+        if tok.is_empty() {
+            continue;
+        }
+        let (name, on) = match tok.strip_prefix("no-") {
+            Some(rest) => (rest, false),
+            None => (tok, true),
+        };
+        match name.to_ascii_lowercase().as_str() {
+            "keystroke" => out.keystroke = on,
+            "output" => out.output = on,
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
+/// When a custom shader's animation loop runs. Ghostty
+/// `custom-shader-animation`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CustomShaderAnimation {
+    /// Never animate — redraw only when the terminal itself changes.
+    False,
+    /// Animate while the window is focused. The default.
+    True,
+    /// Animate even unfocused, which costs CPU on every surface.
+    Always,
+}
+
+impl CustomShaderAnimation {
+    /// Whether to keep requesting repaints, given the window's focus.
+    pub fn animates(self, focused: bool) -> bool {
+        match self {
+            Self::False => false,
+            Self::True => focused,
+            Self::Always => true,
+        }
+    }
+}
+
+/// When a finished command raises a notification. Ghostty
+/// `notify-on-command-finish`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NotifyOnCommandFinish {
+    /// The default — opt in explicitly.
+    Never,
+    /// Only when the window isn't focused, i.e. only when you've looked away.
+    Unfocused,
+    Always,
+}
+
+/// How a finished command tells you. Ghostty `notify-on-command-finish-action`,
+/// a `bell-features`-style flag list (`no-bell,notify`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NotifyOnCommandFinishAction {
+    pub bell: bool,
+    pub notify: bool,
+}
+
+impl Default for NotifyOnCommandFinishAction {
+    /// Ghostty's defaults: ring, don't notify.
+    fn default() -> Self {
+        Self {
+            bell: true,
+            notify: false,
+        }
+    }
+}
+
+impl NotifyOnCommandFinishAction {
+    fn all(on: bool) -> Self {
+        Self {
+            bell: on,
+            notify: on,
+        }
+    }
+}
+
+/// Parse a `notify-on-command-finish-action` value. Same grammar as
+/// [`parse_bell_features`] — a comma-separated list starting from the defaults,
+/// each name negatable with `no-`, or a bare bool for all of them. One unknown
+/// name rejects the whole value (`None`), so a typo keeps the current setting
+/// rather than silently applying half of what was written.
+fn parse_notify_action(value: &str) -> Option<NotifyOnCommandFinishAction> {
+    let v = value.trim();
+    match v {
+        "1" | "t" | "true" => return Some(NotifyOnCommandFinishAction::all(true)),
+        "0" | "f" | "false" => return Some(NotifyOnCommandFinishAction::all(false)),
+        _ => {}
+    }
+    let mut out = NotifyOnCommandFinishAction::default();
+    for tok in v.split(',') {
+        let tok = tok.trim();
+        if tok.is_empty() {
+            continue;
+        }
+        let (name, on) = match tok.strip_prefix("no-") {
+            Some(rest) => (rest, false),
+            None => (tok, true),
+        };
+        match name.to_ascii_lowercase().as_str() {
+            "bell" => out.bell = on,
+            "notify" => out.notify = on,
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
+/// Whether a finished command should raise its notification, given the mode and
+/// whether the window is focused.
+pub fn should_notify_on_finish(mode: NotifyOnCommandFinish, focused: bool) -> bool {
+    match mode {
+        NotifyOnCommandFinish::Never => false,
+        NotifyOnCommandFinish::Unfocused => !focused,
+        NotifyOnCommandFinish::Always => true,
+    }
+}
+
 /// When to confirm before closing a surface. Ghostty `confirm-close-surface`,
 /// whose values are `false` / `true` / `always`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -177,6 +374,63 @@ pub fn needs_confirm(mode: ConfirmClose, busy: Option<bool>) -> bool {
     }
 }
 
+/// Permission for a clipboard operation the *terminal program* asks for.
+/// Ghostty `clipboard-read` / `clipboard-write`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClipboardAccess {
+    /// Perform it silently.
+    Allow,
+    /// Refuse it silently.
+    Deny,
+    /// Ask the user first.
+    Ask,
+}
+
+/// The paste-safety knobs, grouped so [`Session`](crate::session::Session) can
+/// hold one `Copy` value instead of five loose fields.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClipboardPolicy {
+    pub read: ClipboardAccess,
+    pub write: ClipboardAccess,
+    pub trim_trailing_spaces: bool,
+    pub paste_protection: bool,
+    pub paste_bracketed_safe: bool,
+}
+
+/// Whether `data` is unsafe to paste and so needs confirmation first.
+///
+/// A verbatim port of Ghostty's rule (`Surface.zig`, `completeClipboardPaste`),
+/// including the order of the checks — it isn't arbitrary:
+///
+/// - Protection off ⇒ nothing is ever unsafe.
+/// - **`ESC [ 201 ~` is never trusted while bracketed.** It closes a bracketed
+///   paste early, so text after it lands as if typed. This is checked *before*
+///   `paste_bracketed_safe`, which is the whole point: framing can't be relied
+///   on when the payload can break out of the frame.
+/// - Otherwise a bracketed paste is safe if the user trusts bracketing (the
+///   default) — the running program has said it will treat the text as data.
+/// - Otherwise unsafe if it contains a newline (a shell runs it immediately) or
+///   that same end marker. Ghostty flags the marker even when bracketing is off:
+///   its presence at all says something about who produced the data.
+///
+/// The `allow_unsafe` escape hatch Ghostty threads through here lives at the
+/// call site instead — a confirmed paste simply skips this function.
+pub fn paste_is_unsafe(policy: ClipboardPolicy, bracketed: bool, data: &str) -> bool {
+    const PASTE_END: &str = "\x1b[201~";
+    if !policy.paste_protection {
+        return false;
+    }
+    if bracketed {
+        if data.contains(PASTE_END) {
+            return true;
+        }
+        if policy.paste_bracketed_safe {
+            return false;
+        }
+    }
+    data.contains('\n') || data.contains(PASTE_END)
+}
+
 /// When to show the grid-size overlay on resize. Ghostty `resize-overlay`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ResizeOverlay {
@@ -184,6 +438,49 @@ pub enum ResizeOverlay {
     Never,
     /// Show on every resize *except* a surface's first sizing. The default.
     AfterFirst,
+}
+
+/// Whether to show the scrollbar. Ghostty `scrollbar` — which has exactly these
+/// two values, and no width/opacity/always knob. Don't add one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Scrollbar {
+    /// The platform's scrollbar. Ghostty's macOS apprt forces
+    /// `scrollerStyle = .overlay` even when the OS prefers the legacy
+    /// space-reserving style, so "system" means an auto-hiding overlay
+    /// everywhere — which is also the Windows convention.
+    System,
+    Never,
+}
+
+/// How `background-image` is scaled to the terminal area. Ghostty
+/// `background-image-fit`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BackgroundImageFit {
+    /// Uniform scale to the largest size fully inside the area. The default.
+    Contain,
+    /// Uniform scale to the smallest size that covers the area; the overflow is
+    /// cropped.
+    Cover,
+    /// Fill the area exactly, ignoring the aspect ratio.
+    Stretch,
+    /// Leave the image at its own pixel size.
+    None,
+}
+
+/// Where `background-image` sits when its fit leaves space. Ghostty
+/// `background-image-position` — nine anchors, three per axis.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BackgroundImagePosition {
+    TopLeft,
+    TopCenter,
+    TopRight,
+    CenterLeft,
+    /// Also spelled `center-center`, and the default.
+    Center,
+    CenterRight,
+    BottomLeft,
+    BottomCenter,
+    BottomRight,
 }
 
 /// Where the resize overlay sits within the pane. Ghostty
@@ -312,6 +609,26 @@ pub struct Config {
     /// unless `background-opacity` is below `1.0` — the blur shows *through* the
     /// window, so there must be something to see through.
     pub background_blur: BackgroundBlur,
+    /// Path to a PNG or JPEG painted behind the grid. Ghostty `background-image`;
+    /// a relative path resolves against the config directory. Stored raw and
+    /// resolved at the use site, like [`Self::bell_audio_path`].
+    pub background_image: Option<String>,
+    /// Opacity of that image *relative to* `background-opacity`. Ghostty
+    /// `background-image-opacity`: `1.0` lays the image over the background
+    /// color and then applies `background-opacity` to the pair; below `1.0`
+    /// mixes it with the color first. Values **above** `1.0` are legal and make
+    /// the image more opaque than the color behind it (Ghostty's own example:
+    /// `background-opacity = 0.5` with `1.5` here gives the image `0.75`).
+    pub background_image_opacity: f32,
+    /// Where the image sits when it doesn't fill the area. Ghostty
+    /// `background-image-position`.
+    pub background_image_position: BackgroundImagePosition,
+    /// How the image is scaled to the terminal area. Ghostty
+    /// `background-image-fit`.
+    pub background_image_fit: BackgroundImageFit,
+    /// Tile the image to fill the space a non-covering fit leaves. Ghostty
+    /// `background-image-repeat`.
+    pub background_image_repeat: bool,
     /// Maximum scrollback *lines* retained per pane. Ghostty's `scrollback-limit`
     /// is expressed in bytes; giest's underlying VT engine takes a line count, so
     /// the key name matches but the unit is lines.
@@ -357,6 +674,57 @@ pub struct Config {
     /// How long the overlay stays up, in milliseconds. Ghostty
     /// `resize-overlay-duration`; clamped to a range that's actually perceivable.
     pub resize_overlay_duration_ms: u64,
+    /// Whether panes show a scrollbar. Ghostty `scrollbar`.
+    pub scrollbar: Scrollbar,
+    /// Clipboard permissions and paste protection. Ghostty `clipboard-read`,
+    /// `clipboard-write`, `clipboard-trim-trailing-spaces`,
+    /// `clipboard-paste-protection`, `clipboard-paste-bracketed-safe`.
+    pub clipboard: ClipboardPolicy,
+    /// Whether programs may raise desktop notifications (`OSC 9`, `OSC 777`).
+    /// Ghostty `desktop-notifications`; `true` by default there and here.
+    pub desktop_notifications: bool,
+    /// Initial window size in terminal **cells**; `0` means "let the OS decide".
+    /// Ghostty `window-width` / `window-height`, including its 10×4 minimum.
+    /// Applies to a new window only — resizing later is the user's business.
+    pub window_width: u32,
+    pub window_height: u32,
+    /// Initial window position in pixels from the primary monitor's top-left.
+    /// Ghostty `window-position-x` / `-y`; **both** must be set or neither
+    /// applies, which is upstream's rule.
+    pub window_position_x: Option<i16>,
+    pub window_position_y: Option<i16>,
+    /// Hide the pointer while typing, until the mouse moves again. Ghostty
+    /// `mouse-hide-while-typing`; `false` by default there and here.
+    pub mouse_hide_while_typing: bool,
+    /// Whether programs may receive mouse events at all. Ghostty
+    /// `mouse-reporting`; `false` makes the mouse always select, whatever the
+    /// program asks for. Runtime-toggleable via `toggle_mouse_reporting`.
+    pub mouse_reporting: bool,
+    /// Wheel-distance multipliers. Ghostty `mouse-scroll-multiplier`.
+    pub mouse_scroll_multiplier: MouseScrollMultiplier,
+    /// When the viewport snaps back to the live edge. Ghostty
+    /// `scroll-to-bottom`.
+    pub scroll_to_bottom: ScrollToBottom,
+    /// Focus the split under the pointer without clicking. Ghostty
+    /// `focus-follows-mouse`.
+    pub focus_follows_mouse: bool,
+    /// Shadertoy-format GLSL post-process shaders, in the order they run.
+    /// Ghostty `custom-shader` (repeatable); relative paths resolve against the
+    /// config directory.
+    pub custom_shaders: Vec<String>,
+    /// Whether a custom shader animates. Ghostty `custom-shader-animation`.
+    pub custom_shader_animation: CustomShaderAnimation,
+    /// Whether programs may drive a progress indicator with ConEmu's `OSC 9;4`.
+    /// Ghostty `progress-style` (a bool despite the name); `true` by default.
+    pub progress_style: bool,
+    /// When a finished command notifies. Ghostty `notify-on-command-finish`;
+    /// `never` by default there and here, so this is opt-in.
+    pub notify_on_command_finish: NotifyOnCommandFinish,
+    /// How it notifies. Ghostty `notify-on-command-finish-action`.
+    pub notify_on_command_finish_action: NotifyOnCommandFinishAction,
+    /// How long a command must have run to be worth reporting. Ghostty
+    /// `notify-on-command-finish-after`, default 5 s.
+    pub notify_on_command_finish_after_ms: u64,
     /// Which bell effects fire on BEL. Ghostty `bell-features`.
     pub bell: BellFeatures,
     /// Sound file played when `bell-features` includes `audio`. Ghostty
@@ -403,6 +771,11 @@ impl Default for Config {
             cursor_opacity: 1.0,
             faint_opacity: 0.5,
             background_blur: BackgroundBlur::Off,
+            background_image: None,
+            background_image_opacity: 1.0,
+            background_image_position: BackgroundImagePosition::Center,
+            background_image_fit: BackgroundImageFit::Contain,
+            background_image_repeat: false,
             scrollback_limit: 10_000,
             // Ghostty's default: 320 MB (decimal), per screen.
             image_storage_limit: 320 * 1000 * 1000,
@@ -418,6 +791,32 @@ impl Default for Config {
             resize_overlay: ResizeOverlay::AfterFirst,
             resize_overlay_position: ResizeOverlayPosition::Center,
             resize_overlay_duration_ms: 750,
+            scrollbar: Scrollbar::System,
+            // Ghostty's defaults exactly: reads are asked for (they leak the
+            // clipboard *out*), writes are allowed (they only overwrite it).
+            clipboard: ClipboardPolicy {
+                read: ClipboardAccess::Ask,
+                write: ClipboardAccess::Allow,
+                trim_trailing_spaces: true,
+                paste_protection: true,
+                paste_bracketed_safe: true,
+            },
+            desktop_notifications: true,
+            window_width: 0,
+            window_height: 0,
+            window_position_x: None,
+            window_position_y: None,
+            mouse_hide_while_typing: false,
+            mouse_reporting: true,
+            mouse_scroll_multiplier: MouseScrollMultiplier::default(),
+            scroll_to_bottom: ScrollToBottom::default(),
+            focus_follows_mouse: false,
+            custom_shaders: Vec::new(),
+            custom_shader_animation: CustomShaderAnimation::True,
+            progress_style: true,
+            notify_on_command_finish: NotifyOnCommandFinish::Never,
+            notify_on_command_finish_action: NotifyOnCommandFinishAction::default(),
+            notify_on_command_finish_after_ms: 5_000,
             bell: BellFeatures::default(),
             bell_audio_path: None,
             bell_audio_volume: 0.5,
@@ -638,6 +1037,55 @@ const SETTERS: &[(&str, Setter)] = &[
             _ => v.parse::<u8>().map(BackgroundBlur::Radius).unwrap_or(c.background_blur),
         }
     }),
+    ("background-image", |c, v, d| {
+        c.background_image = opt_string(v, &d.background_image)
+    }),
+    ("background-image-opacity", |c, v, d| {
+        // *Not* a 0..1 ratio: Ghostty documents values above 1.0 as meaningful
+        // (they make the image more opaque than the color it sits on). Only the
+        // negative side is nonsense, so that's the only end clamped — the upper
+        // bound is a sanity cap, not a semantic one.
+        c.background_image_opacity = ratio(
+            v,
+            d.background_image_opacity,
+            c.background_image_opacity,
+            0.0,
+            16.0,
+        )
+    }),
+    ("background-image-position", |c, v, d| {
+        c.background_image_position = match v.to_ascii_lowercase().as_str() {
+            "" => d.background_image_position,
+            "top-left" => BackgroundImagePosition::TopLeft,
+            "top-center" => BackgroundImagePosition::TopCenter,
+            "top-right" => BackgroundImagePosition::TopRight,
+            "center-left" => BackgroundImagePosition::CenterLeft,
+            // Ghostty's enum has both spellings and treats them identically.
+            "center" | "center-center" => BackgroundImagePosition::Center,
+            "center-right" => BackgroundImagePosition::CenterRight,
+            "bottom-left" => BackgroundImagePosition::BottomLeft,
+            "bottom-center" => BackgroundImagePosition::BottomCenter,
+            "bottom-right" => BackgroundImagePosition::BottomRight,
+            _ => c.background_image_position,
+        }
+    }),
+    ("background-image-fit", |c, v, d| {
+        c.background_image_fit = match v.to_ascii_lowercase().as_str() {
+            "" => d.background_image_fit,
+            "contain" => BackgroundImageFit::Contain,
+            "cover" => BackgroundImageFit::Cover,
+            "stretch" => BackgroundImageFit::Stretch,
+            "none" => BackgroundImageFit::None,
+            _ => c.background_image_fit,
+        }
+    }),
+    ("background-image-repeat", |c, v, d| {
+        c.background_image_repeat = if v.is_empty() {
+            d.background_image_repeat
+        } else {
+            parse_bool(v, c.background_image_repeat)
+        }
+    }),
     ("window-padding-x", |c, v, d| {
         c.padding_x = padding(v, d.padding_x, c.padding_x)
     }),
@@ -764,6 +1212,29 @@ const SETTERS: &[(&str, Setter)] = &[
                 .unwrap_or(c.resize_overlay_duration_ms)
         }
     }),
+    ("clipboard-read", |c, v, d| {
+        c.clipboard.read = parse_clipboard_access(v, d.clipboard.read, c.clipboard.read);
+    }),
+    ("clipboard-write", |c, v, d| {
+        c.clipboard.write = parse_clipboard_access(v, d.clipboard.write, c.clipboard.write);
+    }),
+    ("clipboard-trim-trailing-spaces", |c, v, d| {
+        c.clipboard.trim_trailing_spaces = parse_bool(v, d.clipboard.trim_trailing_spaces);
+    }),
+    ("clipboard-paste-protection", |c, v, d| {
+        c.clipboard.paste_protection = parse_bool(v, d.clipboard.paste_protection);
+    }),
+    ("clipboard-paste-bracketed-safe", |c, v, d| {
+        c.clipboard.paste_bracketed_safe = parse_bool(v, d.clipboard.paste_bracketed_safe);
+    }),
+    ("scrollbar", |c, v, d| {
+        c.scrollbar = match v.to_ascii_lowercase().as_str() {
+            "" => d.scrollbar,
+            "system" => Scrollbar::System,
+            "never" => Scrollbar::Never,
+            _ => c.scrollbar,
+        }
+    }),
     ("osc-color-report-format", |c, v, d| {
         c.osc_color_report_format = match v.to_ascii_lowercase().as_str() {
             "" => d.osc_color_report_format,
@@ -771,6 +1242,114 @@ const SETTERS: &[(&str, Setter)] = &[
             "8-bit" => OscColorReportFormat::Bits8,
             "16-bit" => OscColorReportFormat::Bits16,
             _ => c.osc_color_report_format,
+        }
+    }),
+    ("desktop-notifications", |c, v, d| {
+        c.desktop_notifications = if v.is_empty() {
+            d.desktop_notifications
+        } else {
+            parse_bool(v, c.desktop_notifications)
+        }
+    }),
+    // Ghostty enforces a 10x4 floor on a *set* size; zero stays zero, meaning
+    // "unset". A window narrower than that is unusable rather than merely small.
+    ("window-width", |c, v, d| {
+        c.window_width = cells(v, d.window_width, c.window_width, 10)
+    }),
+    ("window-height", |c, v, d| {
+        c.window_height = cells(v, d.window_height, c.window_height, 4)
+    }),
+    ("window-position-x", |c, v, d| {
+        c.window_position_x = coord(v, d.window_position_x, c.window_position_x)
+    }),
+    ("window-position-y", |c, v, d| {
+        c.window_position_y = coord(v, d.window_position_y, c.window_position_y)
+    }),
+    ("mouse-hide-while-typing", |c, v, d| {
+        c.mouse_hide_while_typing = if v.is_empty() {
+            d.mouse_hide_while_typing
+        } else {
+            parse_bool(v, c.mouse_hide_while_typing)
+        }
+    }),
+    ("mouse-reporting", |c, v, d| {
+        c.mouse_reporting = if v.is_empty() {
+            d.mouse_reporting
+        } else {
+            parse_bool(v, c.mouse_reporting)
+        }
+    }),
+    ("mouse-scroll-multiplier", |c, v, d| {
+        c.mouse_scroll_multiplier = if v.is_empty() {
+            d.mouse_scroll_multiplier
+        } else {
+            parse_scroll_multiplier(v, c.mouse_scroll_multiplier)
+                .unwrap_or(c.mouse_scroll_multiplier)
+        }
+    }),
+    ("scroll-to-bottom", |c, v, d| {
+        c.scroll_to_bottom = if v.is_empty() {
+            d.scroll_to_bottom
+        } else {
+            parse_scroll_to_bottom(v).unwrap_or(c.scroll_to_bottom)
+        }
+    }),
+    ("focus-follows-mouse", |c, v, d| {
+        c.focus_follows_mouse = if v.is_empty() {
+            d.focus_follows_mouse
+        } else {
+            parse_bool(v, c.focus_follows_mouse)
+        }
+    }),
+    ("custom-shader", |c, v, d| {
+        // Repeatable, like `palette` and `font-feature`: each line appends, and
+        // an empty value resets the whole list.
+        if v.is_empty() {
+            c.custom_shaders = d.custom_shaders.clone();
+        } else {
+            c.custom_shaders.push(v.to_string());
+        }
+    }),
+    ("custom-shader-animation", |c, v, d| {
+        c.custom_shader_animation = match v.to_ascii_lowercase().as_str() {
+            "" => d.custom_shader_animation,
+            "true" | "1" | "on" | "yes" => CustomShaderAnimation::True,
+            "false" | "0" | "off" | "no" => CustomShaderAnimation::False,
+            "always" => CustomShaderAnimation::Always,
+            _ => c.custom_shader_animation,
+        }
+    }),
+    ("progress-style", |c, v, d| {
+        c.progress_style = if v.is_empty() {
+            d.progress_style
+        } else {
+            parse_bool(v, c.progress_style)
+        }
+    }),
+    ("notify-on-command-finish", |c, v, d| {
+        c.notify_on_command_finish = match v.to_ascii_lowercase().as_str() {
+            "" => d.notify_on_command_finish,
+            "never" => NotifyOnCommandFinish::Never,
+            "unfocused" => NotifyOnCommandFinish::Unfocused,
+            "always" => NotifyOnCommandFinish::Always,
+            _ => c.notify_on_command_finish,
+        }
+    }),
+    ("notify-on-command-finish-action", |c, v, d| {
+        c.notify_on_command_finish_action = if v.is_empty() {
+            d.notify_on_command_finish_action
+        } else {
+            parse_notify_action(v).unwrap_or(c.notify_on_command_finish_action)
+        }
+    }),
+    ("notify-on-command-finish-after", |c, v, d| {
+        c.notify_on_command_finish_after_ms = if v.is_empty() {
+            d.notify_on_command_finish_after_ms
+        } else {
+            // Unclamped at the top (a user may legitimately only want to hear
+            // about hour-long jobs), but floored at zero-is-zero: Ghostty
+            // accepts `0` and means "every command".
+            parse_duration_ms(v).unwrap_or(c.notify_on_command_finish_after_ms)
         }
     }),
     ("bell-features", |c, v, d| {
@@ -795,6 +1374,23 @@ const SETTERS: &[(&str, Setter)] = &[
     }),
 ];
 
+/// Parse a `clipboard-read`/`-write` value: `allow` / `deny` / `ask`. An empty
+/// value resets to `default`; anything unrecognized keeps `current`, matching
+/// every other enum key.
+fn parse_clipboard_access(
+    v: &str,
+    default: ClipboardAccess,
+    current: ClipboardAccess,
+) -> ClipboardAccess {
+    match v.to_ascii_lowercase().as_str() {
+        "" => default,
+        "allow" => ClipboardAccess::Allow,
+        "deny" => ClipboardAccess::Deny,
+        "ask" => ClipboardAccess::Ask,
+        _ => current,
+    }
+}
+
 /// Parse a Ghostty-style boolean (`true`/`false`, `yes`/`no`, `on`/`off`, `1`/`0`),
 /// returning `default` for an empty or unrecognized value.
 fn parse_bool(v: &str, default: bool) -> bool {
@@ -814,6 +1410,34 @@ pub fn config_path() -> Option<PathBuf> {
     }
     let appdata = std::env::var_os("APPDATA")?;
     Some(PathBuf::from(appdata).join("giest").join("config"))
+}
+
+/// The directory the config file lives in — what a relative `Path`-valued key
+/// resolves against. `None` when there is no config path at all.
+pub fn config_dir() -> Option<PathBuf> {
+    config_path().and_then(|p| p.parent().map(Path::to_path_buf))
+}
+
+/// Resolve a `Path`-valued config key (`background-image`, `bell-audio-path`)
+/// against `config_dir`.
+///
+/// Relative paths resolve against the config file's own directory — Ghostty
+/// resolves its `Path` values the same way — so a config can ship an image or a
+/// sound beside itself. An empty/whitespace value means "unset", not "the
+/// config directory".
+pub fn resolve_path(raw: &str, config_dir: Option<&Path>) -> Option<PathBuf> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let p = Path::new(raw);
+    if p.is_absolute() {
+        return Some(p.to_path_buf());
+    }
+    Some(match config_dir {
+        Some(dir) => dir.join(p),
+        None => p.to_path_buf(),
+    })
 }
 
 /// Return the last `key = value` value in a config body, or `None`. Used to find
@@ -910,6 +1534,30 @@ fn opt_color(value: &str, default: Option<Rgb>, current: Option<Rgb>) -> Option<
 
 /// Resolve a padding field: empty resets to `default`, a valid non-negative
 /// number sets it (clamped at 0), anything else keeps `current`.
+/// Resolve a cell-count field (`window-width`/`-height`): empty resets, `0`
+/// means "unset", and any other value is floored at `min` — Ghostty's rule, and
+/// a window below it is unusable rather than merely small.
+fn cells(value: &str, default: u32, current: u32, min: u32) -> u32 {
+    if value.is_empty() {
+        return default;
+    }
+    match value.parse::<u32>() {
+        Ok(0) => 0,
+        Ok(n) => n.max(min),
+        Err(_) => current,
+    }
+}
+
+/// Resolve an optional pixel coordinate (`window-position-x`/`-y`): empty
+/// resets, a valid integer sets it, anything else keeps the current value.
+/// Negative is legal — a second monitor left of the primary has negative x.
+fn coord(value: &str, default: Option<i16>, current: Option<i16>) -> Option<i16> {
+    if value.is_empty() {
+        return default;
+    }
+    value.parse::<i16>().ok().map(Some).unwrap_or(current)
+}
+
 fn padding(value: &str, default: f32, current: f32) -> f32 {
     if value.is_empty() {
         default
@@ -1448,6 +2096,110 @@ mod tests {
         );
     }
 
+    /// The default policy, so each test below varies one knob at a time.
+    fn policy() -> ClipboardPolicy {
+        Config::default().clipboard
+    }
+
+    #[test]
+    fn clipboard_defaults_match_ghostty() {
+        let p = policy();
+        // Reads leak the clipboard *out* to the program, so they're asked for;
+        // writes only overwrite it, so they're allowed.
+        assert_eq!(p.read, ClipboardAccess::Ask);
+        assert_eq!(p.write, ClipboardAccess::Allow);
+        assert!(p.trim_trailing_spaces);
+        assert!(p.paste_protection);
+        assert!(p.paste_bracketed_safe);
+    }
+
+    #[test]
+    fn clipboard_access_keys_parse_ghostty_values() {
+        assert_eq!(parsed("clipboard-read = allow").clipboard.read, ClipboardAccess::Allow);
+        assert_eq!(parsed("clipboard-read = deny").clipboard.read, ClipboardAccess::Deny);
+        assert_eq!(parsed("clipboard-write = ask").clipboard.write, ClipboardAccess::Ask);
+        // Garbage keeps the current value; empty resets to the default.
+        assert_eq!(
+            parsed("clipboard-write = deny\nclipboard-write = maybe")
+                .clipboard
+                .write,
+            ClipboardAccess::Deny
+        );
+        assert_eq!(
+            parsed("clipboard-write = deny\nclipboard-write =").clipboard.write,
+            ClipboardAccess::Allow
+        );
+    }
+
+    #[test]
+    fn plain_text_is_always_safe_to_paste() {
+        assert!(!paste_is_unsafe(policy(), false, "hello"));
+        assert!(!paste_is_unsafe(policy(), true, "hello"));
+        // A trailing-newline-free multi-token command is still one line.
+        assert!(!paste_is_unsafe(policy(), false, "git commit -m 'x'"));
+    }
+
+    #[test]
+    fn newlines_are_unsafe_unless_the_program_brackets_the_paste() {
+        // Unbracketed, a newline is a command the shell runs immediately.
+        assert!(paste_is_unsafe(policy(), false, "ls\nrm -rf /"));
+        assert!(paste_is_unsafe(policy(), false, "trailing\n"));
+        // Bracketed, the program has promised to treat it as data.
+        assert!(!paste_is_unsafe(policy(), true, "ls\nrm -rf /"));
+    }
+
+    #[test]
+    fn the_end_marker_is_never_trusted_even_when_bracketed() {
+        // This is the attack `clipboard-paste-bracketed-safe` cannot defend
+        // against: the payload closes the bracket itself, so everything after
+        // it arrives as if typed. Checked *before* the bracketed-safe bail-out.
+        let attack = "safe\x1b[201~rm -rf /";
+        assert!(paste_is_unsafe(policy(), true, attack));
+        assert!(paste_is_unsafe(policy(), false, attack));
+        // And still flagged with bracketed-safe explicitly on.
+        let trusting = ClipboardPolicy {
+            paste_bracketed_safe: true,
+            ..policy()
+        };
+        assert!(paste_is_unsafe(trusting, true, attack));
+    }
+
+    #[test]
+    fn distrusting_bracketing_falls_back_to_the_plain_rule() {
+        let strict = ClipboardPolicy {
+            paste_bracketed_safe: false,
+            ..policy()
+        };
+        // Bracketing no longer excuses a newline…
+        assert!(paste_is_unsafe(strict, true, "ls\nrm -rf /"));
+        // …but plain text is still fine.
+        assert!(!paste_is_unsafe(strict, true, "hello"));
+    }
+
+    #[test]
+    fn disabling_protection_allows_everything() {
+        let off = ClipboardPolicy {
+            paste_protection: false,
+            ..policy()
+        };
+        assert!(!paste_is_unsafe(off, false, "ls\nrm -rf /"));
+        assert!(!paste_is_unsafe(off, true, "safe\x1b[201~rm -rf /"));
+    }
+
+    #[test]
+    fn scrollbar_key_parses_ghostty_values() {
+        assert_eq!(Config::default().scrollbar, Scrollbar::System);
+        assert_eq!(parsed("scrollbar = never").scrollbar, Scrollbar::Never);
+        assert_eq!(parsed("scrollbar = system").scrollbar, Scrollbar::System);
+        // Ghostty has no third value; anything else keeps the current one…
+        assert_eq!(
+            parsed("scrollbar = never\nscrollbar = always").scrollbar,
+            Scrollbar::Never
+        );
+        // …and an empty value resets to the default.
+        assert_eq!(parsed("scrollbar = never\nscrollbar =").scrollbar, Scrollbar::System);
+    }
+
     #[test]
     fn resize_overlay_duration_parses_ghostty_grammar() {
         let ms = |s: &str| parsed(&format!("resize-overlay-duration = {s}")).resize_overlay_duration_ms;
@@ -1675,6 +2427,265 @@ mod tests {
         // `Radius(0)` is disabled, matching Ghostty.
         assert!(!BackgroundBlur::Radius(0).enabled());
         assert!(BackgroundBlur::Radius(1).enabled());
+    }
+
+    #[test]
+    fn window_geometry_keys() {
+        let d = Config::default();
+        assert_eq!((d.window_width, d.window_height), (0, 0), "0 means unset");
+        assert_eq!(d.window_position_x, None);
+
+        assert_eq!(parsed("window-width = 120").window_width, 120);
+        assert_eq!(parsed("window-height = 40").window_height, 40);
+        // Ghostty's 10x4 floor: a window below it is unusable, not merely small.
+        assert_eq!(parsed("window-width = 2").window_width, 10);
+        assert_eq!(parsed("window-height = 1").window_height, 4);
+        // …but zero still means "let the OS decide", not "the minimum".
+        assert_eq!(parsed("window-width = 0").window_width, 0);
+        // Garbage keeps the current value; empty resets.
+        assert_eq!(parsed("window-width = 80\nwindow-width = wide").window_width, 80);
+        assert_eq!(parsed("window-width = 80\nwindow-width =").window_width, 0);
+
+        assert_eq!(parsed("window-position-x = 100").window_position_x, Some(100));
+        // Negative is legal: a monitor left of the primary has negative x.
+        assert_eq!(parsed("window-position-y = -40").window_position_y, Some(-40));
+        assert_eq!(
+            parsed("window-position-x = 10\nwindow-position-x =").window_position_x,
+            None
+        );
+    }
+
+    #[test]
+    fn mouse_scroll_multiplier_grammar() {
+        let d = Config::default().mouse_scroll_multiplier;
+        // Ghostty's split defaults: notched wheels move further per event.
+        assert_eq!(d.precision, 1.0);
+        assert_eq!(d.discrete, 3.0);
+
+        // A bare number sets both.
+        let m = parsed("mouse-scroll-multiplier = 2").mouse_scroll_multiplier;
+        assert_eq!((m.precision, m.discrete), (2.0, 2.0));
+
+        // Prefixes set them independently — Ghostty's own example.
+        let m = parsed("mouse-scroll-multiplier = precision:0.1,discrete:3").mouse_scroll_multiplier;
+        assert_eq!((m.precision, m.discrete), (0.1, 3.0));
+
+        // One prefix leaves the other alone.
+        let m = parsed("mouse-scroll-multiplier = discrete:5").mouse_scroll_multiplier;
+        assert_eq!((m.precision, m.discrete), (1.0, 5.0));
+
+        // Clamped to Ghostty's range at both ends.
+        let m = parsed("mouse-scroll-multiplier = 0").mouse_scroll_multiplier;
+        assert_eq!(m.discrete, 0.01, "zero would make the wheel a no-op");
+        let m = parsed("mouse-scroll-multiplier = 999999").mouse_scroll_multiplier;
+        assert_eq!(m.discrete, 10_000.0);
+
+        // Garbage keeps the current value rather than half-applying.
+        let m = parsed("mouse-scroll-multiplier = 4\nmouse-scroll-multiplier = sideways:2")
+            .mouse_scroll_multiplier;
+        assert_eq!((m.precision, m.discrete), (4.0, 4.0));
+        // Empty resets.
+        let m = parsed("mouse-scroll-multiplier = 4\nmouse-scroll-multiplier =")
+            .mouse_scroll_multiplier;
+        assert_eq!((m.precision, m.discrete), (1.0, 3.0));
+    }
+
+    #[test]
+    fn scroll_to_bottom_flags() {
+        let d = Config::default().scroll_to_bottom;
+        // Ghostty's default is `keystroke, no-output`.
+        assert!(d.keystroke && !d.output);
+
+        let s = parsed("scroll-to-bottom = output").scroll_to_bottom;
+        assert!(s.keystroke && s.output, "a list starts from the defaults");
+        let s = parsed("scroll-to-bottom = no-keystroke").scroll_to_bottom;
+        assert!(!s.keystroke && !s.output);
+        let s = parsed("scroll-to-bottom = no-keystroke,output").scroll_to_bottom;
+        assert!(!s.keystroke && s.output);
+        // An unknown name rejects the whole value.
+        let s = parsed("scroll-to-bottom = no-keystroke\nscroll-to-bottom = output,bogus")
+            .scroll_to_bottom;
+        assert!(!s.keystroke, "a bad value must not half-apply");
+    }
+
+    #[test]
+    fn notify_on_command_finish_keys_match_ghostty() {
+        let d = Config::default();
+        // Opt-in: nothing happens until you ask for it.
+        assert_eq!(d.notify_on_command_finish, NotifyOnCommandFinish::Never);
+        assert!(d.notify_on_command_finish_action.bell);
+        assert!(!d.notify_on_command_finish_action.notify);
+        assert_eq!(d.notify_on_command_finish_after_ms, 5_000);
+
+        for (v, want) in [
+            ("never", NotifyOnCommandFinish::Never),
+            ("unfocused", NotifyOnCommandFinish::Unfocused),
+            ("always", NotifyOnCommandFinish::Always),
+        ] {
+            assert_eq!(
+                parsed(&format!("notify-on-command-finish = {v}")).notify_on_command_finish,
+                want
+            );
+        }
+        // Unknown keeps the current value; empty resets to the default.
+        assert_eq!(
+            parsed("notify-on-command-finish = always\nnotify-on-command-finish = bogus")
+                .notify_on_command_finish,
+            NotifyOnCommandFinish::Always
+        );
+        assert_eq!(
+            parsed("notify-on-command-finish = always\nnotify-on-command-finish =")
+                .notify_on_command_finish,
+            NotifyOnCommandFinish::Never
+        );
+
+        // Ghostty's own documented example.
+        let a = parsed("notify-on-command-finish-action = no-bell,notify")
+            .notify_on_command_finish_action;
+        assert!(!a.bell && a.notify);
+        // A list starts from the defaults, so naming only `notify` leaves the
+        // bell on — same rule as `bell-features`.
+        let a = parsed("notify-on-command-finish-action = notify").notify_on_command_finish_action;
+        assert!(a.bell && a.notify);
+        // One unknown name rejects the whole value.
+        let a = parsed("notify-on-command-finish-action = no-bell\nnotify-on-command-finish-action = bell,nope")
+            .notify_on_command_finish_action;
+        assert!(!a.bell, "a bad value must not half-apply");
+
+        // Ghostty's additive duration grammar, shared with resize-overlay.
+        assert_eq!(
+            parsed("notify-on-command-finish-after = 45s").notify_on_command_finish_after_ms,
+            45_000
+        );
+        assert_eq!(
+            parsed("notify-on-command-finish-after = 1h30m").notify_on_command_finish_after_ms,
+            5_400_000
+        );
+        // Zero means "every command" — this key is deliberately not clamped the
+        // way `resize-overlay-duration` is.
+        assert_eq!(
+            parsed("notify-on-command-finish-after = 0").notify_on_command_finish_after_ms,
+            0
+        );
+    }
+
+    #[test]
+    fn notify_focus_gate() {
+        use super::should_notify_on_finish as go;
+        // never: nothing, either way.
+        assert!(!go(NotifyOnCommandFinish::Never, true));
+        assert!(!go(NotifyOnCommandFinish::Never, false));
+        // unfocused: only when you've looked away.
+        assert!(!go(NotifyOnCommandFinish::Unfocused, true));
+        assert!(go(NotifyOnCommandFinish::Unfocused, false));
+        // always: both.
+        assert!(go(NotifyOnCommandFinish::Always, true));
+        assert!(go(NotifyOnCommandFinish::Always, false));
+    }
+
+    #[test]
+    fn background_image_keys_match_ghostty() {
+        let d = Config::default();
+        assert_eq!(d.background_image, None);
+        assert_eq!(d.background_image_opacity, 1.0);
+        assert_eq!(d.background_image_position, BackgroundImagePosition::Center);
+        assert_eq!(d.background_image_fit, BackgroundImageFit::Contain);
+        assert!(!d.background_image_repeat);
+
+        // The path is stored raw; resolution happens at the use site.
+        assert_eq!(
+            parsed(r"background-image = C:\pics\wall.png")
+                .background_image
+                .as_deref(),
+            Some(r"C:\pics\wall.png")
+        );
+        assert_eq!(
+            parsed("background-image = wall.png\nbackground-image =").background_image,
+            None
+        );
+
+        for (v, want) in [
+            ("contain", BackgroundImageFit::Contain),
+            ("cover", BackgroundImageFit::Cover),
+            ("stretch", BackgroundImageFit::Stretch),
+            ("none", BackgroundImageFit::None),
+        ] {
+            assert_eq!(
+                parsed(&format!("background-image-fit = {v}")).background_image_fit,
+                want
+            );
+        }
+        // An unknown value keeps the current setting rather than resetting.
+        assert_eq!(
+            parsed("background-image-fit = cover\nbackground-image-fit = bogus").background_image_fit,
+            BackgroundImageFit::Cover
+        );
+
+        for (v, want) in [
+            ("top-left", BackgroundImagePosition::TopLeft),
+            ("top-center", BackgroundImagePosition::TopCenter),
+            ("top-right", BackgroundImagePosition::TopRight),
+            ("center-left", BackgroundImagePosition::CenterLeft),
+            ("center", BackgroundImagePosition::Center),
+            // Ghostty's enum spells the middle both ways.
+            ("center-center", BackgroundImagePosition::Center),
+            ("center-right", BackgroundImagePosition::CenterRight),
+            ("bottom-left", BackgroundImagePosition::BottomLeft),
+            ("bottom-center", BackgroundImagePosition::BottomCenter),
+            ("bottom-right", BackgroundImagePosition::BottomRight),
+        ] {
+            assert_eq!(
+                parsed(&format!("background-image-position = {v}")).background_image_position,
+                want,
+                "{v}"
+            );
+        }
+
+        assert!(parsed("background-image-repeat = true").background_image_repeat);
+        assert!(!parsed("background-image-repeat = true\nbackground-image-repeat =")
+            .background_image_repeat);
+    }
+
+    #[test]
+    fn background_image_opacity_allows_values_above_one() {
+        // Ghostty documents >1 as meaningful (the image ends up more opaque than
+        // the background color), so this must NOT clamp to 1.0 the way
+        // `background-opacity` does.
+        assert_eq!(
+            parsed("background-image-opacity = 1.5").background_image_opacity,
+            1.5
+        );
+        assert_eq!(
+            parsed("background-image-opacity = 0.25").background_image_opacity,
+            0.25
+        );
+        // Negative is nonsense and clamps to zero (fully hidden image).
+        assert_eq!(
+            parsed("background-image-opacity = -1").background_image_opacity,
+            0.0
+        );
+        assert_eq!(
+            parsed("background-image-opacity = 2\nbackground-image-opacity =")
+                .background_image_opacity,
+            1.0
+        );
+    }
+
+    #[test]
+    fn path_values_resolve_relative_to_the_config_dir() {
+        let dir = Path::new(r"C:\Users\me\AppData\Roaming\giest");
+        assert_eq!(
+            resolve_path("wall.png", Some(dir)),
+            Some(dir.join("wall.png"))
+        );
+        assert_eq!(
+            resolve_path(r"C:\pics\wall.png", Some(dir)),
+            Some(PathBuf::from(r"C:\pics\wall.png"))
+        );
+        // Blank means unset, not "the config directory".
+        assert_eq!(resolve_path("   ", Some(dir)), None);
+        // With no config file at all, a relative path stays relative.
+        assert_eq!(resolve_path("wall.png", None), Some(PathBuf::from("wall.png")));
     }
 
     #[test]

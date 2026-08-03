@@ -1,6 +1,7 @@
 //! The eframe application: tabs, each holding one or more split panes. The
 //! active tab's panes are laid out, driven, and painted in a single GPU callback.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -11,7 +12,8 @@ use crate::command::{self, Action, PaletteState};
 use crate::config::{Config, MiddleClickAction, ResizeOverlayPosition, RightClickAction};
 use crate::profiles::{self, Profile};
 use crate::keybind::{Chord, Keymap};
-use crate::render::{self, PaneFrame, TermFrame};
+use crate::render::{self, BgImageFrame, PaneFrame, TermFrame};
+use crate::scrollbar;
 use crate::session::{self, Session};
 
 /// A tab: a binary tree of panes (`Node`) with one focused leaf (by id). Each
@@ -102,6 +104,17 @@ impl<T> Node<T> {
     /// Mutable counterpart of [`payload`](Self::payload) (the palette's focused-
     /// pane actions need `&mut`). Written with an early return rather than
     /// `or_else` so the borrow of `first` ends before `second` is tried.
+    /// The id of the first leaf (in layout order) whose payload satisfies `f`.
+    fn find_leaf(&self, f: &mut impl FnMut(&T) -> bool) -> Option<u64> {
+        match self {
+            Node::Leaf { id, payload } => f(payload).then_some(*id),
+            Node::Split { first, second, .. } => {
+                first.find_leaf(f).or_else(|| second.find_leaf(f))
+            }
+            Node::Empty => None,
+        }
+    }
+
     fn payload_mut(&mut self, target: u64) -> Option<&mut T> {
         match self {
             Node::Leaf { id, payload } if *id == target => Some(payload),
@@ -393,6 +406,27 @@ pub struct Window {
     /// Chord → action bindings (built-in defaults plus the config's `keybind`
     /// overrides). `handle_shortcuts` resolves each key event through this.
     keymap: Keymap,
+    /// Leaders pressed so far in a multi-key sequence (`ctrl+a>n`), empty when
+    /// no sequence is in progress. Held across frames because that is exactly
+    /// what a sequence is: state between two key events.
+    pending_keys: Vec<Chord>,
+    /// Whether `mouse-hide-while-typing` has the pointer hidden right now.
+    pointer_hidden: bool,
+    /// Counter for `write_*_file` temp names. A counter, not a clock: two
+    /// captures in the same second would collide on a timestamp.
+    write_file_seq: u64,
+    /// Tracked rather than read back: winit exposes no maximized query through
+    /// eframe, so `toggle_maximize` keeps its own flag (same shape as
+    /// `fullscreen`).
+    maximized: bool,
+    /// Whether `toggle_window_float_on_top` has the window pinned above others.
+    float_on_top: bool,
+    /// `toggle_background_opacity`: force fully opaque, overriding the config.
+    opaque_override: bool,
+    /// Whether `window-width`/`-height`/`-position-*` have been applied. They are
+    /// *initial* geometry, so this fires once — re-applying would fight the user
+    /// every time they resized.
+    geometry_applied: bool,
     /// Whether the window is currently fullscreen (`toggle_fullscreen`). Tracked
     /// here because the viewport's fullscreen flag isn't readable back, so we flip
     /// our own copy and command winit to match.
@@ -438,6 +472,107 @@ pub struct Window {
     /// [`Window::run_pass`] and applied by [`App`] once nothing is borrowed.
     /// The same deferred-intent idiom as `want_split` / `want_close`.
     requests: Vec<AppRequest>,
+    /// Whether any pane's `OSC 9;4` progress changed this pass, so the taskbar
+    /// button needs updating. Set here, consumed by [`App::update_progress`] —
+    /// the button belongs to the process, not to a pane.
+    progress_dirty: bool,
+    /// The decoded `background-image`. Decoded when the config is (re)loaded,
+    /// never per frame; `None` when the key is unset or the file failed to load
+    /// (the error is reported once, at load time). The renderer identifies the
+    /// texture it holds by this `Arc`, so sharing one across windows matters —
+    /// see [`load_bg_image`].
+    bg_image: Option<Arc<crate::bgimage::BgImage>>,
+    /// `custom-shader`, compiled to WGSL when the config was (re)loaded. The
+    /// renderer keys its GPU pipelines on this `Arc`'s identity, so it must be
+    /// replaced wholesale rather than mutated. Empty means no offscreen pass at
+    /// all — the ordinary render path.
+    custom_shaders: Arc<Vec<render::CustomShader>>,
+    /// When the shader clock started, for `iTime`. Reset whenever the shader
+    /// set is reloaded so an edited shader restarts from zero.
+    shader_epoch: std::time::Instant,
+    /// Previous frame's `iTime`, for `iTimeDelta`.
+    shader_last_time: f32,
+    /// Frames rendered with shaders active, for `iFrame`.
+    shader_frame: i32,
+}
+
+/// Process-wide one-slot cache of the decoded `background-image`, keyed by its
+/// resolved path.
+///
+/// Not just an optimization. Every window shares a single eframe `RenderState`,
+/// and therefore **one** background-image texture; the renderer decides whether
+/// to re-upload it by comparing `Arc` identity. Two windows holding distinct
+/// `Arc`s of the same file would each see the other's texture as foreign and
+/// re-upload it every frame, forever. Handing out one `Arc` per path makes that
+/// impossible, and makes a reload that doesn't change the path free.
+static BG_IMAGE_CACHE: std::sync::Mutex<Option<(std::path::PathBuf, Arc<crate::bgimage::BgImage>)>> =
+    std::sync::Mutex::new(None);
+
+/// Load and translate every configured `custom-shader`.
+///
+/// A shader that fails to read or compile is **reported and skipped**, not
+/// fatal: Ghostty does the same, and the alternative — refusing to start over a
+/// typo in a decorative effect — is worse. The message carries the GLSL
+/// compiler's own diagnostic, since nothing else is actionable.
+fn load_custom_shaders(cfg: &Config) -> Arc<Vec<render::CustomShader>> {
+    if cfg.custom_shaders.is_empty() {
+        return Arc::new(Vec::new());
+    }
+    let dir = crate::config::config_dir();
+    let mut out = Vec::new();
+    for raw in &cfg.custom_shaders {
+        let Some(path) = crate::config::resolve_path(raw, dir.as_deref()) else {
+            continue;
+        };
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| raw.clone());
+        match std::fs::read_to_string(&path) {
+            Ok(src) => match crate::shader::compile(&src) {
+                Ok(wgsl) => out.push(render::CustomShader { name, wgsl }),
+                Err(e) => eprintln!(
+                    "giest: custom-shader {} failed to compile:\n{e:#}",
+                    path.display()
+                ),
+            },
+            Err(e) => eprintln!("giest: could not read custom-shader {}: {e}", path.display()),
+        }
+    }
+    Arc::new(out)
+}
+
+/// Decode the configured `background-image`, reporting a failure once.
+///
+/// Returns `None` for "no image", including on error: a bad path must not be
+/// fatal and must not retry every frame, so this is called only when the config
+/// is (re)loaded. Relative paths resolve against the config directory, like
+/// every other `Path`-valued key.
+fn load_bg_image(cfg: &Config) -> Option<Arc<crate::bgimage::BgImage>> {
+    let raw = cfg.background_image.as_deref()?;
+    let dir = crate::config::config_dir();
+    let path = crate::config::resolve_path(raw, dir.as_deref())?;
+
+    let mut cache = BG_IMAGE_CACHE.lock().ok()?;
+    if let Some((cached, img)) = cache.as_ref()
+        && *cached == path
+    {
+        return Some(img.clone());
+    }
+    match crate::bgimage::load(&path) {
+        Ok(img) => {
+            let img = Arc::new(img);
+            *cache = Some((path, img.clone()));
+            Some(img)
+        }
+        Err(e) => {
+            eprintln!("giest: could not load background-image {}: {e}", path.display());
+            // Drop any previously cached image so its VRAM is released once the
+            // renderer swaps to the placeholder.
+            *cache = None;
+            None
+        }
+    }
 }
 
 /// Something only [`App`] can do, raised from inside a window's pass.
@@ -517,6 +652,52 @@ impl PendingClose {
 const MIN_FONT_POINTS: f32 = 6.0;
 const MAX_FONT_POINTS: f32 = 48.0;
 
+/// How much of a clipboard payload the confirmation dialog shows.
+const PREVIEW_LIMIT: usize = 2000;
+
+/// Render clipboard text for the confirmation dialog: control characters made
+/// visible, and the whole thing capped at `limit` characters.
+///
+/// Both halves matter, because this text is chosen by whoever produced the
+/// paste. Escapes are shown as `␛` rather than passed through, so a payload
+/// can't use them to dress itself up as part of the dialog — and the newline
+/// count is *why* the user is being asked, so it has to be legible rather than
+/// silently laid out as ordinary wrapped text. The cap keeps a megabyte-long
+/// paste from making the dialog unusable; the count tells the user what's hidden.
+fn preview_text(text: &str, limit: usize) -> String {
+    let mut out = String::with_capacity(text.len().min(limit) + 32);
+    for ch in text.chars().take(limit) {
+        match ch {
+            '\n' => out.push_str("⏎\n"),
+            '\t' => out.push('→'),
+            '\r' => out.push('␍'),
+            '\x1b' => out.push('␛'),
+            // Every other C0 control plus DEL.
+            c if (c.is_control() && c != '\n') || c == '\u{7f}' => out.push('␦'),
+            c => out.push(c),
+        }
+    }
+    let remaining = text.chars().count().saturating_sub(limit);
+    if remaining > 0 {
+        out.push_str(&format!("\n… {remaining} more characters"));
+    }
+    out
+}
+
+/// Scrollbar metrics, in logical points.
+///
+/// The track hugs the pane's right edge, so at the default `window-padding-x`
+/// of 20 it sits entirely inside the padding gutter — the grid never shrinks
+/// for it, which is what Ghostty's overlay scroller guarantees too. The knob is
+/// drawn narrower than the track it's hit-tested against, and grows on hover.
+/// While hidden, only `SCROLLBAR_HOT_W` at the very edge is interactive, so an
+/// auto-hidden bar never steals a click meant for the last column.
+const SCROLLBAR_TRACK_W: f32 = 12.0;
+const SCROLLBAR_KNOB_W: f32 = 6.0;
+const SCROLLBAR_KNOB_W_HOT: f32 = 10.0;
+const SCROLLBAR_HOT_W: f32 = 4.0;
+const SCROLLBAR_INSET: f32 = 2.0;
+
 /// Tab tint palette offered by the "Tab Color" context-menu submenu, mirroring
 /// Ghostty's set. The menu also offers a "None" entry that clears the tint.
 const TAB_COLORS: &[(&str, egui::Color32)] = &[
@@ -586,6 +767,9 @@ impl Window {
             );
         }
 
+        let bg_image = load_bg_image(&config);
+        let custom_shaders = load_custom_shaders(&config);
+
         let app = Self {
             tabs: vec![Tab::leaf(1, first)],
             active_tab: 0,
@@ -602,6 +786,13 @@ impl Window {
             renaming: None,
             palette: None,
             keymap,
+            pending_keys: Vec::new(),
+            pointer_hidden: false,
+            write_file_seq: 0,
+            maximized: false,
+            float_on_top: false,
+            opaque_override: false,
+            geometry_applied: false,
             fullscreen: false,
             hwnd,
             transparent_surface,
@@ -615,6 +806,12 @@ impl Window {
             pending_bell: false,
             geom: None,
             requests: Vec::new(),
+            progress_dirty: false,
+            bg_image,
+            custom_shaders,
+            shader_epoch: std::time::Instant::now(),
+            shader_last_time: 0.0,
+            shader_frame: 0,
         };
         app.apply_backdrop();
         Ok(app)
@@ -708,6 +905,74 @@ impl Window {
         }
     }
 
+    /// Draw the clipboard-permission modal, if a pane in the active tab is
+    /// waiting on one, and hand the answer back to that pane.
+    ///
+    /// Unlike the close dialog, **Enter does not accept.** This is a security
+    /// prompt: the whole point is that it interrupts a reflex, and a user
+    /// hammering Return to get through a build would paste the very thing the
+    /// protection exists to catch. Escape (and a backdrop click) still deny,
+    /// because denying is always the safe answer.
+    fn render_clipboard_confirm(&mut self, ctx: &egui::Context) {
+        let Some(leaf_id) = self.clipboard_prompt() else {
+            return;
+        };
+        let active = self.active_tab;
+        let Some(req) = self.tabs[active]
+            .root
+            .payload(leaf_id)
+            .and_then(|s: &Session| s.pending_clipboard())
+            .cloned()
+        else {
+            return;
+        };
+
+        let mut decision: Option<bool> = None;
+        let modal = egui::Modal::new(self.id("clipboard-confirm")).show(ctx, |ui| {
+            ui.set_width(400.0);
+            ui.heading(req.title());
+            ui.add_space(6.0);
+            ui.label(req.detail());
+            if let Some(text) = req.preview() {
+                ui.add_space(8.0);
+                // The preview is attacker-controlled text, so it's sanitized and
+                // capped (see `preview_text`) and given a bounded, scrolling box
+                // — a long paste must not push the buttons off the dialog.
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    egui::ScrollArea::vertical()
+                        .max_height(140.0)
+                        .id_salt(self.id("clipboard-preview"))
+                        .show(ui, |ui| {
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(preview_text(text, PREVIEW_LIMIT))
+                                        .monospace(),
+                                )
+                                .wrap(),
+                            );
+                        });
+                });
+            }
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                if ui.button("Deny").clicked() {
+                    decision = Some(false);
+                }
+                if ui.button("Allow").clicked() {
+                    decision = Some(true);
+                }
+            });
+        });
+        if modal.should_close() {
+            decision = Some(false);
+        }
+        if let Some(allow) = decision {
+            if let Some(s) = self.tabs[active].root.payload_mut(leaf_id) {
+                s.resolve_clipboard(allow);
+            }
+        }
+    }
+
     /// Apply the configured `background-blur` to the window (a no-op when the key
     /// is off). Safe to call repeatedly — the DWM attributes are set on the live
     /// window, so this is how a config reload takes effect.
@@ -797,6 +1062,13 @@ impl Window {
             renaming: None,
             palette: None,
             keymap: self.keymap.clone(),
+            pending_keys: Vec::new(),
+            pointer_hidden: false,
+            write_file_seq: 0,
+            maximized: false,
+            float_on_top: false,
+            opaque_override: false,
+            geometry_applied: false,
             fullscreen: false,
             // Only the root viewport has a reachable window handle, so a
             // secondary window gets no DWM backdrop and no taskbar flash.
@@ -812,6 +1084,18 @@ impl Window {
             pending_bell: false,
             geom: None,
             requests: Vec::new(),
+            progress_dirty: false,
+            // Share the parent's `Arc` rather than re-decoding: the renderer
+            // holds one texture for the whole process and identifies it by this
+            // pointer (see `load_bg_image`).
+            bg_image: self.bg_image.clone(),
+            // Shared like `bg_image`, and for the same reason: the renderer
+            // keys its pipelines on this `Arc`'s identity, and there is one
+            // renderer for every window.
+            custom_shaders: self.custom_shaders.clone(),
+            shader_epoch: std::time::Instant::now(),
+            shader_last_time: 0.0,
+            shader_frame: 0,
         })
     }
 
@@ -931,7 +1215,23 @@ impl Window {
     /// bar and the close-confirmation dialog all suppress terminal keys, pane
     /// mouse handling and app shortcuts.
     fn modal_open(&self) -> bool {
-        self.palette.is_some() || self.confirm.is_some() || self.focused_search_open()
+        self.palette.is_some()
+            || self.confirm.is_some()
+            || self.focused_search_open()
+            || self.clipboard_prompt().is_some()
+    }
+
+    /// The active tab's first pane waiting on a clipboard decision, if any.
+    ///
+    /// Scanned per frame rather than cached on the app: the request lives on the
+    /// `Session` that raised it, so there is no pane index to go stale when a
+    /// split closes or a tab is reordered — the prompt simply stops being found.
+    /// A request from a *background* tab stays pending until you switch to that
+    /// tab, which is the safe way round (nothing happens until you say so).
+    fn clipboard_prompt(&self) -> Option<u64> {
+        let tab = self.tabs.get(self.active_tab)?;
+        tab.root
+            .find_leaf(&mut |s: &Session| s.pending_clipboard().is_some())
     }
 
     /// Sessions affected by a pending close, for the busy check.
@@ -1181,9 +1481,101 @@ impl Window {
                 mods: session::key_mods(modifiers),
                 code,
             };
-            if let Some(action) = self.keymap.lookup(&chord) {
-                self.execute_action(ctx, None, action);
+            // Sequence state machine. `pending_keys` holds the leaders pressed
+            // so far; a plain binding is just a sequence that completes on the
+            // first key, so both share this path.
+            self.pending_keys.push(chord);
+            match self.keymap.lookup_seq(&self.pending_keys) {
+                crate::keybind::Lookup::Action(action) => {
+                    self.pending_keys.clear();
+                    self.execute_action(ctx, None, action);
+                }
+                // A leader: swallow and wait. `decide_key` keeps the shell from
+                // seeing these too, so nothing leaks mid-sequence.
+                crate::keybind::Lookup::Pending => {}
+                crate::keybind::Lookup::None => {
+                    // A dead end. Ghostty flushes the buffered keys *and* the
+                    // one that broke the sequence to the terminal, so a mistyped
+                    // `ctrl+a x` still delivers both to the shell rather than
+                    // silently eating them.
+                    let flush = std::mem::take(&mut self.pending_keys);
+                    if flush.len() > 1
+                        && let Some(s) = self.focused_session_mut()
+                    {
+                        s.send_chords(&flush);
+                    }
+                }
             }
+        }
+    }
+
+    /// Move the active tab by `delta` positions (Ghostty `move_tab:N`).
+    ///
+    /// Clamped rather than wrapped: Ghostty clamps, and a tab silently
+    /// teleporting from one end to the other is disorienting when you're just
+    /// holding the key down.
+    fn move_tab_by(&mut self, delta: i8) {
+        if self.tabs.len() < 2 || delta == 0 {
+            return;
+        }
+        let from = self.active_tab;
+        let to = (from as isize + delta as isize).clamp(0, self.tabs.len() as isize - 1) as usize;
+        if to != from {
+            // Delegates to the drag-reorder path, which already handles the
+            // insertion-slot arithmetic and clears the stale `renaming` index.
+            self.move_tab(from, to);
+        }
+    }
+
+    /// Capture the focused pane's text to a temp file and act on the **path**.
+    ///
+    /// The path, not the contents — that is Ghostty's design and the point of
+    /// the feature: it gets a large scrollback out of the terminal and into a
+    /// real tool, so `paste` hands the shell a filename to pipe somewhere and
+    /// `open` gives it to the OS.
+    fn write_terminal_file(
+        &mut self,
+        scope: crate::writefile::WriteScope,
+        what: crate::writefile::WriteAction,
+    ) {
+        use crate::writefile::WriteAction;
+
+        let Some(text) = self
+            .focused_session_mut()
+            .and_then(|s| s.capture_text(scope))
+        else {
+            // Nothing to write. `write_selection_file` with no selection is a
+            // documented no-op upstream, and an empty screen is the same case.
+            return;
+        };
+        // A counter, not a clock: two captures in the same second would collide
+        // on a timestamp alone.
+        self.write_file_seq = self.write_file_seq.wrapping_add(1);
+        let path = match crate::writefile::write(
+            &std::env::temp_dir(),
+            scope,
+            self.write_file_seq,
+            &text,
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("giest: {e:#}");
+                return;
+            }
+        };
+        let display = path.display().to_string();
+        match what {
+            WriteAction::Copy => self.egui_ctx.copy_text(display),
+            // Through `paste_str`, so `clipboard-paste-protection` applies —
+            // the one gate every paste path must go through. A temp path is
+            // always safe, but routing around the gate is how the next path
+            // that isn't ends up bypassing it too.
+            WriteAction::Paste => {
+                if let Some(s) = self.focused_session_mut() {
+                    s.paste_str(&display);
+                }
+            }
+            WriteAction::Open => open_url(&display),
         }
     }
 
@@ -1251,7 +1643,14 @@ impl Window {
                  which is set up at startup — restart giest to apply them."
             );
         }
+        // Re-decode the background image (a no-op when the path is unchanged —
+        // `load_bg_image` caches by path), so editing the key applies live like
+        // the colors do. Only the *surface's* transparency is startup-only.
         self.config = cfg;
+        self.bg_image = load_bg_image(&self.config);
+        // Rebuilt wholesale: the renderer keys its pipelines on this `Arc`.
+        self.custom_shaders = load_custom_shaders(&self.config);
+        self.shader_epoch = std::time::Instant::now();
         self.apply_backdrop();
         if let Some(rs) = render_state {
             let ppp = self.egui_ctx.pixels_per_point().max(1.0);
@@ -1295,6 +1694,91 @@ impl Window {
             Action::LastTab => self.goto_tab(self.tabs.len().saturating_sub(1)),
             Action::TogglePalette => {
                 self.palette = Some(PaletteState::new(self.build_catalog()))
+            }
+            Action::WriteFile(scope, what) => self.write_terminal_file(scope, what),
+            Action::ClearScreen => {
+                if let Some(s) = self.focused_session_mut() {
+                    s.clear_screen();
+                }
+            }
+            Action::CopyTitle => {
+                if let Some(title) = self
+                    .tabs
+                    .get(self.active_tab)
+                    .and_then(|t| t.focused_payload().title())
+                {
+                    ctx.copy_text(title);
+                }
+            }
+            Action::ToggleReadonly => {
+                if let Some(s) = self.focused_session_mut() {
+                    let ro = s.toggle_readonly();
+                    eprintln!("giest: pane is now {}", if ro { "read-only" } else { "writable" });
+                }
+            }
+            Action::MoveTab(delta) => self.move_tab_by(delta),
+            Action::SetFontSize(pt) => {
+                if let Some(rs) = render_state {
+                    let ppp = ctx.pixels_per_point().max(1.0);
+                    self.set_font_points(rs, f32::from(pt), ppp);
+                }
+            }
+            Action::ScrollLines(n) => {
+                let ch = self.cell_h;
+                if let Some(s) = self.focused_session_mut() {
+                    s.scroll_lines(isize::from(n), ch);
+                }
+            }
+            Action::ScrollPageFraction(hundredths) => {
+                let ch = self.cell_h;
+                if let Some(s) = self.focused_session_mut() {
+                    // `page_lines` is the same rows-1 the page-up/down actions
+                    // use, so a fraction of 1.0 matches `scroll_page_down`.
+                    let lines = f32::from(hundredths) / 100.0 * s.page_lines() as f32;
+                    s.scroll_lines(lines.round() as isize, ch);
+                }
+            }
+            Action::Quit => self.requests.push(AppRequest::CloseWindow),
+            Action::PromptTabTitle => {
+                let i = self.active_tab;
+                if let Some(t) = self.tabs.get(i) {
+                    self.renaming = Some((i, t.name.clone().unwrap_or_default()));
+                }
+            }
+            Action::ToggleMaximize => {
+                self.maximized = !self.maximized;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(self.maximized));
+            }
+            Action::ToggleFloatOnTop => {
+                self.float_on_top = !self.float_on_top;
+                ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(if self.float_on_top {
+                    egui::WindowLevel::AlwaysOnTop
+                } else {
+                    egui::WindowLevel::Normal
+                }));
+            }
+            // Flip between the configured opacity and fully opaque. Only
+            // meaningful on a surface that was *created* transparent — see the
+            // startup restriction in `main.rs` — so say so rather than appearing
+            // to do nothing.
+            Action::ToggleBackgroundOpacity => {
+                if self.transparent_surface {
+                    self.opaque_override = !self.opaque_override;
+                } else {
+                    eprintln!(
+                        "giest: toggle_background_opacity needs a transparent window, which is \
+                         set up at startup — set background-opacity below 1 and restart."
+                    );
+                }
+            }
+            Action::ToggleMouseReporting => {
+                if let Some(s) = self.focused_session_mut() {
+                    let on = s.toggle_mouse_reporting();
+                    eprintln!(
+                        "giest: mouse reporting {}",
+                        if on { "enabled" } else { "disabled" }
+                    );
+                }
             }
             Action::ToggleSearch => {
                 if let Some(s) = self.focused_session_mut() {
@@ -1371,6 +1855,14 @@ impl Window {
             Action::ScrollToBottom => {
                 if let Some(s) = self.focused_session_mut() {
                     s.scroll_to_bottom_view();
+                }
+            }
+            Action::ScrollToRow(row) => {
+                let ch = self.cell_h;
+                if let Some(s) = self.focused_session_mut() {
+                    // Eased, unlike the scrollbar's own drag: a keybind is a
+                    // discrete jump, so animating it reads as intentional.
+                    s.scroll_to_row(row as f32, ch, false);
                 }
             }
             Action::JumpToPrompt(delta) => {
@@ -2015,11 +2507,17 @@ impl Window {
         // config reload applies on the next frame with no explicit re-apply.
         let faint_opacity = self.config.faint_opacity;
         let cursor_opacity = self.config.cursor_opacity;
-        let background_opacity = self.config.background_opacity;
+        // `toggle_background_opacity` forces fully opaque over the config.
+        let background_opacity = if self.opaque_override {
+            1.0
+        } else {
+            self.config.background_opacity
+        };
         let background_opacity_cells = self.config.background_opacity_cells;
         let unfocused_split_opacity = self.config.unfocused_split_opacity;
         let unfocused_split_fill = self.config.unfocused_split_fill;
         let resize_overlay_position = self.config.resize_overlay_position;
+        let scrollbar_mode = self.config.scrollbar;
         // Snapshot the keymap so the focused pane's `handle_input` can consult it
         // without holding a borrow on `self` across the pane-tree mutation below.
         // Cheap: a couple dozen (Chord, Action) entries, both `Copy`.
@@ -2036,7 +2534,8 @@ impl Window {
         // `Ui::request_focus` is unconditional — so the pane's per-frame focus
         // grab has to be suppressed explicitly, or typing would still reach the
         // shell behind the confirmation dialog.
-        let palette_open = self.palette.is_some() || self.confirm.is_some();
+        let palette_open =
+            self.palette.is_some() || self.confirm.is_some() || self.clipboard_prompt().is_some();
 
         // Fill the whole area (including the per-pane padding band and the split
         // gutters) with the focused pane's background. This single rect is what
@@ -2048,13 +2547,39 @@ impl Window {
         //
         // Painted here, above the `leaves.is_empty()` early return below, so a tab
         // caught mid-teardown doesn't flash an unpainted (fully transparent) hole.
+        //
+        // With a `background-image` configured, this fill moves *into* the
+        // renderer: its shader paints the background color and the image in one
+        // quad (Ghostty's bg-image pass does the same, and for the same reason).
+        // Painting both would be exactly the double-composite described above.
         let bg = self.tabs[active_tab].focused_payload().default_bg();
-        let bg_alpha8 = (self.config.background_opacity * 255.0).round() as u8;
-        ui.painter().rect_filled(
-            full_area,
-            0.0,
-            egui::Color32::from_rgba_unmultiplied(bg.r, bg.g, bg.b, bg_alpha8),
-        );
+        let bg_image = self.bg_image.clone();
+        let custom_shaders = self.custom_shaders.clone();
+        // A custom shader reads the terminal from an offscreen texture that egui
+        // never draws into, so with one active the fill has to come from the
+        // renderer instead (`TermFrame::window_fill`) or the shader filters a
+        // transparent screen.
+        if bg_image.is_none() && custom_shaders.is_empty() {
+            let bg_alpha8 = (self.config.background_opacity * 255.0).round() as u8;
+            ui.painter().rect_filled(
+                full_area,
+                0.0,
+                egui::Color32::from_rgba_unmultiplied(bg.r, bg.g, bg.b, bg_alpha8),
+            );
+        }
+        let area_px = [
+            (full_area.min.x * ppp).round(),
+            (full_area.min.y * ppp).round(),
+            (full_area.width() * ppp).round(),
+            (full_area.height() * ppp).round(),
+        ];
+        let bg_image = bg_image.map(|source| BgImageFrame {
+            source,
+            fit: self.config.background_image_fit,
+            position: self.config.background_image_position,
+            repeat: self.config.background_image_repeat,
+            opacity: self.config.background_image_opacity,
+        });
 
         let tab = &mut self.tabs[active_tab];
         let mut focus_id = tab.focus;
@@ -2104,6 +2629,19 @@ impl Window {
         let click_pos = if search_open { None } else { press_pos };
         if let Some(pos) = click_pos {
             if let Some(l) = leaves.iter().find(|l| l.rect.contains(pos)) {
+                focus_id = l.id;
+            }
+        }
+        // `focus-follows-mouse`: hovering a split focuses it, no click needed.
+        // Gated on the pointer having actually *moved* — otherwise a parked
+        // cursor would drag focus back every frame and make `focus_split_*`
+        // keybinds impossible to use.
+        if self.config.focus_follows_mouse && !search_open {
+            let moved = ctx.input(|i| i.pointer.velocity() != egui::Vec2::ZERO);
+            if moved
+                && let Some(pos) = ctx.input(|i| i.pointer.latest_pos())
+                && let Some(l) = leaves.iter().find(|l| l.rect.contains(pos))
+            {
                 focus_id = l.id;
             }
         }
@@ -2206,8 +2744,16 @@ impl Window {
                     )
                 });
 
+                // `handle_mouse` reads raw `ctx.input` events rather than the
+                // `Response` above, so egui's widget arbitration does *not*
+                // keep a scrollbar drag out of it — the grab check is what
+                // does. Normally the bar is already hidden while `tracking`
+                // (see `scrollbar::eligible`); this covers the frame a program
+                // enables tracking with the thumb still held.
                 if tracking {
-                    session.handle_mouse(ctx, prect, ppp, cw, ch);
+                    if !session.scrollbar_grabbed() {
+                        session.handle_mouse(ctx, prect, ppp, cw, ch);
+                    }
                     session.clear_selection();
                 } else {
                     let cell_at = |p: egui::Pos2, s: &Session| s.pos_to_cell(p, prect, ppp, cw, ch);
@@ -2366,6 +2912,234 @@ impl Window {
             });
         }
 
+        // Scrollbars. Deliberately a *second* pass over the leaves, after the
+        // loop above: egui resolves which widget owns the pointer from the last
+        // interested widget registered in the layer, so the bar has to register
+        // after each pane's `ui.interact` to win an overlap. That's what keeps a
+        // thumb drag from also painting a text selection, and it only matters
+        // when `window-padding-x` is small enough for the two rects to touch —
+        // at the default 20pt the bar sits entirely inside the padding gutter.
+        //
+        // Not gated on `is_focus`: every split shows its own bar.
+        let mut scrollbars: Vec<(egui::Rect, scrollbar::Thumb, f32, bool)> = Vec::new();
+        // `is_pointer_button_down_on` is true for *any* button, so gate the grab
+        // on the primary one — a right-click on the bar must not drag it.
+        let primary_down = ctx.input(|i| i.pointer.primary_down());
+        for leaf in leaves.iter_mut() {
+            let leaf_rect = leaf.rect;
+            let leaf_id = leaf.id;
+            let session = &mut *leaf.payload;
+            // Per-pane, *not* the focused pane's `tracking` from above.
+            if !scrollbar::eligible(
+                scrollbar_mode,
+                session.scrollback_rows(),
+                session.is_mouse_tracking(),
+            ) {
+                // Drop a grab that a program just invalidated by taking the mouse.
+                session.set_scrollbar_grab(None);
+                continue;
+            }
+            let Some(state) = session.scrollbar_state(ch) else {
+                continue;
+            };
+            let track = egui::Rect::from_min_max(
+                egui::pos2(
+                    leaf_rect.right() - SCROLLBAR_TRACK_W,
+                    leaf_rect.top() + SCROLLBAR_INSET,
+                ),
+                egui::pos2(leaf_rect.right(), leaf_rect.bottom() - SCROLLBAR_INSET),
+            );
+            let Some(thumb) = scrollbar::thumb(track.height(), state.total, state.offset, state.len)
+            else {
+                continue;
+            };
+            let alpha = session.scrollbar_alpha(now);
+
+            // While a modal overlay is up, paint the bar but don't interact.
+            // The palette is an `egui::Modal` and blocks the pointer itself, but
+            // the search overlay is a plain `Area` and does not — so without
+            // this, a click meant for the search box could reach a bar behind it.
+            // Still painted, so a search jump visibly moves the thumb.
+            if palette_open || search_open {
+                if let Some(a) = alpha {
+                    scrollbars.push((track, thumb, a, false));
+                }
+                continue;
+            }
+
+            // Hidden: interact with a narrow band at the very edge, so hovering
+            // there wakes the bar (Ghostty's macOS scroller flashes on hover for
+            // the same reason). Visible: the full track is the hit target.
+            let hit = if alpha.is_some() {
+                track
+            } else {
+                egui::Rect::from_min_max(
+                    egui::pos2(leaf_rect.right() - SCROLLBAR_HOT_W, track.top()),
+                    egui::pos2(leaf_rect.right(), track.bottom()),
+                )
+            };
+            let sense = if alpha.is_some() {
+                egui::Sense::click_and_drag()
+            } else {
+                egui::Sense::hover()
+            };
+            let resp = ui.interact(
+                hit,
+                egui::Id::new(("giest-window", win_id, "scrollbar", active_tab, leaf_id)),
+                sense,
+            );
+            let hovered = resp.hovered();
+            if hovered {
+                session.mark_scrollbar_active(now);
+            }
+
+            // Press. Taken on the press frame rather than `drag_started()`,
+            // which fires a frame later — by then the pointer has already moved
+            // past the drag threshold, and that displacement would be baked into
+            // the grab offset as a permanent few-pixel error.
+            if primary_down && resp.is_pointer_button_down_on() && session.scrollbar_grab().is_none()
+            {
+                if let Some(pos) = resp.interact_pointer_pos() {
+                    let y = pos.y - track.top();
+                    match scrollbar::track_click_page(y, &thumb) {
+                        0 => session.set_scrollbar_grab(Some(y - thumb.top)),
+                        dir => {
+                            // Click in the track pages toward the pointer, eased.
+                            // `scroll_lines` takes a negative delta to move *up*
+                            // into history, which is the same sign convention
+                            // `track_click_page` uses (-1 = above the thumb).
+                            let page = session.page_lines();
+                            session.scroll_lines(dir as isize * page, ch);
+                        }
+                    }
+                }
+            }
+
+            // Drag. `interact_pointer_pos` keeps reporting while the button is
+            // held *outside* the widget, so the drag continues off the bar.
+            if let (Some(grab), Some(pos)) = (session.scrollbar_grab(), resp.interact_pointer_pos())
+            {
+                let top = pos.y - track.top() - grab;
+                let offset = scrollbar::offset_from_thumb_top(top, &thumb, state.total, state.len);
+                session.scroll_to_row(offset, ch, true);
+                session.mark_scrollbar_active(now);
+            }
+            if !primary_down {
+                session.set_scrollbar_grab(None);
+            }
+
+            // Re-read: a drag or a hover this frame may have raised the bar that
+            // was hidden when `alpha` was sampled above.
+            let grabbed = session.scrollbar_grabbed();
+            if let Some(a) = session.scrollbar_alpha(now) {
+                // Recompute against the position the drag just wrote, so the
+                // thumb lands exactly under the cursor with no easing lag.
+                let live = session
+                    .scrollbar_state(ch)
+                    .and_then(|s| scrollbar::thumb(track.height(), s.total, s.offset, s.len))
+                    .unwrap_or(thumb);
+                scrollbars.push((track, live, a, hovered || grabbed));
+            }
+        }
+
+        // `window-width`/`-height`/`-position-*`, applied exactly once.
+        //
+        // Deferred to here rather than done at window creation because the size
+        // is in **cells**, and cell metrics don't exist until the glyph atlas is
+        // built — which happens *after* the window. Doing it here also makes the
+        // chrome exact: the tab strip's height is simply whatever the layout
+        // didn't give the terminal, rather than a guessed constant.
+        if !self.geometry_applied {
+            self.geometry_applied = true;
+            let cfg = &self.config;
+            if cfg.window_width > 0 || cfg.window_height > 0 {
+                let chrome_h = ctx.content_rect().height() - full_area.height();
+                let cur = full_area.size();
+                let w = if cfg.window_width > 0 {
+                    cfg.window_width as f32 * cw / ppp + 2.0 * self.config.padding_x
+                } else {
+                    cur.x
+                };
+                let h = if cfg.window_height > 0 {
+                    cfg.window_height as f32 * ch / ppp + 2.0 * self.config.padding_y + chrome_h
+                } else {
+                    cur.y + chrome_h
+                };
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, h)));
+            }
+            // Both or neither, which is Ghostty's rule — a half-specified
+            // position is more likely a typo than an intent.
+            //
+            // Divided by `ppp` because Ghostty documents the position in
+            // **pixels** while egui's viewport commands are in points: at 125%
+            // scaling, passing the number through unchanged lands the window 25%
+            // too far down and right (measured).
+            if let (Some(x), Some(y)) = (cfg.window_position_x, cfg.window_position_y) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
+                    x as f32 / ppp,
+                    y as f32 / ppp,
+                )));
+            }
+        }
+
+        // `mouse-hide-while-typing`: hide the pointer on a key press, bring it
+        // back as soon as the mouse moves. Latched on `self` rather than derived
+        // per frame, since "typing" is an edge and "hidden" is a state that has
+        // to persist through the still frames in between.
+        if self.config.mouse_hide_while_typing {
+            let (typed, moved) = ctx.input(|i| {
+                (
+                    i.events.iter().any(|e| {
+                        matches!(e, egui::Event::Key { pressed: true, .. } | egui::Event::Text(_))
+                    }),
+                    i.pointer.velocity() != egui::Vec2::ZERO,
+                )
+            });
+            if moved {
+                self.pointer_hidden = false;
+            } else if typed {
+                self.pointer_hidden = true;
+            }
+            if self.pointer_hidden {
+                ctx.set_cursor_icon(egui::CursorIcon::None);
+            }
+        }
+
+        // Shader uniforms for this frame. `iResolution` is the **framebuffer**,
+        // not the terminal area: the offscreen targets are framebuffer-sized so
+        // that every instance coordinate stays valid without remapping, so that
+        // is also the space a shader's `fragCoord` lives in.
+        let shader_globals = if custom_shaders.is_empty() {
+            crate::shader::Globals::default()
+        } else {
+            let screen = ctx.viewport_rect();
+            let now = self.shader_epoch.elapsed().as_secs_f32();
+            let mut g = crate::shader::Globals::default();
+            g.set_resolution((screen.width() * ppp).round(), (screen.height() * ppp).round());
+            g.set_time(now);
+            g.time_delta = (now - self.shader_last_time).max(0.0);
+            g.frame_rate = if g.time_delta > 0.0 { 1.0 / g.time_delta } else { 0.0 };
+            g.frame = self.shader_frame;
+            g.focus = i32::from(window_focused);
+            let rgb = |c: crate::engine::Rgb| {
+                [c.r as f32 / 255.0, c.g as f32 / 255.0, c.b as f32 / 255.0, 1.0]
+            };
+            g.background_color = rgb(bg);
+            g.foreground_color = rgb(self.config.fg);
+            g.selection_background_color = rgb(sel_bg);
+            g.selection_foreground_color = rgb(sel_fg.unwrap_or(self.config.fg));
+            g.cursor_color = rgb(self.config.cursor.unwrap_or(self.config.fg));
+            g.cursor_text = rgb(bg);
+            self.shader_last_time = now;
+            self.shader_frame = self.shader_frame.wrapping_add(1);
+            // An animated shader has to be driven: nothing else repaints an idle
+            // terminal, so without this the effect freezes between keystrokes.
+            if self.config.custom_shader_animation.animates(window_focused) {
+                ctx.request_repaint();
+            }
+            g
+        };
+
         // One callback paints every pane (shared instance buffer).
         ui.painter().add(egui_wgpu::Callback::new_paint_callback(
             full_area,
@@ -2377,6 +3151,15 @@ impl Window {
                 background_opacity_cells,
                 faint_opacity,
                 cursor_opacity,
+                background_color: bg,
+                area_px,
+                // Only the renderer can put the background where a custom
+                // shader will see it; without shaders the app's own
+                // `rect_filled` above is still the one true fill.
+                window_fill: !custom_shaders.is_empty(),
+                bg_image,
+                custom_shaders,
+                shader_globals,
             },
         ));
 
@@ -2460,6 +3243,40 @@ impl Window {
             }
         }
 
+        // Scrollbars, painted last so a bar over an unfocused split stays
+        // legible through the dim rect. Painter-only — the interaction already
+        // happened above, where registration order settles it against the pane.
+        // Must keep requesting repaints or the auto-hide fade freezes on an
+        // idle terminal.
+        if !scrollbars.is_empty() {
+            ctx.request_repaint();
+            for (track, thumb, a, hot) in &scrollbars {
+                let w = if *hot {
+                    SCROLLBAR_KNOB_W_HOT
+                } else {
+                    SCROLLBAR_KNOB_W
+                };
+                let knob = egui::Rect::from_min_size(
+                    egui::pos2(track.center().x - w * 0.5, track.top() + thumb.top),
+                    egui::vec2(w, thumb.len),
+                );
+                // Light grey at ~55% (brighter when grabbed or hovered) reads on
+                // both light and dark backgrounds without a border.
+                let base = if *hot { 235u8 } else { 200u8 };
+                let peak = if *hot { 0.85 } else { 0.55 };
+                ui.painter().rect_filled(
+                    knob,
+                    w * 0.5,
+                    egui::Color32::from_rgba_unmultiplied(
+                        base,
+                        base,
+                        base,
+                        (a * peak * 255.0) as u8,
+                    ),
+                );
+            }
+        }
+
         // Commit the (possibly click-updated) focus back to the tab. Done last,
         // after the final use of `leaves` (which borrows `tab.root`).
         self.tabs[active_tab].focus = focus_id;
@@ -2481,15 +3298,55 @@ impl Window {
     ///
     /// The bell *effects* are only latched here: firing them needs this window's
     /// own focus state, which is only meaningful inside its own pass.
-    fn pump_all(&mut self, now: f64) {
+    fn pump_all(&mut self, now: f64, notifications: &mut Vec<crate::osc_notify::Notification>) {
         let mut rang = false;
+        let mut finished: Vec<session::CommandFinish> = Vec::new();
+        let mut progress_changed = false;
         for tab in &mut self.tabs {
             tab.root.for_each_mut(&mut |pane| {
                 pane.pump_pty();
                 rang |= pane.take_bell_effect(now);
+                notifications.append(&mut pane.take_notifications());
+                finished.append(&mut pane.take_command_finishes());
+                progress_changed |= pane.take_progress().is_some();
             });
         }
         self.pending_bell |= rang;
+        if progress_changed {
+            self.progress_dirty = true;
+        }
+
+        // `notify-on-command-finish`. The mode and the `unfocused` test both
+        // belong to *this* window (a background window's long build should still
+        // report), so it is decided here rather than in the app-level drain —
+        // but a `notify` action still goes out through that drain, since only
+        // the root window has an `HWND` to hang a toast on.
+        let mode = self.config.notify_on_command_finish;
+        if mode == crate::config::NotifyOnCommandFinish::Never || finished.is_empty() {
+            return;
+        }
+        // `i.focused` is per-viewport and only meaningful during that viewport's
+        // own pass, so read this window's *last observed* focus rather than the
+        // running pass's — `pump_all` runs for every window from the root pass.
+        if !crate::config::should_notify_on_finish(mode, self.was_focused) {
+            return;
+        }
+        let after = Duration::from_millis(self.config.notify_on_command_finish_after_ms);
+        let action = self.config.notify_on_command_finish_action;
+        for f in finished.iter().filter(|f| f.duration >= after) {
+            if action.bell {
+                // Reuses the whole `bell-features` path, so a user who has
+                // configured the bell to flash or flag the taskbar gets that
+                // here too — which is what "action = bell" means upstream.
+                self.pending_bell = true;
+            }
+            if action.notify {
+                notifications.push(crate::osc_notify::Notification {
+                    title: f.title().to_string(),
+                    body: f.body(),
+                });
+            }
+        }
     }
 
     /// Run one UI pass for this window, into whichever viewport is current.
@@ -2634,6 +3491,10 @@ impl Window {
         self.render_search(&ctx);
         // The close confirmation draws over everything else.
         self.render_confirm_close(&ctx);
+        // …and the clipboard permission prompt over that: it's the one dialog
+        // whose answer can leak data or run a command, so nothing may sit on
+        // top of it and take the click meant for "Deny".
+        self.render_clipboard_confirm(&ctx);
 
         std::mem::take(&mut self.requests)
     }
@@ -2646,6 +3507,91 @@ impl App {
             focused: 0,
             next_window_id: 1,
         })
+    }
+
+    /// Push the aggregate `OSC 9;4` progress onto the taskbar button.
+    ///
+    /// There is **one** button for the process but any number of panes, so the
+    /// states have to be merged. The rule is worst-news-wins: a failure is what
+    /// you need to see, then a pause, then indeterminate work, and only then a
+    /// plain percentage — which is the *lowest* of the running jobs, since the
+    /// button should read "how far along is the slowest thing", not flicker
+    /// between them. Ghostty sidesteps all of this by drawing per-surface.
+    fn update_progress(&mut self) {
+        use crate::taskbar::Progress;
+
+        let dirty = self.windows.iter_mut().any(|w| std::mem::take(&mut w.progress_dirty));
+        if !dirty {
+            return;
+        }
+        let Some(hwnd) = self.windows.first().and_then(|w| w.hwnd) else {
+            return;
+        };
+
+        let mut worst: Option<Progress> = None;
+        for w in &mut self.windows {
+            for tab in &mut w.tabs {
+                // `for_each_mut` is the only traversal the split tree exposes;
+                // this closure only reads.
+                tab.root.for_each_mut(&mut |pane: &mut Session| {
+                    let Some(p) = pane.progress() else { return };
+                    worst = Some(match (worst, p) {
+                        (None, p) => p,
+                        // A failure outranks everything.
+                        (Some(Progress::Error(a)), Progress::Error(b)) => Progress::Error(a.min(b)),
+                        (Some(Progress::Error(a)), _) => Progress::Error(a),
+                        (Some(_), Progress::Error(b)) => Progress::Error(b),
+                        // Then a pause.
+                        (Some(Progress::Paused(a)), Progress::Paused(b)) => {
+                            Progress::Paused(a.min(b))
+                        }
+                        (Some(Progress::Paused(a)), _) => Progress::Paused(a),
+                        (Some(_), Progress::Paused(b)) => Progress::Paused(b),
+                        // Then unknown-length work, which can't be averaged in.
+                        (Some(Progress::Indeterminate), _) | (_, Progress::Indeterminate) => {
+                            Progress::Indeterminate
+                        }
+                        // Then the least-far-along determinate job.
+                        (Some(Progress::Normal(a)), Progress::Normal(b)) => {
+                            Progress::Normal(a.min(b))
+                        }
+                        (Some(Progress::Normal(a)), Progress::None) => Progress::Normal(a),
+                        (Some(Progress::None), p) => p,
+                    });
+                });
+            }
+        }
+        crate::taskbar::set(hwnd, worst.unwrap_or(Progress::None));
+    }
+
+    /// Raise the desktop notifications requested by any pane in any window
+    /// during this pass's pump.
+    ///
+    /// App-scoped rather than per-window on purpose. There is exactly one
+    /// notification-area entry for the process, and `Shell_NotifyIconW` just
+    /// needs *a* window handle owned by this thread — but only the root window
+    /// has a reachable one (a child viewport's is not exposed), so a per-window
+    /// call would silently drop every notification from a secondary window.
+    ///
+    /// Unlike the bell there is no rate limit and no focus gate: OSC 9 / OSC 777
+    /// are explicit requests from the program, and Ghostty shows them whatever
+    /// the focus state. `MAX_BURST` is only a runaway guard — a program looping
+    /// on OSC 9 could otherwise queue an unbounded stack of toasts.
+    fn raise_notifications(&mut self, notifications: Vec<crate::osc_notify::Notification>) {
+        /// Most notifications raised from a single pump. Windows coalesces
+        /// balloons anyway, so beyond a handful they'd be invisible *and*
+        /// expensive.
+        const MAX_BURST: usize = 4;
+
+        if notifications.is_empty() {
+            return;
+        }
+        let Some(hwnd) = self.windows.first().and_then(|w| w.hwnd) else {
+            return;
+        };
+        for n in notifications.iter().filter(|n| !n.is_empty()).take(MAX_BURST) {
+            crate::notify::show(hwnd, &n.title, &n.body);
+        }
     }
 
     /// Apply the app-scoped intents raised by this pass's windows. Runs after
@@ -2739,6 +3685,17 @@ impl eframe::App for App {
         [0.0, 0.0, 0.0, 0.0]
     }
 
+    /// Remove the notification-area icon on the way out.
+    ///
+    /// The shell would eventually garbage-collect a stale one, but only when the
+    /// user next hovers the tray — until then giest appears to still be running.
+    /// A no-op unless something actually notified (see [`crate::notify`]).
+    fn on_exit(&mut self) {
+        if let Some(hwnd) = self.windows.first().and_then(|w| w.hwnd) {
+            crate::notify::shutdown(hwnd);
+        }
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         // One `RenderState` serves every viewport (egui-wgpu keeps a single
@@ -2754,9 +3711,12 @@ impl eframe::App for App {
         // Pump every window's PTYs before drawing any of them, so background
         // windows keep flowing and their shell exits are noticed.
         let now = ctx.input(|i| i.time);
+        let mut notifications = Vec::new();
         for w in &mut self.windows {
-            w.pump_all(now);
+            w.pump_all(now, &mut notifications);
         }
+        self.raise_notifications(notifications);
+        self.update_progress();
 
         let mut requests: Vec<(u64, AppRequest)> = Vec::new();
         // The root window draws into the `Ui` eframe handed us.
@@ -3089,7 +4049,8 @@ fn ellipsize(s: &str, max: usize) -> String {
 mod tests {
     use super::{
         Dir, Node, Tab, cycle_pick, dim_alpha, drop_index, ellipsize, keep_only_tab, nav_dir,
-        overlay_anchor, reap_tabs, reorder_tabs, retire_window, split_rect, truncate_tabs_to_right,
+        overlay_anchor, preview_text, reap_tabs, reorder_tabs, retire_window, split_rect,
+        truncate_tabs_to_right,
     };
     use crate::config::ResizeOverlayPosition as P;
     use eframe::egui;
@@ -3387,6 +4348,40 @@ mod tests {
         let root = split(false, split(true, leaf(7, 1), leaf(8, 1)), leaf(9, 1));
         assert_eq!(root.first_leaf_id(), 7);
         assert_eq!(Node::<u32>::Empty.first_leaf_id(), 0);
+    }
+
+    #[test]
+    fn preview_makes_control_characters_visible() {
+        // The newline is *why* the user is being asked, so it must be legible
+        // rather than laid out as ordinary wrapped text.
+        assert_eq!(preview_text("ls\nrm -rf /", 100), "ls⏎\nrm -rf /");
+        // An escape can't be passed through to dress the payload up as dialog
+        // chrome — nor can any other control byte.
+        assert_eq!(preview_text("a\x1b[201~b", 100), "a␛[201~b");
+        assert_eq!(preview_text("a\x07\x00b", 100), "a␦␦b");
+        assert_eq!(preview_text("a\tb\rc", 100), "a→b␍c");
+        // Ordinary text is untouched.
+        assert_eq!(preview_text("hello world", 100), "hello world");
+    }
+
+    #[test]
+    fn preview_caps_length_and_says_how_much_is_hidden() {
+        let long = "x".repeat(50);
+        let out = preview_text(&long, 10);
+        assert!(out.starts_with("xxxxxxxxxx"), "{out}");
+        assert!(out.ends_with("… 40 more characters"), "{out}");
+        // Exactly at the limit, nothing is elided.
+        assert_eq!(preview_text("abcde", 5), "abcde");
+        // Counted in characters, not bytes, so multi-byte text isn't cut short.
+        assert_eq!(preview_text("äöüßé", 5), "äöüßé");
+    }
+
+    #[test]
+    fn find_leaf_returns_the_first_match_in_layout_order() {
+        let root = split(true, leaf(1, 10), split(false, leaf(2, 20), leaf(3, 20)));
+        assert_eq!(root.find_leaf(&mut |p| *p == 20), Some(2));
+        assert_eq!(root.find_leaf(&mut |p| *p == 10), Some(1));
+        assert_eq!(root.find_leaf(&mut |p| *p == 99), None);
     }
 
     #[test]

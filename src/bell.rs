@@ -166,21 +166,11 @@ pub fn clear_attention(hwnd: isize) {
 
 /// Resolve a configured `bell-audio-path` against `config_dir`.
 ///
-/// Relative paths resolve against the config file's directory (Ghostty resolves
-/// `Path` values the same way), so a config can ship a sound beside itself.
+/// Thin alias for [`crate::config::resolve_path`], which every `Path`-valued
+/// key shares so `bell-audio-path` and `background-image` can't drift apart on
+/// how a relative path is anchored.
 pub fn resolve_audio_path(raw: &str, config_dir: Option<&Path>) -> Option<PathBuf> {
-    let raw = raw.trim();
-    if raw.is_empty() {
-        return None;
-    }
-    let p = Path::new(raw);
-    if p.is_absolute() {
-        return Some(p.to_path_buf());
-    }
-    Some(match config_dir {
-        Some(dir) => dir.join(p),
-        None => p.to_path_buf(),
-    })
+    crate::config::resolve_path(raw, config_dir)
 }
 
 #[cfg(test)]

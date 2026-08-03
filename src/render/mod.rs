@@ -25,9 +25,9 @@ pub fn regular_font() -> &'static [u8] {
 /// One instanced quad. `mode` 0 = solid fill (backgrounds/cursor/straight
 /// underlines), 1 = glyph (alpha = atlas coverage), 2 = color emoji, 3 =
 /// procedural decoration (dotted/dashed/curly underline, sub-style chosen by
-/// `param`). Rect and uv are absolute pixels / normalized UV; for mode 3, `uv.x`
-/// is an absolute-pixel phase (so the pattern tiles seamlessly across cells) and
-/// `uv.y` spans 0..1 over the quad height.
+/// `param`), 4 = `background-image`. Rect and uv are absolute pixels /
+/// normalized UV; for mode 3, `uv.x` is an absolute-pixel phase (so the pattern
+/// tiles seamlessly across cells) and `uv.y` spans 0..1 over the quad height.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Instance {
@@ -36,7 +36,9 @@ struct Instance {
     color: [f32; 4],
     mode: u32,
     param: u32,
-    _pad: [u32; 2],
+    /// Two spare per-mode floats. Previously dead padding kept only for the
+    /// 16-byte stride; mode 4 uses `extra[0]` as `background-image-opacity`.
+    extra: [f32; 2],
 }
 
 /// Procedural underline sub-styles for `Instance::mode == 3`, passed in `param`.
@@ -57,7 +59,7 @@ impl Instance {
             color,
             mode: 0,
             param: 0,
-            _pad: [0; 2],
+            extra: [0.0; 2],
         }
     }
 
@@ -73,7 +75,7 @@ impl Instance {
             color,
             mode: 3,
             param: style,
-            _pad: [0; 2],
+            extra: [0.0; 2],
         }
     }
 }
@@ -86,13 +88,38 @@ const INITIAL_INSTANCES: u64 = 8192;
 pub struct GpuResources {
     pipeline: wgpu::RenderPipeline,
     bind_group: wgpu::BindGroup,
+    /// Kept so the bind group can be rebuilt when the `background-image`
+    /// texture is (re)uploaded — the only binding that changes after startup.
+    bind_layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
     uniform: wgpu::Buffer,
     corners: wgpu::Buffer,
     indices: wgpu::Buffer,
     instances: wgpu::Buffer,
     capacity: u64,
     atlas: Atlas,
+    /// The `background-image` texture at binding 4, and the decoded image it was
+    /// uploaded from. A 1×1 transparent placeholder until one is configured,
+    /// because the bind group must always satisfy the layout. Holding the `Arc`
+    /// is what makes `Arc::ptr_eq` a sound "is this the same image" test.
+    bg_image: wgpu::Texture,
+    bg_view: wgpu::TextureView,
+    bg_source: Option<Arc<crate::bgimage::BgImage>>,
+    /// Instance index of the full-area `background-image` quad, when there is
+    /// one. Drawn before (and outside) the per-pane scissor loop.
+    bg_instance: Option<u32>,
+    /// The `custom-shader` post-process chain, once one has been built.
+    shaders: Option<ShaderChain>,
+    /// Identity of the shader list the chain was built from, so it is rebuilt
+    /// only when the config actually changes. Stored as an address rather than
+    /// a pointer because `GpuResources` must stay `Send + Sync` for egui's
+    /// `callback_resources`; the chain keeps the `Arc` alive, which is what
+    /// makes comparing addresses sound (same trick as `bg_source`).
+    shader_key: Option<usize>,
     is_srgb: bool,
+    /// The swapchain format. The custom-shader chain's offscreen targets must
+    /// match it, or the blit changes the colour space midway.
+    target_format: wgpu::TextureFormat,
     /// Coverage gamma for text antialiasing (>1 thickens light-on-dark AA).
     /// Passed to the shader as its reciprocal each frame.
     text_gamma: f32,
@@ -162,6 +189,56 @@ pub struct TermFrame {
     /// `cursor-opacity`: alpha for a *focused* pane's cursor. An unfocused pane's
     /// hollow cursor is always opaque, matching Ghostty.
     pub cursor_opacity: f32,
+    /// The window background color — what a cell on the *default* background
+    /// shows.
+    pub background_color: Rgb,
+    /// The terminal area in device pixels (`[x, y, w, h]`) — everything below
+    /// the tab strip. Both the window fill and `background-image` cover exactly
+    /// this.
+    pub area_px: [f32; 4],
+    /// Paint the window background fill **in the renderer** rather than letting
+    /// the app's `rect_filled` do it.
+    ///
+    /// Cells on the default background emit no quad at all (see [`bg_alpha`]),
+    /// so *something* has to put the background there. Normally that is an egui
+    /// rect painted before this callback — but a custom shader reads its input
+    /// from an offscreen texture that egui never touches, so with shaders active
+    /// the fill has to come from here or the shader filters a transparent
+    /// screen. `bg_image` supersedes this: it paints the colour itself.
+    pub window_fill: bool,
+    /// `background-image`, when one is configured and decoded. `Some` **moves
+    /// the window-background fill into the renderer**: the app skips its
+    /// `rect_filled` and this quad paints the color *and* the image, at
+    /// `background_opacity`. Two layers would double-composite (see `bg_alpha`).
+    pub bg_image: Option<BgImageFrame>,
+    /// `custom-shader`, already translated to WGSL, in the order they run.
+    /// Empty is the ordinary path: no offscreen pass at all.
+    pub custom_shaders: Arc<Vec<CustomShader>>,
+    /// Uniforms handed to every custom shader this frame.
+    pub shader_globals: crate::shader::Globals,
+}
+
+/// One compiled custom shader.
+pub struct CustomShader {
+    /// Where it came from, for error messages.
+    pub name: String,
+    /// WGSL translated from the user's GLSL by [`crate::shader::compile`].
+    pub wgsl: String,
+}
+
+/// The `background-image` state for one frame.
+pub struct BgImageFrame {
+    /// The decoded image. The renderer re-uploads its texture only when this
+    /// `Arc` is not the one it already holds — and it *keeps* that one alive, so
+    /// the comparison is sound: a live allocation's address can't be reused by
+    /// the replacement. The app hands out one `Arc` per path across all windows
+    /// (they share a single wgpu device, and so a single texture).
+    pub source: Arc<crate::bgimage::BgImage>,
+    pub fit: crate::config::BackgroundImageFit,
+    pub position: crate::config::BackgroundImagePosition,
+    pub repeat: bool,
+    /// `background-image-opacity`, which may exceed 1.0.
+    pub opacity: f32,
 }
 
 /// Where a kitty image sits relative to the text and cell backgrounds.
@@ -414,6 +491,20 @@ pub fn build_resources(
                 },
                 count: None,
             },
+            // Binding 4: the `background-image` texture. One per window, not a
+            // shelf in either atlas — the RGBA atlas flushes its *entire* cache
+            // on overflow, so a wallpaper-sized image there would evict every
+            // cached emoji (the same rule kitty images follow).
+            wgpu::BindGroupLayoutEntry {
+                binding: 4,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
         ],
     });
 
@@ -429,28 +520,24 @@ pub fn build_resources(
         min_filter: wgpu::FilterMode::Linear,
         ..Default::default()
     });
-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("term-bind-group"),
-        layout: &bind_layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniform.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::TextureView(&atlas.view),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: wgpu::BindingResource::Sampler(&sampler),
-            },
-            wgpu::BindGroupEntry {
-                binding: 3,
-                resource: wgpu::BindingResource::TextureView(&atlas.color_view),
-            },
-        ],
+    // A 1×1 fully transparent placeholder so the bind group satisfies the layout
+    // before (and without) a configured `background-image`.
+    let bg_image = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("term-bg-image-placeholder"),
+        size: wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: bg_image_format(format.is_srgb()),
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
     });
+    let bg_view = bg_image.create_view(&Default::default());
+    let bind_group = build_bind_group(device, &bind_layout, &uniform, &atlas, &sampler, &bg_view);
 
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("term-pipeline-layout"),
@@ -480,8 +567,9 @@ pub fn build_resources(
                         1 => Float32x4, // rect
                         2 => Float32x4, // uv
                         3 => Float32x4, // color
-                        4 => Uint32,    // mode
-                        5 => Uint32,    // param (mode-3 decoration sub-style)
+                        4 => Uint32,     // mode
+                        5 => Uint32,     // param (mode-3 sub-style / mode-4 repeat)
+                        6 => Float32x2,  // extra (mode-4 image opacity)
                     ],
                 },
             ],
@@ -534,13 +622,22 @@ pub fn build_resources(
     GpuResources {
         pipeline,
         bind_group,
+        bind_layout,
+        sampler,
         uniform,
         corners,
         indices,
         instances,
         capacity: INITIAL_INSTANCES,
         atlas,
+        bg_image,
+        bg_view,
+        bg_source: None,
+        bg_instance: None,
+        shaders: None,
+        shader_key: None,
         is_srgb: format.is_srgb(),
+        target_format: format,
         text_gamma,
         num_instances: 0,
         pane_ranges: Vec::new(),
@@ -551,6 +648,191 @@ pub fn build_resources(
         scratch_runs: Vec::new(),
         scratch_shaped: Vec::new(),
     }
+}
+
+/// The `custom-shader` post-process chain.
+///
+/// The terminal is drawn into `tex[0]`, then each shader reads one texture and
+/// writes the other, ping-pong; `paint` blits whichever ended up holding the
+/// result. Two textures is the minimum that allows a shader to read its input
+/// and write its output in the same pass, and is all any number of shaders needs.
+struct ShaderChain {
+    /// Kept alive so `shader_key`'s address comparison stays sound: a freed
+    /// allocation could otherwise be reused by the next shader list and read as
+    /// "unchanged". Never read — holding it *is* the point.
+    #[allow(dead_code)]
+    source: Arc<Vec<CustomShader>>,
+    pipelines: Vec<wgpu::RenderPipeline>,
+    /// Copies the final texture to the screen.
+    blit: wgpu::RenderPipeline,
+    layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+    uniform: wgpu::Buffer,
+    tex: [wgpu::Texture; 2],
+    view: [wgpu::TextureView; 2],
+    /// `bind[i]` samples `tex[i]`.
+    bind: [wgpu::BindGroup; 2],
+    size: (u32, u32),
+    /// Which texture holds the finished image (`pipelines.len() % 2`).
+    final_index: usize,
+}
+
+/// Vertex + fragment stages shared by the chain's plumbing.
+///
+/// The fullscreen triangle matches Ghostty's (`vid 0` at `(-1,-3)`, `1` at
+/// `(-1,1)`, `2` at `(3,1)`) so a shader's `gl_FragCoord` sees the same
+/// coordinates it would there.
+///
+/// **Nothing here flips Y**, and that is load-bearing rather than an omission:
+/// in a fullscreen post-process the fragment writes to the pixel it is at, so
+/// flipping the coordinate moves where the output lands relative to where the
+/// input was read. Coordinate and texture orientation must agree; both are
+/// Y-down, which is also where Ghostty lands. See `shader::SUFFIX` — a flip was
+/// tried here first and measurably produced an upside-down screen.
+const CHAIN_SHADER: &str = r#"
+@group(0) @binding(0) var src: texture_2d<f32>;
+@group(0) @binding(2) var smp: sampler;
+
+@vertex
+fn vs(@builtin(vertex_index) vid: u32) -> @builtin(position) vec4<f32> {
+  let x = select(-1.0, 3.0, vid == 2u);
+  let y = select(1.0, -3.0, vid == 0u);
+  return vec4<f32>(x, y, 0.0, 1.0);
+}
+
+@fragment
+fn blit(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+  let dim = vec2<f32>(textureDimensions(src));
+  let uv = vec2<f32>(pos.x / dim.x, pos.y / dim.y);
+  return textureSampleLevel(src, smp, uv, 0.0);
+}
+"#;
+
+/// Allocate the chain's two ping-pong targets and the bind group that samples
+/// each. `bind[i]` reads `tex[i]`, so a pass writing `tex[1]` binds `bind[0]`.
+fn chain_targets(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    layout: &wgpu::BindGroupLayout,
+    sampler: &wgpu::Sampler,
+    uniform: &wgpu::Buffer,
+    size: (u32, u32),
+) -> ([wgpu::Texture; 2], [wgpu::TextureView; 2], [wgpu::BindGroup; 2]) {
+    let make = || {
+        device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("custom-shader-target"),
+            size: wgpu::Extent3d {
+                width: size.0.max(1),
+                height: size.1.max(1),
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        })
+    };
+    let tex = [make(), make()];
+    let view = [
+        tex[0].create_view(&Default::default()),
+        tex[1].create_view(&Default::default()),
+    ];
+    let bind = [0usize, 1].map(|i| {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("custom-shader-bind"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view[i]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+            ],
+        })
+    });
+    (tex, view, bind)
+}
+
+impl ShaderChain {
+    fn resize(&mut self, device: &wgpu::Device, format: wgpu::TextureFormat, size: (u32, u32)) {
+        let (tex, view, bind) = chain_targets(
+            device,
+            format,
+            &self.layout,
+            &self.sampler,
+            &self.uniform,
+            size,
+        );
+        self.tex = tex;
+        self.view = view;
+        self.bind = bind;
+        self.size = size;
+    }
+}
+
+/// Texture format for the `background-image`.
+///
+/// Chosen to match the render target's color space so the sampler does the
+/// decode for us: on an sRGB target the pipeline blends in linear (every color
+/// goes through [`srgb_to_linear`] first), and an `*UnormSrgb` texture returns
+/// linear samples, so the image lands in the same space as the background color
+/// it is mixed with. On a non-sRGB target both stay raw. Getting this wrong
+/// isn't an error anywhere — the image just renders visibly too bright or too
+/// dark next to the text.
+fn bg_image_format(is_srgb: bool) -> wgpu::TextureFormat {
+    if is_srgb {
+        wgpu::TextureFormat::Rgba8UnormSrgb
+    } else {
+        wgpu::TextureFormat::Rgba8Unorm
+    }
+}
+
+/// Build the one bind group, which every binding but the background image is
+/// fixed for the process. Factored out because the image can be replaced at
+/// runtime (config reload), and a bind group can't be mutated in place.
+fn build_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    uniform: &wgpu::Buffer,
+    atlas: &Atlas,
+    sampler: &wgpu::Sampler,
+    bg_view: &wgpu::TextureView,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("term-bind-group"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniform.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(&atlas.view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: wgpu::BindingResource::TextureView(&atlas.color_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: wgpu::BindingResource::TextureView(bg_view),
+            },
+        ],
+    })
 }
 
 /// Re-rasterize the glyph atlas at a new pixel font size and return the new
@@ -610,6 +892,218 @@ impl GpuResources {
         self.scratch_out.len() as u32
     }
 
+    /// (Re)upload the `background-image` texture and rebuild the bind group.
+    ///
+    /// Called from `prepare` only when the image actually changes, so a
+    /// configured image costs one upload at load and nothing per frame. Passing
+    /// `None` drops back to the 1×1 placeholder, which is what frees the VRAM
+    /// when a reload removes the image.
+    fn set_bg_image(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        img: Option<&Arc<crate::bgimage::BgImage>>,
+    ) {
+        let (w, h, data): (u32, u32, &[u8]) = match img {
+            Some(f) => (f.width.max(1), f.height.max(1), &f.rgba),
+            None => (1, 1, &[0, 0, 0, 0]),
+        };
+        // A short buffer would be a decoder bug, but a wgpu validation panic is
+        // a poor way to learn that: keep the placeholder instead.
+        if data.len() < (w as usize * h as usize * 4) {
+            return;
+        }
+        let size = wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        };
+        self.bg_image = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("term-bg-image"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: bg_image_format(self.is_srgb),
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            self.bg_image.as_image_copy(),
+            &data[..w as usize * h as usize * 4],
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(w * 4),
+                rows_per_image: Some(h),
+            },
+            size,
+        );
+        self.bg_view = self.bg_image.create_view(&Default::default());
+        self.bind_group = build_bind_group(
+            device,
+            &self.bind_layout,
+            &self.uniform,
+            &self.atlas,
+            &self.sampler,
+            &self.bg_view,
+        );
+        self.bg_source = img.cloned();
+    }
+
+    /// Build (or rebuild, or tear down) the custom-shader chain.
+    ///
+    /// A shader that fails to *compile* never reaches here — `shader::compile`
+    /// rejects it at load time and the app reports it — so by this point the
+    /// WGSL is known good and the only work is GPU objects.
+    fn set_shaders(
+        &mut self,
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        shaders: &Arc<Vec<CustomShader>>,
+        size: (u32, u32),
+    ) {
+        if shaders.is_empty() {
+            self.shaders = None;
+            self.shader_key = None;
+            return;
+        }
+        let key = Arc::as_ptr(shaders) as usize;
+        // Rebuild on a config change; resize in place otherwise.
+        if self.shader_key == Some(key)
+            && let Some(chain) = &mut self.shaders
+        {
+            if chain.size != size {
+                chain.resize(device, format, size);
+            }
+            return;
+        }
+
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("custom-shader-layout"),
+            entries: &[
+                // Bindings 0/1/2 are fixed by `shader::PREFIX`'s
+                // `layout(binding = N)` declarations — texture, uniforms, sampler.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("custom-shader-pipeline-layout"),
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
+
+        let chain_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("custom-shader-chain"),
+            source: wgpu::ShaderSource::Wgsl(CHAIN_SHADER.into()),
+        });
+
+        // A post-process replaces its input rather than compositing over it, so
+        // every chain pass writes with blending off. Only the final blit
+        // composites, and it does so premultiplied — which is what rendering
+        // onto a cleared (transparent) target with SrcAlpha blending produces.
+        let make = |frag_module: &wgpu::ShaderModule, entry: &str, blend| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("custom-shader-pass"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &chain_module,
+                    entry_point: Some("vs"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: frag_module,
+                    entry_point: Some(entry),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+
+        let mut pipelines = Vec::with_capacity(shaders.len());
+        for s in shaders.iter() {
+            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some(&s.name),
+                source: wgpu::ShaderSource::Wgsl(s.wgsl.as_str().into()),
+            });
+            pipelines.push(make(&module, "main", None));
+        }
+        let blit = make(
+            &chain_module,
+            "blit",
+            Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+        );
+
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("custom-shader-sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            // Shadertoy shaders routinely sample outside 0..1 (the CRT curve
+            // does); clamping keeps the edge pixel rather than wrapping the
+            // image around, which is what a real CRT bezel looks like.
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            ..Default::default()
+        });
+        let uniform = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("custom-shader-globals"),
+            size: crate::shader::GLOBALS_SIZE as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let final_index = pipelines.len() % 2;
+        let (tex, view, bind) = chain_targets(device, format, &layout, &sampler, &uniform, size);
+        self.shaders = Some(ShaderChain {
+            source: shaders.clone(),
+            pipelines,
+            blit,
+            layout,
+            sampler,
+            uniform,
+            tex,
+            view,
+            bind,
+            size,
+            final_index,
+        });
+        self.shader_key = Some(key);
+    }
+
     /// Drop all cached glyphs / shaped runs so the next `build_frame_instances`
     /// re-rasterizes from cold — lets a bench measure rasterization cost rather
     /// than the warm-atlas steady state.
@@ -643,6 +1137,36 @@ impl GpuResources {
         // (instance index, image id) for this pane's image quads, in emission
         // order — `split_draws` turns it into the pane's draw list.
         let mut pane_images: Vec<(u32, u32)> = Vec::new();
+
+        // `background-image` first, so every pane draws over it. It is a single
+        // quad covering the whole terminal area and it paints the *background
+        // color* too (see `BgImageFrame`), which is why the app skips its own
+        // window fill whenever this is present.
+        let [ax, ay, aw, ah] = frame.area_px;
+        let mut bg_instance = None;
+        if let Some(bg) = frame.bg_image.as_ref() {
+            let tex = (bg.source.width.max(1) as f32, bg.source.height.max(1) as f32);
+            let dest = crate::bgimage::dest_rect((aw, ah), tex, bg.fit, bg.position);
+            bg_instance = Some(out.len() as u32);
+            out.push(Instance {
+                rect: [ax, ay, aw, ah],
+                uv: crate::bgimage::uv((aw, ah), dest),
+                color: self.color(frame.background_color, frame.background_opacity),
+                mode: 4,
+                param: u32::from(bg.repeat),
+                extra: [bg.opacity, 0.0],
+            });
+        } else if frame.window_fill {
+            // Same job as the image quad, minus the image: put the window
+            // background where cells that emit nothing would otherwise leave a
+            // hole. Only reached with custom shaders active — see `window_fill`.
+            bg_instance = Some(out.len() as u32);
+            out.push(Instance::solid(
+                [ax, ay, aw, ah],
+                self.color(frame.background_color, frame.background_opacity),
+            ));
+        }
+        self.bg_instance = bg_instance;
 
         for pane in &frame.panes {
             // Per pane, emit background → glyphs/decorations → non-block cursor,
@@ -692,7 +1216,7 @@ impl GpuResources {
                         color: [1.0, 0.0, 1.0, 0.5],
                         mode: 0,
                         param: 0,
-                        _pad: [0; 2],
+                        extra: [0.0; 2],
                     });
                 }
             };
@@ -983,7 +1507,7 @@ impl GpuResources {
                             color,
                             mode,
                             param: 0,
-                            _pad: [0; 2],
+                            extra: [0.0; 2],
                         });
                     }
                 }
@@ -1053,12 +1577,19 @@ impl CallbackTrait for TermFrame {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         screen_descriptor: &egui_wgpu::ScreenDescriptor,
-        _encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut wgpu::CommandEncoder,
         resources: &mut egui_wgpu::CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
         let res: &mut GpuResources = resources.get_mut().expect("GpuResources missing");
 
         let [sw, sh] = screen_descriptor.size_in_pixels;
+
+        // Build/resize the custom-shader chain before anything reads it. The
+        // offscreen targets are the *full framebuffer*, which is the whole
+        // reason every instance coordinate below stays valid unchanged.
+        let format = res.target_format;
+        res.set_shaders(device, format, &self.custom_shaders, (sw, sh));
+
         // Pass the gamma reciprocal so the shader applies `pow(cov, gamma_inv)`
         // with a single op; >1 text_gamma → exponent <1 → thicker AA coverage.
         let gamma_inv = 1.0 / res.text_gamma.max(0.1);
@@ -1067,6 +1598,22 @@ impl CallbackTrait for TermFrame {
             0,
             bytemuck::cast_slice(&[sw as f32, sh as f32, gamma_inv, 0.0]),
         );
+        if let Some(chain) = &res.shaders {
+            queue.write_buffer(&chain.uniform, 0, bytemuck::bytes_of(&self.shader_globals));
+        }
+
+        // The background-image texture is the one binding that changes at
+        // runtime, and it can only be replaced here — `paint` gets the resources
+        // immutably and has no device.
+        let want = self.bg_image.as_ref().map(|f| &f.source);
+        let same = match (&res.bg_source, want) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            (None, None) => true,
+            _ => false,
+        };
+        if !same {
+            res.set_bg_image(device, queue, want);
+        }
 
         res.build_instances(self, queue);
         let needed = res.scratch_out.len() as u64;
@@ -1086,6 +1633,11 @@ impl CallbackTrait for TermFrame {
             queue.write_buffer(&res.instances, 0, bytemuck::cast_slice(&res.scratch_out));
         }
 
+        // Draw the grid offscreen and run it through the shaders. Must come
+        // after the instance upload above, and can only happen here: `paint`
+        // has no encoder, and its render pass cannot be nested.
+        res.run_shader_chain(encoder, [sw, sh]);
+
         Vec::new()
     }
 
@@ -1099,17 +1651,142 @@ impl CallbackTrait for TermFrame {
         if res.num_instances == 0 {
             return;
         }
-        render_pass.set_pipeline(&res.pipeline);
-        render_pass.set_bind_group(0, &res.bind_group, &[]);
-        render_pass.set_vertex_buffer(0, res.corners.slice(..));
-        render_pass.set_vertex_buffer(1, res.instances.slice(..));
-        render_pass.set_index_buffer(res.indices.slice(..), wgpu::IndexFormat::Uint16);
-
-        // egui's own clip (already clamped to the framebuffer) bounds every
-        // pane scissor, so intersections stay within the attachment.
         let egui_clip = info.clip_rect_in_pixels();
-        let (ex0, ey0) = (egui_clip.left_px, egui_clip.top_px);
-        let (ex1, ey1) = (ex0 + egui_clip.width_px, ey0 + egui_clip.height_px);
+        let clip = [
+            egui_clip.left_px,
+            egui_clip.top_px,
+            egui_clip.left_px + egui_clip.width_px,
+            egui_clip.top_px + egui_clip.height_px,
+        ];
+
+        // With custom shaders active the grid was already drawn — offscreen, in
+        // `prepare` — and filtered through the shader chain; all that's left is
+        // to put the result on screen.
+        if res.blit(render_pass, clip) {
+            return;
+        }
+        res.record_grid(render_pass, clip);
+    }
+}
+
+impl GpuResources {
+    /// Run the offscreen render + shader chain for this frame.
+    ///
+    /// Everything happens here rather than in `paint` because this is the only
+    /// hook with a `CommandEncoder`: `paint` is handed a render pass that egui
+    /// has already begun on the swapchain, and a pass cannot be nested.
+    fn run_shader_chain(&self, encoder: &mut wgpu::CommandEncoder, screen: [u32; 2]) {
+        let Some(chain) = &self.shaders else { return };
+        let clip = [0, 0, screen[0] as i32, screen[1] as i32];
+
+        // 1. The terminal, into tex[0]. Cleared to transparent so the parts of
+        //    the framebuffer the grid doesn't cover (the tab strip) stay empty
+        //    and composite away at the blit.
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("custom-shader-grid"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &chain.view[0],
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            self.record_grid(&mut pass, clip);
+        }
+
+        // 2. One pass per shader, ping-ponging. Pass i reads tex[i % 2] and
+        //    writes the other, so after n passes the result is in
+        //    tex[n % 2] — which is what `final_index` records.
+        for (i, pipeline) in chain.pipelines.iter().enumerate() {
+            let src = i % 2;
+            let dst = 1 - src;
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("custom-shader-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &chain.view[dst],
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        // The shader writes every pixel, so there is nothing to
+                        // preserve — and clearing is cheaper than loading.
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, &chain.bind[src], &[]);
+            pass.draw(0..3, 0..1);
+        }
+    }
+
+    /// Put the chain's finished image on screen. Returns `false` when no chain
+    /// is active, meaning the caller should draw the grid directly instead.
+    fn blit(&self, pass: &mut wgpu::RenderPass<'_>, clip: [i32; 4]) -> bool {
+        let Some(chain) = &self.shaders else {
+            return false;
+        };
+        let [x0, y0, x1, y1] = clip;
+        if x1 <= x0 || y1 <= y0 {
+            return true;
+        }
+        pass.set_scissor_rect(
+            x0.max(0) as u32,
+            y0.max(0) as u32,
+            (x1 - x0) as u32,
+            (y1 - y0) as u32,
+        );
+        pass.set_pipeline(&chain.blit);
+        pass.set_bind_group(0, &chain.bind[chain.final_index], &[]);
+        pass.draw(0..3, 0..1);
+        true
+    }
+
+    /// Record the whole terminal — background quad, then every pane — into
+    /// `pass`, clipped to `clip` (`[x0, y0, x1, y1]`, device px).
+    ///
+    /// Factored out of `paint` because the offscreen pass needs the identical
+    /// sequence: the offscreen target is the *full framebuffer*, precisely so
+    /// that every instance coordinate stays valid with no remapping.
+    fn record_grid(&self, pass: &mut wgpu::RenderPass<'_>, clip: [i32; 4]) {
+        if self.num_instances == 0 {
+            return;
+        }
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &self.bind_group, &[]);
+        pass.set_vertex_buffer(0, self.corners.slice(..));
+        pass.set_vertex_buffer(1, self.instances.slice(..));
+        pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint16);
+
+        let [ex0, ey0, ex1, ey1] = clip;
+        let res = self;
+        let render_pass = pass;
+
+        // `background-image` spans the whole terminal area, so it must be drawn
+        // *before* the per-pane scissor loop and bounded only by egui's clip —
+        // a pane scissor is the grid box, which excludes the padding band and
+        // the split gutters.
+        if let Some(i) = res.bg_instance {
+            render_pass.set_scissor_rect(
+                ex0.max(0) as u32,
+                ey0.max(0) as u32,
+                (ex1 - ex0).max(0) as u32,
+                (ey1 - ey0).max(0) as u32,
+            );
+            render_pass.draw_indexed(0..QUAD_INDICES.len() as u32, 0, i..i + 1);
+        }
 
         for (clip, span) in &res.pane_ranges {
             // Intersect the pane's grid box with egui's clip; skip if empty.
@@ -1142,6 +1819,7 @@ struct U { screen: vec2<f32>, gamma_inv: f32, pad: f32 };
 @group(0) @binding(1) var atlas_tex: texture_2d<f32>;
 @group(0) @binding(2) var atlas_smp: sampler;
 @group(0) @binding(3) var color_tex: texture_2d<f32>;
+@group(0) @binding(4) var bg_image_tex: texture_2d<f32>;
 
 const TAU: f32 = 6.2831853;
 
@@ -1151,6 +1829,7 @@ struct VsOut {
   @location(1) color: vec4<f32>,
   @location(2) @interpolate(flat) mode: u32,
   @location(3) @interpolate(flat) param: u32,
+  @location(4) @interpolate(flat) extra: vec2<f32>,
 };
 
 @vertex
@@ -1159,7 +1838,8 @@ fn vs(@location(0) corner: vec2<f32>,
       @location(2) uvr: vec4<f32>,
       @location(3) color: vec4<f32>,
       @location(4) mode: u32,
-      @location(5) param: u32) -> VsOut {
+      @location(5) param: u32,
+      @location(6) extra: vec2<f32>) -> VsOut {
   let px = rect.xy + corner * rect.zw;
   let ndc = vec2<f32>(px.x / u.screen.x * 2.0 - 1.0, 1.0 - px.y / u.screen.y * 2.0);
   var out: VsOut;
@@ -1168,6 +1848,7 @@ fn vs(@location(0) corner: vec2<f32>,
   out.color = color;
   out.mode = mode;
   out.param = param;
+  out.extra = extra;
   return out;
 }
 
@@ -1200,6 +1881,33 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       cov = 1.0 - smoothstep(0.20, 0.26, abs(in.uv.y - center));
     }
     return vec4<f32>(in.color.rgb, in.color.a * cov);
+  }
+  if (in.mode == 4u) {
+    // `background-image`. uv is in image-normalized units across the whole
+    // terminal area, so `repeat` is a plain fract() and "off the image" is a
+    // 0..1 bounds test — no second sampler, no pixel-space coordinates.
+    // `in.color` is the window background color at `background-opacity`;
+    // `in.extra.x` is `background-image-opacity`.
+    var uv = in.uv;
+    var inside = 1.0;
+    if (in.param == 1u) {
+      // fract() is x - floor(x), so it wraps negatives the way Ghostty's
+      // double fmod does.
+      uv = fract(uv);
+    } else if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
+      inside = 0.0;
+    }
+    let img = textureSample(bg_image_tex, atlas_smp, uv);
+    // Ghostty's bg_image_fragment, rearranged from premultiplied to straight
+    // alpha (this pipeline blends with SrcAlpha, not One):
+    //   premul.rgb = img.rgb*t + bg.rgb*max(0, 1-t),  premul.a = max(t, 1)
+    // where t = img.a * opacity. Dividing by premul.a recovers the straight
+    // color, so an `opacity` above 1 overexposes exactly as it does upstream
+    // instead of just saturating.
+    let t = img.a * inside * in.extra.x;
+    let denom = max(t, 1.0);
+    let rgb = (img.rgb * t + in.color.rgb * max(0.0, 1.0 - t)) / denom;
+    return vec4<f32>(rgb, denom * in.color.a);
   }
   // Coverage gamma thickens light-on-dark AA, which a linear-correct alpha
   // blend (sRGB framebuffer) otherwise renders too thin/spindly.

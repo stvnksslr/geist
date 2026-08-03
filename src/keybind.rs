@@ -26,12 +26,26 @@ pub struct Chord {
     pub code: KeyCode,
 }
 
-/// The app keymap: an ordered list of chord → action bindings. Later entries win
+/// What a key press means, given the keys already pressed in this sequence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Lookup {
+    /// A complete binding: run this.
+    Action(Action),
+    /// A *prefix* of one or more longer bindings — the leader of a sequence.
+    /// Consume the key and wait for the next one.
+    Pending,
+    /// Bound to nothing.
+    None,
+}
+
+/// The app keymap: an ordered list of *sequence* → action bindings. A plain
+/// `ctrl+shift+t` is simply a sequence of length one, so single chords and
+/// multi-key sequences (`ctrl+a>n`) share one lookup path. Later entries win
 /// (config overrides are appended after the defaults), so lookup scans in
 /// reverse.
 #[derive(Clone, Debug)]
 pub struct Keymap {
-    binds: Vec<(Chord, Action)>,
+    binds: Vec<(Vec<Chord>, Action)>,
 }
 
 impl Default for Keymap {
@@ -43,26 +57,59 @@ impl Default for Keymap {
 }
 
 impl Keymap {
-    /// The action bound to `chord`, if any (most-recently-set wins).
+    /// The action bound to a single `chord`, if any (most-recently-set wins).
+    ///
+    /// Only matches bindings that are *complete* at one chord — the leader of a
+    /// sequence returns `None` here. Callers that need to know about leaders
+    /// must use [`Self::lookup_seq`].
     pub fn lookup(&self, chord: &Chord) -> Option<Action> {
-        self.binds
-            .iter()
-            .rev()
-            .find(|(c, _)| c == chord)
-            .map(|(_, a)| *a)
-    }
-
-    /// Bind `chord` to `action`, replacing any existing binding for that chord.
-    fn set(&mut self, chord: Chord, action: Action) {
-        match self.binds.iter_mut().find(|(c, _)| *c == chord) {
-            Some(slot) => slot.1 = action,
-            None => self.binds.push((chord, action)),
+        match self.lookup_seq(std::slice::from_ref(chord)) {
+            Lookup::Action(a) => Some(a),
+            _ => None,
         }
     }
 
-    /// Remove any binding for `chord` (Ghostty's `unbind`).
-    fn unset(&mut self, chord: &Chord) {
-        self.binds.retain(|(c, _)| c != chord);
+    /// Resolve a whole key sequence.
+    ///
+    /// An exact binding wins over being a prefix, so `ctrl+a=x` alongside
+    /// `ctrl+a>n=y` runs `x` immediately rather than waiting forever for a
+    /// second key that can never arrive — the same precedence a shell gives an
+    /// exact match.
+    pub fn lookup_seq(&self, keys: &[Chord]) -> Lookup {
+        if keys.is_empty() {
+            return Lookup::None;
+        }
+        if let Some((_, a)) = self.binds.iter().rev().find(|(seq, _)| seq == keys) {
+            return Lookup::Action(*a);
+        }
+        if self
+            .binds
+            .iter()
+            .any(|(seq, _)| seq.len() > keys.len() && &seq[..keys.len()] == keys)
+        {
+            return Lookup::Pending;
+        }
+        Lookup::None
+    }
+
+    /// Whether `chord` begins any binding — a complete one *or* a sequence.
+    /// This is what tells the PTY path to swallow a leader like `ctrl+a`, which
+    /// on its own is bound to nothing.
+    pub fn starts_binding(&self, chord: &Chord) -> bool {
+        !matches!(self.lookup_seq(std::slice::from_ref(chord)), Lookup::None)
+    }
+
+    /// Bind `seq` to `action`, replacing any existing binding for it.
+    fn set(&mut self, seq: Vec<Chord>, action: Action) {
+        match self.binds.iter_mut().find(|(s, _)| *s == seq) {
+            Some(slot) => slot.1 = action,
+            None => self.binds.push((seq, action)),
+        }
+    }
+
+    /// Remove any binding for `seq` (Ghostty's `unbind`).
+    fn unset(&mut self, seq: &[Chord]) {
+        self.binds.retain(|(s, _)| s != seq);
     }
 
     /// Build the keymap from the built-in defaults plus the user's `keybind`
@@ -72,17 +119,17 @@ impl Keymap {
     pub fn from_config(overrides: &[(String, String)]) -> Self {
         let mut km = Self::default();
         for (trigger, action) in overrides {
-            let Some(chord) = parse_chord(trigger) else {
+            let Some(seq) = parse_sequence(trigger) else {
                 eprintln!("giest: ignoring keybind with unparseable trigger '{trigger}'");
                 continue;
             };
             let a = action.trim();
             if a.eq_ignore_ascii_case("unbind") || a.eq_ignore_ascii_case("ignore") {
-                km.unset(&chord);
+                km.unset(&seq);
                 continue;
             }
             match Action::from_name(a) {
-                Some(act) => km.set(chord, act),
+                Some(act) => km.set(seq, act),
                 None => eprintln!("giest: ignoring keybind to unknown action '{a}'"),
             }
         }
@@ -90,9 +137,19 @@ impl Keymap {
     }
 }
 
+/// Parse a `>`-separated key sequence like `ctrl+a>n` into its chords.
+///
+/// A trigger with no `>` yields a one-element sequence, which is why the rest of
+/// the keymap needs no special case for plain chords. Returns `None` if any
+/// chord fails to parse or the sequence is empty.
+pub fn parse_sequence(s: &str) -> Option<Vec<Chord>> {
+    let seq: Option<Vec<Chord>> = s.split('>').map(|part| parse_chord(part.trim())).collect();
+    seq.filter(|v: &Vec<Chord>| !v.is_empty())
+}
+
 /// The built-in default bindings, mirroring the host shortcuts giest has always
 /// had. Every trigger here parses and sits inside an app-reserved namespace.
-fn default_binds() -> Vec<(Chord, Action)> {
+fn default_binds() -> Vec<(Vec<Chord>, Action)> {
     const DEFAULTS: &[(&str, Action)] = &[
         ("ctrl+shift+t", Action::NewTab),
         // Ghostty's non-Darwin default for `new_window`.
@@ -132,10 +189,18 @@ fn default_binds() -> Vec<(Chord, Action)> {
         ("ctrl+shift+tab", Action::PrevTab),
         ("ctrl+shift+up", Action::JumpToPrompt(-1)),
         ("ctrl+shift+down", Action::JumpToPrompt(1)),
+        // Ghostty's non-Darwin scrollback bindings. These live here rather than
+        // in `decide_key` so that `keybind = shift+home=unbind` actually works:
+        // an unbind removes a keymap entry, so a key handled only by a
+        // hardcoded branch could be *re*bound but never turned off.
+        ("shift+pageup", Action::ScrollPageUp),
+        ("shift+pagedown", Action::ScrollPageDown),
+        ("shift+home", Action::ScrollToTop),
+        ("shift+end", Action::ScrollToBottom),
     ];
     DEFAULTS
         .iter()
-        .filter_map(|(t, a)| parse_chord(t).map(|c| (c, *a)))
+        .filter_map(|(t, a)| parse_chord(t).map(|c| (vec![c], *a)))
         .collect()
 }
 
@@ -235,6 +300,226 @@ mod tests {
         parse_chord(s).unwrap_or_else(|| panic!("chord {s:?} should parse"))
     }
 
+    fn seq(s: &str) -> Vec<Chord> {
+        parse_sequence(s).unwrap_or_else(|| panic!("sequence {s:?} should parse"))
+    }
+
+    /// A keymap with one two-key sequence bound, for the state-machine tests.
+    fn with_sequence() -> Keymap {
+        Keymap::from_config(&[("ctrl+a>n".into(), "new_tab".into())])
+    }
+
+    #[test]
+    fn newly_wired_ghostty_actions_parse() {
+        for (name, want) in [
+            ("clear_screen", Action::ClearScreen),
+            ("copy_title_to_clipboard", Action::CopyTitle),
+            ("toggle_readonly", Action::ToggleReadonly),
+            ("prompt_tab_title", Action::PromptTabTitle),
+            ("quit", Action::Quit),
+        ] {
+            assert_eq!(Action::from_name(name), Some(want), "{name}");
+            assert_eq!(want.name(), name, "name() must round-trip");
+        }
+        // Ghostty's alias for quit-by-closing-everything.
+        assert_eq!(Action::from_name("close_all_windows"), Some(Action::Quit));
+        // giest's splits are always 50/50, so this is accepted as a no-op —
+        // binding it must not log "unknown action" at a user who can't act on it.
+        assert!(Action::from_name("equalize_splits").is_some());
+    }
+
+    #[test]
+    fn parameterised_actions_parse_and_clamp() {
+        assert_eq!(Action::from_name("move_tab:1"), Some(Action::MoveTab(1)));
+        assert_eq!(Action::from_name("move_tab:-2"), Some(Action::MoveTab(-2)));
+        assert_eq!(Action::from_name("move_tab:x"), None);
+
+        assert_eq!(Action::from_name("set_font_size:14"), Some(Action::SetFontSize(14)));
+        // Ghostty's parameter is a float; giest's font size is whole points, so
+        // round rather than reject — 13.5 meaning 14 beats doing nothing.
+        assert_eq!(Action::from_name("set_font_size:13.5"), Some(Action::SetFontSize(14)));
+        assert_eq!(Action::from_name("set_font_size:0"), None);
+
+        assert_eq!(Action::from_name("scroll_page_lines:-5"), Some(Action::ScrollLines(-5)));
+        // Stored x100 so `Action` stays `Copy + Eq` without carrying a float.
+        assert_eq!(
+            Action::from_name("scroll_page_fractional:0.5"),
+            Some(Action::ScrollPageFraction(50))
+        );
+        assert_eq!(
+            Action::from_name("scroll_page_fractional:-1"),
+            Some(Action::ScrollPageFraction(-100))
+        );
+
+        // Every one round-trips through `name()`, which is what makes a config
+        // written by giest re-readable by giest.
+        for a in [
+            Action::MoveTab(-2),
+            Action::SetFontSize(14),
+            Action::ScrollLines(-5),
+            Action::ScrollPageFraction(50),
+        ] {
+            assert_eq!(Action::from_name(&a.name()), Some(a), "{}", a.name());
+        }
+    }
+
+    #[test]
+    fn window_toggle_actions_use_ghosttys_names() {
+        // The names are the compatibility surface: a Ghostty config must bind.
+        for (name, want) in [
+            ("toggle_maximize", Action::ToggleMaximize),
+            ("toggle_window_float_on_top", Action::ToggleFloatOnTop),
+            ("toggle_background_opacity", Action::ToggleBackgroundOpacity),
+        ] {
+            assert_eq!(Action::from_name(name), Some(want), "{name}");
+            assert_eq!(want.name(), name, "name() must round-trip");
+        }
+    }
+
+    #[test]
+    fn write_file_actions_parse_and_round_trip() {
+        use crate::writefile::{WriteAction, WriteScope};
+
+        // All three scopes × all three path actions.
+        for (name, scope) in [
+            ("write_scrollback_file", WriteScope::Scrollback),
+            ("write_screen_file", WriteScope::Screen),
+            ("write_selection_file", WriteScope::Selection),
+        ] {
+            for act in [WriteAction::Copy, WriteAction::Paste, WriteAction::Open] {
+                let spec = format!("{name}:{}", act.name());
+                let parsed = Action::from_name(&spec)
+                    .unwrap_or_else(|| panic!("{spec} should parse"));
+                assert_eq!(parsed, Action::WriteFile(scope, act));
+                assert_eq!(parsed.name(), spec, "name() must round-trip");
+            }
+        }
+
+        // The parameter is required: Ghostty has no default, and inventing one
+        // would make a typo silently do something other than what was written.
+        assert_eq!(Action::from_name("write_screen_file"), None);
+        assert_eq!(Action::from_name("write_screen_file:"), None);
+        assert_eq!(Action::from_name("write_screen_file:email"), None);
+        assert_eq!(Action::from_name("write_nonsense_file:copy"), None);
+    }
+
+    #[test]
+    fn parses_a_multi_key_sequence() {
+        let s = seq("ctrl+a>n");
+        assert_eq!(s.len(), 2);
+        assert!(s[0].mods.ctrl && s[0].code == KeyCode::A);
+        assert!(!s[1].mods.ctrl && s[1].code == KeyCode::N);
+
+        // A plain chord is a one-element sequence — that is what lets single
+        // binds and sequences share one lookup path.
+        assert_eq!(seq("ctrl+shift+t").len(), 1);
+        // Whitespace around the separator is tolerated.
+        assert_eq!(seq("ctrl+a > n").len(), 2);
+        // Three keys work as well as two.
+        assert_eq!(seq("ctrl+a>b>c").len(), 3);
+        // A malformed element rejects the whole trigger rather than binding a
+        // truncated prefix, which would silently steal a key.
+        assert!(parse_sequence("ctrl+a>").is_none());
+        assert!(parse_sequence(">n").is_none());
+        assert!(parse_sequence("ctrl+a>nonsensekey").is_none());
+    }
+
+    #[test]
+    fn a_sequence_resolves_one_key_at_a_time() {
+        let km = with_sequence();
+        let a = chord("ctrl+a");
+        let n = chord("n");
+
+        // The leader alone is not an action — it is a promise of one.
+        assert_eq!(km.lookup_seq(&[a]), Lookup::Pending);
+        assert_eq!(km.lookup(&a), None, "a leader must not resolve as an action");
+        // …and completing it runs the binding.
+        assert_eq!(km.lookup_seq(&[a, n]), Lookup::Action(Action::NewTab));
+        // A wrong second key is a dead end, not a partial match.
+        assert_eq!(km.lookup_seq(&[a, chord("x")]), Lookup::None);
+        // The second key on its own means nothing.
+        assert_eq!(km.lookup_seq(&[n]), Lookup::None);
+    }
+
+    #[test]
+    fn a_leader_is_reserved_from_the_shell() {
+        // The whole feature hinges on this: `ctrl+a` is bound to no action, so a
+        // plain `lookup` says "not ours" and the shell would receive it — and
+        // the sequence would never begin.
+        let km = with_sequence();
+        assert!(km.starts_binding(&chord("ctrl+a")));
+        assert!(!km.starts_binding(&chord("ctrl+q")));
+        // A complete single binding still counts as starting one.
+        assert!(km.starts_binding(&chord("ctrl+shift+t")));
+    }
+
+    #[test]
+    fn an_exact_binding_beats_being_a_prefix() {
+        // With both `ctrl+a` and `ctrl+a>n` bound, the bare `ctrl+a` must fire
+        // immediately rather than hang waiting for a second key.
+        let km = Keymap::from_config(&[
+            ("ctrl+a>n".into(), "new_tab".into()),
+            ("ctrl+a".into(), "new_window".into()),
+        ]);
+        assert_eq!(km.lookup_seq(&[chord("ctrl+a")]), Lookup::Action(Action::NewWindow));
+        // The longer binding becomes unreachable, which is the user's choice to
+        // make — but it must not break lookup.
+        assert_eq!(
+            km.lookup_seq(&[chord("ctrl+a"), chord("n")]),
+            Lookup::Action(Action::NewTab)
+        );
+    }
+
+    #[test]
+    fn sequences_can_be_rebound_and_unbound() {
+        let km = Keymap::from_config(&[
+            ("ctrl+a>n".into(), "new_tab".into()),
+            ("ctrl+a>n".into(), "new_window".into()),
+        ]);
+        assert_eq!(
+            km.lookup_seq(&[chord("ctrl+a"), chord("n")]),
+            Lookup::Action(Action::NewWindow),
+            "the later binding must win"
+        );
+
+        let km = Keymap::from_config(&[
+            ("ctrl+a>n".into(), "new_tab".into()),
+            ("ctrl+a>n".into(), "unbind".into()),
+        ]);
+        assert_eq!(km.lookup_seq(&[chord("ctrl+a"), chord("n")]), Lookup::None);
+        // …and with the only sequence gone, the leader is released back to the
+        // shell rather than being swallowed forever.
+        assert!(!km.starts_binding(&chord("ctrl+a")));
+    }
+
+    #[test]
+    fn unbinding_one_branch_keeps_the_others() {
+        let km = Keymap::from_config(&[
+            ("ctrl+a>n".into(), "new_tab".into()),
+            ("ctrl+a>w".into(), "close_surface".into()),
+            ("ctrl+a>n".into(), "unbind".into()),
+        ]);
+        assert_eq!(km.lookup_seq(&[chord("ctrl+a"), chord("n")]), Lookup::None);
+        assert!(matches!(
+            km.lookup_seq(&[chord("ctrl+a"), chord("w")]),
+            Lookup::Action(_)
+        ));
+        assert!(km.starts_binding(&chord("ctrl+a")), "the leader still leads somewhere");
+    }
+
+    #[test]
+    fn defaults_are_unaffected_by_sequence_support() {
+        // Every built-in is a one-key binding and must still resolve in one
+        // press, with no pending state.
+        let km = Keymap::default();
+        assert_eq!(
+            km.lookup_seq(&[chord("ctrl+shift+t")]),
+            Lookup::Action(Action::NewTab)
+        );
+        assert_eq!(km.lookup(&chord("ctrl+shift+t")), Some(Action::NewTab));
+        assert_eq!(km.lookup_seq(&[]), Lookup::None);
+    }
+
     #[test]
     fn parses_modifiers_and_key() {
         let c = chord("ctrl+shift+t");
@@ -320,9 +605,33 @@ mod tests {
             Action::ReloadConfig,
             Action::ToggleSplitZoom,
             Action::ToggleFullscreen,
+            Action::ScrollToRow(200),
         ] {
             assert_eq!(Action::from_name(&a.name()), Some(a), "roundtrip {a:?}");
         }
+    }
+
+    /// The scrollback keys are keymap entries rather than a hardcoded branch in
+    /// `decide_key`, which is what makes them *unbindable* — see below.
+    #[test]
+    fn default_keymap_binds_the_scrollback_keys() {
+        let km = Keymap::default();
+        assert_eq!(km.lookup(&chord("shift+pageup")), Some(Action::ScrollPageUp));
+        assert_eq!(
+            km.lookup(&chord("shift+pagedown")),
+            Some(Action::ScrollPageDown)
+        );
+        assert_eq!(km.lookup(&chord("shift+home")), Some(Action::ScrollToTop));
+        assert_eq!(km.lookup(&chord("shift+end")), Some(Action::ScrollToBottom));
+    }
+
+    #[test]
+    fn config_unbind_removes_shift_home() {
+        let overrides = vec![("shift+home".to_string(), "unbind".to_string())];
+        assert_eq!(
+            Keymap::from_config(&overrides).lookup(&chord("shift+home")),
+            None
+        );
     }
 
     #[test]

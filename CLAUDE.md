@@ -67,10 +67,33 @@ fallback engine without app changes:
 - **`blur.rs`** — Windows DWM backdrop (acrylic/mica) for `background-blur`: the documented Win11
   `DWMWA_SYSTEMBACKDROP_TYPE`, falling back to the undocumented `SetWindowCompositionAttribute` accent
   policy (resolved via `GetProcAddress`, never linked) on Win10, then to nothing.
+- **`osc_notify.rs`** — side-scanner for OSC 9 / OSC 777 desktop-notification requests (the engine
+  drops them, like OSC 7). **`notify.rs`** — shows them as Windows toasts via the notification-area
+  balloon API; WinRT toasts would need a registered AppUserModelID (i.e. a Start Menu shortcut).
+  **`shader.rs`** — `custom-shader`: Shadertoy GLSL → naga IR → WGSL. **The prefix's oddities are
+  all forced by naga, not style**: no combined `sampler2D` (Vulkan-style `texture2D`+`sampler`
+  re-formed by a `#define`), the entry point appended as a *suffix* because naga's IR needs
+  functions in dependency order, `#version 450` (only 440/450/460 parse), and `vec4 iChannelTime`
+  rather than `float[4]` because WebGPU requires a 16-byte array stride in uniform space — a rule
+  naga's own validator does **not** enforce, so `tests/shader_gpu.rs` compiles on a *real device*
+  to catch it. The render pipeline isn't built yet; see GAP.md.
+  **`writefile.rs`** — `write_scrollback/screen/selection_file`: capture terminal text to a temp
+  file. Its `copy`/`paste`/`open` parameter acts on the file **path**, not the contents (Ghostty's
+  design); `paste` still goes through `Session::paste_str` so the paste gate holds.
+  **`taskbar.rs`** — `ITaskbarList3` progress on the taskbar button, for ConEmu's `OSC 9;4`.
+  windows-sys ships no COM interfaces, so the vtable prefix is declared by hand; getting a slot
+  wrong fails silently, which is what `taskbar::available()` and its ignored test exist to catch.
+  **`osc133.rs`** — side-scanner for the OSC 133 `C`/`D` *command* marks. The engine applies the
+  `A`/`B` prompt marks to the screen (that's what `cursor_at_prompt` reads), but `D`'s exit code
+  never lands on a cell, so `notify-on-command-finish` has to read it off the stream.
+- **`bgimage.rs`** — `background-image`: PNG/JPEG decode (format sniffed from magic bytes) plus the
+  pure fit/position geometry. Ghostty computes that geometry per vertex in its shader; giest does it
+  on the CPU so it can be table-tested, and the shader (`render` mode 4) just samples.
 - **`config.rs`** — Ghostty-format config (`key = value` lines, kebab-case keys, unquoted
   colors, repeatable `palette`) from `%APPDATA%\giest\config` (override with `GIEST_CONFIG`);
   defines the full ANSI 16 + 256-color palette. **`profiles.rs`** — shell profiles (pwsh/powershell/cmd/wsl).
-  **`osc52.rs`** — side-stream parser for OSC 52 clipboard-set.
+  **`osc52.rs`** — side-stream parser for OSC 52 clipboard set/query (parsing only; the
+  permission policy lives in `session.rs`).
 
 ## Non-obvious gotchas
 
@@ -90,8 +113,23 @@ fallback engine without app changes:
   `is_copy_command` ignores Shift, so both Ctrl+C and Ctrl+Shift+C arrive as `Event::Copy`. Copy/paste
   logic must live in the `Event::Copy`/`Cut`/`Paste` arms, not the Key handler (that would be dead code).
   Windows-Terminal semantics: `Event::Copy` copies the selection if one exists, else sends `0x03` (SIGINT).
-  OSC 52 clipboard *write* runs from `pump_pty` (no ctx) via `arboard` in `osc52.rs`; OSC 52 read/query
-  is intentionally unanswered to avoid leaking the clipboard to terminal output.
+  OSC 52 runs from `pump_pty` (no ctx) via `arboard`; `osc52.rs` only *parses*, and
+  `Session::handle_osc52` applies `clipboard-write`/`clipboard-read`.
+- **Every paste must go through `Session::paste_str`.** It is the one gate that applies
+  `clipboard-paste-protection`, and unsafe text becomes a pending `ClipboardRequest` instead of
+  reaching the PTY. `encode_paste` therefore has exactly one caller (the private `write_paste`);
+  a new paste path that calls the engine directly would silently bypass the protection. The
+  request lives on the **`Session`**, not the app, deliberately — routing it by pane index would
+  hit the stale-index trap below.
+- **`$?` must be the first statement in the PowerShell prompt hook.** It reflects only the
+  immediately preceding command, so *any* statement above it — even an assignment — resets it and
+  every command reports success. The exit code needs `$?` **and** `$LASTEXITCODE`: `$?` alone misses
+  a native program's real code, `$LASTEXITCODE` alone misses a failed cmdlet. A test in
+  `profiles.rs` pins the ordering, because the hook ships as base64 inside `-EncodedCommand` where a
+  mistake produces no diagnostic at all — the marks simply never appear.
+- **A new modal must be added to *two* gates, not one.** `App::modal_open` (shortcuts + font zoom)
+  and the `palette_open` local in `render_active` (terminal keys, pane mouse, scrollbar) are
+  separate lists, and missing either means the dialog is up while the terminal still takes input.
 - **OSC 7 (working dir) must be side-scanned — `Terminal::pwd()` is always empty.** libghostty-vt's
   *read-only* stream parses OSC 7 but discards `report_pwd` (it never reaches the terminal's `pwd`), so
   the binding's `pwd()` returns `None` even after a valid report (unlike `title()`, which works). So a new
@@ -113,6 +151,25 @@ fallback engine without app changes:
   `src/win/psuedocon.rs:31` under `#[allow(dead_code)]` and never passes (`:83-90` sends only
   `RESIZE_QUIRK | WIN32_INPUT_MODE`); using it means vendoring and patching portable-pty, and it
   changes stream handling globally. See GAP.md's kitty-graphics section.
+  **`tests/conpty_passthrough.rs` is the probe, made permanent** — an ignored host test that spawns
+  a real shell and asserts which sequences survive (OSC 7/9/52/133/777 do; APC does not). Run it
+  *first* for any new escape-sequence work: `cargo test --test conpty_passthrough -- --ignored`.
+  The APC case is asserted **inverted** — it fails if a future Windows build stops stripping APC,
+  which is how we'd learn kitty graphics is unblocked.
+- **A PTY harness with no VT engine must answer `ESC[6n` itself, or it gets nothing.** ConPTY opens
+  by requesting a cursor-position report and withholds the child's output until it is answered; the
+  child then blocks on the full pipe and never exits either. The app never notices because the
+  engine auto-replies via `take_responses` — but any test that drives `Pty` directly must write
+  `ESC[1;1R` back, and must not wait on process exit alone. `conpty_throughput.rs` does neither and
+  hangs until its timeout; `conpty_passthrough.rs` does both.
+- **OSC 9 is overloaded, and the disambiguation is a faithful copy, not tidy code.** ConEmu claims
+  `9;1`–`9;9`; only a payload that *doesn't* match one is an iTerm2 notification. `osc_notify.rs`'s
+  `parse_osc9` mirrors Ghostty's `osc9.zig` branch for branch **including its fall-through**: a
+  payload that begins a ConEmu shape but doesn't complete it is a notification (`9;4;1;50` is a
+  progress report; `9;4` is a notification whose body is the text `4`). Do not "simplify" it into a
+  leading-digit test — that would swallow every message starting with a digit. Notifications and
+  `9;4` taskbar progress therefore share **one** parser and one module: they are the same decision,
+  and two parsers would be two copies of it free to drift.
 - **Kitty graphics: the borrow the compiler won't catch for you.**
   `PlacementIterator::update` returns an iteration whose lifetime is tied to the *iterator*, not to
   the `Graphics` handle — so nothing stops a `vt_write` mid-walk from invalidating every pointer it
@@ -169,6 +226,36 @@ fallback engine without app changes:
   color, which under transparency composites to `1-(1-a)²` (a=0.5 reads as 0.75). Cells on the *default*
   background emit no quad at all (`render::bg_alpha`, mirroring Ghostty), so that one fill is what shows
   through them — any second translucent fill over the same area is a bug.
+- **A keybind *leader* is bound to nothing, so `Keymap::lookup` won't reserve it.** In
+  `ctrl+a>n=new_tab`, `ctrl+a` has no action of its own — a plain lookup returns `None`, the key
+  reaches the shell, and the sequence never starts. `session::decide_key` must use
+  `starts_binding` (exact match **or** prefix). Silent failure, and `ctrl+a` is the common case.
+- **A custom shader can only see what the *renderer* drew.** Its input is an offscreen texture built
+  in `prepare`; egui's own painting never reaches it. Since cells on the default background emit no
+  quad (see the rule below), the window fill has to come from `TermFrame::window_fill` whenever
+  shaders are active, or the shader samples transparent black and the screen goes dark. Same move
+  `background-image` makes, same reason. Also: the offscreen pass **must** live in `prepare` — it is
+  the only hook with a `CommandEncoder`, and `paint`'s render pass cannot be nested.
+- **Don't "fix" the custom-shader Y orientation.** Shadertoy is Y-up for `fragCoord` *and* channel
+  textures; WGSL is Y-down for both. Flipping `gl_FragCoord` looks like the fix and is not — in a
+  fullscreen post-process the fragment writes to the pixel it is at, so the flip moves the output
+  relative to the input and the screen renders upside down (this was built, measured, and reverted).
+  Y-down is also what Ghostty does, so shaders written for it match.
+- **`background-image` *replaces* the window fill; it does not sit on top of it.** With an image
+  configured, `render_active` skips its `rect_filled` entirely and the mode-4 shader paints the
+  background color *and* the image in one quad (Ghostty's bg-image pass does the same). This is
+  forced by the rule above, not a style choice: painting both would put two translucent layers over
+  the same rect. Two more non-obvious pieces: the quad is drawn **before** the per-pane scissor loop
+  in `paint` (a pane scissor is the *grid box*, so it would clip away the padding band and the split
+  gutters), and its texture can only be created in `prepare` — `paint` gets `&CallbackResources` and
+  no device.
+- **One decoded `background-image` `Arc` per path, process-wide (`app.rs::BG_IMAGE_CACHE`).** eframe
+  keeps a single `RenderState`, so there is exactly *one* bg-image texture for every window, and the
+  renderer decides whether to re-upload it by `Arc::ptr_eq`. Two windows each holding their own
+  `Arc` of the same file would each see the other's texture as foreign and re-upload it **every
+  frame, forever**. The cache is what makes that impossible; `Window::sibling` clones the parent's
+  `Arc` for the same reason. (The pointer comparison is sound only because `GpuResources` *holds*
+  the `Arc` it uploaded — a freed allocation's address could otherwise be reused.)
 - **`Cell::bg_explicit` polarity is deliberate.** `false` (the `Default`) means "draw no background
   quad". Cells the VT iterators never yield get blanked to the default, so inverting the flag's sense
   (`bg_is_default`) would make every one of them paint opaque black over a translucent window.
@@ -212,3 +299,33 @@ false "it works" conclusions on exactly these tasks.
   backdrop near the edges. Don't trust a single pixel's *appearance*; solve the blend.
 - Effect sizes can be below the visible threshold (e.g. 8px padding read as "flush"). When a change
   "should" be visible but isn't, suspect the magnitude before re-debugging the mechanism.
+
+### Solving a capture instead of eyeballing it
+
+A capture *can* be proof when the expected pixel value is **computed rather than recognised** — the
+same discipline as the transparency probe above. This worked for `background-image`: render a
+known image with a known fit, then assert the exact colour and the exact band edges. It caught
+nothing (the feature was right) but it would have caught a wrong texture format, a mirrored UV, or
+an off-centre anchor, none of which a human glance reliably distinguishes.
+
+Two traps make every such measurement silently wrong, and both cost real time here:
+
+- **The probing process must be per-monitor DPI aware** (`SetProcessDpiAwarenessContext(-4)`).
+  Otherwise Windows *virtualises* `GetClientRect` and `PrintWindow` for it: at 125% scaling a
+  1200×750 client is reported as 960×600 and the capture is silently downscaled by 0.8, so every
+  measured edge is off by a fifth and none of the arithmetic closes.
+- **`PrintWindow` needs `PW_CLIENTONLY | PW_RENDERFULLCONTENT` (`3`).** With `2` alone it renders the
+  *whole* window — title bar and border included — so client-relative coordinates are shifted by an
+  unknown amount.
+
+Pick discriminating colours: mid-grey (`#808080`) moves to ~`#37` or ~`#BC` under a wrong sRGB
+transform, while saturated primaries are invariant and pass either way. And derive the terminal
+area's top from the tab strip's height, **not** from where the background colour first appears —
+PowerShell paints its first row with an explicit background, so that row is opaque and sits between
+the two.
+
+The auto-hiding scrollbar can be captured too: park the pointer with `SetCursorPos` inside the 4-pt
+hot band at the pane's right edge (2 px in — 6 px is already outside it), nudge *vertically* so the
+nudge can't leave the band, and restore the cursor afterwards. Give the pane real scrollback with a
+`command =` pointing at a `.cmd` that prints a few hundred lines and then blocks on `pause`; the
+`command` key names a **program, not a command line**, so args have to live in a script.

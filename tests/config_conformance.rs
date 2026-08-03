@@ -12,7 +12,10 @@
 //! keys, unquoted values, `#` comment lines (no inline comments), repeatable
 //! keys (e.g. `palette`), and an empty value resets a key to its default.
 
-use giest::config::{Config, MiddleClickAction, RightClickAction};
+use giest::config::{
+    BackgroundImageFit, BackgroundImagePosition, ClipboardAccess, Config, MiddleClickAction,
+    RightClickAction,
+};
 use giest::engine::Rgb;
 
 /// Parse a Ghostty-format body over the built-in defaults.
@@ -171,6 +174,133 @@ fn copy_on_select_enum_values() {
     assert!(cfg("copy-on-select = clipboard").copy_on_select);
     // Windows has no primary selection, so `primary` behaves like the others.
     assert!(cfg("copy-on-select = primary").copy_on_select);
+}
+
+#[test]
+fn background_image_key_family() {
+    // A Ghostty config block, verbatim from its documented value names.
+    let c = cfg(
+        "background-image = wallpaper.png\n\
+         background-image-opacity = 0.4\n\
+         background-image-position = bottom-right\n\
+         background-image-fit = cover\n\
+         background-image-repeat = true\n",
+    );
+    assert_eq!(c.background_image.as_deref(), Some("wallpaper.png"));
+    assert_eq!(c.background_image_opacity, 0.4);
+    assert_eq!(
+        c.background_image_position,
+        BackgroundImagePosition::BottomRight
+    );
+    assert_eq!(c.background_image_fit, BackgroundImageFit::Cover);
+    assert!(c.background_image_repeat);
+
+    // Defaults with the key family absent.
+    let d = cfg("");
+    assert_eq!(d.background_image, None);
+    assert_eq!(d.background_image_fit, BackgroundImageFit::Contain);
+    assert_eq!(d.background_image_position, BackgroundImagePosition::Center);
+    assert_eq!(d.background_image_opacity, 1.0);
+    assert!(!d.background_image_repeat);
+}
+
+#[test]
+fn desktop_notifications_defaults_on() {
+    assert!(cfg("").desktop_notifications);
+    assert!(!cfg("desktop-notifications = false").desktop_notifications);
+    assert!(!cfg("desktop-notifications = no").desktop_notifications);
+    // Empty resets to the default, like every other key.
+    assert!(cfg("desktop-notifications = false\ndesktop-notifications =").desktop_notifications);
+}
+
+#[test]
+fn mouse_keys_match_ghostty_defaults() {
+    let d = cfg("");
+    assert!(!d.mouse_hide_while_typing);
+    assert!(d.mouse_reporting);
+    assert!(!d.focus_follows_mouse);
+    assert_eq!(d.mouse_scroll_multiplier.precision, 1.0);
+    assert_eq!(d.mouse_scroll_multiplier.discrete, 3.0);
+    assert!(d.scroll_to_bottom.keystroke && !d.scroll_to_bottom.output);
+
+    assert!(cfg("mouse-hide-while-typing = true").mouse_hide_while_typing);
+    assert!(!cfg("mouse-reporting = false").mouse_reporting);
+    assert!(cfg("focus-follows-mouse = true").focus_follows_mouse);
+}
+
+#[test]
+fn custom_shader_is_repeatable_and_ordered() {
+    // Ghostty runs multiple shaders in the order given, so the list must keep
+    // its order — a reversed chain silently produces a different image.
+    let c = cfg("custom-shader = a.glsl\ncustom-shader = b.glsl\n");
+    assert_eq!(c.custom_shaders, vec!["a.glsl".to_string(), "b.glsl".to_string()]);
+    // An empty value resets the whole list, like `font-feature`.
+    assert!(
+        cfg("custom-shader = a.glsl\ncustom-shader =")
+            .custom_shaders
+            .is_empty()
+    );
+    assert!(cfg("").custom_shaders.is_empty());
+}
+
+#[test]
+fn custom_shader_animation_values() {
+    use giest::config::CustomShaderAnimation as A;
+    assert_eq!(cfg("").custom_shader_animation, A::True);
+    assert_eq!(cfg("custom-shader-animation = false").custom_shader_animation, A::False);
+    assert_eq!(cfg("custom-shader-animation = always").custom_shader_animation, A::Always);
+    // The focus gate: `true` animates only when focused, `always` regardless.
+    assert!(A::True.animates(true));
+    assert!(!A::True.animates(false));
+    assert!(A::Always.animates(false));
+    assert!(!A::False.animates(true));
+}
+
+#[test]
+fn progress_style_defaults_on() {
+    // Ghostty's key is a bool despite the name.
+    assert!(cfg("").progress_style);
+    assert!(!cfg("progress-style = false").progress_style);
+    assert!(cfg("progress-style = false\nprogress-style =").progress_style);
+}
+
+#[test]
+fn clipboard_permission_and_protection_keys() {
+    // Ghostty's defaults: reads ask, writes are allowed, the rest are on.
+    let d = cfg("");
+    assert_eq!(d.clipboard.read, ClipboardAccess::Ask);
+    assert_eq!(d.clipboard.write, ClipboardAccess::Allow);
+    assert!(d.clipboard.trim_trailing_spaces);
+    assert!(d.clipboard.paste_protection);
+    assert!(d.clipboard.paste_bracketed_safe);
+
+    assert_eq!(
+        cfg("clipboard-read = deny").clipboard.read,
+        ClipboardAccess::Deny
+    );
+    assert_eq!(
+        cfg("clipboard-write = ask").clipboard.write,
+        ClipboardAccess::Ask
+    );
+    assert_eq!(
+        cfg("clipboard-read = allow").clipboard.read,
+        ClipboardAccess::Allow
+    );
+    assert!(
+        !cfg("clipboard-paste-protection = false")
+            .clipboard
+            .paste_protection
+    );
+    assert!(
+        !cfg("clipboard-paste-bracketed-safe = false")
+            .clipboard
+            .paste_bracketed_safe
+    );
+    assert!(
+        !cfg("clipboard-trim-trailing-spaces = false")
+            .clipboard
+            .trim_trailing_spaces
+    );
 }
 
 #[test]

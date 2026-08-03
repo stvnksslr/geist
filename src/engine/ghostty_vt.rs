@@ -904,6 +904,37 @@ mod tests {
         assert_eq!(eng.hyperlink_at(10, 0), None);
     }
 
+    /// giest reconstructs the scrollbar's `{total, offset, len}` from
+    /// `scrollback_rows()` + the viewport height instead of calling the
+    /// binding's `Terminal::scrollbar()` (expensive at arbitrary pins, and its
+    /// integer `offset` can't carry a sub-line position). That's only valid if
+    /// the two agree — so compare them directly, and catch it here rather than
+    /// as a subtly skewed thumb if upstream ever changes the arithmetic.
+    #[test]
+    fn scrollbar_state_matches_the_reconstruction_from_scrollback_rows() {
+        const ROWS: u16 = 24;
+        let mut eng = GhosttyVtEngine::new(80, ROWS, 1000).unwrap();
+        for i in 0..200 {
+            eng.write(format!("line {i}\r\n").as_bytes());
+        }
+        let scrollback = eng.scrollback_rows();
+        assert!(scrollback > 0, "200 lines into a 24-row grid must scroll off");
+
+        let bar = eng.term.scrollbar().unwrap();
+        assert_eq!(bar.len as usize, ROWS as usize, "len is the viewport height");
+        assert_eq!(
+            bar.total as usize,
+            scrollback + ROWS as usize,
+            "total is scrollback plus the viewport"
+        );
+        // Parked at the live bottom, so the viewport starts at the last page.
+        assert_eq!(bar.offset as usize, scrollback);
+
+        // And it tracks the pin: scrolling up 10 lines moves `offset` by 10.
+        eng.scroll(-10);
+        assert_eq!(eng.term.scrollbar().unwrap().offset as usize, scrollback - 10);
+    }
+
     #[test]
     fn enter_key_encodes_carriage_return() {
         let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
@@ -921,6 +952,18 @@ mod tests {
         let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
         // Default: bracketed paste off → newlines become carriage returns.
         assert_eq!(eng.encode_paste("a\nb"), b"a\rb");
+    }
+
+    /// Paste protection needs the mode *before* encoding, so it reads it
+    /// through its own accessor rather than inferring it from the output.
+    #[test]
+    fn bracketed_paste_mode_is_reported() {
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        assert!(!eng.bracketed_paste(), "off until the program asks");
+        eng.write(b"\x1b[?2004h");
+        assert!(eng.bracketed_paste(), "DECSET 2004 enables it");
+        eng.write(b"\x1b[?2004l");
+        assert!(!eng.bracketed_paste(), "DECRST 2004 disables it");
     }
 
     #[test]
@@ -1497,6 +1540,10 @@ impl TerminalEngine for GhosttyVtEngine {
             }
             Err(_) => src.to_vec(),
         }
+    }
+
+    fn bracketed_paste(&self) -> bool {
+        self.term.mode(Mode::BRACKETED_PASTE).unwrap_or(false)
     }
 
     fn take_responses(&mut self) -> Vec<u8> {
