@@ -213,10 +213,9 @@ mod imp {
     }
 
     pub fn apply(hwnd: isize, blur: BackgroundBlur, tint: Rgb, opacity: f32) -> Backdrop {
-        // Rec. 601 luma — cheap and more than accurate enough to answer "is this
-        // a dark theme?". Half-intensity is the split.
-        let luma = 0.299 * tint.r as f32 + 0.587 * tint.g as f32 + 0.114 * tint.b as f32;
-        set_dark_mode(hwnd, luma < 128.0);
+        // The same predicate the chrome uses to pick its light/dark surfaces, so
+        // the title bar and the tab strip below it can never disagree.
+        set_dark_mode(hwnd, crate::theme::prefers_dark(tint));
 
 
         if !blur.enabled() {

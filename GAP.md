@@ -166,7 +166,10 @@ blur (Windows acrylic), `faint-opacity`, `cursor-opacity`, unfocused-split dimmi
 **Window / UI** — quick (dropdown) terminal w/ global hotkey; window/tab/split **state restore**;
 titlebar/decoration styles; settings UI; inspector; about dialog; custom app icons.
 *(fullscreen toggle, split zoom, tab drag-reorder, resize overlay, confirm-close-surface,
-**multi-window**, **scrollbar** — now done.)*
+**multi-window**, **scrollbar**, **`window-theme` + the chrome design system** (`theme.rs`:
+tab strip, palette, overlays and dialogs all derive their colors from
+`background`/`foreground`/`palette` instead of egui's defaults, and no longer follow the OS
+light/dark preference) — now done.)*
 
 **Input / keybinds** — key tables / leader sequences; the remaining ~60 keybind *actions* (write_*_file,
 set_*_title, toggle_*, send raw text/esc/csi, undo/redo, …). *(Config-driven binding + several actions
@@ -656,9 +659,12 @@ giest matches that. Notes where the implementation differs or is Windows-specifi
   `scroll_px` directly, bypassing the ease); the grid follows on the next frame, since input and
   scroll easing run before the scrollbar pass. Structurally the same as Ghostty's macOS scroller
   posting `scroll_to_row` to the core.
-- **At `window-padding-x < 12` the visible bar overlays the last column(s).** At the default 20 it
-  sits entirely inside the padding gutter, costing no columns. While hidden, only 4 pt is
-  interactive, and with hover-only sense — so a click at the right edge still reaches the terminal.
+- **The visible bar overlays the last column(s) at `window-padding-x < 14`**, which includes the
+  default of 2 (Ghostty's own). That is deliberate parity: Ghostty forces an overlay scroller, so the
+  bar floats over the grid rather than costing columns; the knob carries a 1 px background outline to
+  stay legible over text. Raise the padding past ~14 and it sits inside the gutter instead. While
+  hidden, only 4 pt is interactive, and with hover-only sense — so a click at the right edge still
+  reaches the terminal.
 - **Hidden while the program reports the mouse** (an alt-screen TUI has no scrollback, and the bar
   must not compete for the pointer). One bar per pane in splits, painted above the unfocused-split
   dim so it stays legible.

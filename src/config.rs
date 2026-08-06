@@ -483,6 +483,18 @@ pub enum BackgroundImagePosition {
     BottomRight,
 }
 
+/// Light/dark mode for the window chrome. Ghostty `window-theme`.
+///
+/// [`WindowTheme::Auto`] follows the configured `background`, so the chrome
+/// matches the terminal rather than the OS.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WindowTheme {
+    #[default]
+    Auto,
+    Dark,
+    Light,
+}
+
 /// Where the resize overlay sits within the pane. Ghostty
 /// `resize-overlay-position`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -556,6 +568,14 @@ pub struct Config {
     pub padding_x: f32,
     /// Logical-point padding above/below the grid. Ghostty `window-padding-y`.
     pub padding_y: f32,
+    /// Light/dark mode for the window *chrome* — the tab strip, the command
+    /// palette, the overlays and the dialogs. Ghostty `window-theme`.
+    ///
+    /// [`WindowTheme::Auto`] derives it from [`Self::bg`], which is what makes
+    /// the chrome match the terminal by default; the explicit modes override
+    /// that. Note giest never follows the *OS* theme — egui's default does, and
+    /// that is what used to render a light tab strip over a dark terminal.
+    pub window_theme: WindowTheme,
     /// Coverage gamma applied to text antialiasing in the glyph shader; values
     /// above 1 thicken light-on-dark text that linear blending renders too thin.
     /// giest-specific (`text-gamma`); Ghostty has no equivalent.
@@ -756,8 +776,14 @@ impl Default for Config {
             fg: Rgb::new(0xc5, 0xc8, 0xc6),
             bg: Rgb::new(0x10, 0x12, 0x18),
             palette: xterm_palette(GIEST_ANSI16),
-            padding_x: 20.0,
+            // Ghostty's own defaults. giest used to ship 20 here so the 12pt
+            // scrollbar could sit entirely inside the padding gutter, but that
+            // put a lopsided 20/2 frame around every pane. The bar is an overlay
+            // now (see the scrollbar metrics in `app.rs`), which is what Ghostty
+            // does too, so the padding no longer has to pay for it.
+            padding_x: 2.0,
             padding_y: 2.0,
+            window_theme: WindowTheme::Auto,
             text_gamma: 1.3,
             cursor: None,
             cursor_style: CursorShape::Block,
@@ -1091,6 +1117,19 @@ const SETTERS: &[(&str, Setter)] = &[
     }),
     ("window-padding-y", |c, v, d| {
         c.padding_y = padding(v, d.padding_y, c.padding_y)
+    }),
+    ("window-theme", |c, v, d| {
+        c.window_theme = match v.to_ascii_lowercase().as_str() {
+            "" => d.window_theme,
+            // Ghostty's `auto` means "match the terminal background", which is
+            // exactly what giest derives. `system` is accepted as its documented
+            // alias but treated the same: following the OS is what produced a
+            // light tab strip over a dark terminal.
+            "auto" | "system" => WindowTheme::Auto,
+            "dark" => WindowTheme::Dark,
+            "light" => WindowTheme::Light,
+            _ => c.window_theme,
+        }
     }),
     ("text-gamma", |c, v, d| {
         c.text_gamma = ratio(v, d.text_gamma, c.text_gamma, 0.5, 3.0)

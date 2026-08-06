@@ -15,6 +15,7 @@ use crate::keybind::{Chord, Keymap};
 use crate::render::{self, BgImageFrame, PaneFrame, TermFrame};
 use crate::scrollbar;
 use crate::session::{self, Session};
+use crate::theme;
 
 /// A tab: a binary tree of panes (`Node`) with one focused leaf (by id). Each
 /// split divides only the focused pane, so splits nest (like Ghostty) instead of
@@ -245,7 +246,7 @@ impl<T> Node<T> {
 
     /// Append each leaf's (id, payload, rect) to `out`, dividing `area` by each
     /// split's axis (with a gutter between children).
-    fn collect<'a>(&'a mut self, area: egui::Rect, out: &mut Vec<Leaf<'a, T>>) {
+    fn collect<'a>(&'a mut self, area: egui::Rect, ppp: f32, out: &mut Vec<Leaf<'a, T>>) {
         match self {
             Node::Leaf { id, payload } => out.push(Leaf {
                 id: *id,
@@ -257,11 +258,31 @@ impl<T> Node<T> {
                 first,
                 second,
             } => {
-                let (a, b) = split_rect(area, *vertical);
-                first.collect(a, out);
-                second.collect(b, out);
+                let (a, _, b) = split_rect(area, *vertical, ppp);
+                first.collect(a, ppp, out);
+                second.collect(b, ppp, out);
             }
             Node::Empty => {}
+        }
+    }
+
+    /// Append every split gutter's rect to `out`, using the same division as
+    /// [`collect`](Self::collect).
+    ///
+    /// Separate from `collect` — and immutable — so the caller can gather the
+    /// gutters *before* `collect` takes `&mut self` for the panes. The two
+    /// borrows are sequential, so neither needs to know about the other.
+    fn gutters(&self, area: egui::Rect, ppp: f32, out: &mut Vec<egui::Rect>) {
+        if let Node::Split {
+            vertical,
+            first,
+            second,
+        } = self
+        {
+            let (a, g, b) = split_rect(area, *vertical, ppp);
+            out.push(g);
+            first.gutters(a, ppp, out);
+            second.gutters(b, ppp, out);
         }
     }
 
@@ -387,6 +408,10 @@ pub struct Window {
     /// Current logical font size in points (adjusted at runtime with Ctrl +/-/0).
     font_points: f32,
     config: Config,
+    /// The chrome palette derived from `config`, cached so painting code can
+    /// reach for a named color instead of a literal. Rebuilt on config reload
+    /// alongside the egui `Style` (see [`crate::theme::install`]).
+    chrome: theme::Chrome,
     /// Available shell profiles and the default index, detected at startup.
     profiles: Vec<Profile>,
     default_profile: usize,
@@ -684,19 +709,121 @@ fn preview_text(text: &str, limit: usize) -> String {
     out
 }
 
+/// Lay out `text` with the characters at `matched` in `hit` and the rest in
+/// `base`.
+///
+/// `matched` holds **char** indices (that is what
+/// [`command::fuzzy_match_indices`] returns) while [`egui::text::LayoutJob`]
+/// sections are **byte** ranges, so they are mapped rather than used directly.
+/// Every command title is ASCII today — but `New Tab with <shell>` interpolates
+/// a detected profile name, which need not be, and a byte range landing mid-UTF-8
+/// panics inside egui rather than merely looking wrong.
+///
+/// Highlighting is by color only, never weight: swapping in a bold face changes
+/// glyph advances, so the row would visibly reflow with each keystroke.
+fn highlight_job(
+    text: &str,
+    matched: &[usize],
+    font: egui::FontId,
+    base: egui::Color32,
+    hit: egui::Color32,
+) -> egui::text::LayoutJob {
+    use egui::text::{LayoutJob, TextFormat};
+    let mut job = LayoutJob::default();
+    let plain = TextFormat::simple(font.clone(), base);
+    if matched.is_empty() {
+        job.append(text, 0.0, plain);
+        return job;
+    }
+    let lit = TextFormat::simple(font, hit);
+    // Walk the string once, grouping neighbouring chars that share a state into
+    // one section — a section per character would be pathological.
+    let mut run_start = 0usize;
+    let mut run_hit = false;
+    let mut mi = 0usize;
+    for (ci, (bi, ch)) in text.char_indices().enumerate() {
+        while mi < matched.len() && matched[mi] < ci {
+            mi += 1;
+        }
+        let is_hit = mi < matched.len() && matched[mi] == ci;
+        if ci == 0 {
+            run_hit = is_hit;
+        } else if is_hit != run_hit {
+            job.append(
+                &text[run_start..bi],
+                0.0,
+                if run_hit { lit.clone() } else { plain.clone() },
+            );
+            run_start = bi;
+            run_hit = is_hit;
+        }
+        let _ = ch;
+    }
+    job.append(
+        &text[run_start..],
+        0.0,
+        if run_hit { lit } else { plain },
+    );
+    job
+}
+
+/// A dialog's button row: right-aligned, primary first (so it lands right-most,
+/// the Windows convention), both buttons the same width.
+///
+/// Returns `(primary_clicked, secondary_clicked)`.
+///
+/// Shared by both modals so they can't drift apart. The row used to be a plain
+/// left-aligned `ui.horizontal` of two default buttons, which gave the
+/// destructive answer and the safe one identical weight and let their widths
+/// differ by however long their labels were.
+fn dialog_buttons(
+    ui: &mut egui::Ui,
+    chrome: &theme::Chrome,
+    primary: &str,
+    primary_danger: bool,
+    secondary: &str,
+) -> (bool, bool) {
+    let (fill, ink) = if primary_danger {
+        (chrome.danger, chrome.on_danger)
+    } else {
+        (chrome.accent, chrome.on_accent)
+    };
+    let size = egui::vec2(96.0, 28.0);
+    let mut yes = false;
+    let mut no = false;
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        yes = ui
+            .add_sized(
+                size,
+                egui::Button::new(egui::RichText::new(primary).color(ink)).fill(fill),
+            )
+            .clicked();
+        no = ui.add_sized(size, egui::Button::new(secondary)).clicked();
+    });
+    (yes, no)
+}
+
 /// Scrollbar metrics, in logical points.
 ///
-/// The track hugs the pane's right edge, so at the default `window-padding-x`
-/// of 20 it sits entirely inside the padding gutter — the grid never shrinks
-/// for it, which is what Ghostty's overlay scroller guarantees too. The knob is
-/// drawn narrower than the track it's hit-tested against, and grows on hover.
-/// While hidden, only `SCROLLBAR_HOT_W` at the very edge is interactive, so an
-/// auto-hidden bar never steals a click meant for the last column.
+/// The bar is an *overlay*: it floats over the pane's right edge rather than
+/// reserving a column, which is what Ghostty's scroller does too (its macOS
+/// apprt forces `scrollerStyle = .overlay` even against the OS preference). The
+/// knob is drawn narrower than the track it's hit-tested against, and grows on
+/// hover. While hidden, only `SCROLLBAR_HOT_W` at the very edge is interactive
+/// *and* it senses hover only, so an auto-hidden bar can never steal a click
+/// meant for the last column.
 const SCROLLBAR_TRACK_W: f32 = 12.0;
 const SCROLLBAR_KNOB_W: f32 = 6.0;
 const SCROLLBAR_KNOB_W_HOT: f32 = 10.0;
 const SCROLLBAR_HOT_W: f32 = 4.0;
 const SCROLLBAR_INSET: f32 = 2.0;
+/// Gap between the track's outer edge and the pane's.
+///
+/// Without it the hot knob (10pt, ending flush with the pane) sits *under* the
+/// 2pt focused-split border, which is stroked `Inside` on the same rect — the
+/// knob's own edge and the focus ring overlap and fight.
+const SCROLLBAR_EDGE_INSET: f32 = 2.0;
 
 /// Tab tint palette offered by the "Tab Color" context-menu submenu, mirroring
 /// Ghostty's set. The menu also offers a "None" entry that clears the tint.
@@ -732,6 +859,12 @@ impl Window {
         // scales up while the text appears to stay the same size.
         cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
         install_ui_fallback_font(&cc.egui_ctx);
+        // Pin the chrome to the terminal's own theme. egui otherwise follows the
+        // *OS* preference, which renders a light tab strip and light dialogs
+        // over a dark terminal. `Style` lives in egui's process-global
+        // `Options`, so this is once-per-process like the atlas above — a later
+        // window inherits it, and a config reload in any window restyles all.
+        theme::install(&cc.egui_ctx, &config);
         let ppp = cc.egui_ctx.pixels_per_point().max(1.0);
         let px = (config.font_points * ppp).round();
         let (cell_w, cell_h) = render::init(render_state, px, config.text_gamma, &font_spec(&config));
@@ -777,6 +910,7 @@ impl Window {
             cell_w,
             cell_h,
             font_points: config.font_points,
+            chrome: theme::chrome(&config),
             config,
             profiles,
             default_profile,
@@ -872,21 +1006,23 @@ impl Window {
         let Some(what) = self.confirm else {
             return;
         };
+        let chrome = self.chrome;
         let mut decision: Option<bool> = None;
         let modal = egui::Modal::new(self.id("confirm-close")).show(ctx, |ui| {
-            ui.set_width(320.0);
+            ui.set_width(360.0);
             ui.heading("Close terminal?");
-            ui.add_space(6.0);
-            ui.label(what.description());
-            ui.add_space(12.0);
-            ui.horizontal(|ui| {
-                if ui.button("Cancel").clicked() {
-                    decision = Some(false);
-                }
-                if ui.button("Close").clicked() {
-                    decision = Some(true);
-                }
-            });
+            ui.add_space(8.0);
+            ui.label(egui::RichText::new(what.description()).color(chrome.weak_text));
+            ui.add_space(16.0);
+            // Closing is destructive and irreversible (the panes' scrollback goes
+            // with them), so it is the red one — not merely the default.
+            let (yes, no) = dialog_buttons(ui, &chrome, "Close", true, "Cancel");
+            if yes {
+                decision = Some(true);
+            }
+            if no {
+                decision = Some(false);
+            }
         });
         // Esc or a backdrop click cancels, like the palette.
         if modal.should_close() {
@@ -927,12 +1063,13 @@ impl Window {
             return;
         };
 
+        let chrome = self.chrome;
         let mut decision: Option<bool> = None;
         let modal = egui::Modal::new(self.id("clipboard-confirm")).show(ctx, |ui| {
-            ui.set_width(400.0);
+            ui.set_width(440.0);
             ui.heading(req.title());
-            ui.add_space(6.0);
-            ui.label(req.detail());
+            ui.add_space(8.0);
+            ui.label(egui::RichText::new(req.detail()).color(chrome.weak_text));
             if let Some(text) = req.preview() {
                 ui.add_space(8.0);
                 // The preview is attacker-controlled text, so it's sanitized and
@@ -953,15 +1090,19 @@ impl Window {
                         });
                 });
             }
-            ui.add_space(12.0);
-            ui.horizontal(|ui| {
-                if ui.button("Deny").clicked() {
-                    decision = Some(false);
-                }
-                if ui.button("Allow").clicked() {
-                    decision = Some(true);
-                }
-            });
+            ui.add_space(16.0);
+            // "Allow" is styled as the *destructive* action, not the primary
+            // one: it is the answer that can leak the clipboard or run a
+            // command. Nothing here requests focus — egui activates a focused
+            // button on Space/Enter, so focusing "Allow" would quietly restore
+            // exactly the reflex this prompt exists to interrupt.
+            let (yes, no) = dialog_buttons(ui, &chrome, "Allow", true, "Deny");
+            if yes {
+                decision = Some(true);
+            }
+            if no {
+                decision = Some(false);
+            }
         });
         if modal.should_close() {
             decision = Some(false);
@@ -1053,6 +1194,7 @@ impl Window {
             cell_w: self.cell_w,
             cell_h: self.cell_h,
             font_points: self.font_points,
+            chrome: self.chrome,
             config: self.config.clone(),
             profiles: self.profiles.clone(),
             default_profile: self.default_profile,
@@ -1647,6 +1789,12 @@ impl Window {
         // `load_bg_image` caches by path), so editing the key applies live like
         // the colors do. Only the *surface's* transparency is startup-only.
         self.config = cfg;
+        // Re-derive the chrome and re-install the egui `Style`, so editing
+        // `background`/`foreground`/`palette`/`window-theme` restyles the tab
+        // strip, palette, overlays and dialogs live like the terminal colors do.
+        // `Style` is process-global, so this restyles every window at once.
+        self.chrome = theme::chrome(&self.config);
+        theme::install(&self.egui_ctx, &self.config);
         self.bg_image = load_bg_image(&self.config);
         // Rebuilt wholesale: the renderer keys its pipelines on this `Arc`.
         self.custom_shaders = load_custom_shaders(&self.config);
@@ -1905,25 +2053,28 @@ impl Window {
                 }
             });
 
-        let width = (screen.width() * 0.6).clamp(560.0, 900.0).min(screen.width() - 40.0);
+        let chrome = self.chrome;
+        // Ghostty's palette is a fixed 700pt dialog (`command-palette.blp`'s
+        // `content-width: 700`), not a fraction of the window.
+        let width = 700.0_f32.min(screen.width() - 80.0);
         egui::Area::new(self.id("palette"))
             .order(egui::Order::Foreground)
             .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, screen.height() * 0.12))
             .show(ctx, |ui| {
-                egui::Frame::NONE
-                    .fill(ui.visuals().window_fill)
-                    .stroke(ui.visuals().window_stroke)
-                    .corner_radius(egui::CornerRadius::same(10))
+                egui::Frame::popup(ui.style())
                     .inner_margin(egui::Margin::same(10))
                     .show(ui, |ui| {
                         ui.set_width(width);
 
                         // Search box: auto-focus once; reset the selection on edit.
+                        // Frameless, so it reads as a search *line* above the
+                        // separator rather than a boxed input inside a box.
                         let resp = ui.add(
                             egui::TextEdit::singleline(&mut state.query)
                                 .hint_text("Execute a command…")
                                 .desired_width(f32::INFINITY)
-                                .font(egui::FontId::proportional(20.0))
+                                .frame(egui::Frame::NONE)
+                                .font(egui::FontId::proportional(18.0))
                                 .margin(egui::Margin::symmetric(12, 10)),
                         );
                         if state.just_opened {
@@ -1991,14 +2142,19 @@ impl Window {
                         let pointer_moved = ctx.input(|i| i.pointer.delta() != egui::Vec2::ZERO);
 
                         ui.separator();
+                        // Ghostty's list is `min-content-height: 300` with
+                        // separators between rows, each row a title over a
+                        // monospace action key with the shortcut on the right.
                         egui::ScrollArea::vertical()
+                            .min_scrolled_height(300.0)
                             .max_height(screen.height() * 0.6)
                             .show(ui, |ui| {
-                                let font = egui::FontId::proportional(16.0);
+                                let title_font = egui::FontId::proportional(15.0);
+                                let sub_font = egui::FontId::monospace(12.0);
                                 for (row, &cmd_idx) in filtered.iter().enumerate() {
                                     let selected = row == state.selected;
                                     let (rect, resp) = ui.allocate_exact_size(
-                                        egui::vec2(ui.available_width(), 30.0),
+                                        egui::vec2(ui.available_width(), 44.0),
                                         egui::Sense::click(),
                                     );
                                     if resp.hovered() && pointer_moved {
@@ -2007,37 +2163,93 @@ impl Window {
                                     if selected {
                                         ui.painter().rect_filled(
                                             rect,
-                                            egui::CornerRadius::same(4),
-                                            ui.visuals().selection.bg_fill,
+                                            egui::CornerRadius::same(theme::RADIUS_MD),
+                                            chrome.accent,
                                         );
                                     } else if resp.hovered() {
                                         ui.painter().rect_filled(
                                             rect,
-                                            egui::CornerRadius::same(4),
-                                            ui.visuals().widgets.hovered.weak_bg_fill,
+                                            egui::CornerRadius::same(theme::RADIUS_MD),
+                                            chrome.fill_hover,
+                                        );
+                                    } else if row > 0 {
+                                        ui.painter().hline(
+                                            (rect.left() + 12.0)..=(rect.right() - 12.0),
+                                            rect.top(),
+                                            egui::Stroke::new(1.0_f32, chrome.divider),
                                         );
                                     }
                                     let cmd = &state.catalog[cmd_idx];
-                                    let text_color = if selected {
-                                        ui.visuals().selection.stroke.color
+                                    let (ink, dim) = if selected {
+                                        (chrome.on_accent, chrome.on_accent)
                                     } else {
-                                        ui.visuals().text_color()
+                                        (chrome.text, chrome.weak_text)
                                     };
-                                    ui.painter().text(
-                                        rect.left_center() + egui::vec2(10.0, 0.0),
-                                        egui::Align2::LEFT_CENTER,
+
+                                    // Title, with the fuzzy-matched characters
+                                    // picked out. `fuzzy_match_indices` has
+                                    // always returned these; nothing in the UI
+                                    // used them until now.
+                                    let matched = command::fuzzy_match_indices(
+                                        &state.query,
                                         &cmd.title,
-                                        font.clone(),
-                                        text_color,
+                                    )
+                                    .map(|(_, ix)| ix)
+                                    .unwrap_or_default();
+                                    let job = highlight_job(
+                                        &cmd.title,
+                                        &matched,
+                                        title_font.clone(),
+                                        ink,
+                                        if selected { chrome.on_accent } else { chrome.accent },
                                     );
+                                    let galley = ui.painter().layout_job(job);
+                                    ui.painter().galley(
+                                        egui::pos2(rect.left() + 12.0, rect.top() + 6.0),
+                                        galley,
+                                        ink,
+                                    );
+
+                                    // The action key, monospace and dim.
+                                    ui.painter().text(
+                                        egui::pos2(rect.left() + 12.0, rect.bottom() - 8.0),
+                                        egui::Align2::LEFT_BOTTOM,
+                                        cmd.action.name(),
+                                        sub_font.clone(),
+                                        dim,
+                                    );
+
+                                    // Shortcut, right-aligned as one chip per
+                                    // key (Ghostty uses a `Gtk.ShortcutLabel`).
                                     if let Some(kb) = &cmd.keybind {
-                                        ui.painter().text(
-                                            rect.right_center() - egui::vec2(10.0, 0.0),
-                                            egui::Align2::RIGHT_CENTER,
-                                            kb,
-                                            font.clone(),
-                                            ui.visuals().weak_text_color(),
-                                        );
+                                        let mut x = rect.right() - 12.0;
+                                        for key in kb.rsplit('+') {
+                                            let g = ui.painter().layout_no_wrap(
+                                                key.to_owned(),
+                                                sub_font.clone(),
+                                                dim,
+                                            );
+                                            let chip = egui::Rect::from_min_size(
+                                                egui::pos2(
+                                                    x - g.size().x - 12.0,
+                                                    rect.center().y - g.size().y * 0.5 - 3.0,
+                                                ),
+                                                g.size() + egui::vec2(12.0, 6.0),
+                                            );
+                                            if !selected {
+                                                ui.painter().rect_filled(
+                                                    chip,
+                                                    egui::CornerRadius::same(theme::RADIUS_SM),
+                                                    chrome.fill_weak,
+                                                );
+                                            }
+                                            ui.painter().galley(
+                                                chip.min + egui::vec2(6.0, 3.0),
+                                                g,
+                                                dim,
+                                            );
+                                            x = chip.left() - 4.0;
+                                        }
                                     }
                                     if selected && (up || down) {
                                         resp.scroll_to_me(Some(egui::Align::Center));
@@ -2097,16 +2309,43 @@ impl Window {
         let mut prev = false;
         let mut toggle_case = false;
 
+        // Anchor inside the *focused pane*, not the window.
+        //
+        // An `Area`'s anchor resolves against its `constrain_rect`, which
+        // defaults to `ctx.content_rect()` — the whole window, tab strip
+        // included. At 8pt from that rect's top the overlay landed **on top of
+        // the tab strip**, covering the rightmost tabs and the new-tab control
+        // and, being an interactable `Order::Foreground` area, winning the hit
+        // test there for as long as search was open.
+        //
+        // `last_layout` is written by `render_active`, which runs earlier in
+        // this same pass (see `run_pass`), so the rect is current rather than a
+        // frame stale. The fallback covers the first frame and teardown.
+        // Anchoring per-pane also matches Ghostty, whose search bar belongs to a
+        // surface rather than to the window.
+        let focus = self.tabs.get(self.active_tab).map(|t| t.focus);
+        let pane = focus
+            .and_then(|f| self.last_layout.iter().find(|(id, _)| *id == f))
+            .map(|(_, r)| *r)
+            .unwrap_or_else(|| ctx.content_rect());
+
         egui::Area::new(self.id("search"))
             .order(egui::Order::Foreground)
-            .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-16.0, 8.0))
+            .constrain_to(pane)
+            .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-8.0, 8.0))
             .show(ctx, |ui| {
+                // Ghostty's own search overlay: `padding: 6px 8px; margin: 8px;
+                // border-radius: 8px` with a 1px outline (its `style.css`).
                 egui::Frame::NONE
                     .fill(ui.visuals().window_fill)
                     .stroke(ui.visuals().window_stroke)
-                    .corner_radius(egui::CornerRadius::same(8))
-                    .inner_margin(egui::Margin::same(8))
+                    .corner_radius(egui::CornerRadius::same(theme::RADIUS_LG))
+                    .inner_margin(egui::Margin::symmetric(8, 6))
                     .show(ui, |ui| {
+                        // The four trailing buttons are a cluster, not four
+                        // separate controls; the default 8pt gap reads as the
+                        // latter and leaves them touching the text field.
+                        ui.spacing_mut().item_spacing.x = 4.0;
                         ui.horizontal(|ui| {
                             let resp = ui.add(
                                 egui::TextEdit::singleline(&mut query)
@@ -2236,55 +2475,186 @@ impl Window {
         let default_profile = self.default_profile;
         let profile_names: Vec<String> = self.profiles.iter().map(|p| p.name.clone()).collect();
 
-        ui.horizontal(|ui| {
-            for (i, tab) in self.tabs.iter().enumerate() {
-                let raw = tab
-                    .name
-                    .clone()
-                    .or_else(|| tab.focused_payload().title())
-                    .unwrap_or_else(|| format!("shell {}", i + 1));
-                let mut label = ellipsize(&raw, 24);
-                let count = tab.leaf_count();
-                if count > 1 {
-                    label = format!("{label} [{count}]");
-                }
-                let editing = matches!(&renaming, Some((ri, _)) if *ri == i);
+        let chrome = self.chrome;
+        // Reserve the new-tab controls *before* the tabs, and give the tabs only
+        // what's left. The strip used to be one flat `ui.horizontal`, so past
+        // ~8 tabs the row overflowed the panel's clip rect — and because egui
+        // hit-tests against `rect ∩ clip_rect`, the overflowed tabs *and the
+        // trailing new-tab button* became invisible and unclickable at once,
+        // with no way to open a tab from the strip at all.
+        let ctl_w = 30.0 + 26.0 + theme::TAB_GAP;
 
-                // Each tab is one tinted frame holding the title and a folded-in
-                // close `×`. The tint (when set) is the only visible difference
-                // between a plain and a colored tab.
-                let fill = tab.color.unwrap_or(egui::Color32::TRANSPARENT);
-                let frame = egui::Frame::NONE
-                    .fill(fill)
-                    .inner_margin(egui::Margin::symmetric(4, 1))
-                    .corner_radius(egui::CornerRadius::same(4));
-                let title_resp = frame
-                    .show(ui, |ui| {
-                        ui.spacing_mut().item_spacing.x = 2.0;
-                        ui.horizontal(|ui| {
-                            let resp = if editing {
-                                let text = &mut renaming.as_mut().unwrap().1;
-                                let te =
-                                    ui.add(egui::TextEdit::singleline(text).desired_width(120.0));
-                                if !te.has_focus() {
-                                    te.request_focus();
+        let row = ui.horizontal(|ui| {
+            let avail = (ui.available_width() - ctl_w).max(theme::TAB_MIN_W);
+            // Shrink toward the minimum before scrolling, so a handful of tabs
+            // stay fully readable and only a genuinely full strip scrolls.
+            let natural = |w: f32| w.clamp(theme::TAB_MIN_W, theme::TAB_MAX_W);
+            let budget = if ntabs > 0 {
+                natural((avail - theme::TAB_GAP * (ntabs as f32 - 1.0)) / ntabs as f32)
+            } else {
+                theme::TAB_MAX_W
+            };
+
+            ui.allocate_ui_with_layout(
+                egui::vec2(avail, theme::TAB_H),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    egui::ScrollArea::horizontal()
+                        // Not optional: `Memory::data` (where a `ScrollArea`
+                        // keeps its offset) is *not* viewport-keyed, so two
+                        // windows would share one scroll position.
+                        .id_salt(self.id("tab-scroll"))
+                        .scroll_bar_visibility(
+                            egui::scroll_area::ScrollBarVisibility::AlwaysHidden,
+                        )
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            ui.spacing_mut().item_spacing.x = theme::TAB_GAP;
+                            for (i, tab) in self.tabs.iter().enumerate() {
+                                let raw = tab
+                                    .name
+                                    .clone()
+                                    .or_else(|| tab.focused_payload().title())
+                                    .unwrap_or_else(|| format!("shell {}", i + 1));
+                                let count = tab.leaf_count();
+                                let suffix =
+                                    if count > 1 { format!(" [{count}]") } else { String::new() };
+                                let editing = matches!(&renaming, Some((ri, _)) if *ri == i);
+                                let is_active = i == active;
+
+                                if editing {
+                                    // The rename box replaces the tab entirely.
+                                    // Its rect deliberately does *not* join
+                                    // `tab_rects`: at 140pt it is wider than any
+                                    // tab and would skew every drop midpoint (a
+                                    // drag is suppressed while renaming anyway).
+                                    let text = &mut renaming.as_mut().unwrap().1;
+                                    let te = ui.add_sized(
+                                        [140.0, theme::TAB_H],
+                                        egui::TextEdit::singleline(text),
+                                    );
+                                    if !te.has_focus() {
+                                        te.request_focus();
+                                    }
+                                    // Escape cancels; Enter or clicking away
+                                    // commits (empty text clears the override).
+                                    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                                        stop_rename = true;
+                                    } else if te.lost_focus() {
+                                        let val = if text.trim().is_empty() {
+                                            None
+                                        } else {
+                                            Some(text.clone())
+                                        };
+                                        commit_rename = Some((i, val));
+                                        stop_rename = true;
+                                    }
+                                    tab_rects.push(te.rect);
+                                    continue;
                                 }
-                                // Escape cancels; Enter or clicking away commits
-                                // (empty text clears the override).
-                                if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                                    stop_rename = true;
-                                } else if te.lost_focus() {
-                                    let val = if text.trim().is_empty() {
-                                        None
-                                    } else {
-                                        Some(text.clone())
-                                    };
-                                    commit_rename = Some((i, val));
-                                    stop_rename = true;
+
+                                // Allocate the WHOLE tab and sense on it, so the
+                                // active/hover states cover the tab rather than
+                                // just its label, and so the padding and tint
+                                // band answer clicks and the context menu. This
+                                // is registered *before* the close button:
+                                // egui's hit test breaks a tie by taking the
+                                // last-registered widget, so the `×` must come
+                                // second to stay clickable. The resulting
+                                // click/drag split gives the `×` the click and
+                                // the tab the drag, so press-and-drag from over
+                                // the `×` still reorders.
+                                let (rect, resp) = ui.allocate_exact_size(
+                                    egui::vec2(budget, theme::TAB_H),
+                                    egui::Sense::click_and_drag(),
+                                );
+                                tab_rects.push(rect);
+
+                                let show_close = is_active || resp.hovered();
+                                let fill = if is_active {
+                                    chrome.fill_active
+                                } else if resp.is_pointer_button_down_on() {
+                                    chrome.fill_active
+                                } else if resp.hovered() {
+                                    chrome.fill_hover
+                                } else {
+                                    egui::Color32::TRANSPARENT
+                                };
+                                let p = ui.painter();
+                                if fill != egui::Color32::TRANSPARENT {
+                                    p.rect_filled(
+                                        rect,
+                                        egui::CornerRadius::same(theme::RADIUS_SM),
+                                        fill,
+                                    );
                                 }
-                                te
-                            } else {
-                                let resp = ui.selectable_label(i == active, label);
+                                // The tab's tint is a band along the bottom edge
+                                // rather than the tab's fill, so a *tinted
+                                // inactive* tab still reads as inactive — as its
+                                // fill, the tint overrode the one signal that
+                                // matters most in the strip.
+                                if let Some(tint) = tab.color {
+                                    p.rect_filled(
+                                        egui::Rect::from_min_max(
+                                            egui::pos2(rect.left(), rect.bottom() - theme::TAB_TINT_H),
+                                            rect.max,
+                                        ),
+                                        egui::CornerRadius {
+                                            nw: 0,
+                                            ne: 0,
+                                            sw: theme::RADIUS_SM,
+                                            se: theme::RADIUS_SM,
+                                        },
+                                        tint,
+                                    );
+                                }
+                                if is_active {
+                                    // The active tab's underline. Ghostty/Adw
+                                    // marks the selected tab this way, and it
+                                    // survives a tab tint sitting beneath it.
+                                    p.rect_filled(
+                                        egui::Rect::from_min_max(
+                                            egui::pos2(rect.left() + 4.0, rect.bottom() - 2.0),
+                                            egui::pos2(rect.right() - 4.0, rect.bottom()),
+                                        ),
+                                        egui::CornerRadius::ZERO,
+                                        chrome.accent,
+                                    );
+                                }
+
+                                // Text is truncated by *measured width*, not by a
+                                // character count: the chrome font is
+                                // proportional, so 24 chars of "WWWW…" and of
+                                // "iiii…" are wildly different widths and the
+                                // old cap either overflowed or wasted the tab.
+                                // `TAB_CLOSE_COL` stays reserved whether or not
+                                // the `×` is showing, so nothing reflows on
+                                // hover.
+                                let text_max =
+                                    (rect.width() - 8.0 - theme::TAB_CLOSE_COL).max(8.0);
+                                let font = egui::TextStyle::Button.resolve(ui.style());
+                                let ink = if is_active { chrome.text } else { chrome.weak_text };
+                                let label = {
+                                    let p = ui.painter();
+                                    let f = font.clone();
+                                    truncate_to_width(&raw, &suffix, text_max, |s| {
+                                        p.layout_no_wrap(
+                                            s.to_owned(),
+                                            f.clone(),
+                                            egui::Color32::WHITE,
+                                        )
+                                        .size()
+                                        .x
+                                    })
+                                };
+                                p.text(
+                                    egui::pos2(rect.left() + 8.0, rect.center().y),
+                                    egui::Align2::LEFT_CENTER,
+                                    &label,
+                                    font,
+                                    ink,
+                                );
+
                                 if resp.clicked() {
                                     switch_to = Some(i);
                                 }
@@ -2292,99 +2662,122 @@ impl Window {
                                 if resp.clicked_by(egui::PointerButton::Middle) {
                                     want_close = Some(i);
                                 }
-                                resp
-                            };
-                            if ui
-                                .small_button("×")
-                                .on_hover_text("Close tab (Ctrl+Shift+W)")
-                                .clicked()
-                            {
-                                want_close = Some(i);
-                            }
-                            resp
-                        })
-                        .inner
-                    })
-                    .inner;
-
-                tab_rects.push(title_resp.rect);
-                // Drag to reorder. A separate drag-sensing widget over the
-                // *title* rect (not the whole frame, so the `×` stays clickable).
-                // egui resolves click-hits and drag-hits independently, so the
-                // label's click-to-switch and middle-click-to-close still fire.
-                // Skipped while renaming, where a drag is text selection.
-                if !editing {
-                    let drag = ui.interact(
-                        title_resp.rect,
-                        self.id(("tab-drag", i)),
-                        egui::Sense::drag(),
-                    );
-                    // Primary only: egui starts drags on *any* held button, so a
-                    // middle-press-and-jiggle would otherwise begin a reorder
-                    // instead of closing the tab.
-                    if drag.drag_started_by(egui::PointerButton::Primary) {
-                        drag_from = Some(i);
-                    }
-                }
-
-                if !editing {
-                    title_resp.context_menu(|ui| {
-                        if ui.button("New Tab").clicked() {
-                            want_new = Some(default_profile);
-                            ui.close();
-                        }
-                        ui.menu_button("New Tab with shell", |ui| {
-                            for (pi, name) in profile_names.iter().enumerate() {
-                                if ui.button(name).clicked() {
-                                    want_new = Some(pi);
-                                    ui.close();
+                                // Primary only: egui starts drags on *any* held
+                                // button, so a middle-press-and-jiggle would
+                                // otherwise begin a reorder instead of closing.
+                                if resp.drag_started_by(egui::PointerButton::Primary) {
+                                    drag_from = Some(i);
                                 }
+                                if label != raw {
+                                    resp.clone().on_hover_text(&raw);
+                                }
+
+                                // The close button, registered last so it wins
+                                // the click where it overlaps the tab.
+                                if show_close {
+                                    let cb = egui::Rect::from_center_size(
+                                        egui::pos2(
+                                            rect.right() - theme::TAB_CLOSE_COL * 0.5 - 2.0,
+                                            rect.center().y,
+                                        ),
+                                        egui::vec2(16.0, 16.0),
+                                    );
+                                    let cr = ui.interact(
+                                        cb,
+                                        self.id(("tab-close", i)),
+                                        egui::Sense::click(),
+                                    );
+                                    if cr.hovered() {
+                                        ui.painter().rect_filled(
+                                            cb,
+                                            egui::CornerRadius::same(theme::RADIUS_SM),
+                                            chrome.fill_hover,
+                                        );
+                                    }
+                                    ui.painter().text(
+                                        cb.center(),
+                                        egui::Align2::CENTER_CENTER,
+                                        "×",
+                                        egui::TextStyle::Body.resolve(ui.style()),
+                                        if cr.hovered() { chrome.text } else { chrome.weak_text },
+                                    );
+                                    if cr.on_hover_text("Close tab (Ctrl+Shift+W)").clicked() {
+                                        want_close = Some(i);
+                                    }
+                                }
+
+                                // On the whole-tab response, so the padding, the
+                                // tint band and the `×` all answer a right-click
+                                // (it used to be on the label alone).
+                                resp.context_menu(|ui| {
+                                    if ui.button("New Tab").clicked() {
+                                        want_new = Some(default_profile);
+                                        ui.close();
+                                    }
+                                    ui.menu_button("New Tab with shell", |ui| {
+                                        for (pi, name) in profile_names.iter().enumerate() {
+                                            if ui.button(name).clicked() {
+                                                want_new = Some(pi);
+                                                ui.close();
+                                            }
+                                        }
+                                    });
+                                    ui.separator();
+                                    if ui.button("Rename Tab…").clicked() {
+                                        want_rename = Some(i);
+                                        ui.close();
+                                    }
+                                    ui.menu_button("Tab Color", |ui| {
+                                        if ui.button("None").clicked() {
+                                            want_color = Some((i, None));
+                                            ui.close();
+                                        }
+                                        for (name, col) in TAB_COLORS {
+                                            if ui.button(*name).clicked() {
+                                                want_color = Some((i, Some(*col)));
+                                                ui.close();
+                                            }
+                                        }
+                                    });
+                                    ui.separator();
+                                    if ui.button("Close Tab").clicked() {
+                                        want_close = Some(i);
+                                        ui.close();
+                                    }
+                                    if ui
+                                        .add_enabled(ntabs > 1, egui::Button::new("Close Other Tabs"))
+                                        .clicked()
+                                    {
+                                        want_close_others = Some(i);
+                                        ui.close();
+                                    }
+                                    if ui
+                                        .add_enabled(
+                                            i + 1 < ntabs,
+                                            egui::Button::new("Close Tabs to the Right"),
+                                        )
+                                        .clicked()
+                                    {
+                                        want_close_right = Some(i);
+                                        ui.close();
+                                    }
+                                });
                             }
                         });
-                        ui.separator();
-                        if ui.button("Rename Tab…").clicked() {
-                            want_rename = Some(i);
-                            ui.close();
-                        }
-                        ui.menu_button("Tab Color", |ui| {
-                            if ui.button("None").clicked() {
-                                want_color = Some((i, None));
-                                ui.close();
-                            }
-                            for (name, col) in TAB_COLORS {
-                                if ui.button(*name).clicked() {
-                                    want_color = Some((i, Some(*col)));
-                                    ui.close();
-                                }
-                            }
-                        });
-                        ui.separator();
-                        if ui.button("Close Tab").clicked() {
-                            want_close = Some(i);
-                            ui.close();
-                        }
-                        if ui
-                            .add_enabled(ntabs > 1, egui::Button::new("Close Other Tabs"))
-                            .clicked()
-                        {
-                            want_close_others = Some(i);
-                            ui.close();
-                        }
-                        if ui
-                            .add_enabled(
-                                i + 1 < ntabs,
-                                egui::Button::new("Close Tabs to the Right"),
-                            )
-                            .clicked()
-                        {
-                            want_close_right = Some(i);
-                            ui.close();
-                        }
-                    });
-                }
+                },
+            );
+
+            // The new-tab controls, pinned: they are laid out in the space
+            // reserved above, so they stay put and stay reachable no matter how
+            // many tabs are open.
+            if ui
+                .add_sized([26.0, theme::TAB_H], egui::Button::new("+").frame(false))
+                .on_hover_text("New tab (Ctrl+Shift+T)")
+                .clicked()
+            {
+                want_new = Some(default_profile);
             }
-            // Profile picker: open a tab running a chosen shell (also the primary
-            // new-tab affordance now that the standalone `+` is gone).
+            // Profile picker: open a tab running a chosen shell.
             ui.menu_button("⏷", |ui| {
                 if ui.button("New Tab").clicked() {
                     want_new = Some(default_profile);
@@ -2402,33 +2795,79 @@ impl Window {
             .on_hover_text("New tab (pick a shell)");
         });
 
+        // Measured from the laid-out row, not from `ui.max_rect()`: a top panel
+        // sizes itself to its content, so before the row is built `max_rect` is
+        // the whole remaining window, not the strip.
+        let strip_top = row.response.rect.top();
+        let strip_bottom = row.response.rect.bottom();
+
+        // A hairline along the panel's bottom edge, so the strip reads as chrome
+        // sitting above the terminal rather than blending into it (at opacity 1
+        // the two fills are close enough to merge). Ghostty's tab bar has the
+        // same edge. `clip_rect` is the panel, so the line spans its full width
+        // rather than stopping at the content margin.
+        //
+        // Snapped to device pixels, like the split gutter, so the line sits in
+        // the same place every frame instead of drifting with the panel's
+        // fractional height.
+        //
+        // It will still render slightly soft: egui feathers *all* geometry for
+        // anti-aliasing, so a one-device-pixel band spreads over two rows at
+        // partial coverage no matter how it is drawn (measured at 1.5×:
+        // `divider` `#2D2F34` lands as two rows of `#282A2F`, ~83% each).
+        // Snapping is worth it anyway — an unsnapped line moves between the two
+        // rows as the window resizes, which reads as flicker.
+        let ppp = ui.ctx().pixels_per_point().max(1.0);
+        let top = ((strip_bottom + 3.0) * ppp).round() / ppp;
+        let clip = ui.clip_rect();
+        ui.painter().rect_filled(
+            egui::Rect::from_min_max(
+                egui::pos2(clip.left(), top),
+                egui::pos2(clip.right(), top + 1.0 / ppp),
+            ),
+            egui::CornerRadius::ZERO,
+            chrome.divider,
+        );
+
         // Resolve an in-progress tab drag. The tabs stay put while dragging; an
         // insertion caret shows where the drop would land.
+        //
+        // Suppressed entirely while a rename is open: the rename box is not in
+        // `tab_rects` (it is far wider than a tab), so the midpoints a drop would
+        // be computed from don't describe the strip on screen.
         if let Some(from) = drag_from {
             self.tab_drag = Some(from);
         }
-        if let Some(from) = self.tab_drag {
+        if renaming.is_some() {
+            self.tab_drag = None;
+        } else if let Some(from) = self.tab_drag {
             let pointer = ui.ctx().input(|i| i.pointer.clone());
             let held = pointer.any_down();
-            if let (Some(x), Some(&r0)) = (pointer.latest_pos().map(|p| p.x), tab_rects.first()) {
+            if let Some(x) = pointer.latest_pos().map(|p| p.x) {
                 let to = drop_index(&tab_rects, x);
-                if held {
+                if held && !tab_rects.is_empty() {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
-                    // Caret at the drop slot: the left edge of the tab we'd land
-                    // before, or the right edge of the strip when dropping last.
-                    let cx = match tab_rects.get(to) {
-                        Some(r) => r.left(),
-                        None => tab_rects.last().map_or(r0.right(), |r| r.right()),
+                    // Caret centred in the *gap* the tab would land in. Drawn at
+                    // a tab's edge it sat inside the neighbouring tab instead of
+                    // between the two, which reads as "replace this one" rather
+                    // than "insert here".
+                    let last = tab_rects.len() - 1;
+                    let cx = if to == 0 {
+                        tab_rects[0].left() - theme::TAB_GAP * 0.5
+                    } else if to > last {
+                        tab_rects[last].right() + theme::TAB_GAP * 0.5
+                    } else {
+                        (tab_rects[to - 1].right() + tab_rects[to].left()) * 0.5
                     };
                     ui.painter().rect_filled(
                         egui::Rect::from_min_max(
-                            egui::pos2(cx - 1.5, r0.top() - 2.0),
-                            egui::pos2(cx + 1.5, r0.bottom() + 2.0),
+                            egui::pos2(cx - 1.0, strip_top),
+                            egui::pos2(cx + 1.0, strip_bottom),
                         ),
-                        1.0,
-                        egui::Color32::from_rgb(0x5a, 0x82, 0xc8),
+                        egui::CornerRadius::same(1),
+                        chrome.accent,
                     );
-                } else {
+                } else if !held {
                     want_move = Some((from, to));
                 }
             }
@@ -2593,10 +3032,18 @@ impl Window {
         // Lay the split tree out across the full area; each leaf gets its rect
         // (padding is applied per-leaf below). When a split is zoomed, that one
         // leaf takes the whole area and the rest are hidden.
+        //
+        // The gutters are gathered first, through an immutable walk, because
+        // `collect` needs `&mut tab.root` for the payloads. Zoomed tabs show one
+        // pane and therefore have none.
         let mut leaves: Vec<Leaf<Session>> = Vec::new();
+        let mut gutters: Vec<egui::Rect> = Vec::new();
         match zoomed {
             Some(id) => tab.root.collect_leaf(id, full_area, &mut leaves),
-            None => tab.root.collect(full_area, &mut leaves),
+            None => {
+                tab.root.gutters(full_area, ppp, &mut gutters);
+                tab.root.collect(full_area, ppp, &mut leaves);
+            }
         }
         if leaves.is_empty() {
             return;
@@ -2942,12 +3389,10 @@ impl Window {
             let Some(state) = session.scrollbar_state(ch) else {
                 continue;
             };
+            let right = leaf_rect.right() - SCROLLBAR_EDGE_INSET;
             let track = egui::Rect::from_min_max(
-                egui::pos2(
-                    leaf_rect.right() - SCROLLBAR_TRACK_W,
-                    leaf_rect.top() + SCROLLBAR_INSET,
-                ),
-                egui::pos2(leaf_rect.right(), leaf_rect.bottom() - SCROLLBAR_INSET),
+                egui::pos2(right - SCROLLBAR_TRACK_W, leaf_rect.top() + SCROLLBAR_INSET),
+                egui::pos2(right, leaf_rect.bottom() - SCROLLBAR_INSET),
             );
             let Some(thumb) = scrollbar::thumb(track.height(), state.total, state.offset, state.len)
             else {
@@ -2974,8 +3419,8 @@ impl Window {
                 track
             } else {
                 egui::Rect::from_min_max(
-                    egui::pos2(leaf_rect.right() - SCROLLBAR_HOT_W, track.top()),
-                    egui::pos2(leaf_rect.right(), track.bottom()),
+                    egui::pos2(right - SCROLLBAR_HOT_W, track.top()),
+                    egui::pos2(right, track.bottom()),
                 )
             };
             let sense = if alpha.is_some() {
@@ -3163,12 +3608,31 @@ impl Window {
             },
         ));
 
+        // Paint the split gutters.
+        //
+        // Nothing used to draw them: the 1pt band was simply left out of both
+        // panes and showed whatever was underneath. Under `background-opacity`
+        // that "whatever" is the translucent window fill, so every divider was a
+        // transparent slit straight through to the desktop. Ghostty paints its
+        // separator explicitly for the same reason.
+        //
+        // This is not the double-composite the fill above warns about: `divider`
+        // is opaque, and the gutter rects are disjoint from every pane rect.
+        for rect in &gutters {
+            ui.painter().rect_filled(*rect, 0.0, self.chrome.divider);
+        }
+
         // Dim the unfocused splits by painting a semi-transparent rectangle over
         // each — the same mechanism Ghostty uses (an overlay, not a renderer
         // effect). Painter-only, so it never intercepts clicks.
         for (rect, col) in &dim_rects {
             ui.painter().rect_filled(*rect, 0.0, *col);
         }
+
+        // Border widths are snapped for the same reason the gutter is: a 2pt
+        // stroke at 1.25× scaling straddles a pixel boundary and rasterizes as a
+        // blurred 3px band on one edge and a crisp 2px one on another.
+        let stroke_w = |pt: f32| (pt * ppp).round().max(1.0) / ppp;
 
         // Outline the focused pane when the tab is split. Frame the *full* pane
         // rect (not the padded grid) so the padding band shows as a visible gap
@@ -3177,7 +3641,7 @@ impl Window {
             ui.painter().rect_stroke(
                 leaves[focus_idx].rect,
                 0.0,
-                egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(90, 130, 200)),
+                egui::Stroke::new(stroke_w(2.0), self.chrome.accent),
                 egui::StrokeKind::Inside,
             );
         } else if zoomed.is_some() {
@@ -3187,7 +3651,7 @@ impl Window {
             ui.painter().rect_stroke(
                 full_area,
                 0.0,
-                egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(80, 200, 120)),
+                egui::Stroke::new(stroke_w(2.0), self.chrome.accent_zoom),
                 egui::StrokeKind::Inside,
             );
         }
@@ -3198,12 +3662,13 @@ impl Window {
         if !bell_flashes.is_empty() {
             ctx.request_repaint();
             for (rect, a) in &bell_flashes {
-                let alpha = (a * 220.0) as u8;
-                let col = egui::Color32::from_rgba_unmultiplied(0xff, 0xc6, 0x6b, alpha);
+                let w = self.chrome.accent_warn;
+                let col =
+                    egui::Color32::from_rgba_unmultiplied(w.r(), w.g(), w.b(), (a * 220.0) as u8);
                 ui.painter().rect_stroke(
                     *rect,
                     0.0,
-                    egui::Stroke::new(3.0_f32, col),
+                    egui::Stroke::new(stroke_w(3.0), col),
                     egui::StrokeKind::Inside,
                 );
             }
@@ -3216,30 +3681,29 @@ impl Window {
         if !resize_overlays.is_empty() {
             ctx.request_repaint();
             for (rect, label, a) in &resize_overlays {
+                // Ghostty's resize overlay: `padding: 4px 8px; border-radius: 6`
+                // with a 1px outline (its `style.css`).
+                let fade = |c: egui::Color32, mul: f32| {
+                    egui::Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), (a * mul) as u8)
+                };
                 let (anchor, align) = overlay_anchor(*rect, resize_overlay_position, 12.0);
                 let font = egui::FontId::proportional(14.0);
-                let galley = ui.painter().layout_no_wrap(
-                    label.clone(),
-                    font,
-                    egui::Color32::from_rgba_unmultiplied(0xf0, 0xf0, 0xf0, (a * 255.0) as u8),
-                );
+                let galley =
+                    ui.painter()
+                        .layout_no_wrap(label.clone(), font, fade(self.chrome.text, 255.0));
                 let text_rect = align.anchor_size(anchor, galley.size());
-                let pill = text_rect.expand2(egui::vec2(10.0, 6.0));
-                ui.painter().rect_filled(
-                    pill,
-                    6.0,
-                    egui::Color32::from_rgba_unmultiplied(0x20, 0x22, 0x28, (a * 230.0) as u8),
-                );
+                let pill = text_rect.expand2(egui::vec2(8.0, 4.0));
+                let r = egui::CornerRadius::same(theme::RADIUS_MD);
+                ui.painter()
+                    .rect_filled(pill, r, fade(self.chrome.window_fill, 230.0));
                 ui.painter().rect_stroke(
                     pill,
-                    6.0,
-                    egui::Stroke::new(
-                        1.0_f32,
-                        egui::Color32::from_rgba_unmultiplied(0x60, 0x66, 0x78, (a * 220.0) as u8),
-                    ),
+                    r,
+                    egui::Stroke::new(stroke_w(1.0), fade(self.chrome.divider, 220.0)),
                     egui::StrokeKind::Inside,
                 );
-                ui.painter().galley(text_rect.min, galley, egui::Color32::WHITE);
+                ui.painter()
+                    .galley(text_rect.min, galley, self.chrome.text);
             }
         }
 
@@ -3260,20 +3724,33 @@ impl Window {
                     egui::pos2(track.center().x - w * 0.5, track.top() + thumb.top),
                     egui::vec2(w, thumb.len),
                 );
-                // Light grey at ~55% (brighter when grabbed or hovered) reads on
-                // both light and dark backgrounds without a border.
-                let base = if *hot { 235u8 } else { 200u8 };
-                let peak = if *hot { 0.85 } else { 0.55 };
-                ui.painter().rect_filled(
-                    knob,
-                    w * 0.5,
+                // The knob is an overlay: it floats over the grid rather than
+                // over a chrome surface, so it needs a hairline of the *window*
+                // background around it to separate it from whatever text is
+                // underneath. Without the outline it reads as a smear over a
+                // dense line of output.
+                let peak = if *hot { 0.95 } else { 0.65 };
+                let a8 = |c: egui::Color32, mul: f32| {
                     egui::Color32::from_rgba_unmultiplied(
-                        base,
-                        base,
-                        base,
-                        (a * peak * 255.0) as u8,
-                    ),
+                        c.r(),
+                        c.g(),
+                        c.b(),
+                        (a * mul * 255.0) as u8,
+                    )
+                };
+                let fill = if *hot {
+                    self.chrome.text
+                } else {
+                    self.chrome.knob
+                };
+                let radius = egui::CornerRadius::same((w * 0.5).round() as u8);
+                ui.painter().rect_stroke(
+                    knob.expand(1.0),
+                    radius,
+                    egui::Stroke::new(stroke_w(1.0), a8(egui::Color32::from_rgb(bg.r, bg.g, bg.b), peak)),
+                    egui::StrokeKind::Inside,
                 );
+                ui.painter().rect_filled(knob, radius, a8(fill, peak));
             }
         }
 
@@ -3468,9 +3945,16 @@ impl Window {
         let a8 = (self.config.background_opacity * 255.0).round() as u8;
         egui::Panel::top(self.id("tabs"))
             .frame(
-                egui::Frame::side_top_panel(&ctx.global_style()).fill(
-                    egui::Color32::from_rgba_unmultiplied(strip.r(), strip.g(), strip.b(), a8),
-                ),
+                egui::Frame::side_top_panel(&ctx.global_style())
+                    // A stable margin: the default `(8, 2)` leaves the tabs
+                    // touching the strip's edges once they have a real height.
+                    .inner_margin(egui::Margin::symmetric(6, 3))
+                    .fill(egui::Color32::from_rgba_unmultiplied(
+                        strip.r(),
+                        strip.g(),
+                        strip.b(),
+                        a8,
+                    )),
             )
             .show_inside(ui, |ui| self.tab_bar(ui));
 
@@ -4007,50 +4491,98 @@ fn cycle_pick(ids: &[u64], focus: u64, forward: bool) -> Option<u64> {
     Some(ids[next])
 }
 
-/// Split `area` into two halves along one axis with a 1px gutter between them.
+/// Nominal width of a split gutter, in logical points.
+const SPLIT_GUTTER_PT: f32 = 1.0;
+
+/// Round a logical-point coordinate to a device-pixel boundary.
+fn snap(v: f32, ppp: f32) -> f32 {
+    (v * ppp).round() / ppp
+}
+
+/// Split `area` into two halves along one axis, returning
+/// `(first, gutter, second)`.
+///
 /// `vertical` = a vertical divider, i.e. side-by-side columns (Ctrl+Shift+O);
 /// otherwise stacked rows (Ctrl+Shift+E).
-fn split_rect(area: egui::Rect, vertical: bool) -> (egui::Rect, egui::Rect) {
-    let gap = 1.0;
+///
+/// Both the gutter's width and the boundary between the halves are snapped to
+/// device pixels. A nominal 1pt gutter is *not* one pixel at fractional scaling:
+/// left as a raw float it lands between pixels and rasterizes at 0, 1 or 2 px
+/// depending on where the split happens to fall, so a divider could vanish
+/// entirely on one split and read as a fat seam on another.
+///
+/// The trailing half is built with `from_min_max` so it ends exactly on the
+/// parent's edge. Sizing both halves independently (as this used to) leaves a
+/// sub-pixel sliver at the far edge whenever the arithmetic doesn't divide
+/// evenly — and once the boundary is snapped, it never does.
+fn split_rect(area: egui::Rect, vertical: bool, ppp: f32) -> (egui::Rect, egui::Rect, egui::Rect) {
+    let ppp = ppp.max(1.0);
+    // At least one whole device pixel, so the gutter is always visible.
+    let gap = ((SPLIT_GUTTER_PT * ppp).round().max(1.0)) / ppp;
     if vertical {
-        let w = ((area.width() - gap) / 2.0).max(1.0);
+        let mid = snap(area.min.x + ((area.width() - gap) * 0.5).max(1.0), ppp)
+            .clamp(area.min.x, (area.max.x - gap).max(area.min.x));
         (
-            egui::Rect::from_min_size(area.min, egui::vec2(w, area.height())),
-            egui::Rect::from_min_size(
-                egui::pos2(area.min.x + w + gap, area.min.y),
-                egui::vec2(w, area.height()),
+            egui::Rect::from_min_max(area.min, egui::pos2(mid, area.max.y)),
+            egui::Rect::from_min_max(
+                egui::pos2(mid, area.min.y),
+                egui::pos2(mid + gap, area.max.y),
             ),
+            egui::Rect::from_min_max(egui::pos2(mid + gap, area.min.y), area.max),
         )
     } else {
-        let h = ((area.height() - gap) / 2.0).max(1.0);
+        let mid = snap(area.min.y + ((area.height() - gap) * 0.5).max(1.0), ppp)
+            .clamp(area.min.y, (area.max.y - gap).max(area.min.y));
         (
-            egui::Rect::from_min_size(area.min, egui::vec2(area.width(), h)),
-            egui::Rect::from_min_size(
-                egui::pos2(area.min.x, area.min.y + h + gap),
-                egui::vec2(area.width(), h),
+            egui::Rect::from_min_max(area.min, egui::pos2(area.max.x, mid)),
+            egui::Rect::from_min_max(
+                egui::pos2(area.min.x, mid),
+                egui::pos2(area.max.x, mid + gap),
             ),
+            egui::Rect::from_min_max(egui::pos2(area.min.x, mid + gap), area.max),
         )
     }
 }
 
-/// Truncate a tab label to `max` chars with an ellipsis.
-fn ellipsize(s: &str, max: usize) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() <= max {
-        s.to_string()
-    } else {
-        let mut out: String = chars[..max.saturating_sub(1)].iter().collect();
-        out.push('…');
-        out
+/// Fit `title + suffix` into `max` logical points, truncating the *title* with
+/// an ellipsis and always keeping the suffix.
+///
+/// Measured rather than counted. The chrome font is proportional, so a character
+/// cap (what this used to be) is only right for one string: 24 chars of `W` and
+/// 24 of `i` differ by more than a tab's width, so the same cap both overflowed
+/// wide titles and wasted most of the tab on narrow ones.
+///
+/// The suffix is the split count (`" [3]"`), which is information the ellipsis
+/// must not eat — it is what tells you the tab has hidden panes.
+/// `width` measures a string in the font the label will be drawn in; it is
+/// injected rather than taken from a `Ui` so the fitting logic is testable
+/// without a font atlas (a headless egui context measures everything as zero).
+fn truncate_to_width(title: &str, suffix: &str, max: f32, w: impl Fn(&str) -> f32) -> String {
+    let full = format!("{title}{suffix}");
+    if w(&full) <= max {
+        return full;
     }
+    let budget = (max - w(suffix) - w("…")).max(0.0);
+    // Longest prefix that fits. Linear over chars: a tab title is short, and
+    // this runs once per tab per frame.
+    let mut out = String::new();
+    for c in title.chars() {
+        let mut probe = out.clone();
+        probe.push(c);
+        if w(&probe) > budget {
+            break;
+        }
+        out = probe;
+    }
+    format!("{}…{suffix}", out.trim_end())
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        Dir, Node, Tab, cycle_pick, dim_alpha, drop_index, ellipsize, keep_only_tab, nav_dir,
+        Dir, Node, Tab, cycle_pick, dim_alpha, drop_index, highlight_job, keep_only_tab, nav_dir,
         overlay_anchor, preview_text, reap_tabs, reorder_tabs, retire_window, split_rect,
-        truncate_tabs_to_right,
+        truncate_tabs_to_right, truncate_to_width,
     };
     use crate::config::ResizeOverlayPosition as P;
     use eframe::egui;
@@ -4458,7 +4990,7 @@ mod tests {
         let mut root = split(true, leaf(1, 1), leaf(2, 1));
         let area = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(101.0, 50.0));
         let mut leaves = Vec::new();
-        root.collect(area, &mut leaves);
+        root.collect(area, 1.0, &mut leaves);
         assert_eq!(leaves.len(), 2);
         assert_eq!(leaves[0].id, 1);
         assert_eq!(leaves[1].id, 2);
@@ -4467,16 +4999,68 @@ mod tests {
         assert!(leaves[1].rect.min.x >= leaves[0].rect.max.x);
     }
 
+    /// The gutters must line up exactly with the space `collect` leaves between
+    /// panes — they are painted, so a mismatch shows as a seam or an overlap.
+    #[test]
+    fn gutters_fill_the_space_between_panes() {
+        let mut root = split(true, leaf(1, 1), split(false, leaf(2, 1), leaf(3, 1)));
+        let area = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(400.0, 300.0));
+        for ppp in [1.0, 1.25, 1.5, 2.0] {
+            let mut leaves = Vec::new();
+            let mut gutters = Vec::new();
+            root.gutters(area, ppp, &mut gutters);
+            root.collect(area, ppp, &mut leaves);
+            assert_eq!(leaves.len(), 3);
+            assert_eq!(gutters.len(), 2, "one gutter per split");
+            // The vertical gutter abuts both columns exactly.
+            assert!((gutters[0].left() - leaves[0].rect.right()).abs() < 1e-4);
+            assert!((gutters[0].right() - leaves[1].rect.left()).abs() < 1e-4);
+            for g in &gutters {
+                let px = g.width().min(g.height()) * ppp;
+                assert!(
+                    (px - px.round()).abs() < 1e-3 && px >= 1.0,
+                    "gutter is {px} device px at ppp {ppp}; must be a whole pixel"
+                );
+            }
+        }
+    }
+
     #[test]
     fn split_rect_halves_each_axis() {
         let area = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(101.0, 51.0));
-        let (a, b) = split_rect(area, true); // columns
+        let (a, g, b) = split_rect(area, true, 1.0); // columns
         assert!((a.width() - 50.0).abs() < 0.01);
         assert!((b.width() - 50.0).abs() < 0.01);
         assert_eq!(a.height(), 51.0);
-        let (c, _d) = split_rect(area, false); // rows
+        assert_eq!(g.width(), 1.0);
+        let (c, _, _) = split_rect(area, false, 1.0); // rows
         assert!((c.height() - 25.0).abs() < 0.01);
         assert_eq!(c.width(), 101.0);
+    }
+
+    /// The two halves plus the gutter must cover the parent exactly. Sizing each
+    /// half independently (the old shape) left a sub-pixel sliver at the far
+    /// edge whenever the arithmetic didn't divide evenly — and once the boundary
+    /// is snapped to device pixels, it never does.
+    #[test]
+    fn split_rect_covers_the_parent_exactly() {
+        for ppp in [1.0, 1.25, 1.5, 2.0] {
+            for extent in [100.0, 101.0, 137.5, 401.0] {
+                let area =
+                    egui::Rect::from_min_size(egui::pos2(3.0, 7.0), egui::vec2(extent, extent));
+                let (a, g, b) = split_rect(area, true, ppp);
+                assert_eq!(a.left(), area.left());
+                assert_eq!(b.right(), area.right());
+                assert_eq!(a.right(), g.left());
+                assert_eq!(g.right(), b.left());
+
+                let (a, g, b) = split_rect(area, false, ppp);
+                assert_eq!(a.top(), area.top());
+                assert_eq!(b.bottom(), area.bottom());
+                assert_eq!(a.bottom(), g.top());
+                assert_eq!(g.bottom(), b.top());
+            }
+        }
     }
 
     #[test]
@@ -4564,8 +5148,85 @@ mod tests {
     }
 
     #[test]
-    fn ellipsize_truncates_with_ellipsis() {
-        assert_eq!(ellipsize("short", 10), "short");
-        assert_eq!(ellipsize("a very long tab title", 6), "a ver…");
+    fn truncate_to_width_fits_and_keeps_the_suffix() {
+        // A proportional metric, so the test exercises the thing a character
+        // count got wrong: `W` is four times the width of `i`.
+        let w = |s: &str| {
+            s.chars()
+                .map(|c| match c {
+                    'W' | 'M' => 4.0,
+                    'i' | 'l' | ' ' => 1.0,
+                    '…' => 2.0,
+                    _ => 2.0,
+                })
+                .sum::<f32>()
+        };
+
+        // Fits: returned whole, with the suffix.
+        assert_eq!(truncate_to_width("pwsh", " [2]", 400.0, w), "pwsh [2]");
+
+        // Doesn't fit: truncated, ellipsis added, suffix kept — and the result
+        // actually fits the budget it was given.
+        let long = "WWWWWWWWWW";
+        let out = truncate_to_width(long, " [3]", 20.0, w);
+        assert!(out.ends_with("… [3]"), "got {out:?}");
+        assert!(w(&out) <= 20.0, "{out:?} is {} wide, budget 20", w(&out));
+
+        // Same budget, narrow glyphs → more characters survive. This is exactly
+        // what a character cap could not express.
+        let narrow = truncate_to_width("iiiiiiiiiiiiiiiiiiii", " [3]", 20.0, w);
+        assert!(
+            narrow.chars().count() > out.chars().count(),
+            "narrow {narrow:?} should keep more chars than wide {out:?}"
+        );
+
+        // The split-count suffix survives even a budget too small for it: it is
+        // what tells you the tab has hidden panes.
+        assert!(truncate_to_width(long, " [9]", 1.0, w).ends_with(" [9]"));
+    }
+
+    /// The palette highlights fuzzy matches by re-coloring runs of the title.
+    /// `fuzzy_match_indices` counts in **chars** and `LayoutJob` slices in
+    /// **bytes**, so a multi-byte title is the case that would panic inside egui
+    /// rather than merely look wrong.
+    #[test]
+    fn highlight_job_maps_char_indices_to_byte_ranges() {
+        let font = egui::FontId::proportional(15.0);
+        let base = egui::Color32::WHITE;
+        let hit = egui::Color32::RED;
+
+        // No matches → one plain section covering the whole string.
+        let job = highlight_job("New Tab", &[], font.clone(), base, hit);
+        assert_eq!(job.text, "New Tab");
+        assert_eq!(job.sections.len(), 1);
+        assert_eq!(job.sections[0].format.color, base);
+
+        // Neighbouring matches collapse into one run rather than one section
+        // per character.
+        let job = highlight_job("New Tab", &[0, 1, 2], font.clone(), base, hit);
+        assert_eq!(job.text, "New Tab");
+        assert_eq!(job.sections.len(), 2);
+        assert_eq!(job.sections[0].byte_range, 0..3);
+        assert_eq!(job.sections[0].format.color, hit);
+        assert_eq!(job.sections[1].byte_range, 3..7);
+
+        // Multi-byte: char 0 is a 2-byte 'é', so a matched char 2 is byte 3..4.
+        // Slicing by char index would land mid-codepoint and panic.
+        let text = "éa-b";
+        assert_eq!(text.len(), 5);
+        let job = highlight_job(text, &[2], font, base, hit);
+        assert_eq!(job.text, text);
+        let lit: Vec<_> = job
+            .sections
+            .iter()
+            .filter(|s| s.format.color == hit)
+            .map(|s| s.byte_range.clone())
+            .collect();
+        assert_eq!(lit, vec![3..4]);
+        // Every section boundary is a char boundary.
+        for s in &job.sections {
+            assert!(text.is_char_boundary(s.byte_range.start));
+            assert!(text.is_char_boundary(s.byte_range.end));
+        }
     }
 }

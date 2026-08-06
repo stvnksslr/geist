@@ -150,6 +150,30 @@ fn window_padding_x_and_y() {
     let c = cfg("window-padding-x = 12\nwindow-padding-y = 6");
     assert_eq!(c.padding_x, 12.0);
     assert_eq!(c.padding_y, 6.0);
+    // Unset, both match Ghostty's defaults. giest used to ship 20 on the x axis
+    // so the scrollbar could live inside the padding; the bar overlays now, as
+    // Ghostty's does, so the padding is free to match upstream.
+    let d = cfg("");
+    assert_eq!(d.padding_x, 2.0);
+    assert_eq!(d.padding_y, 2.0);
+}
+
+#[test]
+fn window_theme() {
+    use giest::config::WindowTheme;
+    // Default follows the configured background rather than the OS.
+    assert_eq!(cfg("").window_theme, WindowTheme::Auto);
+    assert_eq!(cfg("window-theme = dark").window_theme, WindowTheme::Dark);
+    assert_eq!(cfg("window-theme = light").window_theme, WindowTheme::Light);
+    assert_eq!(cfg("window-theme = auto").window_theme, WindowTheme::Auto);
+    // `system` is Ghostty's documented alias; giest maps it onto `auto` because
+    // following the OS is what rendered light chrome over a dark terminal.
+    assert_eq!(cfg("window-theme = system").window_theme, WindowTheme::Auto);
+    // An unknown value leaves the previous setting alone rather than resetting.
+    assert_eq!(
+        cfg("window-theme = dark\nwindow-theme = sideways").window_theme,
+        WindowTheme::Dark
+    );
 }
 
 #[test]

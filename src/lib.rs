@@ -34,4 +34,5 @@ pub mod session;
 pub mod shader;
 pub mod synthetic;
 pub mod taskbar;
+pub mod theme;
 pub mod writefile;

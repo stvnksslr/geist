@@ -1203,13 +1203,16 @@ fn srgb_to_linear(c: u8) -> f32 {
 
 /// Relative luminance of an sRGB color, per WCAG (linearized channels weighted
 /// 0.2126/0.7152/0.0722). Mirrors the renderer's `luminance`.
-fn luminance(c: Rgb) -> f32 {
+pub fn luminance(c: Rgb) -> f32 {
     0.2126 * srgb_to_linear(c.r) + 0.7152 * srgb_to_linear(c.g) + 0.0722 * srgb_to_linear(c.b)
 }
 
 /// WCAG contrast ratio between two colors (`1.0..=21.0`). Mirrors the renderer's
 /// `contrast_ratio`.
-fn contrast_ratio(a: Rgb, b: Rgb) -> f32 {
+///
+/// Also the chrome's contrast floor (see [`crate::theme`]), so the UI and the
+/// terminal's `minimum-contrast` agree on what "readable" means.
+pub fn contrast_ratio(a: Rgb, b: Rgb) -> f32 {
     let la = luminance(a) + 0.05;
     let lb = luminance(b) + 0.05;
     la.max(lb) / la.min(lb)

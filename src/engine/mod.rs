@@ -14,6 +14,9 @@ pub mod ghostty_vt;
 pub mod png_decode;
 
 pub use ghostty_vt::GhosttyVtEngine;
+/// WCAG color math, shared by the engine's `minimum-contrast` and the chrome's
+/// accent floor (see [`crate::theme`]) so both agree on what "readable" means.
+pub use ghostty_vt::{contrast_ratio, luminance};
 
 /// 24-bit color. The engine resolves palette indices and the default fg/bg to
 /// concrete RGB so the renderer only ever deals in true color.

@@ -50,7 +50,8 @@ palette = 8=#666a73
 | `font-size` | float | Logical font size; scaled by DPI, then rasterized into the glyph atlas. Also the reset target for Ctrl+0. |
 | `foreground` / `background` | `#rrggbb` | Default fg/bg, applied via `engine.apply_theme`. |
 | `cursor-color` | `#rrggbb` | Cursor color; omit to defer to the program/engine default. |
-| `window-padding-x` / `window-padding-y` | float | Per-pane inset in logical points (wraps every split, not just the window edge). |
+| `window-padding-x` / `window-padding-y` | float | Per-pane inset in logical points (wraps every split, not just the window edge). Defaults to Ghostty's `2`; the scrollbar overlays rather than reserving space, so the padding doesn't have to make room for it. |
+| `window-theme` | enum | Light/dark mode for the **chrome** (tab strip, command palette, overlays, dialogs): `auto` (default) derives it from `background`, so the chrome matches your terminal; `dark`/`light` force it. giest never follows the OS theme — that is what used to render a light tab strip over a dark terminal. Colors and accents come from `foreground`/`background`/`palette`, so a theme change restyles the chrome too. |
 | `text-gamma` | float (0.5–3.0) | Anti-aliasing gamma passed to the shader; >1 thickens light-on-dark text. **giest-specific** — Ghostty has no equivalent. |
 | `scrollback-limit` | int | Max scrollback **lines** retained per pane. Note: Ghostty's `scrollback-limit` is in *bytes*; giest's VT engine takes a line count, so the key matches but the unit differs. |
 | `selection-background` | `#rrggbb` | Background of selected cells. |
@@ -312,10 +313,13 @@ later. Drag the thumb to scroll; click above or below it to page. Ghostty has ex
 values and no width/opacity/always knob, so neither does giest.
 
 It never reserves space — the grid keeps every column it would otherwise have. At the default
-`window-padding-x` of 20 the bar sits entirely inside the padding, clear of the text; set the padding
-below ~12 and the bar will overlay the last column *while visible* (a click at the very edge still
-reaches the terminal while it's hidden). The bar also hides itself while a full-screen program is
-capturing the mouse, since there's no scrollback to point at.
+`window-padding-x` of 2 that means the visible bar overlays the last column, which is what Ghostty's
+scroller does too (its macOS apprt forces an overlay scroller even against the OS preference); the
+knob is outlined so it stays legible over text. Raise `window-padding-x` past ~14 and the bar sits
+entirely inside the padding instead, clear of the text. A click at the very edge still reaches the
+terminal while the bar is hidden — only 4 pt is interactive then, and with hover-only sense. The bar
+also hides itself while a full-screen program is capturing the mouse, since there's no scrollback to
+point at.
 
 `keybind = <chord>=scroll_to_row:N` scrolls so absolute row `N` is at the top. Ghostty leaves this
 action unbound — it exists so the scrollbar can drive the terminal — but giest accepts it in a
