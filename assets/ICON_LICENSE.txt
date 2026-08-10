@@ -1,0 +1,12 @@
+giest icon artwork provenance and license
+
+Artwork:
+Original geometric artwork created specifically for the giest project.
+Concept: lowercase "g" monogram with a blue cursor-square accent on a dark rounded tile.
+The artwork is constructed from geometric primitives and does not incorporate Ghostty's
+ghost mark, third-party icon artwork, or a font glyph.
+
+License:
+CC0 1.0 Universal public-domain dedication applies to assets/icon.png and assets/icon.ico.
+
+No third-party artwork was incorporated.

@@ -80,6 +80,13 @@ raw-window-handle = "0.6"
 [patch.crates-io]
 egui-winit = { path = "vendor/egui-winit" }
 
+# Writes the RT_GROUP_ICON resource into the exe so Explorer/Start/pinned
+# shortcuts show the icon without running the process (see build.rs). Windows
+# only, and build-time only — nothing links against it. Maintained fork of the
+# unmaintained `winres`.
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
 [dev-dependencies]
 # Statistical benchmark harness for the host CPU-path benches (see benches/).
 criterion = "0.5"

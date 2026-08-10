@@ -226,6 +226,17 @@ fallback engine without app changes:
   color, which under transparency composites to `1-(1-a)²` (a=0.5 reads as 0.75). Cells on the *default*
   background emit no quad at all (`render::bg_alpha`, mirroring Ghostty), so that one fill is what shows
   through them — any second translucent fill over the same area is a bug.
+- **The wgpu backend must stay pinned to DX12, or a driver we never use can kill startup.**
+  `Backends::all()` doesn't just *list* backends — enumerating adapters loads and initializes each
+  one's driver, the OpenGL ICD included. On an AMD card that ICD (`atio6axx.dll`) faulted with an
+  access violation, so the exe died before any window with **no panic, no stderr and no message of
+  any kind** — the only evidence was the Windows Application event log's faulting-module line
+  (`Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='Application Error'}`;
+  reach for it first for any silent-exit report, as an `0xC0000005` from a vendor DLL looks exactly
+  like a giest bug). The pin in `main.rs` is therefore **unconditional**, not part of the
+  transparency branch it originally lived in — that branch pinned DX12 for its own reasons, which
+  masked this everywhere `background-opacity < 1` and left the *default* config as the one that
+  crashed. `WGPU_BACKEND` still overrides, deliberately.
 - **A keybind *leader* is bound to nothing, so `Keymap::lookup` won't reserve it.** In
   `ctrl+a>n=new_tab`, `ctrl+a` has no action of its own — a plain lookup returns `None`, the key
   reaches the shell, and the sequence never starts. `session::decide_key` must use
@@ -259,6 +270,15 @@ fallback engine without app changes:
 - **`Cell::bg_explicit` polarity is deliberate.** `false` (the `Default`) means "draw no background
   quad". Cells the VT iterators never yield get blanked to the default, so inverting the flag's sense
   (`bg_is_default`) would make every one of them paint opaque black over a translucent window.
+- **The app icon is *two* mechanisms, and the window one shares one `Arc` process-wide.** `build.rs`
+  embeds `assets/icon.ico` as a Win32 `RT_GROUP_ICON` (what Explorer/Start/a pinned shortcut read
+  without running the exe); `icon::apply` sets the 256px master on each `ViewportBuilder` (what the
+  taskbar button and Alt-Tab show). Neither covers the other's case. `icon::apply` hands out one
+  shared `Arc` from a `OnceLock` because `ViewportBuilder::patch` compares icons with **`Arc::ptr_eq`**
+  (egui `viewport.rs`) and `App::child_builder` rebuilds its builder *every pass* — a per-call `Arc`
+  would look like a new icon every frame and push a `ViewportCommand::Icon` for every child window,
+  forever. Same trap as `BG_IMAGE_CACHE` above, same fix. A missing `rc.exe` only *warns*, so an
+  icon-less exe is a build-log line, not a failure.
 
 - **`egui::Modal` does not stop the terminal grabbing the keyboard.** It blocks pointer interaction
   and tab-traversal focus, but `Memory::request_focus` is unconditional and the pane calls

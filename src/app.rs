@@ -1248,14 +1248,20 @@ impl Window {
     /// path clears **every** viewport's surface (not just this one) — a visible
     /// hitch on the root too. Anything dynamic goes through `ViewportCommand`.
     fn child_builder(&self) -> egui::ViewportBuilder {
-        egui::ViewportBuilder::default()
-            .with_title("giest")
-            .with_inner_size([960.0, 600.0])
-            // NOT optional. The vendored egui-winit patch reads `transparent` to
-            // set WS_EX_NOREDIRECTIONBITMAP at creation, and children go through
-            // the same `create_window`. Omit it and a secondary window renders as
-            // the solid grey wash CLAUDE.md documents.
-            .with_transparent(self.transparent_surface)
+        // `icon::apply` hands over a process-wide shared `Arc`, which this call
+        // site *requires*: it runs on every pass, and `ViewportBuilder::patch`
+        // tests the icon with `Arc::ptr_eq`. A per-call `Arc` would read as a
+        // new icon every frame and re-set it on every child window forever.
+        crate::icon::apply(
+            egui::ViewportBuilder::default()
+                .with_title("giest")
+                .with_inner_size([960.0, 600.0])
+                // NOT optional. The vendored egui-winit patch reads `transparent` to
+                // set WS_EX_NOREDIRECTIONBITMAP at creation, and children go through
+                // the same `create_window`. Omit it and a secondary window renders as
+                // the solid grey wash CLAUDE.md documents.
+                .with_transparent(self.transparent_surface),
+        )
     }
 
     /// This window's child viewport id. Derived from the stable `window_id`, not

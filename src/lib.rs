@@ -18,6 +18,7 @@ pub mod command;
 pub mod config;
 pub mod decscusr;
 pub mod engine;
+pub mod icon;
 pub mod keybind;
 pub mod notify;
 pub mod osc133;
