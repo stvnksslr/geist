@@ -278,7 +278,10 @@ fallback engine without app changes:
   (egui `viewport.rs`) and `App::child_builder` rebuilds its builder *every pass* — a per-call `Arc`
   would look like a new icon every frame and push a `ViewportCommand::Icon` for every child window,
   forever. Same trap as `BG_IMAGE_CACHE` above, same fix. A missing `rc.exe` only *warns*, so an
-  icon-less exe is a build-log line, not a failure.
+  icon-less exe is a build-log line, not a failure. Both assets are **generated**: `mise exec --
+  cargo run --example icongen` redraws every size from the per-size geometry tables in
+  `examples/icongen.rs` (each ICO size is drawn on its own integer pixel grid — never downscaled,
+  which is what made earlier revisions mushy). Regenerate; don't hand-edit.
 
 - **`egui::Modal` does not stop the terminal grabbing the keyboard.** It blocks pointer interaction
   and tab-traversal focus, but `Memory::request_focus` is unconditional and the pane calls
