@@ -46,12 +46,20 @@ pub enum Lookup {
 #[derive(Clone, Debug)]
 pub struct Keymap {
     binds: Vec<(Vec<Chord>, Action)>,
+    /// `global:` bindings — chords that fire even when giest isn't focused.
+    /// Kept **out** of `binds` on purpose: they are delivered by the OS-level
+    /// hook ([`crate::hotkey`]) whether or not giest has focus, so putting them
+    /// in the ordinary keymap too would run the action twice on a focused press.
+    globals: Vec<(Chord, Action)>,
 }
 
 impl Default for Keymap {
     fn default() -> Self {
         Self {
             binds: default_binds(),
+            // No global binding by default: a low-level keyboard hook is a
+            // system-wide cost, and a terminal should not take one uninvited.
+            globals: Vec::new(),
         }
     }
 }
@@ -99,6 +107,11 @@ impl Keymap {
         !matches!(self.lookup_seq(std::slice::from_ref(chord)), Lookup::None)
     }
 
+    /// The `global:` bindings, in config order.
+    pub fn globals(&self) -> &[(Chord, Action)] {
+        &self.globals
+    }
+
     /// Bind `seq` to `action`, replacing any existing binding for it.
     fn set(&mut self, seq: Vec<Chord>, action: Action) {
         match self.binds.iter_mut().find(|(s, _)| *s == seq) {
@@ -119,6 +132,28 @@ impl Keymap {
     pub fn from_config(overrides: &[(String, String)]) -> Self {
         let mut km = Self::default();
         for (trigger, action) in overrides {
+            // Ghostty's `global:` trigger flag. It is inherently unsequenceable
+            // upstream too — the OS delivers one key, not a leader and a
+            // follower — so a global trigger must be a single chord.
+            if let Some(rest) = strip_flag(trigger, "global") {
+                let Some(chord) = parse_chord(rest.trim()) else {
+                    eprintln!("giest: ignoring global keybind with unparseable trigger '{trigger}'");
+                    continue;
+                };
+                let a = action.trim();
+                if a.eq_ignore_ascii_case("unbind") || a.eq_ignore_ascii_case("ignore") {
+                    km.globals.retain(|(c, _)| *c != chord);
+                    continue;
+                }
+                match Action::from_name(a) {
+                    Some(act) => match km.globals.iter_mut().find(|(c, _)| *c == chord) {
+                        Some(slot) => slot.1 = act,
+                        None => km.globals.push((chord, act)),
+                    },
+                    None => eprintln!("giest: ignoring keybind to unknown action '{a}'"),
+                }
+                continue;
+            }
             let Some(seq) = parse_sequence(trigger) else {
                 eprintln!("giest: ignoring keybind with unparseable trigger '{trigger}'");
                 continue;
@@ -135,6 +170,17 @@ impl Keymap {
         }
         km
     }
+}
+
+/// Strip a leading Ghostty trigger flag (`global:`, `all:`, …), returning the
+/// rest of the trigger when it matches.
+///
+/// Case-insensitive, and it will not mistake a *key* for a flag: the match needs
+/// the colon, and `global` alone is not a key name anyway.
+fn strip_flag<'a>(trigger: &'a str, flag: &str) -> Option<&'a str> {
+    let t = trigger.trim_start();
+    let (head, rest) = t.split_once(':')?;
+    head.trim().eq_ignore_ascii_case(flag).then_some(rest)
 }
 
 /// Parse a `>`-separated key sequence like `ctrl+a>n` into its chords.
@@ -295,6 +341,58 @@ fn key_from_name(name: &str) -> Option<KeyCode> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_global_trigger_binds_globally_and_not_in_the_ordinary_keymap() {
+        let km = Keymap::from_config(&[(
+            "global:ctrl+alt+g".into(),
+            "toggle_quick_terminal".into(),
+        )]);
+        assert_eq!(
+            km.globals(),
+            [(chord("ctrl+alt+g"), Action::ToggleQuickTerminal)]
+        );
+        // Not also in `binds`: the OS hook delivers it whether or not giest is
+        // focused, so a second copy here would run the action twice.
+        assert_eq!(km.lookup(&chord("ctrl+alt+g")), None);
+        assert!(!km.starts_binding(&chord("ctrl+alt+g")));
+    }
+
+    #[test]
+    fn a_global_trigger_can_be_rebound_and_unbound() {
+        let km = Keymap::from_config(&[
+            ("global:ctrl+alt+g".into(), "toggle_quick_terminal".into()),
+            ("global:ctrl+alt+g".into(), "new_window".into()),
+        ]);
+        assert_eq!(km.globals(), [(chord("ctrl+alt+g"), Action::NewWindow)]);
+
+        let km = Keymap::from_config(&[
+            ("global:ctrl+alt+g".into(), "toggle_quick_terminal".into()),
+            ("global:ctrl+alt+g".into(), "unbind".into()),
+        ]);
+        assert!(km.globals().is_empty());
+    }
+
+    #[test]
+    fn a_global_trigger_is_case_insensitive_and_tolerates_spacing() {
+        let km = Keymap::from_config(&[("GLOBAL: ctrl+alt+g".into(), "new_window".into())]);
+        assert_eq!(km.globals().len(), 1);
+    }
+
+    #[test]
+    fn a_bad_global_trigger_is_skipped_without_touching_the_keymap() {
+        let km = Keymap::from_config(&[("global:ctrl+nope".into(), "new_window".into())]);
+        assert!(km.globals().is_empty());
+        // The defaults still work — one bad line must not take the file down.
+        assert_eq!(km.lookup(&chord("ctrl+shift+t")), Some(Action::NewTab));
+    }
+
+    #[test]
+    fn there_are_no_global_bindings_by_default() {
+        // A low-level keyboard hook is a system-wide cost; nothing installs one
+        // until the user asks for it.
+        assert!(Keymap::default().globals().is_empty());
+    }
 
     fn chord(s: &str) -> Chord {
         parse_chord(s).unwrap_or_else(|| panic!("chord {s:?} should parse"))

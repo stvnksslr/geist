@@ -380,6 +380,45 @@ fn truncate_tabs_to_right<T>(
     }
 }
 
+/// Snapshot a split tree for `window-save-state`, marking the leaf with id
+/// `focus`. Generic over the payload (and taking the working directory through a
+/// closure) so the walk is unit-testable without spawning shells — the same
+/// reason [`Node`] itself is generic.
+fn capture_node_with<T>(
+    node: &Node<T>,
+    focus: u64,
+    pwd: &impl Fn(&T) -> Option<String>,
+) -> crate::state::SavedNode {
+    match node {
+        Node::Split {
+            vertical,
+            first,
+            second,
+        } => crate::state::SavedNode::Split {
+            vertical: *vertical,
+            first: Box::new(capture_node_with(first, focus, pwd)),
+            second: Box::new(capture_node_with(second, focus, pwd)),
+        },
+        Node::Leaf { id, payload } => crate::state::SavedNode::Leaf {
+            cwd: pwd(payload),
+            focused: *id == focus,
+        },
+        // `Empty` only ever exists mid-restructure, never at capture time; a
+        // pane-less leaf is the closest honest thing to write.
+        Node::Empty => crate::state::SavedNode::Leaf {
+            cwd: None,
+            focused: false,
+        },
+    }
+}
+
+/// [`capture_node_with`] over live sessions, reading each pane's OSC 7 cwd.
+fn capture_node(node: &Node<Session>, focus: u64) -> crate::state::SavedNode {
+    capture_node_with(node, focus, &|s: &Session| {
+        s.pwd().map(|p| p.display().to_string())
+    })
+}
+
 /// One laid-out pane: a focusable leaf with its payload and screen rect.
 struct Leaf<'a, T> {
     id: u64,
@@ -456,6 +495,15 @@ pub struct Window {
     /// here because the viewport's fullscreen flag isn't readable back, so we flip
     /// our own copy and command winit to match.
     fullscreen: bool,
+    /// Whether this window is *the* quick terminal (Ghostty's dropdown
+    /// terminal). At most one exists; it is an ordinary window in every other
+    /// respect, so tabs, splits and the palette all work inside it.
+    quick: bool,
+    /// Whether the quick terminal is on screen. Hiding it means **not drawing
+    /// its viewport**, which destroys the native window while leaving the
+    /// `Window` and its running shells untouched — the whole point of a
+    /// dropdown terminal is that it comes back exactly as you left it.
+    quick_visible: bool,
     /// The window's `HWND`, captured at startup for the DWM backdrop
     /// ([`crate::blur`]). `None` off Windows or if the handle wasn't available.
     hwnd: Option<isize>,
@@ -609,6 +657,8 @@ enum AppRequest {
     NewWindow(Option<std::path::PathBuf>),
     /// Retire the raising window. Quits giest when it's the last one.
     CloseWindow,
+    /// Show or hide the quick terminal, creating it on first use.
+    ToggleQuickTerminal,
 }
 
 /// The whole application: every open window, plus the little state that has to
@@ -620,6 +670,21 @@ pub struct App {
     /// pass — never held across frames, since a retire can invalidate it.
     focused: usize,
     next_window_id: u64,
+    /// The layout as it stood at the last window close, for `window-save-state`.
+    ///
+    /// Held because by the time `on_exit` runs there are no windows left to read
+    /// — quitting *is* closing the last one. Refreshed at the top of every
+    /// [`App::retire`], so it always describes the moment before the close that
+    /// ended the process, which is what a restore should reopen.
+    last_state: crate::state::SavedState,
+    /// Actions bound to `global:` triggers, indexed the same way as the
+    /// bindings handed to [`crate::hotkey`] — the hook reports an index, this
+    /// turns it back into an action.
+    global_actions: Vec<Action>,
+    /// The chords currently registered with the hook, so a pass only re-installs
+    /// when they actually changed (a config reload). Re-registering every frame
+    /// would take a lock on the OS input path 60 times a second.
+    global_chords: Vec<crate::keybind::Chord>,
 }
 
 /// The kind of surface being created, for the working-directory inheritance
@@ -928,6 +993,8 @@ impl Window {
             opaque_override: false,
             geometry_applied: false,
             fullscreen: false,
+            quick: false,
+            quick_visible: false,
             hwnd,
             transparent_surface,
             tab_drag: None,
@@ -1212,6 +1279,8 @@ impl Window {
             opaque_override: false,
             geometry_applied: false,
             fullscreen: false,
+            quick: false,
+            quick_visible: false,
             // Only the root viewport has a reachable window handle, so a
             // secondary window gets no DWM backdrop and no taskbar flash.
             hwnd: None,
@@ -1241,6 +1310,106 @@ impl Window {
         })
     }
 
+    /// Snapshot this window's layout for `window-save-state`.
+    fn capture_state(&self) -> crate::state::SavedWindow {
+        crate::state::SavedWindow {
+            tabs: self
+                .tabs
+                .iter()
+                .map(|t| crate::state::SavedTab {
+                    name: t.name.clone(),
+                    // The *zoom* is deliberately not saved: it is a transient
+                    // view of a layout, and restoring one would hide panes the
+                    // user would then have to discover.
+                    tree: capture_node(&t.root, t.focus),
+                })
+                .collect(),
+            active_tab: self.active_tab,
+        }
+    }
+
+    /// Rebuild `saved`'s tabs into this window, spawning one shell per leaf.
+    ///
+    /// Replaces whatever the window already had — for the first window that is
+    /// the one session [`Window::first`] just opened, which is dropped here. The
+    /// alternative (deciding before the window exists) would mean doing the
+    /// once-per-process setup somewhere else entirely; one short-lived shell is
+    /// the cheaper trade.
+    ///
+    /// A leaf whose shell fails to spawn collapses out of the tree rather than
+    /// taking the tab with it, and a window that ends up with no tabs at all is
+    /// left untouched — the user gets their original window, never none.
+    fn restore(&mut self, saved: &crate::state::SavedWindow) {
+        let mut next = 1;
+        let mut tabs = Vec::new();
+        for st in &saved.tabs {
+            let mut focus = None;
+            let Some(root) = self.build_saved(&st.tree, &mut next, &mut focus) else {
+                continue;
+            };
+            let focus = focus.unwrap_or_else(|| root.first_leaf_id());
+            tabs.push(Tab {
+                root,
+                focus,
+                name: st.name.clone(),
+                color: None,
+                zoomed: None,
+            });
+        }
+        if tabs.is_empty() {
+            return;
+        }
+        self.active_tab = saved.active_tab.min(tabs.len() - 1);
+        self.tabs = tabs;
+        self.next_id = next;
+    }
+
+    /// Spawn the sessions for one saved subtree. `next` is a plain counter
+    /// rather than [`Window::alloc_id`] because the walk holds `&self` for
+    /// `spawn_session`; the caller stores it back as `next_id`.
+    fn build_saved(
+        &self,
+        node: &crate::state::SavedNode,
+        next: &mut u64,
+        focus: &mut Option<u64>,
+    ) -> Option<Node<Session>> {
+        match node {
+            crate::state::SavedNode::Leaf { cwd, focused } => {
+                let cwd = cwd.as_ref().map(std::path::PathBuf::from);
+                // A directory that no longer exists would fail the spawn, which
+                // would silently cost the user a pane — fall back to the default.
+                let cwd = cwd.filter(|p| p.is_dir());
+                let session = self.spawn_session(self.default_profile, cwd.as_deref())?;
+                let id = *next;
+                *next += 1;
+                if *focused {
+                    *focus = Some(id);
+                }
+                Some(Node::Leaf {
+                    id,
+                    payload: session,
+                })
+            }
+            crate::state::SavedNode::Split {
+                vertical,
+                first,
+                second,
+            } => {
+                let first = self.build_saved(first, next, focus);
+                let second = self.build_saved(second, next, focus);
+                match (first, second) {
+                    (Some(a), Some(b)) => Some(Node::Split {
+                        vertical: *vertical,
+                        first: Box::new(a),
+                        second: Box::new(b),
+                    }),
+                    (Some(n), None) | (None, Some(n)) => Some(n),
+                    (None, None) => None,
+                }
+            }
+        }
+    }
+
     /// The `ViewportBuilder` for this window as a child viewport.
     ///
     /// Built once and cloned verbatim every pass. Several `ViewportBuilder`
@@ -1248,6 +1417,9 @@ impl Window {
     /// path clears **every** viewport's surface (not just this one) — a visible
     /// hitch on the root too. Anything dynamic goes through `ViewportCommand`.
     fn child_builder(&self) -> egui::ViewportBuilder {
+        if self.quick {
+            return self.quick_builder();
+        }
         // `icon::apply` hands over a process-wide shared `Arc`, which this call
         // site *requires*: it runs on every pass, and `ViewportBuilder::patch`
         // tests the icon with `Arc::ptr_eq`. A per-call `Arc` would read as a
@@ -1262,6 +1434,43 @@ impl Window {
                 // the solid grey wash CLAUDE.md documents.
                 .with_transparent(self.transparent_surface),
         )
+    }
+
+    /// The `ViewportBuilder` for the quick terminal: undecorated, above other
+    /// windows, and parked against the configured screen edge.
+    ///
+    /// The geometry is computed in **physical pixels** by `quickterm::frame`
+    /// (that is what the OS work area is in) and divided by `pixels_per_point`
+    /// here, because egui's viewport geometry is in points. Passing physical
+    /// pixels through unchanged is the same bug `window-position-*` had: at 125%
+    /// scaling the window lands a quarter of the way off.
+    ///
+    /// Falls back to the plain child geometry if the work area can't be read —
+    /// an unplaced window is recoverable; no window at all is not.
+    fn quick_builder(&self) -> egui::ViewportBuilder {
+        let base = crate::icon::apply(
+            egui::ViewportBuilder::default()
+                .with_title("giest quick terminal")
+                // No titlebar: a dropdown terminal is chrome the user never
+                // drags or minimizes, and the strip would eat a row of cells.
+                .with_decorations(false)
+                .with_always_on_top()
+                // It must not steal a taskbar button from the real windows.
+                .with_taskbar(false)
+                // NOT optional — see `child_builder`.
+                .with_transparent(self.transparent_surface),
+        );
+        let Some(work) = crate::quickterm::work_area() else {
+            return base.with_inner_size([960.0, 400.0]);
+        };
+        let f = crate::quickterm::frame(
+            self.config.quick_terminal_position,
+            &self.config.quick_terminal_size,
+            work,
+        );
+        let ppp = self.egui_ctx.pixels_per_point().max(1.0);
+        base.with_inner_size([f.w / ppp, f.h / ppp])
+            .with_position([f.x / ppp, f.y / ppp])
     }
 
     /// This window's child viewport id. Derived from the stable `window_id`, not
@@ -1948,6 +2157,11 @@ impl Window {
             Action::ToggleSplitZoom => self.toggle_split_zoom(),
             Action::ClosePane => self.request_close(PendingClose::Pane),
             Action::ToggleFullscreen => self.toggle_fullscreen(ctx),
+            // App-level: there is one quick terminal for the process, and it may
+            // not exist yet.
+            Action::ToggleQuickTerminal => {
+                self.requests.push(AppRequest::ToggleQuickTerminal)
+            }
             Action::FocusSplitLeft => self.focus_dir(Dir::Left),
             Action::FocusSplitRight => self.focus_dir(Dir::Right),
             Action::FocusSplitUp => self.focus_dir(Dir::Up),
@@ -3992,11 +4206,184 @@ impl Window {
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Result<Self> {
-        Ok(Self {
-            windows: vec![Window::first(cc, 0)?],
+        let first = Window::first(cc, 0)?;
+        let mut app = Self {
+            windows: vec![first],
             focused: 0,
             next_window_id: 1,
-        })
+            last_state: crate::state::SavedState::default(),
+            global_actions: Vec::new(),
+            global_chords: Vec::new(),
+        };
+        app.restore_state();
+        app.sync_global_binds(&cc.egui_ctx);
+        Ok(app)
+    }
+
+    /// Rebuild the previous session's windows when `window-save-state = always`.
+    ///
+    /// The file is **consumed** — deleted as soon as it is read — because it
+    /// describes one specific exit. Leaving it would resurrect that layout after
+    /// a later crash that never got to write its own, which reads as giest
+    /// ignoring everything the user has done since.
+    fn restore_state(&mut self) {
+        if !self.windows[0].config.window_save_state.restores() {
+            return;
+        }
+        let saved = crate::state::load();
+        crate::state::clear();
+        let mut windows = saved.windows.iter();
+        let Some(root) = windows.next() else {
+            return;
+        };
+        self.windows[0].restore(root);
+        for w in windows {
+            let id = self.next_window_id;
+            let Some(mut win) = self.windows[0].sibling(id, None) else {
+                continue;
+            };
+            self.next_window_id += 1;
+            win.restore(w);
+            self.windows.push(win);
+        }
+    }
+
+    /// Register the config's `global:` keybinds with the OS-level hook, if they
+    /// changed since the last pass.
+    ///
+    /// Read from `windows[0]`: every window holds its own `Config` clone, but a
+    /// global binding is a *process*-wide OS registration, so it needs one
+    /// authority rather than the last window to be drawn.
+    fn sync_global_binds(&mut self, ctx: &egui::Context) {
+        let Some(w) = self.windows.first() else {
+            return;
+        };
+        let globals = w.keymap.globals();
+        let chords: Vec<crate::keybind::Chord> = globals.iter().map(|(c, _)| *c).collect();
+        if chords == self.global_chords {
+            return;
+        }
+        self.global_chords = chords;
+        self.global_actions = globals.iter().map(|(_, a)| *a).collect();
+        // A chord whose key has no virtual-key code can't be registered; drop it
+        // *and* its action together so the indices stay aligned with the hook's.
+        let mut binds = Vec::new();
+        let mut actions = Vec::new();
+        for (chord, action) in globals {
+            match crate::hotkey::GlobalBind::from_chord(chord) {
+                Some(b) => {
+                    binds.push(b);
+                    actions.push(*action);
+                }
+                None => eprintln!("giest: global keybind key has no Windows virtual-key code"),
+            }
+        }
+        self.global_actions = actions;
+        crate::hotkey::set_binds(ctx, binds);
+    }
+
+    /// Run the actions of any global bindings that fired since the last pass.
+    fn dispatch_global_binds(
+        &mut self,
+        ctx: &egui::Context,
+        render_state: Option<&egui_wgpu::RenderState>,
+    ) {
+        for i in crate::hotkey::fired() {
+            let Some(action) = self.global_actions.get(i).copied() else {
+                continue;
+            };
+            if action == Action::ToggleQuickTerminal {
+                self.toggle_quick_terminal(ctx);
+                continue;
+            }
+            // Everything else is a *window* action, and the focused window is
+            // the only sensible target — including when giest isn't focused at
+            // all, where "the window you last used" is what a user means.
+            let idx = self.focused.min(self.windows.len().saturating_sub(1));
+            if let Some(w) = self.windows.get_mut(idx) {
+                w.execute_action(ctx, render_state, action);
+            }
+        }
+    }
+
+    /// Show or hide the quick terminal, creating it on first use.
+    ///
+    /// The window is an ordinary [`Window`] in the list — it has tabs, splits
+    /// and the palette like any other — flagged so it gets the dropdown
+    /// geometry and so hiding it doesn't retire its sessions. Hiding works by
+    /// *not drawing the viewport*: eframe destroys the native window, while the
+    /// `Window` (and every shell inside it) stays in the list, so reopening is
+    /// instant and nothing in the terminal has moved.
+    fn toggle_quick_terminal(&mut self, ctx: &egui::Context) {
+        if let Some(i) = self.windows.iter().position(|w| w.quick) {
+            let w = &mut self.windows[i];
+            w.quick_visible = !w.quick_visible;
+            if w.quick_visible {
+                self.focused = i;
+            }
+            ctx.request_repaint();
+            return;
+        }
+        let id = self.next_window_id;
+        // Cloned from the focused window so it inherits the live config, the
+        // profiles and the font metrics, exactly like `new_window`.
+        let from = self.focused.min(self.windows.len().saturating_sub(1));
+        let Some(src) = self.windows.get(from) else {
+            return;
+        };
+        let Some(mut w) = src.sibling(id, None) else {
+            return;
+        };
+        self.next_window_id += 1;
+        w.quick = true;
+        w.quick_visible = true;
+        self.windows.push(w);
+        self.focused = self.windows.len() - 1;
+        ctx.request_repaint();
+    }
+
+    /// Hide the quick terminal when it loses focus (`quick-terminal-autohide`).
+    ///
+    /// Read from the window's *last observed* focus rather than this pass's
+    /// input: `ui` runs from the root pass, where `i.focused` answers for the
+    /// root viewport, not for the quick terminal's.
+    fn autohide_quick_terminal(&mut self) {
+        for w in &mut self.windows {
+            if w.quick && w.quick_visible && w.config.quick_terminal_autohide && !w.was_focused {
+                w.quick_visible = false;
+            }
+        }
+    }
+
+    /// Whether state saving is on. Read from the root window's config, which is
+    /// the one a reload fans out from.
+    fn saves_state(&self) -> bool {
+        self.windows
+            .first()
+            .is_some_and(|w| w.config.window_save_state.restores())
+    }
+
+    /// Refresh [`App::last_state`] from the live windows.
+    fn snapshot_state(&mut self) {
+        if !self.saves_state() {
+            // Cleared rather than left alone, so turning the key off mid-session
+            // (a config reload) can't still write the layout it captured while
+            // it was on.
+            self.last_state = crate::state::SavedState::default();
+            return;
+        }
+        self.last_state = crate::state::SavedState {
+            windows: self.windows.iter().map(Window::capture_state).collect(),
+        };
+    }
+
+    /// Write the saved layout on the way out. A no-op unless
+    /// `window-save-state = always`, and an empty layout deletes the file rather
+    /// than leaving a stale one.
+    fn save_state(&self) {
+        if !self.last_state.is_empty() {
+            crate::state::save(&self.last_state);
+        }
     }
 
     /// Push the aggregate `OSC 9;4` progress onto the taskbar button.
@@ -4096,6 +4483,7 @@ impl App {
             match req {
                 AppRequest::CloseWindow => self.retire(ctx, id),
                 AppRequest::NewWindow(cwd) => self.spawn_window(ctx, cwd.as_deref()),
+                AppRequest::ToggleQuickTerminal => self.toggle_quick_terminal(ctx),
             }
         }
     }
@@ -4121,6 +4509,9 @@ impl App {
         let Some(idx) = self.windows.iter().position(|w| w.window_id == id) else {
             return;
         };
+        // Capture *before* the removal: closing the last window is how giest
+        // quits, so this is the only moment the exiting layout still exists.
+        self.snapshot_state();
         // Remember where the surviving root-slot window is on screen *before*
         // the move, so a rehost can put the root native window there.
         let rehost_to = (idx == 0).then(|| self.windows.get(1).and_then(|w| w.geom)).flatten();
@@ -4181,6 +4572,12 @@ impl eframe::App for App {
     /// user next hovers the tray — until then giest appears to still be running.
     /// A no-op unless something actually notified (see [`crate::notify`]).
     fn on_exit(&mut self) {
+        // A window still standing means the process is going down some other way
+        // (an OS shutdown, a `quit` that skipped the close path) — snapshot it.
+        if !self.windows.is_empty() {
+            self.snapshot_state();
+        }
+        self.save_state();
         if let Some(hwnd) = self.windows.first().and_then(|w| w.hwnd) {
             crate::notify::shutdown(hwnd);
         }
@@ -4230,6 +4627,12 @@ impl eframe::App for App {
             // render state. Nothing here touches `self.windows` as a whole.
             let App { windows, .. } = self;
             let w = &mut windows[i];
+            // A hidden quick terminal: skipping the viewport is what *closes*
+            // the native window (a child ignores `ViewportCommand::Close`), and
+            // its sessions keep running because the `Window` stays in the list.
+            if w.quick && !w.quick_visible {
+                continue;
+            }
             let (id, vp, builder) = (w.window_id, w.viewport_id(), w.child_builder());
             let out = ctx.show_viewport_immediate(vp, builder, |cui, _class| {
                 w.run_pass(cui, render_state.as_ref())
@@ -4248,6 +4651,11 @@ impl eframe::App for App {
         }
 
         self.apply_requests(&ctx, requests);
+        // After the requests, so a `global:` binding sees the layout this pass
+        // produced rather than the previous one's.
+        self.sync_global_binds(&ctx);
+        self.dispatch_global_binds(&ctx, render_state.as_ref());
+        self.autohide_quick_terminal();
     }
 }
 
@@ -4586,7 +4994,8 @@ fn truncate_to_width(title: &str, suffix: &str, max: f32, w: impl Fn(&str) -> f3
 #[cfg(test)]
 mod tests {
     use super::{
-        Dir, Node, Tab, cycle_pick, dim_alpha, drop_index, highlight_job, keep_only_tab, nav_dir,
+        Dir, Node, Tab, capture_node_with, cycle_pick, dim_alpha, drop_index, highlight_job,
+        keep_only_tab, nav_dir,
         overlay_anchor, preview_text, reap_tabs, reorder_tabs, retire_window, split_rect,
         truncate_tabs_to_right, truncate_to_width,
     };
@@ -4795,6 +5204,67 @@ mod tests {
             first: Box::new(first),
             second: Box::new(second),
         }
+    }
+
+    #[test]
+    fn capture_node_mirrors_the_tree_and_marks_the_focused_leaf() {
+        // The payload stands in for a session's cwd: pane 7 reported one, 3 didn't.
+        let tree = split(true, leaf(3, 0), split(false, leaf(7, 1), leaf(9, 0)));
+        let cwd = |p: &u32| (*p == 1).then(|| r"C:\src".to_string());
+        let got = capture_node_with(&tree, 7, &cwd);
+
+        let crate::state::SavedNode::Split {
+            vertical,
+            first,
+            second,
+        } = got
+        else {
+            panic!("root must stay a split");
+        };
+        assert!(vertical);
+        assert_eq!(
+            *first,
+            crate::state::SavedNode::Leaf {
+                cwd: None,
+                focused: false
+            }
+        );
+        let crate::state::SavedNode::Split {
+            vertical,
+            first: inner,
+            second: last,
+        } = *second
+        else {
+            panic!("nested split must survive");
+        };
+        assert!(!vertical, "the inner axis is independent of the outer one");
+        assert_eq!(
+            *inner,
+            crate::state::SavedNode::Leaf {
+                cwd: Some(r"C:\src".into()),
+                focused: true
+            }
+        );
+        assert_eq!(
+            *last,
+            crate::state::SavedNode::Leaf {
+                cwd: None,
+                focused: false
+            }
+        );
+    }
+
+    #[test]
+    fn capture_node_marks_nothing_when_the_focus_id_is_gone() {
+        let got = capture_node_with(&leaf(3, 0), 99, &|_: &u32| None);
+        assert_eq!(
+            got,
+            crate::state::SavedNode::Leaf {
+                cwd: None,
+                focused: false
+            },
+            "a stale focus id must not silently focus a different pane"
+        );
     }
 
     #[test]

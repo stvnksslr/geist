@@ -374,6 +374,31 @@ pub fn needs_confirm(mode: ConfirmClose, busy: Option<bool>) -> bool {
     }
 }
 
+/// Whether the window/tab/split layout survives a quit. Ghostty
+/// `window-save-state`, whose values are `default` / `never` / `always`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum WindowSaveState {
+    /// Restore only when the OS asks for it. On macOS that's the system's own
+    /// "reopen windows on relaunch"; **Windows has no such mechanism**, so here
+    /// it behaves as `never` — the same net effect as Ghostty's default on a
+    /// machine with the system setting off.
+    #[default]
+    Default,
+    /// Never save or restore.
+    Never,
+    /// Always save on exit and restore on launch.
+    Always,
+}
+
+impl WindowSaveState {
+    /// Whether giest should write a state file on exit and read it at startup.
+    /// One predicate for both halves on purpose: a mode that saved but never
+    /// restored would leave a file that only ever goes stale.
+    pub fn restores(self) -> bool {
+        matches!(self, WindowSaveState::Always)
+    }
+}
+
 /// Permission for a clipboard operation the *terminal program* asks for.
 /// Ghostty `clipboard-read` / `clipboard-write`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -687,6 +712,18 @@ pub struct Config {
     /// When to confirm before closing a pane/tab/window. Ghostty
     /// `confirm-close-surface`.
     pub confirm_close: ConfirmClose,
+    /// Whether the window/tab/split layout is saved on exit and restored at the
+    /// next launch. Ghostty `window-save-state`.
+    pub window_save_state: WindowSaveState,
+    /// Which screen edge the quick terminal drops from. Ghostty
+    /// `quick-terminal-position`.
+    pub quick_terminal_position: crate::quickterm::Position,
+    /// The quick terminal's size on its primary (and optionally secondary) axis.
+    /// Ghostty `quick-terminal-size`.
+    pub quick_terminal_size: crate::quickterm::QuickSize,
+    /// Whether the quick terminal hides itself when it loses focus. Ghostty
+    /// `quick-terminal-autohide`, whose default is **false** off macOS.
+    pub quick_terminal_autohide: bool,
     /// When to show the grid-size overlay on resize. Ghostty `resize-overlay`.
     pub resize_overlay: ResizeOverlay,
     /// Where that overlay sits in the pane. Ghostty `resize-overlay-position`.
@@ -814,6 +851,13 @@ impl Default for Config {
             keybinds: Vec::new(),
             osc_color_report_format: OscColorReportFormat::Bits16,
             confirm_close: ConfirmClose::WhenBusy,
+            window_save_state: WindowSaveState::Default,
+            quick_terminal_position: crate::quickterm::Position::Top,
+            quick_terminal_size: crate::quickterm::QuickSize::default(),
+            // Ghostty's non-macOS default. A global hotkey is the only way back
+            // to a hidden quick terminal, so hiding it on every focus change is
+            // the more surprising behaviour of the two.
+            quick_terminal_autohide: false,
             resize_overlay: ResizeOverlay::AfterFirst,
             resize_overlay_position: ResizeOverlayPosition::Center,
             resize_overlay_duration_ms: 750,
@@ -910,6 +954,11 @@ impl Config {
     /// unknown keys are logged and ignored (the rest of the file still applies).
     fn parse(&mut self, text: &str) {
         let defaults = Config::default();
+        // Strip a UTF-8 BOM. Notepad and `Set-Content -Encoding utf8` on Windows
+        // PowerShell both write one, and it would otherwise glue itself to the
+        // first key — producing "unsupported config key" for a line that looks
+        // perfectly correct on screen.
+        let text = text.strip_prefix('\u{feff}').unwrap_or(text);
         for (i, raw) in text.lines().enumerate() {
             let line = raw.trim();
             if line.is_empty() || line.starts_with('#') {
@@ -1216,6 +1265,50 @@ const SETTERS: &[(&str, Setter)] = &[
             "true" | "yes" | "on" | "1" => ConfirmClose::WhenBusy,
             "always" => ConfirmClose::Always,
             _ => c.confirm_close,
+        }
+    }),
+    ("quick-terminal-position", |c, v, d| {
+        c.quick_terminal_position = match v {
+            "" => d.quick_terminal_position,
+            _ => crate::quickterm::Position::parse(v).unwrap_or(c.quick_terminal_position),
+        }
+    }),
+    ("quick-terminal-size", |c, v, d| {
+        c.quick_terminal_size = match v {
+            "" => d.quick_terminal_size,
+            _ => match crate::quickterm::QuickSize::parse(v) {
+                Some(s) => s,
+                None => {
+                    // Ghostty makes a bare number a config *error*; giest logs
+                    // and keeps the previous value, since it has no error UI.
+                    eprintln!(
+                        "giest: ignoring quick-terminal-size '{v}' \
+                         (sizes need a % or px suffix, e.g. '25%' or '400px')"
+                    );
+                    c.quick_terminal_size
+                }
+            },
+        }
+    }),
+    // Recognized so a transposed Ghostty config doesn't warn, but only `main` is
+    // honored: `mouse` needs per-monitor enumeration giest has no handle for and
+    // `macos-menu-bar` has no Windows meaning. Says so rather than silently
+    // placing the window on the wrong screen.
+    ("quick-terminal-screen", |_c, v, _d| {
+        if !v.is_empty() && !v.eq_ignore_ascii_case("main") {
+            eprintln!("giest: quick-terminal-screen '{v}' is not supported; using 'main'");
+        }
+    }),
+    ("quick-terminal-autohide", |c, v, d| {
+        c.quick_terminal_autohide = parse_bool(v, d.quick_terminal_autohide)
+    }),
+    ("window-save-state", |c, v, d| {
+        c.window_save_state = match v.to_ascii_lowercase().as_str() {
+            "" => d.window_save_state,
+            "default" => WindowSaveState::Default,
+            "never" => WindowSaveState::Never,
+            "always" => WindowSaveState::Always,
+            _ => c.window_save_state,
         }
     }),
     ("resize-overlay", |c, v, d| {
@@ -2078,6 +2171,36 @@ mod tests {
         // Out-of-range values clamp to [0.5, 3.0].
         assert_eq!(parsed("text-gamma = 10.0").text_gamma, 3.0);
         assert_eq!(parsed("text-gamma = 0.1").text_gamma, 0.5);
+    }
+
+    #[test]
+    fn a_utf8_bom_does_not_hide_the_first_key() {
+        // Notepad and PowerShell's `-Encoding utf8` both write one.
+        assert_eq!(
+            parsed("\u{feff}window-save-state = always").window_save_state,
+            WindowSaveState::Always
+        );
+    }
+
+    #[test]
+    fn window_save_state_parses_and_only_always_restores() {
+        assert_eq!(Config::default().window_save_state, WindowSaveState::Default);
+        assert_eq!(
+            parsed("window-save-state = always").window_save_state,
+            WindowSaveState::Always
+        );
+        assert_eq!(
+            parsed("window-save-state = never").window_save_state,
+            WindowSaveState::Never
+        );
+        assert_eq!(
+            parsed("window-save-state = default").window_save_state,
+            WindowSaveState::Default
+        );
+        // `default` means "when the OS asks", and Windows never does.
+        assert!(WindowSaveState::Always.restores());
+        assert!(!WindowSaveState::Default.restores());
+        assert!(!WindowSaveState::Never.restores());
     }
 
     #[test]

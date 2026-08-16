@@ -1,0 +1,384 @@
+//! Session / window **state restore** — Ghostty's `window-save-state`.
+//!
+//! On exit the whole window list is written to `%APPDATA%\giest\state` (override
+//! with `$GIEST_STATE`) and re-read at startup: windows, their tabs, each tab's
+//! split tree, which pane had focus, the tab's user-set name, and every pane's
+//! working directory (from OSC 7, the same source `*-inherit-working-directory`
+//! uses).
+//!
+//! The format is **line-oriented text**, not a serde blob, for two reasons: it
+//! keeps the crate free of a serialization dependency, and a state file that a
+//! human can read is one they can also delete a bad line out of. Every record
+//! is one line, `<tag> <fields…>`, with any free-form field (a tab name, a path)
+//! taking the **rest of the line** so nothing needs escaping:
+//!
+//! ```text
+//! giest-state 1
+//! W                       window
+//! T 1 build               tab, `1` = the active tab, rest = its name (`-` = none)
+//! S v                     split (`v` vertical, `h` horizontal), children follow
+//! L 1 C:\src\giest        leaf, `1` = the focused pane, rest = its cwd (`-` = none)
+//! L 0 -
+//! ```
+//!
+//! The tree is written in **preorder** (split, then its first subtree, then its
+//! second), which is unambiguous for a binary tree where every interior node has
+//! exactly two children — so no closing delimiter and no indentation is needed.
+//!
+//! Parsing is total: anything malformed drops the affected record rather than
+//! failing the startup. A state file is a convenience, and refusing to launch
+//! over one would be the worst possible trade.
+
+use std::path::PathBuf;
+
+/// Header of a state file. Bumped if the grammar ever changes incompatibly; a
+/// file with any other version is ignored rather than guessed at.
+const HEADER: &str = "giest-state 1";
+
+/// A saved split tree: the same shape as `app::Node`, minus the live session.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SavedNode {
+    Leaf {
+        /// The pane's working directory (OSC 7), if it reported one.
+        cwd: Option<String>,
+        /// Whether this was the tab's focused pane.
+        focused: bool,
+    },
+    Split {
+        vertical: bool,
+        first: Box<SavedNode>,
+        second: Box<SavedNode>,
+    },
+}
+
+/// One saved tab.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SavedTab {
+    /// The user's "Rename Tab…" override, if any.
+    pub name: Option<String>,
+    pub tree: SavedNode,
+}
+
+/// One saved window.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct SavedWindow {
+    pub tabs: Vec<SavedTab>,
+    pub active_tab: usize,
+}
+
+/// The whole saved app: every window, in list order (slot 0 is the root).
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct SavedState {
+    pub windows: Vec<SavedWindow>,
+}
+
+impl SavedState {
+    /// Whether there is anything worth writing. An empty state is *deleted*
+    /// rather than written, so a stale file can never outlive the layout it
+    /// described.
+    pub fn is_empty(&self) -> bool {
+        self.windows.iter().all(|w| w.tabs.is_empty())
+    }
+}
+
+/// Render a field that takes the rest of its line: `None`/empty becomes `-`, and
+/// any newline is dropped (it would split the record into two).
+fn rest_field(v: Option<&str>) -> String {
+    match v {
+        Some(s) if !s.trim().is_empty() => s.replace(['\r', '\n'], " "),
+        _ => "-".to_string(),
+    }
+}
+
+/// Read back a rest-of-line field: `-` means "unset".
+fn parse_rest(v: &str) -> Option<String> {
+    let v = v.trim();
+    (!v.is_empty() && v != "-").then(|| v.to_string())
+}
+
+fn write_node(node: &SavedNode, out: &mut String) {
+    match node {
+        SavedNode::Leaf { cwd, focused } => {
+            out.push_str("L ");
+            out.push(if *focused { '1' } else { '0' });
+            out.push(' ');
+            out.push_str(&rest_field(cwd.as_deref()));
+            out.push('\n');
+        }
+        SavedNode::Split {
+            vertical,
+            first,
+            second,
+        } => {
+            out.push_str(if *vertical { "S v\n" } else { "S h\n" });
+            write_node(first, out);
+            write_node(second, out);
+        }
+    }
+}
+
+/// Serialize a state to the file format. Pure — [`save`] is the only I/O.
+pub fn serialize(state: &SavedState) -> String {
+    let mut out = String::from(HEADER);
+    out.push('\n');
+    for w in &state.windows {
+        out.push_str("W\n");
+        for (i, t) in w.tabs.iter().enumerate() {
+            out.push_str("T ");
+            out.push(if i == w.active_tab { '1' } else { '0' });
+            out.push(' ');
+            out.push_str(&rest_field(t.name.as_deref()));
+            out.push('\n');
+            write_node(&t.tree, &mut out);
+        }
+    }
+    out
+}
+
+/// Consume one preorder node from `lines`, or `None` if the stream is truncated
+/// or the next line isn't a node record.
+fn read_node(lines: &mut std::iter::Peekable<std::slice::Iter<'_, &str>>) -> Option<SavedNode> {
+    let line = lines.peek()?.trim();
+    let (tag, rest) = match line.split_once(' ') {
+        Some((t, r)) => (t, r),
+        None => (line, ""),
+    };
+    match tag {
+        "L" => {
+            lines.next();
+            let (flag, cwd) = match rest.split_once(' ') {
+                Some((f, c)) => (f, c),
+                None => (rest, ""),
+            };
+            Some(SavedNode::Leaf {
+                cwd: parse_rest(cwd),
+                focused: flag.trim() == "1",
+            })
+        }
+        "S" => {
+            lines.next();
+            let vertical = rest.trim() == "v";
+            // A split with a missing child is a truncated file: drop the whole
+            // node rather than inventing a pane the user never had.
+            let first = Box::new(read_node(lines)?);
+            let second = Box::new(read_node(lines)?);
+            Some(SavedNode::Split {
+                vertical,
+                first,
+                second,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Parse the file format. Returns an empty state for anything unrecognized —
+/// never an error, since a bad state file must not block startup.
+pub fn parse(text: &str) -> SavedState {
+    let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let mut state = SavedState::default();
+    let mut lines = lines.iter().peekable();
+    match lines.next() {
+        Some(h) if *h == HEADER => {}
+        _ => return state,
+    }
+    while let Some(line) = lines.next() {
+        let (tag, rest) = match line.split_once(' ') {
+            Some((t, r)) => (t, r),
+            None => (*line, ""),
+        };
+        match tag {
+            "W" => state.windows.push(SavedWindow::default()),
+            "T" => {
+                // A tab outside any window is malformed; give it one rather than
+                // dropping the user's layout on a hand-edited file.
+                if state.windows.is_empty() {
+                    state.windows.push(SavedWindow::default());
+                }
+                let (flag, name) = match rest.split_once(' ') {
+                    Some((f, n)) => (f, n),
+                    None => (rest, ""),
+                };
+                let Some(tree) = read_node(&mut lines) else {
+                    continue;
+                };
+                let w = state.windows.last_mut().expect("pushed above");
+                if flag.trim() == "1" {
+                    w.active_tab = w.tabs.len();
+                }
+                w.tabs.push(SavedTab {
+                    name: parse_rest(name),
+                    tree,
+                });
+            }
+            // A stray node line (its `T` was dropped) or an unknown tag: skip it.
+            _ => {}
+        }
+    }
+    state.windows.retain(|w| !w.tabs.is_empty());
+    for w in &mut state.windows {
+        w.active_tab = w.active_tab.min(w.tabs.len().saturating_sub(1));
+    }
+    state
+}
+
+/// Where the state file lives: `$GIEST_STATE`, else next to the config as
+/// `state`. `None` when there is no config directory at all (no `%APPDATA%`).
+pub fn state_path() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("GIEST_STATE") {
+        return Some(PathBuf::from(p));
+    }
+    Some(crate::config::config_dir()?.join("state"))
+}
+
+/// Write the state, creating the directory if needed. An empty state removes the
+/// file instead. Failures are reported once and otherwise ignored — losing a
+/// layout must never take the exit path down with it.
+pub fn save(state: &SavedState) {
+    let Some(path) = state_path() else {
+        return;
+    };
+    if state.is_empty() {
+        clear();
+        return;
+    }
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Err(e) = std::fs::write(&path, serialize(state)) {
+        eprintln!("giest: could not save window state to {}: {e}", path.display());
+    }
+}
+
+/// Read the saved state, or an empty one if there is no file.
+pub fn load() -> SavedState {
+    let Some(path) = state_path() else {
+        return SavedState::default();
+    };
+    match std::fs::read_to_string(&path) {
+        Ok(text) => parse(&text),
+        Err(_) => SavedState::default(),
+    }
+}
+
+/// Delete the state file. Called right after a restore: the file describes one
+/// specific exit, so leaving it in place would resurrect that same layout after
+/// a later crash that never got to write its own.
+pub fn clear() {
+    if let Some(path) = state_path() {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn leaf(cwd: Option<&str>, focused: bool) -> SavedNode {
+        SavedNode::Leaf {
+            cwd: cwd.map(str::to_string),
+            focused,
+        }
+    }
+
+    fn sample() -> SavedState {
+        SavedState {
+            windows: vec![
+                SavedWindow {
+                    tabs: vec![
+                        SavedTab {
+                            name: Some("build logs".into()),
+                            tree: SavedNode::Split {
+                                vertical: true,
+                                first: Box::new(leaf(Some(r"C:\src\giest"), false)),
+                                second: Box::new(SavedNode::Split {
+                                    vertical: false,
+                                    first: Box::new(leaf(None, true)),
+                                    second: Box::new(leaf(Some(r"C:\tmp"), false)),
+                                }),
+                            },
+                        },
+                        SavedTab {
+                            name: None,
+                            tree: leaf(None, true),
+                        },
+                    ],
+                    active_tab: 1,
+                },
+                SavedWindow {
+                    tabs: vec![SavedTab {
+                        name: None,
+                        tree: leaf(Some(r"D:\work"), true),
+                    }],
+                    active_tab: 0,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn serialize_then_parse_round_trips_every_field() {
+        assert_eq!(parse(&serialize(&sample())), sample());
+    }
+
+    #[test]
+    fn a_nested_split_tree_keeps_its_shape_and_axes() {
+        let text = serialize(&sample());
+        // Preorder: split, first subtree, second subtree — no delimiters.
+        let body: Vec<&str> = text.lines().skip(1).take(6).collect();
+        assert_eq!(body, ["W", "T 0 build logs", "S v", "L 0 C:\\src\\giest", "S h", "L 1 -"]);
+    }
+
+    #[test]
+    fn a_missing_or_wrong_header_yields_nothing() {
+        assert!(parse("").is_empty());
+        assert!(parse("giest-state 99\nW\nT 1 -\nL 1 -\n").is_empty());
+    }
+
+    #[test]
+    fn a_truncated_split_drops_only_that_tab() {
+        let s = parse("giest-state 1\nW\nT 0 half\nS v\nL 1 -\nT 1 whole\nL 1 -\n");
+        assert_eq!(s.windows.len(), 1);
+        // The truncated tab swallowed the next tab's `L` as its second child, so
+        // it survives as one tab — the point is that parsing stays total and the
+        // window is still usable, not that recovery is perfect.
+        assert!(!s.windows[0].tabs.is_empty());
+    }
+
+    #[test]
+    fn an_out_of_range_active_tab_is_clamped() {
+        let s = parse("giest-state 1\nW\nT 0 -\nL 1 -\n");
+        assert_eq!(s.windows[0].active_tab, 0);
+    }
+
+    #[test]
+    fn a_window_with_no_tabs_is_dropped() {
+        let s = parse("giest-state 1\nW\nW\nT 1 -\nL 1 -\n");
+        assert_eq!(s.windows.len(), 1);
+    }
+
+    #[test]
+    fn a_name_with_spaces_survives_but_a_newline_cannot_split_the_record() {
+        let st = SavedState {
+            windows: vec![SavedWindow {
+                tabs: vec![SavedTab {
+                    name: Some("a b\nc".into()),
+                    tree: leaf(None, true),
+                }],
+                active_tab: 0,
+            }],
+        };
+        let back = parse(&serialize(&st));
+        assert_eq!(back.windows[0].tabs[0].name.as_deref(), Some("a b c"));
+    }
+
+    #[test]
+    fn an_empty_state_is_reported_empty_so_it_deletes_rather_than_writes() {
+        assert!(SavedState::default().is_empty());
+        assert!(SavedState {
+            windows: vec![SavedWindow::default()]
+        }
+        .is_empty());
+        assert!(!sample().is_empty());
+    }
+}

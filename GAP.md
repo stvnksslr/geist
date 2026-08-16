@@ -163,13 +163,13 @@ metrics; box-drawing/powerline/braille sprite synthesis; COLRv1 emoji; Ghostty's
 `bold-is-bright`/`bold-color`, `cursor-style`/`-blink`, **transparency + background-opacity**,
 blur (Windows acrylic), `faint-opacity`, `cursor-opacity`, unfocused-split dimming — now done.)*
 
-**Window / UI** — quick (dropdown) terminal w/ global hotkey; window/tab/split **state restore**;
-titlebar/decoration styles; settings UI; inspector; about dialog; custom app icons.
+**Window / UI** — titlebar/decoration styles; settings UI; inspector; about dialog; custom app icons.
 *(fullscreen toggle, split zoom, tab drag-reorder, resize overlay, confirm-close-surface,
 **multi-window**, **scrollbar**, **`window-theme` + the chrome design system** (`theme.rs`:
 tab strip, palette, overlays and dialogs all derive their colors from
 `background`/`foreground`/`palette` instead of egui's defaults, and no longer follow the OS
-light/dark preference) — now done.)*
+light/dark preference), **window/tab/split state restore** (`window-save-state`), **quick
+(dropdown) terminal + global hotkey** — now done.)*
 
 **Input / keybinds** — key tables / leader sequences; the remaining ~60 keybind *actions* (write_*_file,
 set_*_title, toggle_*, send raw text/esc/csi, undo/redo, …). *(Config-driven binding + several actions
@@ -272,13 +272,13 @@ Effort: **S** <1d · **M** 1–3d · **L** ~1wk · **XL** multi-wk. Status: ✅ 
 | Gap | Files | Binding | Effort | Status |
 |---|---|---|---|---|
 | Full configurable keybinds (tables/sequences) | `keybind.rs`, `app.rs`, `session.rs` | ✅ | L | ◐ (chords + `>` sequences done; named key *tables* still open) |
-| Quick / dropdown terminal | new module + `app.rs`/`main.rs` | — | L | ⬜ (needs P2✅,P5) |
+| Quick / dropdown terminal | `quickterm.rs`, `hotkey.rs`, `app.rs` | — | L | ✅ (+ `global:` keybinds — see the ledger) |
 | Kitty graphics (inline images) | `engine`, `GridSnapshot`, `render/mod.rs` | ✅ | L–XL | ◐ **blocked on ConPTY** — engine + geometry done, see below |
 | Scrollback search overlay | `search.rs`, `session.rs`, `app.rs`, `engine`, `render` | ✋ | M–L | ✅ (single-row matches; pins deferred) |
 | Custom shaders | `shader.rs`, `render/mod.rs`, `config.rs` | — | L | ✅ (Shadertoy GLSL→WGSL, offscreen chain, both keys; verified end to end) |
 | background-image / blur | `bgimage.rs`, `render/mod.rs`, `config.rs` | — | M–L | ✅ (blur via Windows DWM acrylic/mica, `blur.rs`; image via `bgimage.rs` + shader mode 4) |
 | Multi-window (`new_window` / `close_window`) | `app.rs`, `command.rs`, `keybind.rs` | — | L | ✅ |
-| Session / window state restore | `app.rs` + persistence module | ◐ | L | ⬜ (needs P5) |
+| Session / window state restore | `app.rs`, `state.rs` | ◐ | L | ✅ (`window-save-state`; layout only — see the ledger) |
 | Clipboard permission + paste protection | `session.rs`, `app.rs`, `config.rs`, `osc52.rs` | ✋ | M | ✅ |
 | Desktop notifications + notify-on-command-finish | `osc_notify.rs`, `notify.rs`, `osc133.rs`, `profiles.rs`, `session.rs`, `app.rs` | ✋ | M | ✅ (both halves; cmd can't report an exit code — see the ledger) |
 | Real scrollbar widget | `scrollbar.rs`, `app.rs`, `session.rs` | ✅ | M | ✅ |
@@ -358,10 +358,102 @@ With Phase 0 done, the remaining Tier-1 items are mostly small, registry-backed 
     `profiles.rs` inject only A/B today. See the ledger below.
 12. ✅ **OSC 9;4 progress → Windows taskbar** (+ `progress-style`) — Tier 3, but it rides the OSC 9
     parser the notifications just built and is squarely Windows-native. See the ledger below.
-13. Next: the remaining Tier-2 big rocks — **custom shaders** (unblocked by P4, and by the texture /
-    extra-binding plumbing background-image just built), **session/window state restore** (unblocked
-    by P5), and **OSC 133 C/D → desktop notifications** (note cmd.exe has no preexec hook, so C/D
-    would be pwsh-only).
+13. ✅ **Session / window state restore** — `window-save-state`, a new `state.rs`. See the ledger below.
+14. ✅ **Quick (dropdown) terminal + `global:` keybinds** — `quickterm.rs`, `hotkey.rs`. See below.
+15. Next: **migrating to the binding's selection model** (which would also give search cross-wrap
+    matches and drift-free match tracking), then the Tier-3 long tail (box-drawing/powerline
+    sprites, `adjust-cell-*`, readonly/secure-input indicators, settings UI).
+
+### Quick terminal + global keybinds — ✅ divergences
+
+`toggle_quick_terminal` plus `quick-terminal-position` / `-size` / `-autohide` / `-screen`, and the
+`global:` trigger flag that makes them reachable — Ghostty's own example binding is
+`global:cmd+grave`, and a dropdown terminal you can only summon while it's focused is no dropdown
+terminal at all.
+
+- **A low-level keyboard hook, not `RegisterHotKey`.** `RegisterHotKey` posts `WM_HOTKEY` to the
+  *thread message queue*, and winit owns the message loop with no hook for unrecognized thread
+  messages — the message would be dispatched and dropped somewhere we can't see. `WH_KEYBOARD_LL`
+  calls back on the installing thread during the dispatch winit is already pumping. The callback is
+  on the OS input path, so it does the minimum (compare a VK, read modifiers, set a bit in an
+  atomic) and `try_lock`s rather than blocks: Windows silently *unregisters* a hook that exceeds
+  `LowLevelHooksTimeout`, and the feature would then stop working with no error anywhere.
+- **The hook is installed only when a `global:` binding exists**, and removed when the last one goes.
+  A system-wide keyboard hook is a real cost to every application, and a terminal should not take
+  one uninvited. There is no default global binding for the same reason.
+- **A matched chord is swallowed.** The key must not also reach whatever app was focused — that is
+  what separates a global binding from a listener.
+- **A global binding is deliberately *not* also an in-app binding.** The hook fires regardless of
+  focus, so keeping a copy in the ordinary keymap would run the action twice on a focused press.
+  `Keymap::globals()` is therefore a separate list, and a test pins that `lookup`/`starts_binding`
+  don't see it.
+- **Global binds follow the *root* window's config.** Every window holds its own `Config` clone
+  (giest reloads per window, like Ghostty's per-surface clone), but an OS registration is
+  process-wide and needs one authority. A reload in a secondary window won't re-register them.
+- **Hiding the quick terminal means not drawing its viewport.** A child viewport ignores
+  `ViewportCommand::Close`; ceasing to show it is what destroys the native window — and because the
+  `Window` stays in `App::windows`, every shell inside keeps running and reopening is instant.
+- **The frame math is a CPU port of `QuickTerminalSize.calculate` + `finalOrigin`**, defaults
+  included (400px primary, full screen secondary, 800×400 centered landscape), so it can be table-
+  tested; upstream computes the same numbers inside AppKit calls that can only be checked by eye.
+  The **one** intentional inversion is the Y axis: AppKit's `visibleFrame` is Y-up from the
+  bottom-left, Windows' work area is Y-down from the top-left, so `top`/`bottom` use the opposite
+  arithmetic to the Swift to get the same visual result.
+- **The geometry is divided by `pixels_per_point`** — the work area is physical pixels, egui's
+  viewport commands are points. Exactly the trap `window-position-*` hit.
+- **Sizes are clamped to the work area.** A `200%` would otherwise put most of the window off the
+  edge with nothing on screen to say why. And the work area (not the full screen) is what a
+  `bottom`-positioned terminal anchors to, or it would sit under the taskbar.
+- **`quick-terminal-screen` honors `main` only**: `mouse` needs per-monitor enumeration giest has no
+  handle for, and `macos-menu-bar` has no Windows meaning. It says so rather than silently placing
+  the window on the wrong screen.
+- **`quick-terminal-autohide` defaults to `false`**, which is Ghostty's own non-macOS default —
+  and the right one here for the same reason: a global hotkey is the only way back.
+- **Not done:** the slide-in animation (`quick-terminal-animation-duration`, macOS-only upstream),
+  `quick-terminal-space-behavior` (macOS spaces), the GTK/Wayland `-layer` and `-namespace` keys,
+  and the other trigger flags (`all:`, `unconsumed:`, `performable:`).
+- **Verified live, by measurement**: with `quick-terminal-size = 30%` on a 2560×1392 work area, the
+  hotkey pressed while giest was **unfocused** produced a new top-level window at `0,0` sized
+  `2560×417` — full width, and 30% of 1392 = 417.6 → 417. Toggling again removed the window and a
+  third press brought it back.
+
+### Session / window state restore — ✅ divergences
+
+`window-save-state = default | never | always`, with Ghostty's default. On exit the window list is
+written to `%APPDATA%\giest\state` (`$GIEST_STATE` overrides) and rebuilt at the next launch:
+windows, tabs and their order and active index, each tab's nested split tree and focused pane, a
+renamed tab's name, and every pane's OSC 7 working directory.
+
+- **`default` behaves as `never`**, and that is parity rather than a shortfall: upstream's `default`
+  means "restore when the OS asks", which on macOS is the system's own reopen-windows setting.
+  Windows has no such mechanism, so there is nothing to defer to. `WindowSaveState::restores()` is
+  the single predicate for both halves — a mode that saved but never restored would only ever
+  accumulate a stale file.
+- **Layout, not session.** Each pane gets a fresh shell in its saved directory; scrollback and shell
+  state are gone. Ghostty is the same (macOS restores surfaces, not their history).
+- **The snapshot is taken in `App::retire`, not `on_exit`.** Quitting *is* closing the last window,
+  so by the time `on_exit` runs there are no windows left to read. `App::last_state` is refreshed at
+  the top of every retire, which makes it describe exactly the moment before the close that ended
+  the process — and closing windows one at a time therefore drops the earlier ones, matching macOS.
+- **The file is consumed on read.** It describes one specific exit; leaving it would resurrect that
+  layout after a later crash that never wrote its own, which reads as giest ignoring everything the
+  user has done since.
+- **Parsing is total.** A line-oriented text format (one record per line, free-form fields taking
+  the rest of the line so nothing needs escaping) with a preorder tree — unambiguous for a binary
+  tree whose interior nodes always have two children, so no delimiters or indentation. Anything
+  malformed drops the affected record; a bad state file can never block startup, which is the worst
+  possible trade for a convenience feature.
+- **Restore is best-effort per leaf.** A saved directory that no longer exists falls back to the
+  default (spawning into it would fail and silently cost a pane), a shell that won't spawn collapses
+  out of its split rather than taking the tab with it, and a window that ends up with no tabs keeps
+  the one it already had — the user gets their original window, never none.
+- **The first window's initial shell is spawned and immediately dropped.** `Window::first` does the
+  once-per-process setup (atlas, theme, profiles) and opens a session on the way; deciding before
+  that would mean moving all of it. One short-lived shell is the cheaper trade.
+- **Not saved: window size/position** (`window-width`/`-height`/`-position-*` already cover that for
+  every launch), **split zoom** (a transient view; restoring one hides panes), tab colors, and the
+  per-pane profile — every restored pane runs the default profile, since a pane doesn't record which
+  profile opened it.
 
 ### Clipboard permissions + paste protection — ✅
 
@@ -434,9 +526,10 @@ path instead of two that could disagree.
   they have to be delivered late, in order.
 - **An exact binding beats being a prefix**, so `ctrl+a` and `ctrl+a>n` can coexist without the
   bare chord hanging forever on a second key that could never take effect.
-- **Not done: named key *tables*** (`activate_key_table`), and the `global:` / `all:` /
-  `unconsumed:` / `performable:` trigger flags. `global:` and `all:` are inherently
-  non-sequenceable upstream too.
+- **Not done: named key *tables*** (`activate_key_table`), and the `all:` / `unconsumed:` /
+  `performable:` trigger flags. **`global:` is now done** — see the quick-terminal ledger. It is
+  inherently non-sequenceable (the OS delivers one key, not a leader and a follower), which is true
+  upstream too, so a global trigger must be a single chord.
 - **Not done: `end_key_sequence`**, Ghostty's action for flushing the prior keys but *not* the one
   that triggered it. giest's dead-end flush includes the triggering key, which is Ghostty's default
   behaviour; only the opt-out is missing.

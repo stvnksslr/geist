@@ -82,6 +82,8 @@ pub enum Action {
     /// Toggle the window between fullscreen and windowed (Ghostty
     /// `toggle_fullscreen`).
     ToggleFullscreen,
+    /// Show/hide the dropdown "quick terminal" (`toggle_quick_terminal`).
+    ToggleQuickTerminal,
     FocusSplitLeft,
     FocusSplitRight,
     FocusSplitUp,
@@ -158,6 +160,7 @@ impl Action {
             Action::ToggleSplitZoom => "Toggle Split Zoom",
             Action::ClosePane => "Close Pane",
             Action::ToggleFullscreen => "Toggle Fullscreen",
+            Action::ToggleQuickTerminal => "Toggle Quick Terminal",
             Action::FocusSplitLeft => "Focus Split: Left",
             Action::FocusSplitRight => "Focus Split: Right",
             Action::FocusSplitUp => "Focus Split: Up",
@@ -215,6 +218,7 @@ impl Action {
             Action::ToggleSplitZoom => "Ctrl+Shift+Enter",
             Action::ClosePane => "Ctrl+Shift+W",
             Action::ToggleFullscreen => "Ctrl+Enter",
+            Action::ToggleQuickTerminal => "",
             Action::FocusSplitLeft => "Ctrl+Alt+\u{2190}",
             Action::FocusSplitRight => "Ctrl+Alt+\u{2192}",
             Action::FocusSplitUp => "Ctrl+Alt+\u{2191}",
@@ -270,6 +274,7 @@ impl Action {
             Action::ToggleSplitZoom => "toggle_split_zoom".into(),
             Action::ClosePane => "close_surface".into(),
             Action::ToggleFullscreen => "toggle_fullscreen".into(),
+            Action::ToggleQuickTerminal => "toggle_quick_terminal".into(),
             Action::FocusSplitLeft => "goto_split:left".into(),
             Action::FocusSplitRight => "goto_split:right".into(),
             Action::FocusSplitUp => "goto_split:up".into(),
@@ -390,6 +395,7 @@ impl Action {
             "close_surface" | "close_pane" => Action::ClosePane,
             "toggle_split_zoom" => Action::ToggleSplitZoom,
             "toggle_fullscreen" => Action::ToggleFullscreen,
+            "toggle_quick_terminal" => Action::ToggleQuickTerminal,
             "increase_font_size" => Action::IncreaseFontSize,
             "decrease_font_size" => Action::DecreaseFontSize,
             "reset_font_size" => Action::ResetFontSize,
@@ -455,6 +461,7 @@ const BASE_ACTIONS: &[Action] = &[
     Action::ToggleSplitZoom,
     Action::ClosePane,
     Action::ToggleFullscreen,
+    Action::ToggleQuickTerminal,
     Action::FocusSplitLeft,
     Action::FocusSplitRight,
     Action::FocusSplitUp,

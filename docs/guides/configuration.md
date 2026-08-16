@@ -89,6 +89,60 @@ backdrop or the taskbar attention flash, which need a window handle only the fir
 answers with the close confirmation. Bind it explicitly with `keybind = alt+f4=close_window` if you
 want the action as well.
 
+### Quick terminal (dropdown) and global keybinds
+
+A **global** keybind fires even when giest isn't the focused application, which is what makes the
+dropdown terminal usable:
+
+```
+keybind = global:ctrl+alt+g=toggle_quick_terminal
+```
+
+| Key | Type | Notes |
+| --- | --- | --- |
+| `quick-terminal-position` | enum | `top` (default), `bottom`, `left`, `right`, `center`. |
+| `quick-terminal-size` | size | One or two comma-separated sizes, each `<n>%` or `<n>px` — a bare number is rejected, as upstream. The first applies to the position's *primary* axis (height for top/bottom, width for left/right), the second to the other one. Defaults match Ghostty: 400px on the primary axis, the full screen on the secondary, and 800×400 centered. |
+| `quick-terminal-autohide` | bool (default `false`) | Hide the quick terminal when it loses focus. `false` is Ghostty's own non-macOS default. |
+| `quick-terminal-screen` | enum | Recognized; only `main` is honored. |
+
+The quick terminal is an ordinary giest window in every respect except its chrome — tabs, splits,
+search and the palette all work inside it — but it has no titlebar, sits above other windows, and
+takes no taskbar button. Hiding it destroys the native window while **leaving its shells running**,
+so it comes back exactly as you left it.
+
+Notes on global binds:
+
+- They are delivered by a system-wide low-level keyboard hook, installed only when a `global:`
+  binding exists. A matched chord is **swallowed** — it does not also reach the app you were typing
+  into, which is the point.
+- The match is exact: `global:ctrl+grave` does not fire on Ctrl+Shift+`.
+- A global binding is *not* also an in-app binding. The hook fires whether or not giest is focused,
+  so binding it twice would run the action twice.
+- Any action can be bound globally, not just `toggle_quick_terminal`; a window action runs against
+  the window you used last.
+
+### Saving and restoring the layout
+
+`window-save-state = always` makes giest write its layout to `%APPDATA%\giest\state` (override the
+path with `$GIEST_STATE`) when the last window closes, and rebuild it at the next launch: every
+window, its tabs in order and which one was active, each tab's nested split tree, which pane had
+focus, a renamed tab's name, and each pane's working directory.
+
+What it deliberately does **not** restore:
+
+- **Scrollback and shell state.** Each pane gets a fresh shell in the saved directory. Nothing of
+  the old session's output survives — this restores a *layout*, not a session.
+- **Window size and position.** Use `window-width` / `window-height` / `window-position-*` for
+  those; they apply to every launch rather than only to a restored one.
+- **Split zoom**, which is a transient view of a layout — restoring one would hide panes the user
+  would then have to go looking for.
+
+The state file is **consumed on read**: it describes one specific exit, so a later crash that never
+got to write its own layout resurrects nothing. A pane whose saved directory no longer exists
+starts in the default one, and a shell that fails to spawn drops out of its split rather than
+taking the tab with it. The file is plain text, one record per line, and anything unparseable is
+skipped — a bad state file can never stop giest starting.
+
 ### More bindable actions
 
 Beyond the defaults, these Ghostty actions are available to `keybind`:
@@ -217,6 +271,7 @@ leader is gone, the leader itself is released back to the shell.
 | `resize-overlay-position` | enum | `center` (default), `top-left`, `top-center`, `top-right`, `bottom-left`, `bottom-center`, `bottom-right`. |
 | `resize-overlay-duration` | duration | Default `750ms`. Accepts Ghostty's additive grammar (`1h30m`, `2s500ms`) and a bare integer as milliseconds; clamped to 250 ms – 60 s. |
 | `confirm-close-surface` | enum | `true` (default) confirms only when a pane looks busy, `always` always confirms, `false` never does. Also guards the titlebar close / Alt+F4. "Busy" is inferred from OSC 133 prompt marks, which giest injects for PowerShell and cmd; a shell that doesn't mark its prompts can't be judged, so it always confirms. |
+| `window-save-state` | enum | `default` (default), `never`, `always`. With `always`, the windows/tabs/splits open at quit — including each pane's working directory, the focused pane and any renamed tab — are restored at the next launch. `default` means "restore when the OS asks", which is a macOS mechanism Windows has no equivalent of, so it behaves as `never`. See below. |
 | `osc-color-report-format` | enum | Precision of replies to `OSC 10/11/12 ; ?` colour queries: `16-bit` (default), `8-bit`, or `none` to not answer. |
 | `scrollbar` | enum | `system` (default) or `never`. See below. |
 | `desktop-notifications` | bool (default `true`) | Whether programs may raise desktop notifications with `OSC 9` or `OSC 777`. See below. |
