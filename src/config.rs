@@ -1116,6 +1116,11 @@ pub struct Config {
     pub split_inherit_working_directory: bool,
     /// Same, for a new window. Ghostty `window-inherit-working-directory`.
     pub window_inherit_working_directory: bool,
+    /// Raw `config-file` specs collected from the body currently being parsed —
+    /// a *staging* list, not a setting. [`Config::apply_body`] drains it after
+    /// every file, so it is empty in a fully loaded config. Ghostty
+    /// `config-file`; see [`Config::load_from_file`] for the traversal.
+    pub config_file: Vec<String>,
 }
 
 impl Default for Config {
@@ -1228,6 +1233,7 @@ impl Default for Config {
             tab_inherit_working_directory: true,
             split_inherit_working_directory: true,
             window_inherit_working_directory: true,
+            config_file: Vec::new(),
         }
     }
 }
@@ -1239,10 +1245,53 @@ impl Config {
         let Some(path) = config_path() else {
             return Self::default();
         };
-        match std::fs::read_to_string(&path) {
-            Ok(text) => Self::from_ghostty_config(&text),
-            Err(_) => Self::default(),
+        Self::load_from_file(&path)
+    }
+
+    /// Load `root` plus every file it pulls in with `config-file`, and the files
+    /// *those* pull in, over the built-in defaults.
+    ///
+    /// The traversal is Ghostty's, which is subtle in two ways worth stating:
+    /// an included file is loaded **after the whole file that named it** (so its
+    /// keys win over that file's, not just over the lines above the
+    /// `config-file` line), and nested includes join the *end* of one shared
+    /// queue — i.e. breadth-first, not depth-first. Both fall out of upstream's
+    /// `loadRecursiveFiles`, which walks a single growing list.
+    ///
+    /// A path is resolved against the directory of the file that named it. A
+    /// `?` prefix makes a missing file silent. A file already loaded is skipped
+    /// with a message, so a cycle terminates instead of hanging.
+    pub fn load_from_file(root: &Path) -> Self {
+        let mut cfg = Self::default();
+        let mut queue: std::collections::VecDeque<(PathBuf, bool)> = Default::default();
+        let mut seen: std::collections::HashSet<PathBuf> = Default::default();
+        seen.insert(load_key(root));
+
+        // A missing *root* config is normal (no file yet) and stays silent;
+        // a missing *included* one is a typo the user asked for by name.
+        let Ok(text) = std::fs::read_to_string(root) else {
+            return cfg;
+        };
+        queue.extend(cfg.apply_body(&text, root.parent()));
+
+        while let Some((path, optional)) = queue.pop_front() {
+            if !seen.insert(load_key(&path)) {
+                eprintln!(
+                    "giest: config-file {}: already loaded (cycle), ignoring",
+                    path.display()
+                );
+                continue;
+            }
+            match std::fs::read_to_string(&path) {
+                Ok(text) => {
+                    let more = cfg.apply_body(&text, path.parent());
+                    queue.extend(more);
+                }
+                Err(e) if optional && e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => eprintln!("giest: error reading config-file {}: {e}", path.display()),
+            }
         }
+        cfg
     }
 
     /// Build a [`Config`] by applying a Ghostty-format config body over the
@@ -1251,14 +1300,29 @@ impl Config {
     /// the parser directly without touching the filesystem.
     pub fn from_ghostty_config(text: &str) -> Self {
         let mut cfg = Self::default();
+        // No path, so nothing to resolve a relative `config-file` against: the
+        // includes this returns are dropped. `load_from_file` is the entry point
+        // that follows them.
+        let _ = cfg.apply_body(text, config_dir().as_deref());
+        cfg
+    }
+
+    /// Apply one config body over this config and return the files it asks for
+    /// via `config-file`, resolved against `base` (the directory of the file the
+    /// body came from).
+    fn apply_body(&mut self, text: &str, base: Option<&Path>) -> Vec<(PathBuf, bool)> {
         // Resolve `theme = ...` first so the theme's colors/palette form a base
         // that the user's own keys then override, regardless of line order
         // (matching Ghostty, where an explicit `background` wins over the theme).
         if let Some(spec) = config_value(text, "theme") {
-            cfg.apply_theme_spec(&spec);
+            self.apply_theme_spec(&spec);
         }
-        cfg.parse(text);
-        cfg
+        self.config_file.clear();
+        self.parse(text);
+        std::mem::take(&mut self.config_file)
+            .iter()
+            .filter_map(|spec| parse_include(spec, base))
+            .collect()
     }
 
     /// Apply a `theme = ...` spec: resolve it to a theme file and parse that
@@ -1967,6 +2031,17 @@ const SETTERS: &[(&str, Setter)] = &[
     ("split-inherit-working-directory", |c, v, d| {
         c.split_inherit_working_directory = parse_bool(v, d.split_inherit_working_directory);
     }),
+    // Repeatable, like `font-family`: each line appends another file to load
+    // *after* this one. An empty value clears the list collected so far from
+    // this body (Ghostty's RepeatablePath), which is the only way to undo an
+    // earlier line.
+    ("config-file", |c, v, _d| {
+        if v.is_empty() {
+            c.config_file.clear();
+        } else {
+            c.config_file.push(v.to_string());
+        }
+    }),
     ("window-inherit-working-directory", |c, v, d| {
         c.window_inherit_working_directory = parse_bool(v, d.window_inherit_working_directory);
     }),
@@ -2036,6 +2111,31 @@ pub fn resolve_path(raw: &str, config_dir: Option<&Path>) -> Option<PathBuf> {
         Some(dir) => dir.join(p),
         None => p.to_path_buf(),
     })
+}
+
+/// Split one `config-file` spec into a resolved path and whether it is optional.
+///
+/// A leading `?` marks the file optional (missing is not an error), matching
+/// Ghostty. **Divergence:** upstream lets `"?name"` quote a *literal* leading
+/// `?`; giest's parser strips surrounding quotes before any key sees the value,
+/// and `?` is not a legal character in a Windows filename anyway, so there is
+/// nothing to escape. An empty path is ignored rather than reset — resetting is
+/// what a bare empty value does, and `?` alone is a typo, not a reset.
+fn parse_include(spec: &str, base: Option<&Path>) -> Option<(PathBuf, bool)> {
+    let spec = spec.trim();
+    let (rest, optional) = match spec.strip_prefix('?') {
+        Some(rest) => (rest, true),
+        None => (spec, false),
+    };
+    resolve_path(rest, base).map(|p| (p, optional))
+}
+
+/// The identity a loaded config file is remembered by, for cycle detection.
+/// Canonicalized so `a/../b` and a symlink can't reintroduce a cycle by
+/// spelling the same file differently; a path that won't canonicalize (it
+/// doesn't exist) falls back to itself, which still catches the literal repeat.
+fn load_key(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// Return the last `key = value` value in a config body, or `None`. Used to find
@@ -2515,6 +2615,113 @@ mod tests {
         // Each key is independent — turning one off must not disturb the others.
         let c = parsed("split-inherit-working-directory = false");
         assert!(c.tab_inherit_working_directory && c.window_inherit_working_directory);
+    }
+
+    /// A scratch directory that removes itself, for the `config-file` tests.
+    /// (`std::env::temp_dir` + a counter; giest has no temp-dir dependency.)
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new() -> Self {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            static N: AtomicUsize = AtomicUsize::new(0);
+            let dir = std::env::temp_dir().join(format!(
+                "giest-cfg-{}-{}",
+                std::process::id(),
+                N.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+
+        fn write(&self, name: &str, body: &str) -> PathBuf {
+            let p = self.0.join(name);
+            if let Some(parent) = p.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(&p, body).unwrap();
+            p
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn config_file_include_is_loaded_after_the_file_that_names_it() {
+        // Ghostty's documented and subtle rule: the include wins over the whole
+        // including file, not just over the lines above the `config-file` line.
+        let s = Scratch::new();
+        s.write("inc", "font-size = 20");
+        let root = s.write("config", "config-file = inc\nfont-size = 11");
+        assert_eq!(Config::load_from_file(&root).font_points, 20.0);
+    }
+
+    #[test]
+    fn config_file_includes_load_breadth_first_in_order() {
+        // `a` (which includes `deep`) then `b`. `deep` joins the *end* of the
+        // one shared queue when `a` is parsed, so the order is a, b, deep — and
+        // `deep` gets the last word. Depth-first would run a, deep, b and leave
+        // `b` winning, which is the divergence this pins.
+        let s = Scratch::new();
+        s.write("a", "config-file = deep\nfont-size = 1");
+        s.write("b", "font-size = 2");
+        s.write("deep", "font-size = 3");
+        let root = s.write("config", "config-file = a\nconfig-file = b");
+        assert_eq!(Config::load_from_file(&root).font_points, 3.0);
+    }
+
+    #[test]
+    fn config_file_paths_resolve_against_the_including_file() {
+        // `sub/child` names `sibling`, which lives in `sub/`, not beside `config`.
+        let s = Scratch::new();
+        s.write("sub/child", "config-file = sibling");
+        s.write("sub/sibling", "font-size = 17");
+        let root = s.write("config", "config-file = sub/child");
+        assert_eq!(Config::load_from_file(&root).font_points, 17.0);
+    }
+
+    #[test]
+    fn config_file_optional_prefix_tolerates_a_missing_file() {
+        let s = Scratch::new();
+        let root = s.write("config", "config-file = ?nope\nfont-size = 13");
+        assert_eq!(Config::load_from_file(&root).font_points, 13.0);
+
+        // A *required* missing file is reported but must not lose the rest.
+        let root = s.write("config2", "config-file = nope\nfont-size = 14");
+        assert_eq!(Config::load_from_file(&root).font_points, 14.0);
+    }
+
+    #[test]
+    fn config_file_cycles_terminate() {
+        // a → b → a, plus a self-include: both must stop rather than hang, and
+        // the keys that did load must survive.
+        let s = Scratch::new();
+        s.write("a", "config-file = b\nfont-size = 21");
+        s.write("b", "config-file = a\nconfig-file = b");
+        let root = s.write("config", "config-file = a\nconfig-file = config");
+        assert_eq!(Config::load_from_file(&root).font_points, 21.0);
+    }
+
+    #[test]
+    fn config_file_empty_value_clears_the_pending_includes() {
+        let s = Scratch::new();
+        s.write("inc", "font-size = 30");
+        let root = s.write("config", "config-file = inc\nconfig-file =\nfont-size = 12");
+        assert_eq!(Config::load_from_file(&root).font_points, 12.0);
+    }
+
+    #[test]
+    fn config_file_staging_list_is_empty_in_a_loaded_config() {
+        // It is a parse-time staging area, not a setting — a caller reading the
+        // loaded config must never see leftovers.
+        let s = Scratch::new();
+        s.write("inc", "font-size = 20");
+        let root = s.write("config", "config-file = inc");
+        assert!(Config::load_from_file(&root).config_file.is_empty());
     }
 
     #[test]

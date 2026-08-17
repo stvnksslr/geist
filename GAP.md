@@ -189,8 +189,8 @@ multi-window lands.)*
 **Clipboard / security** — secure-input indicator; readonly mode. *(`clipboard-read`/`-write`
 permission prompts, paste-protection confirmation and `clipboard-trim-trailing-spaces` — now done.)*
 
-**Config / theming** — `palette-generate`/`harmonious`, config `include`/conditional (`config-file`),
-and the **93 upstream keys still unsupported** (mostly `gtk-*`, `macos-*`, `linux-*` — see the
+**Config / theming** — `palette-generate`/`harmonious`, conditional configuration,
+and the **92 upstream keys still unsupported** (mostly `gtk-*`, `macos-*`, `linux-*` — see the
 config-surface ledger). *(theme/theme-file now done.)*
 
 **Notifications / bell** — desktop notifications (OSC 9/777/99); Win taskbar progress (OSC 9;4);
@@ -373,9 +373,41 @@ With Phase 0 done, the remaining Tier-1 items are mostly small, registry-backed 
 18. ✅ **Semantic selection** — word / soft-wrapped line / command output from the binding, plus
     `selection-word-chars`. See the ledger below.
 19. ✅ **Config-surface batch** — 11 keys found by a measured key diff. See the ledger below.
-20. Next: `config-file` (include) — the "config include/conditional" line in §1 — then the **full**
+20. ✅ **`config-file` (include)** — recursive config loading. See the ledger below.
+21. Next: the **full**
     selection migration (scrollback-spanning selections, search cross-wrap matches), the readonly /
     secure-input indicators, and `enquiry-response` (behind a ConPTY probe).
+
+### `config-file` (config includes) — ✅ divergences
+
+`config-file = <path>`, repeatable, with the `?` optional prefix. `Config::load_from_file` walks the
+include graph; `Config::load` and the reload path both go through it, so an include applies at
+startup *and* on reload.
+
+- **The traversal is upstream's, and upstream's is subtle in two ways** — read off
+  `Config.zig::loadRecursiveFiles` rather than assumed. (1) An included file is loaded **after the
+  entire file that named it**, so its keys beat that file's keys, not merely the lines above the
+  `config-file` line (upstream's own doc comment calls this out in bold). (2) Nested includes append
+  to the **end of one shared list**, making the walk **breadth-first**: `a` (including `deep`) then
+  `b` loads `a`, `b`, `deep`, and `deep` wins. A depth-first walk is the natural implementation and
+  would leave `b` winning; a test pins the ordering because nothing else would notice.
+- **Cycle detection keys on the canonicalized path**, so `a/../b` and a symlink can't reintroduce a
+  cycle by spelling the same file differently. A path that won't canonicalize (it doesn't exist)
+  falls back to itself, which still catches a literal repeat. A repeat is skipped with a message and
+  the load continues, like upstream — never a hang and never a lost config.
+- **A missing *root* config is silent; a missing *include* is reported.** No config file at all is
+  the normal first-run state, whereas an include is a filename the user typed.
+- **Divergence: `"?name"` cannot quote a literal leading `?`.** giest's parser strips surrounding
+  quotes before any setter sees a value, so the escape upstream offers has nowhere to live — and `?`
+  is not a legal character in a Windows filename, so there is nothing to escape.
+- **`config_file` is a staging field, not a setting.** The setter collects raw specs, `apply_body`
+  drains them after each file, and a test asserts a loaded config's list is empty — a leftover would
+  be a plausible-looking value for a caller to act on twice.
+- **Not done: conditional configuration** (`?theme:dark` style predicates / `Conditional` in
+  upstream), which is the other half of the "config include/conditional" line in §1.
+- Verified by tests over real files in a scratch directory: override ordering across an include,
+  breadth-first ordering, relative resolution from a subdirectory, optional-missing and
+  required-missing, a two-file cycle plus a self-include, and the empty-value reset.
 
 ### Sprite glyphs (box drawing, blocks, braille, powerline) — ✅ divergences
 
@@ -461,7 +493,7 @@ grep -oE '^@"[a-z0-9-]+"' ghostty-src/src/config/Config.zig | tr -d '@"' | sort 
 grep -oE '\("[a-z0-9-]+", \|' src/config.rs | grep -oE '"[a-z0-9-]+"' | tr -d '"' | sort -u
 ```
 
-**187 upstream keys; giest now sets 102, of which 94 are upstream's** (the rest are giest-specific,
+**187 upstream keys; giest now sets 103, of which 95 are upstream's** (`config-file` since) (the rest are giest-specific,
 e.g. `text-gamma`). That replaces the "~250 options / ~230 remaining" estimates this document opened
 with, which were never counted.
 

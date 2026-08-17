@@ -64,6 +64,29 @@ palette = 8=#666a73
 | `middle-click-action` | enum | `primary-paste` (default) pastes the clipboard; `ignore` does nothing. Windows has no primary selection, so this reads the system clipboard. |
 | `palette` | repeated `<index>=#rrggbb` | Override individual 256-color palette entries; everything else keeps the bundled theme. |
 
+### Splitting the config across files (`config-file`)
+
+| Key | Type | Notes |
+| --- | --- | --- |
+| `config-file` | repeated path | Another config file to load. Repeatable; included files may include more. A `?` prefix makes a missing file silent. An empty value clears the includes named so far in that file. |
+
+```ini
+config-file = colors
+config-file = ?work-only        # fine if it doesn't exist
+font-size = 11
+```
+
+Two rules are easy to get wrong, and both match Ghostty:
+
+- **An include is loaded after the *whole* file that named it**, not at the line where it appears.
+  In the example above, a `font-size` inside `colors` overrides the `font-size = 11` below it.
+- **Nested includes go to the back of the queue.** If `a` includes `deep` and your config lists
+  `a` then `b`, the load order is `a`, `b`, `deep` — so `deep` has the last word, not `b`.
+
+Relative paths resolve against the directory of the file that named them, so a bundle of files can
+be moved together. A file that is already loaded is skipped with a message, so a cycle stops rather
+than hanging. Includes are re-read on config reload like everything else.
+
 ### Inline images (kitty graphics)
 
 | Key | Type | Notes |
