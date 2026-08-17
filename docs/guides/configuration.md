@@ -424,6 +424,43 @@ Press the leader, then the next key. Three details worth knowing, all matching G
 `keybind = ctrl+a>n=unbind` removes one branch and leaves the others; once the last branch of a
 leader is gone, the leader itself is released back to the shell.
 
+### Key tables (modal bindings)
+
+A **key table** is a named set of bindings that only applies while the table is active — the way to
+build a "copy mode" or a vim-style layer. Define bindings with `<table>/<binding>`, and switch
+tables with the four table actions:
+
+```ini
+# A "copy" mode: enter it with ctrl+shift+space, leave it with escape.
+keybind = ctrl+shift+space=activate_key_table:copy
+keybind = copy/escape=deactivate_key_table
+keybind = copy/j=scroll_page_down
+keybind = copy/k=scroll_page_up
+# Shadow a normal binding while the table is active.
+keybind = copy/ctrl+shift+t=ignore
+```
+
+| Action | Notes |
+| --- | --- |
+| `activate_key_table:<name>` | Push the table. Does nothing if the table doesn't exist, or is already the innermost one. |
+| `activate_key_table_once:<name>` | Same, but the table pops as soon as one of its bindings runs. |
+| `deactivate_key_table` | Pop the innermost table. |
+| `deactivate_all_key_tables` | Pop them all. |
+
+Details worth knowing:
+
+- **A table is not modal on its own.** Lookup runs from the innermost table outward and ends at your
+  normal bindings, so those stay available inside a table. To silence one, bind it to `ignore`.
+- **`ignore` and `unbind` are different.** `ignore` binds the key to nothing (the shell never sees
+  it); `unbind` removes the binding, so the key goes back to the shell.
+- **`<name>/` on its own** defines a table and clears whatever was in it.
+- Table names may not contain `/`, `=`, `+` or `>`. Key sequences work inside a table
+  (`copy/ctrl+a>n=…`).
+- The active tables are **cleared when the config reloads**, since a reload can delete a table you
+  are currently in.
+- Not supported: `catch_all`, `chain=`, and `global:` inside a table (a global hotkey is delivered
+  by the OS and can't know which table is active — it's reported rather than silently bound).
+
 ### Bell, resize overlay, close confirmation
 
 | Key | Type | Notes |

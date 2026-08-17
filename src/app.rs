@@ -474,6 +474,12 @@ pub struct Window {
     /// no sequence is in progress. Held across frames because that is exactly
     /// what a sequence is: state between two key events.
     pending_keys: Vec<Chord>,
+    /// Active key tables, innermost **last**. Runtime state, not config: the
+    /// stack is per window and is cleared on a config reload, since a reload can
+    /// delete a table whose name is still on it — and a stale name silently
+    /// changing which bindings resolve is the worst outcome available.
+    /// `true` marks a one-shot activation, popped when one of its binds runs.
+    key_tables: Vec<crate::keybind::TableEntry>,
     /// Whether `mouse-hide-while-typing` has the pointer hidden right now.
     pointer_hidden: bool,
     /// Counter for `write_*_file` temp names. A counter, not a clock: two
@@ -993,6 +999,7 @@ impl Window {
             palette: None,
             keymap,
             pending_keys: Vec::new(),
+            key_tables: Vec::new(),
             pointer_hidden: false,
             write_file_seq: 0,
             maximized: false,
@@ -1279,6 +1286,7 @@ impl Window {
             palette: None,
             keymap: self.keymap.clone(),
             pending_keys: Vec::new(),
+            key_tables: Vec::new(),
             pointer_hidden: false,
             write_file_seq: 0,
             maximized: false,
@@ -1868,19 +1876,25 @@ impl Window {
             // so far; a plain binding is just a sequence that completes on the
             // first key, so both share this path.
             self.pending_keys.push(chord);
-            match self.keymap.lookup_seq(&self.pending_keys) {
+            // Resolved against the active key-table stack, exactly as
+            // `decide_key` does — the two must agree about which binding a key
+            // resolves to, or a table's key is swallowed and inert, or reaches
+            // the shell *and* runs.
+            let stack = self.key_tables.clone();
+            match self.keymap.lookup_seq_in(&stack, &self.pending_keys) {
                 crate::keybind::Lookup::Action(action) => {
                     // A `performable:` binding only counts while its action can
                     // act; otherwise the key was already left to the shell by
                     // `decide_key`, and running it here would do both.
-                    let performable = self.keymap.is_performable(&self.pending_keys);
+                    let performable = self.keymap.is_performable_in(&stack, &self.pending_keys);
                     self.pending_keys.clear();
-                    let ctx_perform = crate::command::PerformCtx {
-                        has_selection: self
-                            .focused_session_mut()
-                            .is_some_and(|s| s.has_selection()),
-                    };
+                    let ctx_perform = self.perform_ctx();
                     if !performable || crate::command::can_perform(&action, ctx_perform) {
+                        // A one-shot table pops as soon as one of its bindings
+                        // runs — checked *before* the action, so an action that
+                        // activates another table doesn't get popped by its own
+                        // predecessor's one-shot flag.
+                        self.pop_one_shot_table();
                         self.execute_action(ctx, None, action);
                     }
                 }
@@ -1990,6 +2004,31 @@ impl Window {
 
     /// The focused pane's session, if any (the palette's pane-scoped actions —
     /// copy/paste/select/scroll — act on it).
+    /// The live state a `performable:` binding is judged against. **One
+    /// builder** for both gates: the one deciding whether the shell sees a key
+    /// and the one running the action.
+    fn perform_ctx(&self) -> crate::command::PerformCtx<'_> {
+        crate::command::PerformCtx {
+            has_selection: self
+                .focused_session()
+                .is_some_and(crate::session::Session::has_selection),
+            keymap: Some(&self.keymap),
+            tables: &self.key_tables,
+        }
+    }
+
+    /// Pop a one-shot key table now that one of its bindings has run.
+    fn pop_one_shot_table(&mut self) {
+        if self.key_tables.last().is_some_and(|t| t.once) {
+            self.key_tables.pop();
+        }
+    }
+
+    fn focused_session(&self) -> Option<&Session> {
+        let tab = self.tabs.get(self.active_tab)?;
+        tab.root.payload(tab.focus)
+    }
+
     fn focused_session_mut(&mut self) -> Option<&mut Session> {
         let tab = self.tabs.get_mut(self.active_tab)?;
         let focus = tab.focus;
@@ -2026,6 +2065,12 @@ impl Window {
         }
         let new_font = cfg.font_points;
         self.keymap = Keymap::from_config(&cfg.keybinds);
+        // A reload can delete a key table whose name is still on the stack, and
+        // a stale name silently changing which bindings resolve is the worst
+        // available outcome — so the stack is dropped rather than filtered.
+        // Any half-finished key sequence goes with it for the same reason.
+        self.key_tables.clear();
+        self.pending_keys.clear();
         // Transparency is a property of the surface, requested once before the
         // window exists (see `main.rs`). Opacity *values* apply live, but turning
         // transparency on or off crosses that line and needs a restart — say so
@@ -2071,6 +2116,25 @@ impl Window {
         match action {
             // Bound, and deliberately does nothing (see `Action::Noop`).
             Action::Noop(_) => {}
+            // Key tables. `can_perform` has already rejected the no-op cases
+            // (an unknown table, or one that is already innermost), so these
+            // only run when they will actually change the stack.
+            Action::ActivateKeyTable(ref name) | Action::ActivateKeyTableOnce(ref name) => {
+                // Guarded here as well as at the performable gate: upstream's
+                // "no effect" for an unknown or already-innermost table holds
+                // whether or not the binding was flagged `performable:`.
+                let once = matches!(action, Action::ActivateKeyTableOnce(_));
+                if crate::command::can_perform(&action, self.perform_ctx()) {
+                    self.key_tables.push(crate::keybind::TableEntry {
+                        name: name.to_string(),
+                        once,
+                    });
+                }
+            }
+            Action::DeactivateKeyTable => {
+                self.key_tables.pop();
+            }
+            Action::DeactivateAllKeyTables => self.key_tables.clear(),
             // `text:` decodes its escapes at send time, like upstream — a bad
             // escape logs and sends nothing rather than emitting the payload
             // literally. `csi:`/`esc:` payloads are raw and simply get their
@@ -3269,6 +3333,9 @@ impl Window {
         // without holding a borrow on `self` across the pane-tree mutation below.
         // Cheap: a couple dozen (Chord, Action) entries, both `Copy`.
         let keymap = self.keymap.clone();
+        // The key-table stack the focused pane resolves keys against — the same
+        // one `handle_shortcuts` uses, cloned for the same borrow reason.
+        let tables = self.key_tables.clone();
         let bell_border = self.config.bell.border;
         let now = ctx.input(|i| i.time);
         let active_tab = self.active_tab;
@@ -3412,7 +3479,7 @@ impl Window {
         if !palette_open && !search_open {
             leaves[focus_idx]
                 .payload
-                .handle_input(ctx, tracking, ch, &keymap);
+                .handle_input(ctx, tracking, ch, &keymap, &tables);
         } else if search_open {
             // The search overlay owns the keyboard, so input (and its scroll
             // easing) is skipped — but keep the viewport easing toward the match

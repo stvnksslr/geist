@@ -38,6 +38,18 @@ pub enum Lookup {
     None,
 }
 
+/// One entry on the active key-table stack.
+///
+/// Declared here, next to the keymap that resolves against it, so the app and
+/// the keymap share one type: the keymap reads `name`, the app reads `once`, and
+/// there is no per-frame conversion between two shapes of the same stack.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TableEntry {
+    pub name: String,
+    /// A one-shot activation, popped as soon as one of its bindings runs.
+    pub once: bool,
+}
+
 /// One binding: a key sequence, the action it runs, and whether it is
 /// *performable*.
 ///
@@ -60,6 +72,10 @@ struct Bind {
 #[derive(Clone, Debug)]
 pub struct Keymap {
     binds: Vec<Bind>,
+    /// Named **key tables** (`<table>/<binding>` in the config), each a bind
+    /// list that only applies while that table is on the active stack. The
+    /// mechanism behind a "copy mode" or a modal vim-style layer.
+    tables: std::collections::HashMap<String, Vec<Bind>>,
     /// `global:` bindings — chords that fire even when giest isn't focused.
     /// Kept **out** of `binds` on purpose: they are delivered by the OS-level
     /// hook ([`crate::hotkey`]) whether or not giest has focus, so putting them
@@ -71,6 +87,7 @@ impl Default for Keymap {
     fn default() -> Self {
         Self {
             binds: default_binds(),
+            tables: std::collections::HashMap::new(),
             // No global binding by default: a low-level keyboard hook is a
             // system-wide cost, and a terminal should not take one uninvited.
             globals: Vec::new(),
@@ -85,10 +102,34 @@ impl Keymap {
     /// sequence returns `None` here. Callers that need to know about leaders
     /// must use [`Self::lookup_seq`].
     pub fn lookup(&self, chord: &Chord) -> Option<Action> {
-        match self.lookup_seq(std::slice::from_ref(chord)) {
+        self.lookup_in(&[], chord)
+    }
+
+    /// [`Self::lookup`] against an active key-table `stack` (innermost **last**).
+    pub fn lookup_in(&self, stack: &[TableEntry], chord: &Chord) -> Option<Action> {
+        match self.lookup_seq_in(stack, std::slice::from_ref(chord)) {
             Lookup::Action(a) => Some(a),
             _ => None,
         }
+    }
+
+    /// The bind lists to search, innermost table first and the root last.
+    ///
+    /// Upstream's rule: "binding lookup proceeds from the innermost table
+    /// outward, so keybinds in the default table remain available unless
+    /// explicitly unbound in an inner table" — which is why the root is always
+    /// the final entry rather than being skipped while a table is active. A
+    /// table is therefore *not* modal on its own; shadowing a root binding takes
+    /// an explicit `ignore`.
+    fn search_order<'a>(
+        &'a self,
+        stack: &'a [TableEntry],
+    ) -> impl Iterator<Item = &'a Vec<Bind>> {
+        stack
+            .iter()
+            .rev()
+            .filter_map(move |t| self.tables.get(&t.name))
+            .chain(std::iter::once(&self.binds))
     }
 
     /// Resolve a whole key sequence.
@@ -98,18 +139,27 @@ impl Keymap {
     /// second key that can never arrive — the same precedence a shell gives an
     /// exact match.
     pub fn lookup_seq(&self, keys: &[Chord]) -> Lookup {
+        self.lookup_seq_in(&[], keys)
+    }
+
+    /// [`Self::lookup_seq`] against an active key-table `stack`.
+    pub fn lookup_seq_in(&self, stack: &[TableEntry], keys: &[Chord]) -> Lookup {
         if keys.is_empty() {
             return Lookup::None;
         }
-        if let Some(b) = self.binds.iter().rev().find(|b| b.seq == keys) {
-            return Lookup::Action(b.action.clone());
-        }
-        if self
-            .binds
-            .iter()
-            .any(|b| b.seq.len() > keys.len() && &b.seq[..keys.len()] == keys)
-        {
-            return Lookup::Pending;
+        // Each table is resolved completely before falling outward: an exact
+        // match in an inner table beats being a prefix there, and both beat
+        // anything in an outer one.
+        for binds in self.search_order(stack) {
+            if let Some(b) = binds.iter().rev().find(|b| b.seq == keys) {
+                return Lookup::Action(b.action.clone());
+            }
+            if binds
+                .iter()
+                .any(|b| b.seq.len() > keys.len() && &b.seq[..keys.len()] == keys)
+            {
+                return Lookup::Pending;
+            }
         }
         Lookup::None
     }
@@ -125,18 +175,40 @@ impl Keymap {
     /// key to the shell *and* runs the action; only the second swallows the key
     /// and does nothing.
     pub fn is_performable(&self, keys: &[Chord]) -> bool {
-        self.binds
-            .iter()
-            .rev()
-            .find(|b| b.seq == keys)
-            .is_some_and(|b| b.performable)
+        self.is_performable_in(&[], keys)
+    }
+
+    /// [`Self::is_performable`] against an active key-table `stack`. Resolved
+    /// through the same innermost-outward walk as the lookup, so the flag always
+    /// comes from the binding that would actually run.
+    pub fn is_performable_in(&self, stack: &[TableEntry], keys: &[Chord]) -> bool {
+        for binds in self.search_order(stack) {
+            if let Some(b) = binds.iter().rev().find(|b| b.seq == keys) {
+                return b.performable;
+            }
+            if binds
+                .iter()
+                .any(|b| b.seq.len() > keys.len() && &b.seq[..keys.len()] == keys)
+            {
+                return false;
+            }
+        }
+        false
     }
 
     /// Whether `chord` begins any binding — a complete one *or* a sequence.
     /// This is what tells the PTY path to swallow a leader like `ctrl+a`, which
     /// on its own is bound to nothing.
     pub fn starts_binding(&self, chord: &Chord) -> bool {
-        !matches!(self.lookup_seq(std::slice::from_ref(chord)), Lookup::None)
+        self.starts_binding_in(&[], chord)
+    }
+
+    /// [`Self::starts_binding`] against an active key-table `stack`.
+    pub fn starts_binding_in(&self, stack: &[TableEntry], chord: &Chord) -> bool {
+        !matches!(
+            self.lookup_seq_in(stack, std::slice::from_ref(chord)),
+            Lookup::None
+        )
     }
 
     /// The `global:` bindings, in config order.
@@ -144,14 +216,16 @@ impl Keymap {
         &self.globals
     }
 
-    /// Bind `seq` to `action`, replacing any existing binding for it.
-    fn set(&mut self, seq: Vec<Chord>, action: Action, performable: bool) {
-        match self.binds.iter_mut().find(|b| b.seq == seq) {
+    /// Bind `seq` to `action` in `table` (`None` = the root table), replacing
+    /// any existing binding for it.
+    fn set(&mut self, table: Option<&str>, seq: Vec<Chord>, action: Action, performable: bool) {
+        let binds = self.binds_mut(table);
+        match binds.iter_mut().find(|b| b.seq == seq) {
             Some(slot) => {
                 slot.action = action;
                 slot.performable = performable;
             }
-            None => self.binds.push(Bind {
+            None => binds.push(Bind {
                 seq,
                 action,
                 performable,
@@ -160,8 +234,23 @@ impl Keymap {
     }
 
     /// Remove any binding for `seq` (Ghostty's `unbind`).
-    fn unset(&mut self, seq: &[Chord]) {
-        self.binds.retain(|b| b.seq != seq);
+    fn unset(&mut self, table: Option<&str>, seq: &[Chord]) {
+        self.binds_mut(table).retain(|b| b.seq != seq);
+    }
+
+    fn binds_mut(&mut self, table: Option<&str>) -> &mut Vec<Bind> {
+        match table {
+            None => &mut self.binds,
+            Some(t) => self.tables.entry(t.to_string()).or_default(),
+        }
+    }
+
+    /// Whether a key table with this name has been defined.
+    ///
+    /// Activating an undefined table is a no-op upstream *and reports
+    /// performable false*, so this is consulted by the performable gate.
+    pub fn has_table(&self, name: &str) -> bool {
+        self.tables.contains_key(name)
     }
 
     /// Build the keymap from the built-in defaults plus the user's `keybind`
@@ -171,10 +260,42 @@ impl Keymap {
     pub fn from_config(overrides: &[(String, String)]) -> Self {
         let mut km = Self::default();
         for (trigger, action) in overrides {
+            // `<table>/<binding>` puts the binding in a **named key table**,
+            // which only applies while that table is active. `<name>/` with no
+            // binding defines and clears the table.
+            let (table, trigger) = match split_table(trigger) {
+                Some((name, rest)) => {
+                    // Naming a table defines it, which is what makes
+                    // `activate_key_table:<name>` work before anything is bound
+                    // in it. Only the *bare* `<name>/` form clears it — clearing
+                    // on every line would wipe the table's earlier bindings, one
+                    // line at a time.
+                    let binds = km.tables.entry(name.to_string()).or_default();
+                    if rest.trim().is_empty() {
+                        binds.clear();
+                        continue;
+                    }
+                    (Some(name.to_string()), rest.to_string())
+                }
+                None => (None, trigger.clone()),
+            };
+            let trigger = &trigger;
             // Ghostty's `global:` trigger flag. It is inherently unsequenceable
             // upstream too — the OS delivers one key, not a leader and a
             // follower — so a global trigger must be a single chord.
             if let Some(rest) = strip_flag(trigger, "global") {
+                if table.is_some() {
+                    // Upstream allows `foo/global:…`, but a global chord is
+                    // delivered by an OS keyboard hook that deliberately does
+                    // the minimum and never consults app state (see the
+                    // quick-terminal ledger) — it cannot ask which table is
+                    // active. Reported rather than silently registered as an
+                    // unconditional global, which would fire outside the table.
+                    eprintln!(
+                        "giest: 'global:' inside a key table is not supported, ignoring '{trigger}'"
+                    );
+                    continue;
+                }
                 let Some(chord) = parse_chord(rest.trim()) else {
                     eprintln!("giest: ignoring global keybind with unparseable trigger '{trigger}'");
                     continue;
@@ -207,17 +328,40 @@ impl Keymap {
             // whitespace deliberately (`text:hello `), and `Action::from_name`
             // trims the names that should be trimmed itself.
             let a = action.trim_start();
-            if a.trim().eq_ignore_ascii_case("unbind") || a.trim().eq_ignore_ascii_case("ignore") {
-                km.unset(&seq);
+            // `unbind` **removes** the binding, so the key goes back to the
+            // shell. `ignore` **binds** it to nothing, black-holing the key —
+            // upstream's two are genuinely different actions (`set.remove`
+            // versus a bound no-op), and giest treated them as the same. The
+            // difference is what lets a key table shadow a root binding:
+            // `foo/ctrl+t=ignore` silences ctrl+t while `foo` is active, where
+            // `unbind` there would let the root's ctrl+t through.
+            if a.trim().eq_ignore_ascii_case("unbind") {
+                km.unset(table.as_deref(), &seq);
                 continue;
             }
             match Action::from_name(a) {
-                Some(act) => km.set(seq, act, performable),
+                Some(act) => km.set(table.as_deref(), seq, act, performable),
                 None => eprintln!("giest: ignoring keybind to unknown action '{a}'"),
             }
         }
         km
     }
+}
+
+/// Split a `<table>/<binding>` trigger into its table name and the rest.
+///
+/// A table name may contain "anything except `/`, `=`, `+`, and `>`" (upstream's
+/// rule), and that exclusion is what makes this unambiguous: a `/` used as a
+/// *key* (`ctrl+/`) always has a `+` before it, and a `/` inside a key sequence
+/// has a `>`. So a prefix containing any of those is not a table name, and the
+/// trigger is an ordinary one.
+fn split_table(trigger: &str) -> Option<(&str, &str)> {
+    let (name, rest) = trigger.split_once('/')?;
+    let name = name.trim();
+    if name.is_empty() || name.contains(['=', '+', '>']) {
+        return None;
+    }
+    Some((name, rest))
 }
 
 /// Strip a leading Ghostty trigger flag (`global:`, `all:`, …), returning the
@@ -410,6 +554,142 @@ fn key_from_name(name: &str) -> Option<KeyCode> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The active-table stack for a test, innermost last.
+    fn stack(names: &[&str]) -> Vec<TableEntry> {
+        names
+            .iter()
+            .map(|n| TableEntry {
+                name: n.to_string(),
+                once: false,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_key_table_binding_only_applies_while_its_table_is_active() {
+        let km = Keymap::from_config(&[
+            ("copy/j".into(), "scroll_page_down".into()),
+            ("copy/ctrl+n".into(), "new_tab".into()),
+        ]);
+        // Inert with no table active — `j` is just a letter.
+        assert_eq!(km.lookup(&chord("j")), None);
+        assert!(!km.starts_binding(&chord("j")));
+
+        let s = stack(&["copy"]);
+        assert_eq!(
+            km.lookup_in(&s, &chord("j")),
+            Some(Action::ScrollPageDown),
+            "the table's binding applies once it is active"
+        );
+        assert!(km.starts_binding_in(&s, &chord("j")));
+        // An unknown table name on the stack is simply skipped.
+        assert_eq!(km.lookup_in(&stack(&["nope"]), &chord("j")), None);
+    }
+
+    #[test]
+    fn lookup_falls_outward_from_the_innermost_table_to_the_root() {
+        // Upstream: "keybinds in the default table remain available unless
+        // explicitly unbound in an inner table" — so a table is *not* modal by
+        // itself, and shadowing takes an explicit `ignore`.
+        let km = Keymap::from_config(&[
+            ("copy/j".into(), "scroll_page_down".into()),
+            // Shadows the root's ctrl+shift+t while `copy` is active.
+            ("copy/ctrl+shift+t".into(), "ignore".into()),
+            ("inner/j".into(), "scroll_page_up".into()),
+        ]);
+        let copy = stack(&["copy"]);
+
+        // Root bindings stay reachable through an active table.
+        assert_eq!(km.lookup(&chord("ctrl+shift+p")), Some(Action::TogglePalette));
+        assert_eq!(
+            km.lookup_in(&copy, &chord("ctrl+shift+p")),
+            Some(Action::TogglePalette)
+        );
+        // …unless the table binds them to `ignore`, which *binds* rather than
+        // removes. `unbind` in a table would let the root's binding through.
+        assert!(matches!(
+            km.lookup_in(&copy, &chord("ctrl+shift+t")),
+            Some(Action::Noop(_))
+        ));
+        assert_eq!(km.lookup(&chord("ctrl+shift+t")), Some(Action::NewTab));
+
+        // Innermost wins between two active tables.
+        let both = stack(&["copy", "inner"]);
+        assert_eq!(km.lookup_in(&both, &chord("j")), Some(Action::ScrollPageUp));
+    }
+
+    #[test]
+    fn ignore_binds_to_nothing_while_unbind_removes_the_binding() {
+        // These were treated as the same thing, and they are not: upstream's
+        // `unbind` is `set.remove`, while `ignore` black-holes the key. The
+        // difference is invisible until something else would answer the key.
+        let ignored = Keymap::from_config(&[("ctrl+shift+t".into(), "ignore".into())]);
+        assert!(matches!(
+            ignored.lookup(&chord("ctrl+shift+t")),
+            Some(Action::Noop(_))
+        ));
+        assert!(
+            ignored.starts_binding(&chord("ctrl+shift+t")),
+            "still bound, so the shell never sees it"
+        );
+
+        let unbound = Keymap::from_config(&[("ctrl+shift+t".into(), "unbind".into())]);
+        assert_eq!(unbound.lookup(&chord("ctrl+shift+t")), None);
+    }
+
+    #[test]
+    fn a_table_can_be_defined_empty_and_redefining_it_clears_it() {
+        // `<name>/` with no binding defines and clears a table — which is what
+        // makes `activate_key_table:<name>` work before anything is bound in it.
+        let km = Keymap::from_config(&[("scratch/".into(), "".into())]);
+        assert!(km.has_table("scratch"));
+        assert!(!km.has_table("other"));
+
+        let km = Keymap::from_config(&[
+            ("copy/j".into(), "scroll_page_down".into()),
+            ("copy/".into(), "".into()),
+        ]);
+        assert!(km.has_table("copy"));
+        assert_eq!(
+            km.lookup_in(&stack(&["copy"]), &chord("j")),
+            None,
+            "redefining the table reset its bindings"
+        );
+    }
+
+    #[test]
+    fn a_table_name_is_only_read_where_one_is_legal() {
+        // Table names cannot contain `= + >`, which is what keeps a `/` used as
+        // a *key* from being misread as a table prefix.
+        let km = Keymap::from_config(&[("ctrl+/".into(), "new_tab".into())]);
+        assert_eq!(km.lookup(&chord("ctrl+/")), Some(Action::NewTab));
+        assert!(!km.has_table("ctrl+"));
+
+        // Sequences work inside a table.
+        let km = Keymap::from_config(&[("copy/ctrl+a>n".into(), "new_tab".into())]);
+        let s = stack(&["copy"]);
+        assert_eq!(km.lookup_seq_in(&s, &[chord("ctrl+a")]), Lookup::Pending);
+        assert_eq!(
+            km.lookup_seq_in(&s, &[chord("ctrl+a"), chord("n")]),
+            Lookup::Action(Action::NewTab)
+        );
+        // …and are inert while the table is not active.
+        assert_eq!(km.lookup_seq(&[chord("ctrl+a")]), Lookup::None);
+    }
+
+    #[test]
+    fn table_actions_round_trip_through_their_names() {
+        for name in [
+            "activate_key_table:copy",
+            "activate_key_table_once:copy",
+            "deactivate_key_table",
+            "deactivate_all_key_tables",
+        ] {
+            let a = Action::from_name(name).unwrap_or_else(|| panic!("parsing {name}"));
+            assert_eq!(a.name(), name);
+        }
+    }
 
     #[test]
     fn shift_arrows_are_performable_adjust_selection_binds() {

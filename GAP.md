@@ -171,9 +171,10 @@ tab strip, palette, overlays and dialogs all derive their colors from
 light/dark preference), **window/tab/split state restore** (`window-save-state`), **quick
 (dropdown) terminal + global hotkey** — now done.)*
 
-**Input / keybinds** — key tables / leader sequences; the remaining ~60 keybind *actions* (write_*_file,
-set_*_title, toggle_*, send raw text/esc/csi, undo/redo, …). *(Config-driven binding + several actions
-are now done.)*
+**Input / keybinds** — `undo`/`redo`, `catch_all`, `chain=` multi-action bindings, and the `all:`/
+`unconsumed:` trigger flags. *(Config-driven binding, leader sequences, **key tables**, the `global:`
+and `performable:` flags, and the `write_*_file` / `set_*_title` / `toggle_*` / `text:`/`csi:`/`esc:`
+actions — now done.)*
 
 **Selection / scroll / search** — upstream's 60%-of-cell threshold for including the clicked/dragged
 cell; the double-click-*drag* word-snapping refinement; regex search. *(scrollback search plus
@@ -385,8 +386,50 @@ With Phase 0 done, the remaining Tier-1 items are mostly small, registry-backed 
 25. ✅ **Read-only indicator**, and **secure input closed out as N/A** on Windows. See the ledger.
 26. ✅ **`text:`/`csi:`/`esc:`/`set_*_title:`**, on an `Action` that now owns its strings. See the
     ledger.
-27. Next: named key *tables* (`activate_key_table`), the remaining trigger flags (`all:`,
-    `unconsumed:`), `undo`/`redo`, and the inspector.
+27. ✅ **Named key tables**, plus the `ignore`-vs-`unbind` fix they surfaced. See the ledger.
+28. Next: `catch_all`, `chain=` multi-action bindings, the `all:`/`unconsumed:` trigger flags,
+    `undo`/`redo`, and the inspector.
+
+### Key tables — ✅ divergences
+
+`<table>/<binding>` definitions plus `activate_key_table[_once]:<name>`, `deactivate_key_table` and
+`deactivate_all_key_tables`. The mechanism behind a modal "copy mode" or vim-style layer.
+
+- **Lookup falls from the innermost table *outward*, ending at the root**, which is upstream's rule
+  and the non-obvious half of the feature: a table is **not modal by itself**. Root bindings stay
+  reachable while a table is active, so shadowing one takes an explicit `ignore`.
+- **That forced a real bug fix: giest treated `ignore` and `unbind` as the same thing.** Upstream's
+  `unbind` is `set.remove` — the key goes back to the shell — while `ignore` *binds* it to nothing,
+  black-holing it. giest removed the binding for both, so `keybind = ctrl+t=ignore` let the key
+  through to the shell rather than swallowing it. They are now distinct (`ignore` →
+  `Action::Noop("ignore")`), which is also what makes table shadowing expressible.
+- **Only the bare `<name>/` form clears a table.** Naming a table defines it — that is what makes
+  `activate_key_table:<name>` work before anything is bound in it — but clearing on *every* line
+  would wipe the table's earlier bindings one line at a time. Found by a test, not by reading.
+- **A table name is only read where one can legally appear.** Names cannot contain `/ = + >`
+  (upstream's rule), which is exactly what keeps `ctrl+/` from being misread as a table named
+  `ctrl+`. Pinned by a test.
+- **The stack is per-window runtime state and is cleared on config reload**, along with any
+  half-finished key sequence. A reload can delete a table whose name is still on the stack, and a
+  stale name silently changing which bindings resolve is the worst outcome available. Upstream's
+  behaviour here wasn't cheaply discoverable, so this is a deliberate choice rather than a port.
+- **Both gates resolve against the same stack**, through one shared `TableEntry` type — the keymap
+  reads its `name`, the app reads its `once`. This is the two-gate trap's third appearance: a
+  mismatch means a table's key is swallowed-and-inert, or reaches the shell *and* runs.
+- **`can_perform` grew to cover the table actions**, because upstream specifies them in performable
+  terms: activating an unknown table, or one that is already innermost, "has no effect and
+  performable will report false" (which is what stops `A -> B -> B`, while allowing `A -> B -> A`).
+  The "no effect" half is enforced at execution too, since it holds whether or not the binding
+  carried the `performable:` flag.
+- **A one-shot table pops *before* its action runs**, so an action that activates another table
+  isn't immediately popped by its predecessor's flag.
+- **Not done, deliberately:** `catch_all` (orthogonal — it works in the root table too, so it is its
+  own feature; without it, one-shot's "deactivated on any non-catch-all binding" degrades cleanly to
+  "on any binding" and stays correct when catch_all lands); `chain=` multi-action bindings (also not
+  table-specific); and **`global:` inside a table**, which is *reported rather than silently
+  accepted* — a global chord is delivered by an OS keyboard hook that deliberately does the minimum
+  and never consults app state, so it cannot ask which table is active, and registering it
+  unconditionally would fire it outside the table.
 
 ### `text:` / `csi:` / `esc:` / `set_*_title:` — ✅ divergences
 
@@ -1050,7 +1093,7 @@ guessed at, and the ones needing no new subsystem are now wired: `clear_screen`,
 - **`text:`, `csi:`, `esc:`, `set_tab_title:`, `set_surface_title:` are now done.** They needed
   `Action` to own strings, which it does — `Arc<str>` payloads, `Clone` instead of `Copy`. See their
   own ledger; the refactor cost 16 mechanical errors, measured rather than estimated.
-- Still open and genuinely large: `undo`/`redo`, the inspector, key tables, and the finer-grained
+- Still open and genuinely large: `undo`/`redo`, the inspector, and the finer-grained
   search actions (`start_search` / `navigate_search` / `search_selection`) against giest's single
   `toggle_search`.
 
@@ -1070,9 +1113,9 @@ path instead of two that could disagree.
   they have to be delivered late, in order.
 - **An exact binding beats being a prefix**, so `ctrl+a` and `ctrl+a>n` can coexist without the
   bare chord hanging forever on a second key that could never take effect.
-- **Not done: named key *tables*** (`activate_key_table`), and the `all:` / `unconsumed:` trigger
-  flags. **`global:` and `performable:` are now done** — see the quick-terminal and
-  selection-interaction ledgers. `global:` is
+- **Not done: the `all:` / `unconsumed:` trigger flags.** **`global:`, `performable:` and named key
+  *tables* are now done** — see the quick-terminal, selection-interaction and key-table ledgers.
+  `global:` is
   inherently non-sequenceable (the OS delivers one key, not a leader and a follower), which is true
   upstream too, so a global trigger must be a single chord.
 - **Not done: `end_key_sequence`**, Ghostty's action for flushing the prior keys but *not* the one

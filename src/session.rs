@@ -1381,6 +1381,9 @@ impl Session {
         tracking: bool,
         cell_h: f32,
         keymap: &Keymap,
+        // Active key tables, innermost last — the same stack `App::handle_shortcuts`
+        // resolves against, so both gates agree about which binding a key hits.
+        tables: &[crate::keybind::TableEntry],
     ) {
         let (events, ppp) = ctx.input(|i| (i.events.clone(), i.pixels_per_point().max(1.0)));
         let cell_h_pts = (cell_h / ppp).max(1.0);
@@ -1459,7 +1462,10 @@ impl Session {
                     keymap,
                     crate::command::PerformCtx {
                         has_selection: self.engine.selection_active(),
+                        keymap: Some(keymap),
+                        tables,
                     },
+                    tables,
                 ) {
                     KeyAction::Encode(input) => {
                         bytes.extend_from_slice(&self.engine.encode_key(&input));
@@ -1815,7 +1821,8 @@ fn decide_key(
     key: egui::Key,
     modifiers: &egui::Modifiers,
     keymap: &Keymap,
-    perform: crate::command::PerformCtx,
+    perform: crate::command::PerformCtx<'_>,
+    tables: &[crate::keybind::TableEntry],
 ) -> KeyAction {
     let Some(code) = map_egui_key(key) else {
         return KeyAction::Suppress;
@@ -1832,14 +1839,14 @@ fn decide_key(
         mods: key_mods(modifiers),
         code,
     };
-    if keymap.starts_binding(&chord) {
+    if keymap.starts_binding_in(tables, &chord) {
         // A `performable:` binding whose action can't act right now is *not* a
         // binding: the key belongs to the shell. This is what keeps shift+arrow
         // working in an editor when there's nothing selected — and it has to
         // agree with the gate that runs the action, so both call `can_perform`.
         let seq = std::slice::from_ref(&chord);
-        let unperformable = keymap.is_performable(seq)
-            && match keymap.lookup(&chord) {
+        let unperformable = keymap.is_performable_in(tables, seq)
+            && match keymap.lookup_in(tables, &chord) {
                 Some(a) => !crate::command::can_perform(&a, perform),
                 None => false,
             };
@@ -2379,7 +2386,7 @@ mod tests {
     /// exactly the host shortcuts the namespace gating already reserves, so it
     /// does not alter any of these assertions.
     fn decide_key(key: egui::Key, modifiers: &egui::Modifiers, _rows: u16) -> KeyAction {
-        super::decide_key(key, modifiers, &Keymap::default(), Default::default())
+        super::decide_key(key, modifiers, &Keymap::default(), Default::default(), &[])
     }
 
     #[test]
@@ -2426,21 +2433,23 @@ mod tests {
         };
         let with = crate::command::PerformCtx {
             has_selection: true,
+            ..Default::default()
         };
         let without = crate::command::PerformCtx {
             has_selection: false,
+            ..Default::default()
         };
         assert_eq!(
-            super::decide_key(egui::Key::ArrowLeft, &shift, &km, with),
+            super::decide_key(egui::Key::ArrowLeft, &shift, &km, with, &[]),
             KeyAction::Swallow
         );
         assert!(matches!(
-            super::decide_key(egui::Key::ArrowLeft, &shift, &km, without),
+            super::decide_key(egui::Key::ArrowLeft, &shift, &km, without, &[]),
             KeyAction::Encode(_)
         ));
         // A non-performable bind on the same modifier is unaffected.
         assert_eq!(
-            super::decide_key(egui::Key::PageUp, &shift, &km, without),
+            super::decide_key(egui::Key::PageUp, &shift, &km, without, &[]),
             KeyAction::Swallow
         );
     }
@@ -2457,17 +2466,17 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            super::decide_key(egui::Key::A, &ctrl, &km, Default::default()),
+            super::decide_key(egui::Key::A, &ctrl, &km, Default::default(), &[]),
             KeyAction::Swallow
         );
         // An unrelated ctrl chord is still the shell's.
         assert!(matches!(
-            super::decide_key(egui::Key::Q, &ctrl, &km, Default::default()),
+            super::decide_key(egui::Key::Q, &ctrl, &km, Default::default(), &[]),
             KeyAction::Encode(_)
         ));
         // …and with no sequence bound, ctrl+a goes to the shell as before.
         assert!(matches!(
-            super::decide_key(egui::Key::A, &ctrl, &Keymap::default(), Default::default()),
+            super::decide_key(egui::Key::A, &ctrl, &Keymap::default(), Default::default(), &[]),
             KeyAction::Encode(_)
         ));
     }
@@ -2668,7 +2677,7 @@ mod tests {
         // so the shell never sees the key (the app runs the action instead).
         let km = Keymap::from_config(&[("ctrl+a".to_string(), "new_tab".to_string())]);
         assert_eq!(
-            super::decide_key(egui::Key::A, &mods(true, false, false), &km, Default::default()),
+            super::decide_key(egui::Key::A, &mods(true, false, false), &km, Default::default(), &[]),
             KeyAction::Swallow
         );
     }

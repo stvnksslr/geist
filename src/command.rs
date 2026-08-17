@@ -15,8 +15,15 @@ use std::sync::Arc;
 /// the gate that decides whether the shell sees a key and by the gate that runs
 /// the action, and those sit on opposite sides of the app.
 #[derive(Clone, Copy, Debug, Default)]
-pub struct PerformCtx {
+pub struct PerformCtx<'a> {
     pub has_selection: bool,
+    /// The keymap, so the key-table actions can be judged against which tables
+    /// actually exist. Borrowed rather than pre-resolved into flags: the answer
+    /// depends on the action's own payload, and pre-resolving it per call site
+    /// is how the two gates would drift.
+    pub keymap: Option<&'a crate::keybind::Keymap>,
+    /// The active key-table stack, innermost last.
+    pub tables: &'a [crate::keybind::TableEntry],
 }
 
 /// Whether `action` can do anything right now.
@@ -25,11 +32,22 @@ pub struct PerformCtx {
 /// regardless. **One function for both gates** — a second opinion here means the
 /// key is either swallowed and does nothing, or reaches the shell *and* runs the
 /// action.
-pub fn can_perform(action: &Action, ctx: PerformCtx) -> bool {
+pub fn can_perform(action: &Action, ctx: PerformCtx<'_>) -> bool {
     match action {
         // Upstream returns "not performed" with no selection, letting the key
         // fall through to the terminal (`Surface.zig`'s `.adjust_selection`).
         Action::AdjustSelection(_) => ctx.has_selection,
+        // Upstream: activating a table that doesn't exist, or one that is
+        // already the innermost, "has no effect and performable will report
+        // false". The second rule is what stops a table's own activation key
+        // from stacking the same table forever — `A -> B -> A` is fine,
+        // `A -> B -> B` is not.
+        Action::ActivateKeyTable(name) | Action::ActivateKeyTableOnce(name) => {
+            let exists = ctx.keymap.is_some_and(|km| km.has_table(name));
+            let innermost = ctx.tables.last().map(|t| t.name.as_str());
+            exists && innermost != Some(&**name)
+        }
+        Action::DeactivateKeyTable | Action::DeactivateAllKeyTables => !ctx.tables.is_empty(),
         _ => true,
     }
 }
@@ -39,6 +57,8 @@ pub fn can_perform(action: &Action, ctx: PerformCtx) -> bool {
 type PayloadCtor = fn(Arc<str>) -> Action;
 const PAYLOAD_ACTIONS: &[(&str, PayloadCtor)] = &[
     ("text:", Action::SendText),
+    ("activate_key_table:", Action::ActivateKeyTable),
+    ("activate_key_table_once:", Action::ActivateKeyTableOnce),
     ("csi:", Action::SendCsi),
     ("esc:", Action::SendEsc),
     ("set_tab_title:", Action::SetTabTitle),
@@ -154,6 +174,16 @@ pub enum Action {
     SendCsi(Arc<str>),
     /// Send `ESC <payload>` (Ghostty `esc:`). Raw, like `csi:`.
     SendEsc(Arc<str>),
+    /// Push a named key table onto the active stack (Ghostty
+    /// `activate_key_table:<name>`).
+    ActivateKeyTable(Arc<str>),
+    /// Same, but the table pops as soon as one of its bindings runs (Ghostty
+    /// `activate_key_table_once:<name>`).
+    ActivateKeyTableOnce(Arc<str>),
+    /// Pop the innermost key table (Ghostty `deactivate_key_table`).
+    DeactivateKeyTable,
+    /// Pop every active key table (Ghostty `deactivate_all_key_tables`).
+    DeactivateAllKeyTables,
     /// Rename the current tab (Ghostty `set_tab_title:`).
     SetTabTitle(Arc<str>),
     /// Override the focused pane's title (Ghostty `set_surface_title:`). An
@@ -270,6 +300,10 @@ impl Action {
             Action::SendText(_) => "Send Text",
             Action::SendCsi(_) => "Send CSI Sequence",
             Action::SendEsc(_) => "Send Escape Sequence",
+            Action::ActivateKeyTable(_) => "Activate Key Table",
+            Action::ActivateKeyTableOnce(_) => "Activate Key Table (Once)",
+            Action::DeactivateKeyTable => "Deactivate Key Table",
+            Action::DeactivateAllKeyTables => "Deactivate All Key Tables",
             Action::SetTabTitle(_) => "Set Tab Title",
             Action::SetSurfaceTitle(_) => "Set Pane Title",
             Action::NewTab => "New Tab",
@@ -350,6 +384,10 @@ impl Action {
             | Action::SendText(_)
             | Action::SendCsi(_)
             | Action::SendEsc(_)
+            | Action::ActivateKeyTable(_)
+            | Action::ActivateKeyTableOnce(_)
+            | Action::DeactivateKeyTable
+            | Action::DeactivateAllKeyTables
             | Action::SetTabTitle(_)
             | Action::SetSurfaceTitle(_) => return None,
             Action::NewTab => "Ctrl+Shift+T",
@@ -426,6 +464,10 @@ impl Action {
             Action::SendText(s) => format!("text:{s}"),
             Action::SendCsi(s) => format!("csi:{s}"),
             Action::SendEsc(s) => format!("esc:{s}"),
+            Action::ActivateKeyTable(s) => format!("activate_key_table:{s}"),
+            Action::ActivateKeyTableOnce(s) => format!("activate_key_table_once:{s}"),
+            Action::DeactivateKeyTable => "deactivate_key_table".into(),
+            Action::DeactivateAllKeyTables => "deactivate_all_key_tables".into(),
             Action::SetTabTitle(s) => format!("set_tab_title:{s}"),
             Action::SetSurfaceTitle(s) => format!("set_surface_title:{s}"),
             Action::NewTab => "new_tab".into(),
@@ -603,11 +645,17 @@ impl Action {
             // giest splits are always 50/50, so there is nothing to equalize.
             // Accepted as a no-op so a Ghostty config binds without an error
             // rather than logging an "unknown action" the user cannot act on.
+            // Ghostty's `ignore`: bind the key to nothing, black-holing it. Not
+            // the same as `unbind`, which removes the binding and lets the key
+            // reach the shell — that one is handled by the keymap.
+            "ignore" => Action::Noop(Arc::from("ignore")),
             "equalize_splits" => Action::Noop(Arc::from("equalize_splits")),
             // macOS-only upstream and unimplementable on Windows (no API stops
             // other processes reading keystrokes) — accepted so a transferred
             // config binds without an "unknown action" the user cannot act on.
             "toggle_secure_input" => Action::Noop(Arc::from("toggle_secure_input")),
+            "deactivate_key_table" => Action::DeactivateKeyTable,
+            "deactivate_all_key_tables" => Action::DeactivateAllKeyTables,
             "toggle_maximize" => Action::ToggleMaximize,
             "toggle_window_float_on_top" => Action::ToggleFloatOnTop,
             "toggle_background_opacity" => Action::ToggleBackgroundOpacity,
