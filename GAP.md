@@ -407,13 +407,25 @@ wrap is found, and match rows are corrected when scrollback eviction renumbers t
 - **Measured, and worth knowing: pruning is page-granular.** A few lines past the limit evict
   *nothing*, so drift arrives in jumps and the correction is free in the common case. The test that
   forces a real prune is `#[ignore]`d because it needs ~12k lines (~8 s).
-  **Also measured, and a genuine bug filed by this:** `max_scrollback = 10` still retained ~7,200
-  rows after 20k lines. libghostty's option is documented as a line count, but a small
-  `scrollback-limit` is plainly not honoured — presumably it cannot free a partially-used page.
-  giest's `scrollback-limit` docs promise lines. Not fixed here; recorded so it is not rediscovered.
+  **Also measured, and it corrected a documented "divergence" that never existed:**
+  `max_scrollback = 10` retained ~7,200 rows after 20k lines. Chasing that through the vendored
+  source: the C header calls the option "Maximum number of lines to keep in scrollback history", but
+  it is passed straight to `Screen.init`, whose own comment reads *"max_scrollback is the amount of
+  scrollback to keep in **bytes**"*, and `PageList.maxSize()` is
+  `max(explicit_max_size, min_max_size)` — so a value below one page's worth is floored away. The
+  header is wrong. giest's `scrollback-limit` is therefore in **bytes, exactly like Ghostty's**, and
+  the note claiming "the key matches but the unit differs" was the error; `config.rs` and the
+  configuration guide now say so.
 - **`SpacerHead` is now skipped in `screen_text`.** When a wide character doesn't fit at the end of a
   row it moves to the next, leaving a spacer behind; emitting a space for it put one *inside* the
   wrapped word, so a query spanning the wrap could not match. (`SpacerTail` was already skipped.)
+- **The anchor is a row *index*, not a line's contents.** It pins column 0 of the capture's last
+  row, which is usually the blank live row the cursor is sitting on — and that line then gets text
+  written to it. That doesn't matter: only the index is read, and the pin follows its line.
+- **A prune that destroys the anchor triggers a recapture**, in `pump_pty`. Without it the shift
+  would silently fall back to zero and every highlight would go back to being uncorrected — worse
+  than useless, since wrong highlights read as right ones. The recapture costs a screen walk, but
+  only at the moment a prune actually took the anchored row.
 - **Unchanged, deliberately:** ASCII case folding and no regex. This pass is wrap + drift only.
 - Verified by pure tests over hand-built rows (wrap join, a non-wrapped boundary *not* joined, a
   trailing wrapped row not running off the end, the shift arithmetic and the drop rule) and by

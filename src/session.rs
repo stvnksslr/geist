@@ -315,6 +315,7 @@ impl Session {
         self.handle_osc52(&mut clipboard_requests);
         self.handle_command_marks(&marks);
         self.handle_osc9(osc9);
+        self.refresh_search_after_prune();
         // Primary exit signal on Windows: poll the shell process itself.
         if self.alive && !self.pty.is_running() {
             self.alive = false;
@@ -663,6 +664,8 @@ impl Session {
             // and matches are stale — recapture and re-run against the new grid.
             if self.search.is_some() {
                 let anchor = self.capture_search_text();
+                // Raw, not `capture_space_row`: the recapture above just reset
+                // the anchor, so capture space *is* live space here.
                 let target = self.viewport_bottom_row();
                 if let Some(s) = self.search.as_mut() {
                     s.anchor_at_capture = anchor;
@@ -1099,6 +1102,25 @@ impl Session {
         // Stop paying for the tracked reference; it costs bookkeeping on every
         // terminal mutation.
         self.engine.set_row_anchor(None);
+    }
+
+    /// Recapture an open search when its anchor row has been pruned away.
+    ///
+    /// Once the anchor is gone there is nothing left to measure the drift
+    /// against, so every match row would silently go back to being uncorrected.
+    /// Recapturing costs a screen walk, but only at the moment a prune actually
+    /// destroyed the anchored row — which the page-granular pruning below makes
+    /// rare — and the alternative is highlights that quietly point at the wrong
+    /// lines until the user re-types the query.
+    fn refresh_search_after_prune(&mut self) {
+        if self.search.is_none() || self.engine.row_anchor_now().is_some() {
+            return;
+        }
+        let anchor = self.capture_search_text();
+        if let Some(s) = self.search.as_mut() {
+            s.anchor_at_capture = anchor;
+            s.run(&self.search_text);
+        }
     }
 
     /// Convert a live absolute screen row into the capture's coordinate space,

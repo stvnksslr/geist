@@ -989,9 +989,16 @@ pub struct Config {
     /// Tile the image to fill the space a non-covering fit leaves. Ghostty
     /// `background-image-repeat`.
     pub background_image_repeat: bool,
-    /// Maximum scrollback *lines* retained per pane. Ghostty's `scrollback-limit`
-    /// is expressed in bytes; giest's underlying VT engine takes a line count, so
-    /// the key name matches but the unit is lines.
+    /// Maximum scrollback retained per pane, in **bytes** — the same unit as
+    /// Ghostty's `scrollback-limit`, so a Ghostty config transposes exactly.
+    ///
+    /// This was previously documented here as a *line* count, on the strength of
+    /// the C header's "Maximum number of lines to keep in scrollback history".
+    /// That header is wrong: the value is passed straight to `Screen.init`,
+    /// whose own comment reads "max_scrollback is the amount of scrollback to
+    /// keep in **bytes**" — and it was measured, too (a limit of 10 retained
+    /// ~7,200 rows). Small values are also floored: the engine keeps at least
+    /// one page, so a limit below one page's worth buys nothing.
     pub scrollback_limit: usize,
     /// Total bytes of image data (kitty graphics) retained per terminal screen.
     /// Ghostty `image-storage-limit`.
