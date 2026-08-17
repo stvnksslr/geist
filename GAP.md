@@ -171,8 +171,9 @@ tab strip, palette, overlays and dialogs all derive their colors from
 light/dark preference), **window/tab/split state restore** (`window-save-state`), **quick
 (dropdown) terminal + global hotkey** — now done.)*
 
-**Input / keybinds** — `undo`/`redo`, `chain=` multi-action bindings, and the `all:` trigger flag
-(the same gap as Tier-3 broadcast input). *(Config-driven binding, leader sequences, **key tables**, the `global:`
+**Input / keybinds** — `undo`/`redo`, and the `all:` trigger flag (the same gap as Tier-3 broadcast
+input). *(Everything else in this area is done: config-driven binding, leader sequences, key tables,
+`catch_all`, `chain=`, and the `global:` / `performable:` / `unconsumed:` flags.)* *(Config-driven binding, leader sequences, **key tables**, the `global:`
 and `performable:` flags, and the `write_*_file` / `set_*_title` / `toggle_*` / `text:`/`csi:`/`esc:`
 actions — now done.)*
 
@@ -388,8 +389,39 @@ With Phase 0 done, the remaining Tier-1 items are mostly small, registry-backed 
     ledger.
 27. ✅ **Named key tables**, plus the `ignore`-vs-`unbind` fix they surfaced. See the ledger.
 28. ✅ **`catch_all` and the `unconsumed:` trigger flag.** See the ledger.
-29. Next: `chain=` multi-action bindings, `all:` (which is the same gap as Tier-3 broadcast input),
-    `undo`/`redo`, and the inspector.
+29. ✅ **`chain=` multi-action bindings.** See the ledger.
+30. Next: `all:` / broadcast input (one gap, not two), `undo`/`redo`, and the inspector.
+
+### `chain=` multi-action bindings — ✅ divergences
+
+`keybind = chain=<action>` appends an action to the most recently defined binding, so one key can
+run several actions in order.
+
+- **A binding now holds `Vec<Action>`, never empty**, and `Lookup::Action` carries the whole list.
+  A parallel "lookup the chain" API was rejected: two lookups is how the two gates end up disagreeing
+  about what a key does, which this codebase has now hit three times. `lookup` still answers with the
+  *first* action, so every existing caller is unchanged.
+- **Performable for a chain is "any action can act", read from source rather than chosen.**
+  `Surface.zig` accumulates `performed = performed or v` across the chain, so a chain counts as
+  performed if *any* of its actions did. Guessing "the first one decides" was the obvious wrong
+  answer.
+- **The chain parent is parse state, and everything that isn't a plain bind clears it.** An
+  `unbind`, a table definition, a `global:` bind, an unparseable trigger or an unknown action all
+  reset it — upstream's own comment is "removal always resets our chain parent". Without that,
+  `ctrl+a=new_window` / `ctrl+b=unbind` / `chain=…` would silently extend `ctrl+a`. Pinned by a test,
+  because the wrong behaviour is invisible in a config.
+- **`chain` is intercepted as a trigger name before anything else**, since it takes no table prefix
+  (upstream: "chain itself doesn't get prefixed with the table name") and no flags ("chained actions
+  cannot have prefixes") — the original binding's flags apply to the whole chain. A `chain=` with no
+  parent is reported, not a panic.
+- **A chained payload keeps its payload.** `chain=text:a=b` splits on the first `=` like every other
+  keybind line, so the verbatim-payload rule from the `text:` pass holds on this new route too.
+- **One-shot tables pop once per *binding*, not per chained action** — the pop already sits before
+  the loop that runs them.
+- **No round-trip for a chain, deliberately.** A multi-action binding has no single `name()`, which
+  is the same asymmetry upstream has (chains are written as several lines). Checked that nothing
+  serializes the keymap before accepting it: the only `Action::name()` consumer is the command
+  palette's label, and the palette's catalog holds single actions.
 
 ### `catch_all` + the `unconsumed:` flag — ✅ divergences
 

@@ -29,8 +29,9 @@ pub struct Chord {
 /// What a key press means, given the keys already pressed in this sequence.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Lookup {
-    /// A complete binding: run this.
-    Action(Action),
+    /// A complete binding: run these, in order. Never empty; more than one
+    /// means the binding was extended with `chain=`.
+    Action(Vec<Action>),
     /// A *prefix* of one or more longer bindings — the leader of a sequence.
     /// Consume the key and wait for the next one.
     Pending,
@@ -60,7 +61,10 @@ pub struct TableEntry {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Bind {
     seq: Vec<Chord>,
-    action: Action,
+    /// The actions to run, in order. **Never empty** — parsing guarantees at
+    /// least one, and `chain=` appends to the most recently defined binding
+    /// (Ghostty `chain`).
+    actions: Vec<Action>,
     performable: bool,
     /// Ghostty's `unconsumed:` flag: run the action **and** let the key reach
     /// the program, instead of swallowing it.
@@ -108,12 +112,20 @@ impl Keymap {
         self.lookup_in(&[], chord)
     }
 
-    /// [`Self::lookup`] against an active key-table `stack` (innermost **last**).
-    pub fn lookup_in(&self, stack: &[TableEntry], chord: &Chord) -> Option<Action> {
+    /// Every action a single `chord` runs, in order (a `chain=` binding has more
+    /// than one). Empty when the chord is bound to nothing.
+    pub fn lookup_chain(&self, stack: &[TableEntry], chord: &Chord) -> Vec<Action> {
         match self.lookup_seq_in(stack, std::slice::from_ref(chord)) {
-            Lookup::Action(a) => Some(a),
-            _ => None,
+            Lookup::Action(a) => a,
+            _ => Vec::new(),
         }
+    }
+
+    /// The **first** action a chord runs, against an active key-table `stack`
+    /// (innermost **last**). A `chain=` binding has more than one; use
+    /// [`Self::lookup_chain`] when every action matters.
+    pub fn lookup_in(&self, stack: &[TableEntry], chord: &Chord) -> Option<Action> {
+        self.lookup_chain(stack, chord).into_iter().next()
     }
 
     /// The bind lists to search, innermost table first and the root last.
@@ -155,7 +167,7 @@ impl Keymap {
         // anything in an outer one.
         for binds in self.search_order(stack) {
             if let Some(b) = binds.iter().rev().find(|b| b.seq == keys) {
-                return Lookup::Action(b.action.clone());
+                return Lookup::Action(b.actions.clone());
             }
             if binds
                 .iter()
@@ -260,16 +272,38 @@ impl Keymap {
         let binds = self.binds_mut(table);
         match binds.iter_mut().find(|b| b.seq == seq) {
             Some(slot) => {
-                slot.action = action;
+                slot.actions = vec![action];
                 slot.performable = performable;
                 slot.unconsumed = unconsumed;
             }
             None => binds.push(Bind {
                 seq,
-                action,
+                actions: vec![action],
                 performable,
                 unconsumed,
             }),
+        }
+    }
+
+    /// Append `action` to the binding a `chain=` line refers to — the most
+    /// recently *defined* one, identified by `(table, seq)`.
+    ///
+    /// Returns whether there was one to chain onto; a `chain=` with no parent is
+    /// reported rather than silently attached to some older binding.
+    fn chain(&mut self, parent: Option<&(Option<String>, Vec<Chord>)>, action: Action) -> bool {
+        let Some((table, seq)) = parent else {
+            return false;
+        };
+        match self
+            .binds_mut(table.as_deref())
+            .iter_mut()
+            .find(|b| &b.seq == seq)
+        {
+            Some(b) => {
+                b.actions.push(action);
+                true
+            }
+            None => false,
         }
     }
 
@@ -299,7 +333,31 @@ impl Keymap {
     /// removes a binding.
     pub fn from_config(overrides: &[(String, String)]) -> Self {
         let mut km = Self::default();
+        // The binding a `chain=` line extends: the most recently *defined* one.
+        // Anything that is not a plain bind clears it, so a chain can never
+        // silently attach itself to some older binding — upstream's own
+        // `removeExact` says "removal always resets our chain parent".
+        let mut chain_parent: Option<(Option<String>, Vec<Chord>)> = None;
         for (trigger, action) in overrides {
+            // `chain=<action>` appends to that parent. Checked before anything
+            // else, since `chain` is a trigger *name*: it takes no table prefix
+            // (upstream: "chain itself doesn't get prefixed with the table
+            // name") and no flags ("chained actions cannot have prefixes"), the
+            // original binding's flags applying to the whole chain.
+            if trigger.trim() == "chain" {
+                let a = action.trim_start();
+                match Action::from_name(a) {
+                    Some(act) => {
+                        if !km.chain(chain_parent.as_ref(), act) {
+                            eprintln!(
+                                "giest: ignoring 'chain={a}' — no preceding keybind to chain onto"
+                            );
+                        }
+                    }
+                    None => eprintln!("giest: ignoring keybind to unknown action '{a}'"),
+                }
+                continue;
+            }
             // `<table>/<binding>` puts the binding in a **named key table**,
             // which only applies while that table is active. `<name>/` with no
             // binding defines and clears the table.
@@ -313,12 +371,16 @@ impl Keymap {
                     let binds = km.tables.entry(name.to_string()).or_default();
                     if rest.trim().is_empty() {
                         binds.clear();
+                        chain_parent = None;
                         continue;
                     }
                     (Some(name.to_string()), rest.to_string())
                 }
                 None => (None, trigger.clone()),
             };
+            // Every path below either defines a new parent or invalidates the
+            // old one; set it here so no `continue` can leave a stale one.
+            chain_parent = None;
             // Strip the trigger flags in **any order** — upstream documents
             // stacking them (`global:unconsumed:ctrl+a=…`) and does not fix
             // their order, so this loops rather than testing one arrangement.
@@ -395,7 +457,11 @@ impl Keymap {
                 continue;
             }
             match Action::from_name(a) {
-                Some(act) => km.set(table.as_deref(), seq, act, performable, unconsumed),
+                Some(act) => {
+                    km.set(table.as_deref(), seq.clone(), act, performable, unconsumed);
+                    // Only a successful plain bind becomes a chain parent.
+                    chain_parent = Some((table, seq));
+                }
                 None => eprintln!("giest: ignoring keybind to unknown action '{a}'"),
             }
         }
@@ -413,7 +479,7 @@ impl Keymap {
 /// Only a single chord can catch: `catch_all` describes one key press, not a
 /// sequence, so a partially-typed sequence is not caught here (see the
 /// dead-end handling for what happens then).
-fn catch_all_in(binds: &[Bind], keys: &[Chord]) -> Option<Action> {
+fn catch_all_in(binds: &[Bind], keys: &[Chord]) -> Option<Vec<Action>> {
     let [chord] = keys else { return None };
     let find = |mods: KeyMods| {
         binds
@@ -422,7 +488,7 @@ fn catch_all_in(binds: &[Bind], keys: &[Chord]) -> Option<Action> {
             .find(|b| {
                 b.seq.len() == 1 && b.seq[0].code == KeyCode::CatchAll && b.seq[0].mods == mods
             })
-            .map(|b| b.action.clone())
+            .map(|b| b.actions.clone())
     };
     find(chord.mods).or_else(|| {
         (chord.mods != KeyMods::default())
@@ -539,7 +605,7 @@ fn default_binds() -> Vec<Bind> {
         .filter_map(|(t, action, performable)| {
             parse_chord(t).map(|c| Bind {
                 seq: vec![c],
-                action,
+                actions: vec![action],
                 performable,
                 unconsumed: false,
             })
@@ -654,6 +720,91 @@ mod tests {
                 once: false,
             })
             .collect()
+    }
+
+    #[test]
+    fn chain_appends_actions_to_the_most_recent_binding() {
+        let km = Keymap::from_config(&[
+            ("ctrl+alt+a".into(), "new_window".into()),
+            ("chain".into(), "new_tab".into()),
+            ("chain".into(), "toggle_fullscreen".into()),
+        ]);
+        assert_eq!(
+            km.lookup_chain(&[], &chord("ctrl+alt+a")),
+            vec![Action::NewWindow, Action::NewTab, Action::ToggleFullscreen],
+            "in the order they were written"
+        );
+        // `lookup` still answers with the first action, so every existing
+        // caller keeps working.
+        assert_eq!(km.lookup(&chord("ctrl+alt+a")), Some(Action::NewWindow));
+    }
+
+    #[test]
+    fn a_chain_needs_a_parent_and_never_borrows_an_older_one() {
+        // The dangerous case: an intervening line that is *not* a plain bind
+        // must clear the parent, or the chain silently attaches to whatever was
+        // defined before it. Upstream: "removal always resets our chain parent".
+        let km = Keymap::from_config(&[
+            ("ctrl+alt+a".into(), "new_window".into()),
+            ("ctrl+alt+b".into(), "unbind".into()),
+            ("chain".into(), "new_tab".into()),
+        ]);
+        assert_eq!(
+            km.lookup_chain(&[], &chord("ctrl+alt+a")),
+            vec![Action::NewWindow],
+            "the chain was dropped, not attached to ctrl+alt+a"
+        );
+
+        // A chain before any binding is reported, not a panic.
+        let km = Keymap::from_config(&[("chain".into(), "new_tab".into())]);
+        assert_eq!(km.lookup(&chord("ctrl+alt+a")), None);
+
+        // A table definition also clears it.
+        let km = Keymap::from_config(&[
+            ("ctrl+alt+a".into(), "new_window".into()),
+            ("scratch/".into(), "".into()),
+            ("chain".into(), "new_tab".into()),
+        ]);
+        assert_eq!(km.lookup_chain(&[], &chord("ctrl+alt+a")), vec![Action::NewWindow]);
+    }
+
+    #[test]
+    fn chain_works_inside_tables_and_sequences() {
+        // Upstream: "chain itself doesn't get prefixed with the table name,
+        // since it applies to the most recent binding in any table".
+        let km = Keymap::from_config(&[
+            ("copy/j".into(), "scroll_page_down".into()),
+            ("chain".into(), "new_tab".into()),
+        ]);
+        assert_eq!(
+            km.lookup_chain(&stack(&["copy"]), &chord("j")),
+            vec![Action::ScrollPageDown, Action::NewTab]
+        );
+
+        // "Chains with key sequences apply to the most recent binding in the
+        // sequence" — i.e. the completed one.
+        let km = Keymap::from_config(&[
+            ("ctrl+a>n".into(), "new_window".into()),
+            ("chain".into(), "new_tab".into()),
+        ]);
+        assert_eq!(
+            km.lookup_seq(&[chord("ctrl+a"), chord("n")]),
+            Lookup::Action(vec![Action::NewWindow, Action::NewTab])
+        );
+    }
+
+    #[test]
+    fn a_chained_payload_action_keeps_its_payload() {
+        // A new route into the payload parser: everything after the *first* `=`
+        // is the action, so a payload with its own `=` survives.
+        let km = Keymap::from_config(&[
+            ("ctrl+alt+a".into(), "new_window".into()),
+            ("chain".into(), "text:a=b".into()),
+        ]);
+        assert_eq!(
+            km.lookup_chain(&[], &chord("ctrl+alt+a")),
+            vec![Action::NewWindow, Action::SendText("a=b".into())]
+        );
     }
 
     #[test]
@@ -861,7 +1012,7 @@ mod tests {
         assert_eq!(km.lookup_seq_in(&s, &[chord("ctrl+a")]), Lookup::Pending);
         assert_eq!(
             km.lookup_seq_in(&s, &[chord("ctrl+a"), chord("n")]),
-            Lookup::Action(Action::NewTab)
+            Lookup::Action(vec![Action::NewTab])
         );
         // …and are inert while the table is not active.
         assert_eq!(km.lookup_seq(&[chord("ctrl+a")]), Lookup::None);
@@ -1099,7 +1250,7 @@ mod tests {
         assert_eq!(km.lookup_seq(&[a]), Lookup::Pending);
         assert_eq!(km.lookup(&a), None, "a leader must not resolve as an action");
         // …and completing it runs the binding.
-        assert_eq!(km.lookup_seq(&[a, n]), Lookup::Action(Action::NewTab));
+        assert_eq!(km.lookup_seq(&[a, n]), Lookup::Action(vec![Action::NewTab]));
         // A wrong second key is a dead end, not a partial match.
         assert_eq!(km.lookup_seq(&[a, chord("x")]), Lookup::None);
         // The second key on its own means nothing.
@@ -1126,12 +1277,12 @@ mod tests {
             ("ctrl+a>n".into(), "new_tab".into()),
             ("ctrl+a".into(), "new_window".into()),
         ]);
-        assert_eq!(km.lookup_seq(&[chord("ctrl+a")]), Lookup::Action(Action::NewWindow));
+        assert_eq!(km.lookup_seq(&[chord("ctrl+a")]), Lookup::Action(vec![Action::NewWindow]));
         // The longer binding becomes unreachable, which is the user's choice to
         // make — but it must not break lookup.
         assert_eq!(
             km.lookup_seq(&[chord("ctrl+a"), chord("n")]),
-            Lookup::Action(Action::NewTab)
+            Lookup::Action(vec![Action::NewTab])
         );
     }
 
@@ -1143,7 +1294,7 @@ mod tests {
         ]);
         assert_eq!(
             km.lookup_seq(&[chord("ctrl+a"), chord("n")]),
-            Lookup::Action(Action::NewWindow),
+            Lookup::Action(vec![Action::NewWindow]),
             "the later binding must win"
         );
 
@@ -1179,7 +1330,7 @@ mod tests {
         let km = Keymap::default();
         assert_eq!(
             km.lookup_seq(&[chord("ctrl+shift+t")]),
-            Lookup::Action(Action::NewTab)
+            Lookup::Action(vec![Action::NewTab])
         );
         assert_eq!(km.lookup(&chord("ctrl+shift+t")), Some(Action::NewTab));
         assert_eq!(km.lookup_seq(&[]), Lookup::None);

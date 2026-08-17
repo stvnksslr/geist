@@ -282,6 +282,25 @@ reserves whole modifier namespaces (`ctrl+shift+*`, `ctrl+alt+arrows`, `alt+digi
 from the shell, and that still wins — `unconsumed:` on a key in one of those does not deliver it.
 `all:` is not supported.
 
+### Running several actions from one key (`chain=`)
+
+`chain=<action>` appends an action to the binding on the line above it:
+
+```ini
+keybind = ctrl+alt+a=new_window
+keybind = chain=new_tab
+keybind = chain=toggle_fullscreen
+```
+
+They run in order. A few rules:
+
+- The chain attaches to the **most recently defined binding**, so `chain=` lines must follow it
+  directly. Anything in between that isn't a plain binding — an `unbind`, a table definition — breaks
+  the link, and the chain is reported and dropped rather than attaching to something older.
+- `chain=` takes no table prefix and no flags: it applies to the most recent binding whichever table
+  that was in, and the original binding's flags cover the whole chain.
+- It works with key sequences too, attaching to the completed sequence.
+
 ### Catch-all bindings
 
 The special key `catch_all` matches any key **not otherwise bound**:
@@ -486,8 +505,8 @@ Details worth knowing:
   (`copy/ctrl+a>n=…`).
 - The active tables are **cleared when the config reloads**, since a reload can delete a table you
   are currently in.
-- Not supported: `chain=`, and `global:` inside a table (a global hotkey is delivered by the OS and
-  can't know which table is active — it is reported rather than silently bound). `catch_all` **is**
+- Not supported: `global:` inside a table (a global hotkey is delivered by the OS and can't know
+  which table is active — it is reported rather than silently bound). `catch_all` and `chain=` **are**
   supported; see below.
 
 ### Bell, resize overlay, close confirmation

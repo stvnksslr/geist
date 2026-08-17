@@ -1882,20 +1882,28 @@ impl Window {
             // the shell *and* runs.
             let stack = self.key_tables.clone();
             match self.keymap.lookup_seq_in(&stack, &self.pending_keys) {
-                crate::keybind::Lookup::Action(action) => {
+                crate::keybind::Lookup::Action(actions) => {
                     // A `performable:` binding only counts while its action can
                     // act; otherwise the key was already left to the shell by
-                    // `decide_key`, and running it here would do both.
+                    // `decide_key`, and running it here would do both. For a
+                    // `chain=` binding upstream ORs the results
+                    // (`performed = performed or v`), so the chain counts as
+                    // performed if **any** of its actions can act.
                     let performable = self.keymap.is_performable_in(&stack, &self.pending_keys);
                     self.pending_keys.clear();
                     let ctx_perform = self.perform_ctx();
-                    if !performable || crate::command::can_perform(&action, ctx_perform) {
+                    let can = actions
+                        .iter()
+                        .any(|a| crate::command::can_perform(a, ctx_perform));
+                    if !performable || can {
                         // A one-shot table pops as soon as one of its bindings
-                        // runs — checked *before* the action, so an action that
-                        // activates another table doesn't get popped by its own
-                        // predecessor's one-shot flag.
+                        // runs — once per *binding*, not per chained action, and
+                        // before them, so an action that activates another table
+                        // isn't popped by its predecessor's one-shot flag.
                         self.pop_one_shot_table();
-                        self.execute_action(ctx, None, action);
+                        for action in actions {
+                            self.execute_action(ctx, None, action);
+                        }
                     }
                 }
                 // A leader: swallow and wait. `decide_key` keeps the shell from
