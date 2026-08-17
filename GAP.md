@@ -79,7 +79,8 @@ giest's single per-cell chokepoint (`engine/ghostty_vt.rs::copy_cell`) historica
   while the overlay is modal.
   *Limitations: matches don't span soft-wrapped rows, ASCII case-folding, and matches are tracked in
   absolute screen rows so scrollback **eviction** during heavy streaming can drift them until the query is
-  re-typed (Ghostty uses tracked pins — a follow-up).*
+  re-typed (Ghostty uses tracked pins — a follow-up, now **unblocked**: the selection migration
+  proved out `track_grid_ref` for exactly this).*
 
 - **fullscreen / split zoom / tab-inherit-cwd** ✅ (Tier-1 UX cluster) `toggle_fullscreen` (`ctrl+enter`)
   flips the winit viewport, reading the live fullscreen state back so an OS-driven change doesn't desync.
@@ -176,10 +177,10 @@ light/dark preference), **window/tab/split state restore** (`window-save-state`)
 set_*_title, toggle_*, send raw text/esc/csi, undo/redo, …). *(Config-driven binding + several actions
 are now done.)*
 
-**Selection / scroll / search** — `adjust_selection`; fully binding-backed (reflow-correct,
-scrollback-spanning) selection, which would also give search cross-wrap matches + drift-free match
-tracking. *(scrollback search, **semantic selection** (word / wrapped line / command output) — now
-done.)*
+**Selection / scroll / search** — `adjust_selection`; rectangle/block selection; drag-past-edge
+autoscroll; search cross-wrap matches + drift-free match tracking (which the selection migration now
+unlocks). *(scrollback search, **semantic selection** (word / wrapped line / command output), and
+the **full binding-backed selection** — reflow-correct and scrollback-spanning — now done.)*
 
 **Shell integration** — OSC 133 C/D (command output marks → duration, notify-on-command-finish).
 *(OSC 133 A/B prompt marks now injected; `tab-inherit-working-directory` now honored — new tabs inherit
@@ -286,7 +287,7 @@ Effort: **S** <1d · **M** 1–3d · **L** ~1wk · **XL** multi-wk. Status: ✅ 
 | Clipboard permission + paste protection | `session.rs`, `app.rs`, `config.rs`, `osc52.rs` | ✋ | M | ✅ |
 | Desktop notifications + notify-on-command-finish | `osc_notify.rs`, `notify.rs`, `osc133.rs`, `profiles.rs`, `session.rs`, `app.rs` | ✋ | M | ✅ (both halves; cmd can't report an exit code — see the ledger) |
 | Real scrollbar widget | `scrollbar.rs`, `app.rs`, `session.rs` | ✅ | M | ✅ |
-| Migrate to binding selection model | `session.rs`, `engine` | ✅ | M–L | ◐ (semantic selection done; scrollback-spanning ranges still open) |
+| Migrate to binding selection model | `session.rs`, `engine` | ✅ | M–L | ✅ (tracked-ref anchor, scrollback-spanning, reflow-correct — see the ledger; rectangle mode + autoscroll deferred) |
 
 ### Tier 3 — long tail / platform-specific
 readonly mode · secure-input indicator · broadcast input ·
@@ -376,9 +377,63 @@ With Phase 0 done, the remaining Tier-1 items are mostly small, registry-backed 
 20. ✅ **`config-file` (include)** — recursive config loading. See the ledger below.
 21. ✅ **`enquiry-response` closed out as blocked** — the ConPTY probe was written and run; ConPTY
     strips ENQ. See the config-surface ledger.
-22. Next: the **full**
-    selection migration (scrollback-spanning selections, search cross-wrap matches), then the
-    readonly / secure-input indicators.
+22. ✅ **The full selection migration** — engine-owned, tracked-ref, scrollback-spanning. See the
+    ledger below.
+23. Next: search cross-wrap matches + drift-free match tracking (now unblocked by tracked refs),
+    then `adjust_selection` / rectangle selection / drag-past-edge autoscroll, and the readonly /
+    secure-input indicators.
+
+### Selection migration (engine-owned, scrollback-spanning) — ✅ divergences
+
+The selection now lives in the **VT engine**, not the app. `Session`'s two viewport
+`(col,row)` pairs are gone; `GhosttyVtEngine` holds the drag anchor as a libghostty
+**tracked grid ref** and installs the selection into the terminal itself.
+
+- **This is what the semantic-selection ledger said was still open**, and the four limits it
+  recorded are now gone: a selection survives scrolling, scrollback eviction and reflow; copy spans
+  scrollback; a selection starting above the viewport is kept **whole** rather than clamped to the
+  visible part; and `select_all` means everything rather than the viewport rectangle.
+- **The binding already had every piece** — `track_grid_ref` (owned, `Drop`-freed, may outlive the
+  terminal), `set_selection`, `format_selection_alloc`, and the render state's per-row selection
+  range. Nothing needed patching. What made this expensive to *reason* about is that
+  `Selection`/`GridRef` borrow the terminal, and the answer is that nothing borrowing is ever
+  stored: every use snapshots the tracked anchor and drops the untracked ref in the same scope.
+  Holding one across a `vt_write` is the `walk_placements` trap again.
+- **Only the anchor is tracked.** The moving end is wherever the pointer is *now* and is resolved
+  fresh on each update; the range itself is owned by the terminal, which `set_selection` converts
+  to tracked state internally. giest keeps its own anchor solely because the binding exposes no way
+  to read the active selection back (`GHOSTTY_TERMINAL_DATA_SELECTION` is unbound).
+- **`selection_installed` mirrors terminal state that cannot be queried.** Same cause. It is the
+  one piece of duplicated state here, and it exists rather than a guess from "is the anchor set".
+- **An anchor that loses its cell clears the selection.** Upstream's tracked pins move to the
+  screen's top-left when their row is destroyed; extending a drag from a cell that no longer exists
+  would select something the user never pointed at, so giest drops it instead.
+- **A selection change forces a snapshot rebuild.** Installing a selection does not necessarily
+  dirty the render state, and the "nothing changed" fast path would leave the highlight unpainted on
+  an idle screen — the same insurance `viewport_moved` provides, and a silent failure without it.
+- **The renderer stopped computing selection.** `PaneFrame::selection` (an inclusive linear cell
+  range) is deleted; each `Cell` carries `selected`, filled from the row-local range the render
+  state reports — asked **once per row**, which is what the C API recommends for a renderer that
+  works in spans. A rectangle in app coordinates could not have expressed a soft-wrapped or
+  reflowed selection at all.
+- **`Session::extract_selection` and its tests are deleted, not kept as a fallback.** Copy reads
+  through the engine now; a grid-scanning copy would be a second opinion about what is selected —
+  the failure this repo keeps recording. `clipboard-trim-trailing-spaces` maps onto the formatter's
+  own `trim` flag, and `unwrap` is on: a wrapped command copies as one line, not as the rows it was
+  displayed on.
+- **Still deferred, deliberately:** rectangle/block selection (the binding takes a `rectangle` flag
+  and upstream drives it from a modifier); upstream's **60%-of-cell-width threshold** for whether
+  the clicked and dragged cells are included (`Surface.zig::mouseSelection`) — giest includes on
+  cell hit, so a drag can grab one more cell than Ghostty would; **drag-past-the-edge autoscroll**
+  (upstream ticks one row per timer tick while the button is held); the `adjust_selection` keybinds
+  (the `Adjustment` enum makes them cheap now); and **search** cross-wrap matches, which this
+  unlocks but which are their own subsystem and their own pass.
+- **Verified by engine tests driving real escape sequences**: word/`selection-word-chars`
+  boundaries by their *copied text*, a soft-wrapped triple-click returning one unwrapped line while
+  highlighting two display rows, OSC 133 command output, a selection made before ten screens of
+  output still reading back correctly (the tracked-anchor case), `select_all` including a
+  scrolled-off row, trim on/off, clear, and an update with no anchor. The highlight itself is
+  **perceptual** and wants human confirmation in the running app.
 
 ### `config-file` (config includes) — ✅ divergences
 
@@ -552,16 +607,13 @@ read off `Surface.zig` rather than guessed.
   `with_semantic_prompt_boundary`). The old version selected one *visual* row, so triple-clicking a
   command longer than the window gave you a fragment of it.
 - **No lifetime crosses the engine trait.** `Selection`/`GridRef` borrow the terminal and giest's
-  selection outlives any frame, so the trait returns plain viewport cell pairs and the binding types
-  stay inside `engine/ghostty_vt.rs`. That is what makes this slice cheap where the full selection
-  migration is not.
-- **Off-viewport ends are clamped, not dropped.** `point_from_grid_ref` returns `None` in viewport
-  space for a cell that has scrolled off, and a wrapped line or a command's output very often starts
-  above the top of the screen — so the conversion runs in *screen* space and clamps. Returning
-  `None` would make Ctrl+triple-click do nothing in the common case. The cost, stated plainly: copy
-  only sees the visible part. **giest's selection model stays viewport-scoped**; scrollback-spanning
-  selections still need the full migration (which is also why `select_all` is unchanged — the
-  binding's version returns a scrollback-spanning range this model can't hold).
+  selection outlives any frame, so the binding types stay inside `engine/ghostty_vt.rs`. That is what
+  made this slice cheap where the full migration was not.
+- ~~**Off-viewport ends are clamped, not dropped.**~~ **Superseded** by the selection migration
+  above: this slice returned viewport cell pairs, so a selection beginning above the screen had to be
+  clamped and copy saw only the visible part. The selection is now engine-owned and tracked, so such
+  a range is kept whole and `select_all` spans scrollback. Recorded rather than deleted because the
+  clamping behaviour shipped, and this is what changed.
 - **A semantic selection that finds nothing leaves the existing one alone** rather than clearing it,
   so a stray double-click on blank space doesn't discard what the user had.
 - **`selection-word-chars` replaces the engine's list rather than adding to it**, which is upstream's

@@ -173,9 +173,14 @@ with Ghostty rather than with a second opinion computed from the drawn grid:
 | `search-background` / `-foreground` | color | Colors for a scrollback-search match. Also accept `cell-foreground` / `cell-background` to defer to the cell's own colors. |
 | `search-selected-background` / `-foreground` | color | Same, for the match you're currently on. |
 
-A selection that starts above the visible area — a wrapped line scrolled off the top, or almost any
-command output — is **clamped to the viewport**, and copying gets the visible part. giest's selection
-model is viewport-scoped; selections spanning scrollback are a known gap.
+Selections are held by the terminal itself, not by the window, so they behave the way they do in
+Ghostty: one can start above the visible area (a wrapped line scrolled off the top, or almost any
+command output) and copy in full, it survives scrolling and a window resize, and **Select All** takes
+the scrollback too. Copying **unwraps** soft wrapping — a command longer than the window comes back
+as one line rather than as the rows it was displayed on.
+
+Not yet supported: rectangle/block selection, extending a selection with the keyboard
+(`adjust_selection`), and auto-scrolling when you drag past the top or bottom edge.
 
 ### Fonts, fallback chains and synthetic styles
 

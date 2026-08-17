@@ -10,7 +10,6 @@ classDiagram
         engine: GhosttyVtEngine
         snapshot: GridSnapshot
         cols, rows: u16
-        sel_anchor, sel_head: Option~(u16,u16)~
         mouse_down: Option~MouseButton~
         alive: bool
         osc52: Osc52Scanner
@@ -109,13 +108,20 @@ through these helpers:
 
 | Gesture | Method | Behavior |
 | --- | --- | --- |
-| drag | `begin_selection` / `update_selection` | anchor + head cells |
-| double-click | `select_word` | `word_bounds` keeps paths/flags whole (`/ . - _ : @ ~` stay in-word) |
-| triple-click | `select_line` | the whole visual row |
+| drag | `begin_selection` / `update_selection` | anchor + moving end |
+| double-click | `select_word` | the terminal's own word boundaries (`selection-word-chars`) |
+| triple-click | `select_line` | the logical line, following soft wrapping, stopping at a prompt |
+| Ctrl+triple-click | `select_output` | the command's output, from its OSC 133 marks |
 | Shift+click | `extend_selection` | extend an existing selection |
 | Ctrl+click | `url_at` → `find_url_at` | open a URL under the cursor |
 
-`selection_range` returns an inclusive linear (row-major) range;
-`extract_selection` walks it, following text flow and trimming trailing blanks
-per line. These three (`word_bounds`, `find_url_at`, `extract_selection`) are
-unit-tested.
+**The selection itself is not stored here.** It lives in the VT engine, which
+holds the drag anchor as a *tracked* grid reference and installs the range into
+the terminal — so it follows its cells through scrolling, scrollback eviction and
+reflow, which viewport `(col,row)` pairs never could. `Session` keeps only the
+interaction state (`mouse_down`, click counts).
+
+`selection_text` therefore reads through the engine: it spans scrollback and
+unwraps soft wrapping, and `clipboard-trim-trailing-spaces` is the formatter's
+own `trim` flag. The renderer doesn't compute selection either — each `Cell`
+carries `selected`, filled from the render state's row-local range.
