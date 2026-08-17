@@ -662,9 +662,10 @@ impl Session {
             // A reflow renumbers rows/columns, so an open search's captured text
             // and matches are stale — recapture and re-run against the new grid.
             if self.search.is_some() {
-                self.search_text = self.engine.screen_text();
+                let anchor = self.capture_search_text();
                 let target = self.viewport_bottom_row();
                 if let Some(s) = self.search.as_mut() {
+                    s.anchor_at_capture = anchor;
                     s.run(&self.search_text);
                     s.select_nearest(target);
                 }
@@ -1073,14 +1074,47 @@ impl Session {
     /// as text so subsequent keystrokes re-search the snapshot rather than
     /// re-walking the grid. Idempotent — re-opening recaptures.
     pub fn open_search(&mut self) {
+        let mut state = SearchState::new();
+        state.anchor_at_capture = self.capture_search_text();
+        self.search = Some(state);
+    }
+
+    /// Capture the screen text and anchor its **last** row, returning that row.
+    ///
+    /// The anchor is what keeps match rows correct while output streams: heavy
+    /// output evicts the oldest rows and renumbers everything, and comparing the
+    /// anchor's row now against this one gives the shift. Called on open and on
+    /// every recapture (resize).
+    fn capture_search_text(&mut self) -> u32 {
         self.search_text = self.engine.screen_text();
-        self.search = Some(SearchState::new());
+        let last = self.search_text.last().map(|r| r.row).unwrap_or(0);
+        self.engine.set_row_anchor(Some(last));
+        last
     }
 
     /// Close the search overlay and drop the captured text (highlights vanish).
     pub fn close_search(&mut self) {
         self.search = None;
         self.search_text = Vec::new();
+        // Stop paying for the tracked reference; it costs bookkeeping on every
+        // terminal mutation.
+        self.engine.set_row_anchor(None);
+    }
+
+    /// Convert a live absolute screen row into the capture's coordinate space,
+    /// so it can be compared with match rows.
+    fn capture_space_row(&self, live: u32) -> u32 {
+        (i64::from(live) - self.search_row_shift()).max(0) as u32
+    }
+
+    /// How far the captured rows have drifted since capture (0 when nothing has
+    /// been evicted, or when the anchor is gone and a recapture is due).
+    fn search_row_shift(&self) -> i64 {
+        let Some(s) = &self.search else { return 0 };
+        match self.engine.row_anchor_now() {
+            Some(now) => crate::search::row_shift(s.anchor_at_capture, now),
+            None => 0,
+        }
     }
 
     /// Whether the search overlay is open.
@@ -1105,7 +1139,9 @@ impl Session {
     /// Set the query, re-match the captured text, point at the occurrence nearest
     /// the current viewport, and scroll there. No-op if the overlay is closed.
     pub fn set_search_query(&mut self, query: String, cell_h: f32) {
-        let target = self.viewport_bottom_row();
+        // `select_nearest` compares against *capture-space* rows, so a live
+        // viewport row has to have the drift taken back out of it.
+        let target = self.capture_space_row(self.viewport_bottom_row());
         let current = {
             let Some(s) = self.search.as_mut() else {
                 return;
@@ -1136,7 +1172,9 @@ impl Session {
 
     /// Toggle case-sensitivity and re-match, keeping the view near the same place.
     pub fn toggle_search_case(&mut self, cell_h: f32) {
-        let target = self.viewport_bottom_row();
+        // `select_nearest` compares against *capture-space* rows, so a live
+        // viewport row has to have the drift taken back out of it.
+        let target = self.capture_space_row(self.viewport_bottom_row());
         let current = {
             let Some(s) = self.search.as_mut() else {
                 return;
@@ -1160,19 +1198,34 @@ impl Session {
         let Some(s) = &self.search else {
             return Vec::new();
         };
+        let shift = self.search_row_shift();
         let vp_top = self.viewport_top_row();
         let rows = self.rows as u32;
-        s.matches
-            .iter()
-            .enumerate()
-            .filter(|(_, m)| m.row >= vp_top && m.row < vp_top + rows)
-            .map(|(i, m)| SearchHighlight {
-                row: (m.row - vp_top) as u16,
-                col_start: m.col_start,
-                col_end: m.col_end,
-                current: i == s.current,
-            })
-            .collect()
+        let cols = self.cols.saturating_sub(1);
+        let mut out = Vec::new();
+        for (i, m) in s.matches.iter().enumerate() {
+            // Correct for eviction; a match whose rows are gone is dropped
+            // rather than drawn over whatever now sits there.
+            let Some(m) = crate::search::shifted(*m, shift) else {
+                continue;
+            };
+            // A match that spans a soft wrap covers several display rows: the
+            // first runs to the end of the line, the last starts at column 0.
+            for row in m.row..=m.end_row {
+                if row < vp_top || row >= vp_top + rows {
+                    continue;
+                }
+                let col_start = if row == m.row { m.col_start } else { 0 };
+                let col_end = if row == m.end_row { m.col_end } else { cols };
+                out.push(SearchHighlight {
+                    row: (row - vp_top) as u16,
+                    col_start,
+                    col_end,
+                    current: i == s.current,
+                });
+            }
+        }
+        out
     }
 
     /// Absolute screen row of the viewport's top, given the current scroll pin.
@@ -1189,6 +1242,12 @@ impl Session {
     /// Scroll so match `m` sits about a third of the way down the viewport (for
     /// surrounding context), clamped to the live scrollback by `animate_scroll`.
     fn scroll_to_match(&mut self, m: crate::search::Match, cell_h: f32) {
+        // Same eviction correction the highlights make; without it a jump after
+        // heavy output lands on the wrong line.
+        let m = match crate::search::shifted(m, self.search_row_shift()) {
+            Some(m) => m,
+            None => return,
+        };
         let scrollback = self.engine.scrollback_rows() as u32;
         let context = (self.rows / 3) as u32;
         let target_top = m.row.saturating_sub(context);

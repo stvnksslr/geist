@@ -77,10 +77,8 @@ giest's single per-cell chokepoint (`engine/ghostty_vt.rs::copy_cell`) historica
   were emitting a space — now skipped), long ZWJ-emoji clusters (>8 codepoints, heap-buffer retry),
   focus-stealing from a searching pane in splits, resize-while-open recapture, and a scroll-animation tick
   while the overlay is modal.
-  *Limitations: matches don't span soft-wrapped rows, ASCII case-folding, and matches are tracked in
-  absolute screen rows so scrollback **eviction** during heavy streaming can drift them until the query is
-  re-typed (Ghostty uses tracked pins — a follow-up, now **unblocked**: the selection migration
-  proved out `track_grid_ref` for exactly this).*
+  *Limitation: ASCII case-folding, and no regex. **Cross-wrap matches and eviction drift are now
+  fixed** — see the search ledger below.*
 
 - **fullscreen / split zoom / tab-inherit-cwd** ✅ (Tier-1 UX cluster) `toggle_fullscreen` (`ctrl+enter`)
   flips the winit viewport, reading the live fullscreen state back so an OS-driven change doesn't desync.
@@ -379,9 +377,48 @@ With Phase 0 done, the remaining Tier-1 items are mostly small, registry-backed 
     strips ENQ. See the config-surface ledger.
 22. ✅ **The full selection migration** — engine-owned, tracked-ref, scrollback-spanning. See the
     ledger below.
-23. Next: search cross-wrap matches + drift-free match tracking (now unblocked by tracked refs),
-    then `adjust_selection` / rectangle selection / drag-past-edge autoscroll, and the readonly /
-    secure-input indicators.
+23. ✅ **Search cross-wrap matches + drift-free tracking.** See the ledger below.
+24. Next: `adjust_selection` / rectangle selection / drag-past-edge autoscroll, the readonly /
+    secure-input indicators, and the `scrollback-limit` finding recorded in the search ledger.
+
+### Search: cross-wrap matches + drift-free tracking — ✅ divergences
+
+The two limitations the scrollback-search entry shipped with are closed. A query spanning a soft
+wrap is found, and match rows are corrected when scrollback eviction renumbers the screen.
+
+- **Wrapped rows are joined in `search.rs`, not in the engine.** `screen_text` still yields one
+  entry per *display* row and gained a `wrapped` flag (from `Row::is_wrapped`), because
+  `write_scrollback_file` / `write_screen_file` read the same method — joining there would silently
+  unwrap the file giest writes, which nobody asked for. Search does the joining itself, in pure code
+  that hand-built rows can test.
+- **A `Match` now carries a start *and* an end row.** A match across a wrap covers several display
+  rows, so `search_highlights` emits one span per row: the first runs to the end of the line, the
+  last starts at column 0. The renderer's mask builder already took a list, so it is unchanged.
+- **One tracked reference corrects every match, not one per match.** Eviction drops the oldest rows
+  and renumbers the whole screen by the same amount, so a single anchor gives the shift. Each
+  tracked reference costs bookkeeping on every terminal mutation, and a search can have hundreds of
+  matches.
+- **The anchor is the capture's *last* row, and that is load-bearing.** The first row is the first
+  to be evicted, and upstream moves a destroyed pin to the screen's **top-left** — so a top anchor
+  would read as "row 0, no drift" at exactly the moment there was drift. `has_value` is checked
+  before the point for the same reason; a bare point read is confidently wrong.
+- **A match whose rows were evicted is dropped, not shifted.** Drawing it where those rows used to
+  be would highlight unrelated text.
+- **Measured, and worth knowing: pruning is page-granular.** A few lines past the limit evict
+  *nothing*, so drift arrives in jumps and the correction is free in the common case. The test that
+  forces a real prune is `#[ignore]`d because it needs ~12k lines (~8 s).
+  **Also measured, and a genuine bug filed by this:** `max_scrollback = 10` still retained ~7,200
+  rows after 20k lines. libghostty's option is documented as a line count, but a small
+  `scrollback-limit` is plainly not honoured — presumably it cannot free a partially-used page.
+  giest's `scrollback-limit` docs promise lines. Not fixed here; recorded so it is not rediscovered.
+- **`SpacerHead` is now skipped in `screen_text`.** When a wide character doesn't fit at the end of a
+  row it moves to the next, leaving a spacer behind; emitting a space for it put one *inside* the
+  wrapped word, so a query spanning the wrap could not match. (`SpacerTail` was already skipped.)
+- **Unchanged, deliberately:** ASCII case folding and no regex. This pass is wrap + drift only.
+- Verified by pure tests over hand-built rows (wrap join, a non-wrapped boundary *not* joined, a
+  trailing wrapped row not running off the end, the shift arithmetic and the drop rule) and by
+  engine tests on a real terminal (a real wrap marked and matched across, a wide character pushed
+  over a wrap still matching, and the anchor naming the row its line is actually on).
 
 ### Selection migration (engine-owned, scrollback-spanning) — ✅ divergences
 

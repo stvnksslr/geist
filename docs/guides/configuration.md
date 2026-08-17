@@ -71,7 +71,7 @@ palette = 8=#666a73
 | `split-divider-color` | color | The hairline between splits (and the other chrome hairlines); unset derives one from the theme. |
 | `window-theme` | enum | Light/dark mode for the **chrome** (tab strip, command palette, overlays, dialogs): `auto` (default) derives it from `background`, so the chrome matches your terminal; `dark`/`light` force it. giest never follows the OS theme — that is what used to render a light tab strip over a dark terminal. Colors and accents come from `foreground`/`background`/`palette`, so a theme change restyles the chrome too. |
 | `text-gamma` | float (0.5–3.0) | Anti-aliasing gamma passed to the shader; >1 thickens light-on-dark text. **giest-specific** — Ghostty has no equivalent. |
-| `scrollback-limit` | int | Max scrollback **lines** retained per pane. Note: Ghostty's `scrollback-limit` is in *bytes*; giest's VT engine takes a line count, so the key matches but the unit differs. |
+| `scrollback-limit` | int | Scrollback retained per pane, as a **line** count (Ghostty's own key is in *bytes*, so the key matches but the unit differs). ⚠️ Measured caveat: the VT engine frees scrollback a page at a time and will not free a partially-used one, so a *small* limit is not honoured — a limit of 10 still retained thousands of rows. Large values behave as expected. |
 | `selection-background` | `#rrggbb` | Background of selected cells. |
 | `selection-foreground` | `#rrggbb` | Text color over a selection (optional; omit to keep each cell's own fg). |
 | `copy-on-select` | enum | `false` off; `true`/`clipboard`/`primary` copy on selection. Windows has no primary selection, so the three truthy values behave identically. |

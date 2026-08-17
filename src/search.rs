@@ -8,20 +8,50 @@
 
 use crate::engine::RowText;
 
-/// A search hit: an inclusive span of cells on one absolute screen row
-/// (`row` 0 = the oldest scrollback row, matching [`RowText::row`]).
+/// A search hit, as an inclusive `(row, column)` start and end in absolute
+/// screen coordinates (`row` 0 = the oldest scrollback row, matching
+/// [`RowText::row`]).
+///
+/// Start and end can be on **different rows**: a soft-wrapped line is several
+/// display rows and a match may span the wrap.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Match {
     pub row: u32,
     pub col_start: u16,
+    /// Row the match ends on — equal to `row` for the ordinary single-row case.
+    pub end_row: u32,
     pub col_end: u16,
+}
+
+impl Match {
+    /// A match confined to one row.
+    pub fn single(row: u32, col_start: u16, col_end: u16) -> Self {
+        Self {
+            row,
+            col_start,
+            end_row: row,
+            col_end,
+        }
+    }
+}
+
+/// One position inside a joined logical line: which screen row and column the
+/// character at that index came from.
+#[derive(Clone, Copy)]
+struct Origin {
+    row: u32,
+    col: u16,
 }
 
 /// Find every non-overlapping occurrence of `needle` across `rows`, in row- then
 /// column-order. Case-insensitive (ASCII) unless `case_sensitive`. An empty
-/// `needle` yields no matches. Matches are within a single screen row — a
-/// soft-wrapped line is several rows, so a query spanning a wrap is not found
-/// (a documented v1 limitation).
+/// `needle` yields no matches.
+///
+/// Soft-wrapped rows are **joined into logical lines first** (`RowText::wrapped`
+/// marks a row that continues onto the next), so a query spanning a wrap is
+/// found — the row and column of each end are then recovered from the joined
+/// line's origin map. Searching row by row, as this used to, silently missed
+/// every match that happened to straddle the window's right edge.
 pub fn search_rows(rows: &[RowText], needle: &str, case_sensitive: bool) -> Vec<Match> {
     if needle.is_empty() {
         return Vec::new();
@@ -35,22 +65,49 @@ pub fn search_rows(rows: &[RowText], needle: &str, case_sensitive: bool) -> Vec<
     };
     let pat: Vec<char> = needle.chars().map(fold).collect();
     let mut out = Vec::new();
-    for row in rows {
-        if row.chars.len() < pat.len() {
+
+    // One logical line at a time: `hay` is the folded text, `origin` maps each
+    // char back to the cell it came from.
+    let mut hay: Vec<char> = Vec::new();
+    let mut origin: Vec<Origin> = Vec::new();
+    let mut i = 0;
+    while i < rows.len() {
+        hay.clear();
+        origin.clear();
+        // Consume this row and every row it wraps onto.
+        loop {
+            let r = &rows[i];
+            for (k, &ch) in r.chars.iter().enumerate() {
+                hay.push(fold(ch));
+                origin.push(Origin {
+                    row: r.row,
+                    col: r.cols.get(k).copied().unwrap_or(0),
+                });
+            }
+            // A wrapped *last* row has nothing to join to; stop either way.
+            if !r.wrapped || i + 1 >= rows.len() {
+                i += 1;
+                break;
+            }
+            i += 1;
+        }
+
+        if hay.len() < pat.len() {
             continue;
         }
-        let hay: Vec<char> = row.chars.iter().copied().map(fold).collect();
-        let mut i = 0;
-        while i + pat.len() <= hay.len() {
-            if hay[i..i + pat.len()] == pat[..] {
+        let mut j = 0;
+        while j + pat.len() <= hay.len() {
+            if hay[j..j + pat.len()] == pat[..] {
+                let (s, e) = (origin[j], origin[j + pat.len() - 1]);
                 out.push(Match {
-                    row: row.row,
-                    col_start: row.cols[i],
-                    col_end: row.cols[i + pat.len() - 1],
+                    row: s.row,
+                    col_start: s.col,
+                    end_row: e.row,
+                    col_end: e.col,
                 });
-                i += pat.len(); // non-overlapping
+                j += pat.len(); // non-overlapping
             } else {
-                i += 1;
+                j += 1;
             }
         }
     }
@@ -82,6 +139,35 @@ pub struct SearchState {
     /// True on the first frame after opening so the input box grabs focus exactly
     /// once (mirrors the command palette's `just_opened`).
     pub just_opened: bool,
+    /// Absolute screen row the anchor pointed at when the text was captured.
+    /// Compared against where the engine says that row is *now* to correct for
+    /// scrollback eviction — see [`SearchState::row_shift`].
+    pub anchor_at_capture: u32,
+}
+
+/// How far match rows have drifted, given where the capture-time anchor row sits
+/// now. Negative means rows were evicted and everything moved up.
+///
+/// Eviction drops the oldest rows, renumbering the whole screen by the same
+/// amount, so one anchor corrects every match. Pinning the capture's **last**
+/// row rather than its first is deliberate: the first row is the first to be
+/// evicted, and a pin whose row is destroyed reports no value — the correction
+/// would stop working exactly when it became necessary.
+pub fn row_shift(anchor_at_capture: u32, anchor_now: u32) -> i64 {
+    i64::from(anchor_now) - i64::from(anchor_at_capture)
+}
+
+/// Apply `shift` to a match's rows, or `None` if that puts it off the top of the
+/// screen — those rows have been evicted, and highlighting where they used to be
+/// would mark unrelated text.
+pub fn shifted(m: Match, shift: i64) -> Option<Match> {
+    let row = i64::from(m.row) + shift;
+    let end_row = i64::from(m.end_row) + shift;
+    (row >= 0 && end_row >= 0).then_some(Match {
+        row: row as u32,
+        end_row: end_row as u32,
+        ..m
+    })
 }
 
 impl SearchState {
@@ -92,6 +178,7 @@ impl SearchState {
             matches: Vec::new(),
             current: 0,
             just_opened: true,
+            anchor_at_capture: 0,
         }
     }
 
@@ -157,7 +244,7 @@ mod tests {
     use crate::engine::RowText;
 
     /// Build `RowText` rows from plain strings (each char in column = its index),
-    /// numbered from `start_row`.
+    /// numbered from `start_row`. No row is soft-wrapped.
     fn rows(lines: &[&str], start_row: u32) -> Vec<RowText> {
         lines
             .iter()
@@ -166,8 +253,20 @@ mod tests {
                 row: start_row + i as u32,
                 chars: line.chars().collect(),
                 cols: (0..line.chars().count() as u16).collect(),
+                wrapped: false,
             })
             .collect()
+    }
+
+    /// The same, but every row except the last continues onto the next — i.e.
+    /// one logical line broken across the grid's width.
+    fn wrapped_rows(lines: &[&str], start_row: u32) -> Vec<RowText> {
+        let mut r = rows(lines, start_row);
+        let n = r.len();
+        for row in r.iter_mut().take(n.saturating_sub(1)) {
+            row.wrapped = true;
+        }
+        r
     }
 
     #[test]
@@ -175,8 +274,47 @@ mod tests {
         let r = rows(&["the cat sat", "on the mat"], 5);
         let m = search_rows(&r, "the", false);
         assert_eq!(m.len(), 2);
-        assert_eq!(m[0], Match { row: 5, col_start: 0, col_end: 2 });
-        assert_eq!(m[1], Match { row: 6, col_start: 3, col_end: 5 });
+        assert_eq!(m[0], Match::single(5, 0, 2));
+        assert_eq!(m[1], Match::single(6, 3, 5));
+    }
+
+    #[test]
+    fn a_match_spanning_a_soft_wrap_is_found() {
+        // The headline fix. "wonderful" is split across the grid's right edge;
+        // searching row by row never saw it.
+        let r = wrapped_rows(&["hello wond", "erful"], 0);
+        let m = search_rows(&r, "wonderful", false);
+        assert_eq!(m.len(), 1, "the wrap is joined before matching");
+        assert_eq!(
+            m[0],
+            Match {
+                row: 0,
+                col_start: 6,
+                end_row: 1,
+                col_end: 4
+            },
+            "and each end reports its own row"
+        );
+    }
+
+    #[test]
+    fn joining_stops_at_a_line_that_does_not_wrap() {
+        // Two separate lines must not be glued together, or a query straddling
+        // the join would match text that isn't contiguous on screen.
+        let r = rows(&["abc", "def"], 0);
+        assert!(search_rows(&r, "cd", false).is_empty());
+        // …while the same rows *marked* wrapped do join.
+        let w = wrapped_rows(&["abc", "def"], 0);
+        assert_eq!(search_rows(&w, "cd", false).len(), 1);
+    }
+
+    #[test]
+    fn a_trailing_wrapped_row_does_not_run_off_the_end() {
+        // The last captured row can be marked wrapped (its continuation hasn't
+        // been written yet). Joining must stop rather than index past the end.
+        let mut r = rows(&["abc"], 0);
+        r[0].wrapped = true;
+        assert_eq!(search_rows(&r, "abc", false).len(), 1);
     }
 
     #[test]
@@ -207,6 +345,7 @@ mod tests {
             row: 0,
             chars: vec!['世', 'x'],
             cols: vec![0, 2],
+            wrapped: false,
         };
         let m = search_rows(&[row], "x", false);
         assert_eq!(m[0].col_start, 2, "match column follows the cols map");
@@ -241,12 +380,31 @@ mod tests {
     }
 
     #[test]
+    fn eviction_shifts_match_rows_and_drops_the_ones_that_are_gone() {
+        // Rows were captured with the anchor (the capture's last row) at 100.
+        // Ten rows have since been evicted, so that same row is now 90 and every
+        // match moved up by ten.
+        let shift = row_shift(100, 90);
+        assert_eq!(shift, -10);
+        assert_eq!(shifted(Match::single(50, 1, 3), shift), Some(Match::single(40, 1, 3)));
+        // A match in the rows that were evicted is dropped, not drawn ten lines
+        // higher over unrelated text.
+        assert_eq!(shifted(Match::single(4, 0, 0), shift), None);
+        // A match whose *end* fell off is dropped too.
+        let straddling = Match { row: 12, col_start: 0, end_row: 3, col_end: 0 };
+        assert_eq!(shifted(straddling, shift), None);
+        // Nothing evicted: identity.
+        assert_eq!(row_shift(100, 100), 0);
+        assert_eq!(shifted(Match::single(7, 0, 1), 0), Some(Match::single(7, 0, 1)));
+    }
+
+    #[test]
     fn select_nearest_picks_closest_row() {
         let mut s = SearchState::new();
         s.matches = vec![
-            Match { row: 2, col_start: 0, col_end: 0 },
-            Match { row: 10, col_start: 0, col_end: 0 },
-            Match { row: 20, col_start: 0, col_end: 0 },
+            Match::single(2, 0, 0),
+            Match::single(10, 0, 0),
+            Match::single(20, 0, 0),
         ];
         s.select_nearest(11);
         assert_eq!(s.current, 1, "row 10 is nearest 11");

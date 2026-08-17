@@ -227,6 +227,13 @@ pub struct RowText {
     pub row: u32,
     pub chars: Vec<char>,
     pub cols: Vec<u16>,
+    /// This row is **soft-wrapped**: its logical line continues on the next row.
+    ///
+    /// Carried rather than acted on here — `screen_text` still yields one entry
+    /// per *display* row, because `write_scrollback_file` reads the same method
+    /// and joining rows would silently unwrap the file it writes. Search does
+    /// the joining itself, in pure code.
+    pub wrapped: bool,
 }
 
 /// Keyboard modifiers, backend-neutral.
@@ -494,6 +501,24 @@ pub trait TerminalEngine {
     /// return an empty vec (the default).
     fn screen_text(&self) -> Vec<RowText> {
         Vec::new()
+    }
+
+    /// Start tracking absolute screen row `row`, so the caller can later ask
+    /// where that row has moved to. `None` stops tracking.
+    ///
+    /// This exists for **scrollback search**, whose matches are recorded as
+    /// absolute screen rows: those renumber when the oldest rows are evicted, so
+    /// a match found before a burst of output would highlight the wrong line.
+    /// One tracked reference is enough to correct every match — eviction shifts
+    /// them all by the same amount — which is why this is a row anchor rather
+    /// than a pin per match (each tracked reference costs bookkeeping on every
+    /// terminal mutation).
+    fn set_row_anchor(&mut self, _row: Option<u32>) {}
+
+    /// Where the row given to [`Self::set_row_anchor`] is **now**, or `None` if
+    /// there is no anchor or its row is gone (the caller should recapture).
+    fn row_anchor_now(&self) -> Option<u32> {
+        None
     }
 
     /// Find the OSC 133 prompt to jump to: the `delta`-th semantic-prompt row

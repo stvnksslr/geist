@@ -75,6 +75,10 @@ pub struct GhosttyVtEngine {
     /// Whether a selection is installed in the terminal. Mirrors the terminal's
     /// own state, which the binding cannot be asked for.
     selection_installed: bool,
+    /// Tracked reference to the row scrollback search captured last, so match
+    /// rows can be corrected when eviction renumbers the screen. One reference
+    /// for the whole match list — see [`TerminalEngine::set_row_anchor`].
+    row_anchor: Option<TrackedGridRef>,
     /// A selection changed since the last snapshot. Forces a full rebuild, the
     /// same insurance `viewport_moved` provides: installing a selection does not
     /// necessarily dirty the render state, and an otherwise-idle frame taking
@@ -145,6 +149,7 @@ impl GhosttyVtEngine {
             image_cache: HashMap::new(),
             image_ids_seen: Vec::new(),
             sel_anchor: None,
+            row_anchor: None,
             selection_installed: false,
             selection_dirty: false,
         })
@@ -1064,6 +1069,111 @@ mod tests {
     }
 
     #[test]
+    fn screen_text_marks_soft_wrapped_rows_so_search_can_join_them() {
+        // The flag search relies on, read off a real wrap rather than assumed:
+        // 10 columns, 15 characters, so row 0 continues onto row 1.
+        let mut eng = GhosttyVtEngine::new(10, 4, 100).unwrap();
+        eng.write(b"hello wonderful");
+        let rows = eng.screen_text();
+        assert!(rows[0].wrapped, "row 0 continues onto row 1");
+        assert!(!rows[1].wrapped, "row 1 does not");
+
+        // And the join actually finds a query straddling the edge.
+        let m = crate::search::search_rows(&rows, "wonderful", false);
+        assert_eq!(m.len(), 1, "found across the wrap");
+        assert_eq!((m[0].row, m[0].end_row), (0, 1), "spanning both rows");
+    }
+
+    #[test]
+    fn a_wide_char_pushed_over_a_wrap_leaves_no_gap_in_the_text() {
+        // When a wide character doesn't fit at the end of a row it moves to the
+        // next one, leaving a `SpacerHead` blank behind. Emitting a space for it
+        // would put one *inside* the wrapped word and a query spanning the wrap
+        // would not match.
+        let mut eng = GhosttyVtEngine::new(6, 3, 100).unwrap();
+        // 5 narrow cells then a wide char: it cannot fit in the last column.
+        eng.write("abcde世".as_bytes());
+        let rows = eng.screen_text();
+        let joined: String = rows
+            .iter()
+            .take(2)
+            .flat_map(|r| r.chars.iter().copied())
+            .collect();
+        assert_eq!(joined, "abcde世", "no spacer leaked into the text");
+        assert_eq!(
+            crate::search::search_rows(&rows, "e世", false).len(),
+            1,
+            "and a query across the wrap matches"
+        );
+    }
+
+    #[test]
+    fn the_row_anchor_reports_where_a_row_moved_to_after_eviction() {
+        // The drift fix. A 10-row scrollback plus a 2-row viewport holds 12 rows,
+        // so writing past that evicts the oldest and renumbers the screen.
+        let mut eng = GhosttyVtEngine::new(10, 2, 10).unwrap();
+        for i in 0..12 {
+            eng.write(format!("row{i}\r\n").as_bytes());
+        }
+
+        // Anchor a row with known text on it — that text is the oracle. Wherever
+        // the anchor says the row is now, that row must still read the same.
+        let find = |eng: &GhosttyVtEngine, want: &str| -> Option<u32> {
+            eng.screen_text()
+                .into_iter()
+                .find(|r| r.chars.iter().collect::<String>() == want)
+                .map(|r| r.row)
+        };
+        let captured = find(&eng, "row11").expect("the row we just wrote");
+        eng.set_row_anchor(Some(captured));
+        assert_eq!(eng.row_anchor_now(), Some(captured), "no drift yet");
+
+        // Measured, not assumed: libghostty frees scrollback a **page** at a
+        // time, so a few lines past the limit prune nothing and every row keeps
+        // its number. Drift therefore arrives in jumps, and until one lands the
+        // anchor keeps reporting the same row — which is correct, and is why the
+        // correction is free in the common case.
+        for i in 12..200 {
+            eng.write(format!("row{i}\r\n").as_bytes());
+        }
+        let now = eng.row_anchor_now().expect("nothing pruned yet");
+        assert_eq!(
+            find(&eng, "row11"),
+            Some(now),
+            "the anchor names the row that line is actually on"
+        );
+        assert_eq!(crate::search::row_shift(captured, now), 0, "no drift yet");
+
+        // Clearing the anchor stops the tracking.
+        eng.set_row_anchor(None);
+        assert_eq!(eng.row_anchor_now(), None);
+    }
+
+    #[test]
+    #[ignore = "writes ~12k lines to force a scrollback prune; ~8s"]
+    fn a_pruned_row_anchor_reports_no_value_rather_than_a_stale_row() {
+        // The case that would otherwise silently mis-highlight: upstream moves a
+        // destroyed pin to the screen's **top-left**, so reading its point
+        // without checking `has_value` comes back as a confident "row 0" — a
+        // zero drift correction at exactly the moment the correction is needed.
+        //
+        // Ignored only because forcing a real prune is expensive: libghostty
+        // frees scrollback a page at a time, and `max_scrollback = 10` still
+        // retained ~7k rows at 20k lines written (measured, not assumed).
+        let mut eng = GhosttyVtEngine::new(10, 2, 10).unwrap();
+        for i in 0..12 {
+            eng.write(format!("row{i}\r\n").as_bytes());
+        }
+        eng.set_row_anchor(Some(11));
+        assert_eq!(eng.row_anchor_now(), Some(11));
+
+        for i in 12..12_000 {
+            eng.write(format!("row{i}\r\n").as_bytes());
+        }
+        assert_eq!(eng.row_anchor_now(), None, "the anchored row was pruned");
+    }
+
+    #[test]
     fn screen_text_reads_rows_with_column_mapping() {
         let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
         eng.write(b"hello\r\nworld\r\n");
@@ -1954,6 +2064,26 @@ impl TerminalEngine for GhosttyVtEngine {
         Some(String::from_utf8_lossy(&bytes).into_owned())
     }
 
+    fn set_row_anchor(&mut self, row: Option<u32>) {
+        self.row_anchor = row.and_then(|y| {
+            self.term
+                .track_grid_ref(Point::Screen(PointCoordinate { x: 0, y }))
+                .ok()
+        });
+    }
+
+    fn row_anchor_now(&self) -> Option<u32> {
+        let a = self.row_anchor.as_ref()?;
+        // A tracked reference whose row was destroyed reports no value — and
+        // upstream *also* moves such a pin to the screen's top-left, so trusting
+        // a bare point would silently read as "row 0, no drift" at exactly the
+        // moment there is drift. `has_value` is the discriminator.
+        if !a.has_value() {
+            return None;
+        }
+        Some(a.point(PointSpace::Screen).ok()??.y)
+    }
+
     fn jump_to_prompt(&self, delta: isize) -> Option<usize> {
         if delta == 0 {
             return None;
@@ -2043,9 +2173,15 @@ impl TerminalEngine for GhosttyVtEngine {
                 // (emit nothing, don't advance a column) so the wide char's
                 // codepoint stays adjacent to its neighbor; a space here would
                 // defeat search/copy of e.g. "世界".
+                //
+                // `SpacerHead` is the same problem at the other end: the blank
+                // left at the end of a soft-wrapped row when a wide character
+                // didn't fit and moved to the next row. Emitting a space for it
+                // would put one *inside* a word that wrapped, so a query
+                // spanning the wrap would not match.
                 if matches!(
                     gr.cell().ok().and_then(|c| c.wide().ok()),
-                    Some(CellWide::SpacerTail)
+                    Some(CellWide::SpacerTail | CellWide::SpacerHead)
                 ) {
                     continue;
                 }
@@ -2077,10 +2213,20 @@ impl TerminalEngine for GhosttyVtEngine {
             }
             chars.truncate(last_non_blank);
             col_of.truncate(last_non_blank);
+            // Does this row continue onto the next? Search joins such rows into
+            // one logical line so a query can span the wrap.
+            let wrapped = self
+                .term
+                .grid_ref(Point::Screen(PointCoordinate { x: 0, y }))
+                .ok()
+                .and_then(|gr| gr.row().ok())
+                .and_then(|r| r.is_wrapped().ok())
+                .unwrap_or(false);
             out.push(super::RowText {
                 row: y,
                 chars,
                 cols: col_of,
+                wrapped,
             });
         }
         out
