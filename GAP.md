@@ -175,10 +175,11 @@ light/dark preference), **window/tab/split state restore** (`window-save-state`)
 set_*_title, toggle_*, send raw text/esc/csi, undo/redo, …). *(Config-driven binding + several actions
 are now done.)*
 
-**Selection / scroll / search** — `adjust_selection`; rectangle/block selection; drag-past-edge
-autoscroll; search cross-wrap matches + drift-free match tracking (which the selection migration now
-unlocks). *(scrollback search, **semantic selection** (word / wrapped line / command output), and
-the **full binding-backed selection** — reflow-correct and scrollback-spanning — now done.)*
+**Selection / scroll / search** — upstream's 60%-of-cell threshold for including the clicked/dragged
+cell; the double-click-*drag* word-snapping refinement; regex search. *(scrollback search plus
+**cross-wrap matches and drift-free tracking**, **semantic selection**, the **full binding-backed
+selection** — reflow-correct and scrollback-spanning — and **`adjust_selection` / rectangle
+selection / drag-past-edge autoscroll** — now all done.)*
 
 **Shell integration** — OSC 133 C/D (command output marks → duration, notify-on-command-finish).
 *(OSC 133 A/B prompt marks now injected; `tab-inherit-working-directory` now honored — new tabs inherit
@@ -378,8 +379,59 @@ With Phase 0 done, the remaining Tier-1 items are mostly small, registry-backed 
 22. ✅ **The full selection migration** — engine-owned, tracked-ref, scrollback-spanning. See the
     ledger below.
 23. ✅ **Search cross-wrap matches + drift-free tracking.** See the ledger below.
-24. Next: `adjust_selection` / rectangle selection / drag-past-edge autoscroll, the readonly /
-    secure-input indicators, and the `scrollback-limit` finding recorded in the search ledger.
+24. ✅ **`adjust_selection` + the `performable:` flag, rectangle selection, drag-past-edge
+    autoscroll.** See the ledger below.
+25. Next: the readonly / secure-input indicators, the remaining trigger flags (`all:`,
+    `unconsumed:`), key tables, and the `text:`/`csi:`/`esc:` actions (which need `Action` to own
+    strings — a real refactor, see the keybind-coverage ledger).
+
+### Selection interaction: `adjust_selection`, rectangle drag, autoscroll — ✅ divergences
+
+The three follow-ups the selection migration deferred, plus the `performable:` trigger flag they
+needed.
+
+- **`performable:` is now real**, not a listed gap. A performable binding only counts while its
+  action can act; otherwise the key belongs to the shell. That is what keeps `shift+arrow` working
+  in an editor with nothing selected, and it is checked at **both** gates through one
+  `command::can_perform` — the gate deciding whether the shell sees the key and the gate running the
+  action. Checking only the first delivers the key *and* runs the action; only the second swallows
+  it and does nothing. The same two-gate trap as the modal one already recorded in CLAUDE.md.
+- **Only the arrows are bound, and that is upstream, not a shortfall.** `Config.zig` binds
+  `shift+home/end/pageup/pagedown` to `adjust_selection` too — and then registers the viewport-scroll
+  bindings *after* them on every non-macOS platform, so those four are scroll bindings there. giest
+  is Windows and matches. All ten direction names still parse, since a config may bind any of them.
+- **The moves are the binding's, not cursor arithmetic.** `Left` goes to the previous *non-empty*
+  cell, wrapping upward; `Down` to the next non-blank row. Reimplementing that on the grid would be
+  a second opinion about what a selection is.
+- **`adjust_selection` forced the selection *head* to be tracked too.** Adjusting means rebuilding
+  the selection, and the terminal owns the live one but cannot be asked for it
+  (`GHOSTTY_TERMINAL_DATA_SELECTION` is unbound in the binding). A drag still doesn't need it — the
+  end is wherever the pointer is now — so this is the one caller that pays for the second pin.
+- **The new end is scrolled to the nearest edge, not centred.** This fires on every repeat of a held
+  shift+arrow; re-centring each time makes the view lurch.
+- **Rectangle drag is ctrl+alt**, read off `surface_mouse.zig::isRectangleSelectState` (macOS uses a
+  bare alt; every other platform ctrl+alt). It was cheap for the same reason the migration was
+  worth it: the flag rides into `Selection::new` and both the highlight and copy already handle a
+  block. The engine remembers it because `adjust_selection` rebuilds the selection — without that a
+  shift+arrow would silently turn a block back into a run of text — and word/line/output selections
+  reset it, those extents being runs of text by definition.
+- **Drag-past-the-edge autoscroll ticks per frame with a repaint request.** Upstream uses a 15 ms
+  timer, which is one row per frame at 60 Hz. The repaint is the load-bearing part: egui reports the
+  drag every frame, but with the pointer parked outside the pane nothing else would schedule those
+  frames and the scroll would stall after one row.
+  *Divergence:* the selection end is resolved against the frame's *current* viewport, so it trails
+  the scroll by one frame and catches up on the next tick — structurally the same one-frame lag the
+  scrollbar drag documents.
+- **Not done:** upstream's **60%-of-cell-width threshold** for whether the clicked and dragged cells
+  are included (`Surface.zig::mouseSelection`) — giest still includes on cell hit, so a drag can
+  grab one more cell than Ghostty would; and the double-click-*drag* word-snapping refinement
+  (`select_word_between`). Both remain from the migration ledger.
+- Verified by engine tests driving real sequences: adjust moves the free end and leaves the anchor
+  (read untrimmed, so the space it crosses is visible), adjust with no selection reports "not
+  performed", a block selection takes three equal column spans where a linear one takes everything
+  between, a block survives an adjust and is cleared by a word select, plus keymap tests for the
+  flag and a `decide_key` test pinning both halves of the performable rule. **The autoscroll itself
+  is interaction, not logic, and is unverified — it wants a human drag.**
 
 ### Search: cross-wrap matches + drift-free tracking — ✅ divergences
 
@@ -941,8 +993,9 @@ path instead of two that could disagree.
   they have to be delivered late, in order.
 - **An exact binding beats being a prefix**, so `ctrl+a` and `ctrl+a>n` can coexist without the
   bare chord hanging forever on a second key that could never take effect.
-- **Not done: named key *tables*** (`activate_key_table`), and the `all:` / `unconsumed:` /
-  `performable:` trigger flags. **`global:` is now done** — see the quick-terminal ledger. It is
+- **Not done: named key *tables*** (`activate_key_table`), and the `all:` / `unconsumed:` trigger
+  flags. **`global:` and `performable:` are now done** — see the quick-terminal and
+  selection-interaction ledgers. `global:` is
   inherently non-sequenceable (the OS delivers one key, not a leader and a follower), which is true
   upstream too, so a global trigger must be a single chord.
 - **Not done: `end_key_sequence`**, Ghostty's action for flushing the prior keys but *not* the one

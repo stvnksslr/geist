@@ -179,8 +179,17 @@ command output) and copy in full, it survives scrolling and a window resize, and
 the scrollback too. Copying **unwraps** soft wrapping — a command longer than the window comes back
 as one line rather than as the rows it was displayed on.
 
-Not yet supported: rectangle/block selection, extending a selection with the keyboard
-(`adjust_selection`), and auto-scrolling when you drag past the top or bottom edge.
+- **Shift+arrows** extend the selection (Ghostty `adjust_selection`), by whole non-empty cells and
+  rows rather than blindly by one column, scrolling the moving end into view. With **no** selection
+  the keys go to the shell as usual — the binding is `performable:`, so it only claims the key when
+  it has something to do.
+- **Ctrl+alt+drag** selects a **rectangle** (a block) instead of a run of text.
+- **Dragging past the top or bottom edge** scrolls, so a selection can run into the scrollback
+  without letting go.
+
+Not yet matched: upstream includes the cell under the pointer only once you cross 60% of its width,
+where giest includes it as soon as the pointer is over it — so a drag can grab one more cell than
+Ghostty would. Double-click-*drag* also doesn't snap to whole words yet.
 
 ### Fonts, fallback chains and synthetic styles
 
@@ -251,6 +260,16 @@ Notes on global binds:
 - Any action can be bound globally, not just `toggle_quick_terminal`; a window action runs against
   the window you used last.
 
+The other supported trigger flag is **`performable:`**, which binds a key only while its action can
+actually do something and otherwise lets the key reach the shell:
+
+```ini
+keybind = performable:ctrl+alt+k=new_tab
+```
+
+This is how the built-in `shift+arrow` selection bindings stay out of the way when nothing is
+selected. `all:` and `unconsumed:` are not supported.
+
 ### Saving and restoring the layout
 
 `window-save-state = always` makes giest write its layout to `%APPDATA%\giest\state` (override the
@@ -289,6 +308,7 @@ Beyond the defaults, these Ghostty actions are available to `keybind`:
 | `prompt_tab_title` | Opens the inline tab-rename box. |
 | `quit` / `close_all_windows` | Close everything. |
 | `equalize_splits` | Accepted as a no-op: giest's splits are always 50/50, so there is nothing to equalize. It binds without error so a Ghostty config transfers cleanly. |
+| `adjust_selection:<dir>` | Move the selection's free end. All ten upstream directions: `left`, `right`, `up`, `down`, `page_up`, `page_down`, `home`, `end`, `beginning_of_line`, `end_of_line`. Bound to shift+arrows by default (as `performable:`). |
 
 Not available, because `Action` is a `Copy` type with no room for a string parameter:
 `text:`, `csi:`, `esc:`, `set_tab_title:`, `set_surface_title:`.
