@@ -352,6 +352,40 @@ fn the_powershell_hook_reports_command_exit_codes() {
 
 #[test]
 #[ignore = "spawns a real shell; run with --ignored --nocapture"]
+fn enq_is_still_stripped_by_conpty() {
+    // `enquiry-response` answers a bare ENQ (0x05) emitted by the program. That
+    // is only implementable if the byte reaches us at all — ConPTY re-renders the
+    // stream and drops what it doesn't forward, which is what blocks kitty
+    // graphics. Probed before building, per this repo's own rule, and **measured
+    // stripped**: the run below emits `open`, ENQ, `close` and ConPTY returns
+    // `giest-enq-opengiest-enq-close`.
+    //
+    // So this is asserted **inverted**, like the APC probe: it fails if a future
+    // Windows build starts forwarding ENQ, which is how we would learn
+    // `enquiry-response` is unblocked.
+    //
+    // The markers bracket the ENQ so a *missing* byte is distinguishable from a
+    // failed run: both markers present and no 0x05 means ConPTY ate it.
+    let out = run(&emit(&cat(&[
+        lit("giest-enq-open"),
+        "[char]5".into(),
+        lit("giest-enq-close"),
+    ])));
+    let text = String::from_utf8_lossy(&out);
+    eprintln!("ConPTY emitted {} bytes: {:?}", out.len(), text);
+    assert!(
+        contains(&out, b"giest-enq-open") && contains(&out, b"giest-enq-close"),
+        "the probe itself did not run: {text:?}"
+    );
+    assert!(
+        !contains(&out, b"giest-enq-open\x05giest-enq-close"),
+        "ConPTY now forwards ENQ (0x05) — `enquiry-response` may be unblocked. \
+         Got: {text:?}"
+    );
+}
+
+#[test]
+#[ignore = "spawns a real shell; run with --ignored --nocapture"]
 fn apc_is_still_stripped_by_conpty() {
     // The documented blocker for kitty graphics. Pinned as a test so that if a
     // future Windows build *stops* stripping APC, this fails and tells us the

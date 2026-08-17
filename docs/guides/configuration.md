@@ -16,24 +16,39 @@ so keys are transposable with a real Ghostty config:
 
 ## Full annotated example
 
+Note that every comment below is on its **own** line. A `#` after a value is part
+of the value, not a comment — `font-size = 16  # size` sets the size to the text
+`16  # size`, which fails to parse and silently leaves the default.
+
 ```ini
-command          = pwsh        # default shell: name (pwsh/powershell/cmd/wsl) or
-                               # a full path; unset auto-detects (PowerShell 7)
-font-size        = 16          # logical font size (scaled by display DPI)
-foreground       = #c5c8c6     # default text color
-background       = #101218     # default background color
-cursor-color     = #c5c8c6     # cursor color (omit to defer to the program)
-window-padding-x = 2           # logical-point padding left/right of the grid
-window-padding-y = 2           # logical-point padding above/below the grid
-text-gamma       = 1.3         # text AA gamma; >1 thickens light-on-dark (0.5–3.0)
+# Default shell: a name (pwsh/powershell/cmd/wsl) or a full path.
+# Unset auto-detects (PowerShell 7).
+command          = pwsh
+# Logical font size (scaled by display DPI).
+font-size        = 16
+# Default text and background colors, and the cursor
+# (omit cursor-color to defer to the program).
+foreground       = #c5c8c6
+background       = #101218
+cursor-color     = #c5c8c6
+# Logical-point padding around the grid.
+window-padding-x = 2
+window-padding-y = 2
+# Text AA gamma; >1 thickens light-on-dark (0.5–3.0).
+text-gamma       = 1.3
 
-scrollback-limit = 10000       # max scrollback lines retained per pane
+# Max scrollback lines retained per pane.
+scrollback-limit = 10000
 
-selection-background = #385a9c # selected-cell background
-selection-foreground = #ffffff # text color over a selection (optional)
-copy-on-select       = false   # copy to clipboard as soon as text is selected
-right-click-action   = context-menu  # context-menu | copy | paste | copy-or-paste | ignore
-middle-click-action  = primary-paste # primary-paste | ignore
+# Selection colors; selection-foreground is optional.
+selection-background = #385a9c
+selection-foreground = #ffffff
+# Copy to the clipboard as soon as text is selected.
+copy-on-select       = false
+# context-menu | copy | paste | copy-or-paste | ignore
+right-click-action   = context-menu
+# primary-paste | ignore
+middle-click-action  = primary-paste
 
 # Palette overrides — repeat the key, one entry per line:
 palette = 0=#101218
@@ -72,7 +87,8 @@ palette = 8=#666a73
 
 ```ini
 config-file = colors
-config-file = ?work-only        # fine if it doesn't exist
+# The ? prefix makes a missing file silent.
+config-file = ?work-only
 font-size = 11
 ```
 

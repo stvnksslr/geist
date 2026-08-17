@@ -374,9 +374,11 @@ With Phase 0 done, the remaining Tier-1 items are mostly small, registry-backed 
     `selection-word-chars`. See the ledger below.
 19. ✅ **Config-surface batch** — 11 keys found by a measured key diff. See the ledger below.
 20. ✅ **`config-file` (include)** — recursive config loading. See the ledger below.
-21. Next: the **full**
-    selection migration (scrollback-spanning selections, search cross-wrap matches), the readonly /
-    secure-input indicators, and `enquiry-response` (behind a ConPTY probe).
+21. ✅ **`enquiry-response` closed out as blocked** — the ConPTY probe was written and run; ConPTY
+    strips ENQ. See the config-surface ledger.
+22. Next: the **full**
+    selection migration (scrollback-spanning selections, search cross-wrap matches), then the
+    readonly / secure-input indicators.
 
 ### `config-file` (config includes) — ✅ divergences
 
@@ -523,11 +525,13 @@ Landed: `working-directory`, `window-new-tab-position`, `window-padding-balance`
 - **`selection-clear-on-typing` counts only input the program receives.** App shortcuts and reserved
   combos are excluded: they never reach the shell, so clearing on them would drop a selection the
   user is still working with. IME preedit (which upstream also clears on) doesn't exist in giest.
-- **Not attempted: `enquiry-response`.** ENQ is handled by Ghostty's *app* layer, not the terminal
-  core, so libghostty-vt's read-only stream almost certainly drops it — and a bare `0x05` may not
-  survive ConPTY at all. Per this repo's own rule, that needs a `tests/conpty_passthrough.rs` probe
-  *first*; wiring it on the assumption that the bytes arrive is exactly the mistake kitty graphics
-  cost an afternoon to learn.
+- **`enquiry-response` is blocked on ConPTY — now measured, not guessed.** The probe this entry
+  called for was written and run (`enq_is_still_stripped_by_conpty`): a shell emitting
+  `giest-enq-open`, `0x05`, `giest-enq-close` comes back as `giest-enq-opengiest-enq-close`. Both
+  markers survive and the ENQ does not, so the byte never reaches the engine and there is nothing to
+  answer — the same class of blocker as kitty graphics, and it affects any Windows terminal. The
+  assertion is **inverted** like the APC one, so it fails if a future Windows build starts
+  forwarding ENQ.
 - **Verified**: parse tests per key, table tests for the two pure helpers (`balance_padding`,
   `new_tab_index`), and `working-directory` end-to-end through a free oracle — with
   `window-save-state = always`, the state file written at quit records the cwd the shell *itself*
