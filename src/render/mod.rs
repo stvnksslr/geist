@@ -146,8 +146,6 @@ pub struct GpuResources {
 pub struct PaneFrame {
     pub snapshot: Arc<GridSnapshot>,
     pub origin_px: [f32; 2],
-    /// Inclusive linear (row-major) cell range to highlight as selected.
-    pub selection: Option<(usize, usize)>,
     /// Draw the block cursor as a hollow outline rather than a filled cell
     /// (Ghostty does this for unfocused panes / when the window loses focus).
     pub cursor_hollow: bool,
@@ -1278,9 +1276,7 @@ impl GpuResources {
                     let (is_cursor_cell, selected) = if y >= 0 {
                         let yu = y as u16;
                         let icc = filled_block && x == snap.cursor_x && yu == snap.cursor_y;
-                        let lin = yu as usize * snap.cols as usize + x as usize;
-                        let sel = pane.selection.is_some_and(|(a, b)| lin >= a && lin <= b);
-                        (icc, sel)
+                        (icc, cell.selected)
                     } else {
                         (false, false)
                     };
@@ -1441,7 +1437,7 @@ impl GpuResources {
                         let is_cursor_cell =
                             filled_block && x == snap.cursor_x && yu == snap.cursor_y;
                         let lin = yu as usize * snap.cols as usize + x as usize;
-                        let selected = pane.selection.is_some_and(|(a, b)| lin >= a && lin <= b);
+                        let selected = cell.selected;
                         // A search match overrides the text color too — the bg
                         // pass already recolored the cell, and leaving the glyph
                         // at its own fg is how a match ends up unreadable

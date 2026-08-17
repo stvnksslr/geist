@@ -107,6 +107,13 @@ pub struct Cell {
     /// of `background-opacity`, and that rule is checked before the
     /// `background-opacity-cells` one.
     pub inverse: bool,
+    /// The cell falls inside the terminal's active selection.
+    ///
+    /// This comes from the VT engine's own selection (the row-local range the
+    /// render state reports), **not** from a rectangle the app computes — which
+    /// is what lets a selection follow soft wrapping, span scrollback, and
+    /// survive reflow. The renderer only has to ask each cell.
+    pub selected: bool,
 }
 
 /// Cursor shape reported by the terminal (DECSCUSR / app-set).
@@ -499,8 +506,8 @@ pub trait TerminalEngine {
         None
     }
 
-    /// **Semantic selection**: the extent of the word / line / command output at
-    /// viewport cell `(x, y)`, as an inclusive pair of viewport cells.
+    /// **Semantic selection**: select the word / line / command output at
+    /// viewport cell `(x, y)`, installing it as the terminal's selection.
     ///
     /// These are the double-click, triple-click and Ctrl+triple-click gestures,
     /// resolved by the VT engine rather than by scanning the rendered grid — so
@@ -508,17 +515,47 @@ pub trait TerminalEngine {
     /// user's `selection-word-chars`), a line follows **soft wrapping** across
     /// rows, and a command's output is delimited by its OSC 133 marks.
     ///
-    /// A selection may begin above the viewport (a wrapped line whose first row
-    /// has scrolled off; command output usually). Such an end is **clamped**
-    /// into the viewport, because giest's selection model is viewport-scoped —
-    /// see the `SelectKind::Output` note. Engines without support return `None`.
-    fn select_semantic(
-        &self,
-        _kind: SelectKind,
-        _x: u16,
-        _y: u16,
-        _word_boundaries: &[char],
-    ) -> Option<((u16, u16), (u16, u16))> {
+    /// Returns whether anything was selected. A gesture that finds nothing
+    /// leaves any existing selection alone (the caller relies on this, so a
+    /// stray double-click on blank space doesn't discard the user's selection).
+    fn select_semantic(&mut self, _kind: SelectKind, _x: u16, _y: u16, _word_boundaries: &[char]) -> bool {
+        false
+    }
+
+    /// Begin a selection at viewport cell `(x, y)`: this is the drag anchor, and
+    /// the selection starts as that single cell.
+    ///
+    /// The anchor is held by the **engine** as a tracked reference that follows
+    /// its cell through scrolling, scrollback eviction and reflow — which is why
+    /// selection state does not live on the app side. Engines without support do
+    /// nothing (the default).
+    fn selection_begin(&mut self, _x: u16, _y: u16) {}
+
+    /// Move the free end of the selection to viewport cell `(x, y)`, keeping the
+    /// anchor from [`Self::selection_begin`]. No-op if there is no anchor.
+    fn selection_update(&mut self, _x: u16, _y: u16) {}
+
+    /// Clear any active selection.
+    fn selection_clear(&mut self) {}
+
+    /// Select everything the terminal holds — **including scrollback**, not just
+    /// the viewport. Returns whether anything was selected.
+    fn select_all(&mut self) -> bool {
+        false
+    }
+
+    /// Whether a selection is currently active.
+    fn selection_active(&self) -> bool {
+        false
+    }
+
+    /// The selected text, or `None` when nothing is selected.
+    ///
+    /// Read from the VT engine, so it spans scrollback and **unwraps** soft
+    /// wrapping (a wrapped command line comes back as one line, not as the rows
+    /// it happened to be displayed on). `trim` drops trailing whitespace from
+    /// non-blank lines — Ghostty's `clipboard-trim-trailing-spaces`.
+    fn selected_text(&self, _trim: bool) -> Option<String> {
         None
     }
 }

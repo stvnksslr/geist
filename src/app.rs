@@ -3533,7 +3533,7 @@ impl Window {
                     };
                     match right_click_action {
                         RightClickAction::ContextMenu => {
-                            let has_sel = session.selection_range().is_some();
+                            let has_sel = session.has_selection();
                             resp.context_menu(|ui| {
                                 if ui.add_enabled(has_sel, egui::Button::new("Copy")).clicked() {
                                     copy_sel(session);
@@ -3567,7 +3567,7 @@ impl Window {
                             RightClickAction::Copy => copy_sel(session),
                             RightClickAction::Paste => paste(session),
                             RightClickAction::CopyOrPaste => {
-                                if session.selection_range().is_some() {
+                                if session.has_selection() {
                                     copy_sel(session);
                                 } else {
                                     paste(session);
@@ -3612,7 +3612,6 @@ impl Window {
                 // between rows/cells, and glyphs (rasterized on the integer grid)
                 // stay crisp. Matches Ghostty / Windows Terminal pixel snapping.
                 origin_px: [(prect.min.x * ppp).round(), (prect.min.y * ppp).round()],
-                selection: session.selection_range(),
                 cursor_hollow: !pane_active,
                 cursor_blink_hidden,
                 blink_hidden,

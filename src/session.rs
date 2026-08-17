@@ -57,8 +57,11 @@ pub struct Session {
     /// Fractional-notch carry for the mouse-reporting wheel path (`handle_mouse`),
     /// so wheel events forwarded to vim/less are evenly paced.
     scroll_notch_accum: f32,
-    sel_anchor: Option<(u16, u16)>,
-    sel_head: Option<(u16, u16)>,
+    // NOTE: the selection itself lives in the **engine**, not here. It is held as
+    // a tracked reference the VT engine follows through scrolling, scrollback
+    // eviction and reflow, which viewport (col,row) pairs could never do — see
+    // `TerminalEngine::selection_begin`. Only the interaction state below is the
+    // session's.
     mouse_down: Option<MouseButton>,
     /// False once the shell has exited (PTY output channel disconnected).
     alive: bool,
@@ -232,8 +235,6 @@ impl Session {
             scroll_offset_px: 0.0,
             engine_pin_lines: 0,
             scroll_notch_accum: 0.0,
-            sel_anchor: None,
-            sel_head: None,
             mouse_down: None,
             alive: true,
             osc52: Osc52Scanner::new(),
@@ -692,25 +693,28 @@ impl Session {
     }
 
     pub fn begin_selection(&mut self, cell: (u16, u16)) {
-        self.sel_anchor = Some(cell);
-        self.sel_head = Some(cell);
+        self.engine.selection_begin(cell.0, cell.1);
     }
     pub fn update_selection(&mut self, cell: (u16, u16)) {
-        self.sel_head = Some(cell);
+        self.engine.selection_update(cell.0, cell.1);
     }
 
     /// Extend an existing selection to `cell` (Shift+click); starts a new one
     /// if nothing is selected yet.
     pub fn extend_selection(&mut self, cell: (u16, u16)) {
-        if self.sel_anchor.is_some() {
-            self.sel_head = Some(cell);
+        if self.engine.selection_active() {
+            self.engine.selection_update(cell.0, cell.1);
         } else {
             self.begin_selection(cell);
         }
     }
     pub fn clear_selection(&mut self) {
-        self.sel_anchor = None;
-        self.sel_head = None;
+        self.engine.selection_clear();
+    }
+
+    /// Whether this pane currently has a selection.
+    pub fn has_selection(&self) -> bool {
+        self.engine.selection_active()
     }
 
     /// Select the whole word under `cell` (double-click).
@@ -740,25 +744,19 @@ impl Session {
     }
 
     fn select_semantic(&mut self, kind: SelectKind, cell: (u16, u16)) {
-        let Some((a, b)) =
-            self.engine
-                .select_semantic(kind, cell.0, cell.1, &self.selection_word_chars)
-        else {
-            // Nothing there (an empty cell, or a shell with no prompt marks):
-            // leave any existing selection alone rather than clearing it, so a
-            // stray double-click doesn't discard what the user had.
-            return;
-        };
-        self.sel_anchor = Some(a);
-        self.sel_head = Some(b);
+        // A gesture that finds nothing (an empty cell, or a shell with no prompt
+        // marks) leaves any existing selection alone rather than clearing it, so
+        // a stray double-click doesn't discard what the user had. The engine
+        // enforces that; the return value is ignored here on purpose.
+        let _ = self
+            .engine
+            .select_semantic(kind, cell.0, cell.1, &self.selection_word_chars);
     }
 
-    /// Select the entire visible viewport (right-click menu "Select All").
-    /// Viewport-scoped: giest's selection model is grid-cell based, so this does
-    /// not span scrollback (matching double/triple-click selection).
+    /// Select everything the terminal holds — **including scrollback**, not just
+    /// the visible viewport.
     pub fn select_all(&mut self) {
-        self.sel_anchor = Some((0, 0));
-        self.sel_head = Some((self.cols.saturating_sub(1), self.rows.saturating_sub(1)));
+        let _ = self.engine.select_all();
     }
 
     /// Paste `text` into the shell — **the single gated entry point** for every
@@ -979,7 +977,7 @@ impl Session {
     pub fn capture_text(&mut self, scope: crate::writefile::WriteScope) -> Option<String> {
         use crate::writefile::{WriteScope, tidy};
         let text = match scope {
-            WriteScope::Selection => self.selected_text()?,
+            WriteScope::Selection => self.selection_text()?,
             // `screen_text` walks scrollback *and* viewport, so the viewport-only
             // capture is its tail: the last `rows` rows.
             WriteScope::Scrollback | WriteScope::Screen => {
@@ -1208,27 +1206,15 @@ impl Session {
             .or_else(|| find_url_at(&self.snapshot, cell.0, cell.1))
     }
 
-    /// Current selection as an inclusive linear (row-major) cell range.
-    pub fn selection_range(&self) -> Option<(usize, usize)> {
-        let (a, h) = (self.sel_anchor?, self.sel_head?);
-        let cols = self.cols as usize;
-        let la = a.1 as usize * cols + a.0 as usize;
-        let lh = h.1 as usize * cols + h.0 as usize;
-        Some((la.min(lh), la.max(lh)))
-    }
-
-    fn selected_text(&self) -> Option<String> {
-        let range = self.selection_range()?;
-        Some(extract_selection(
-            &self.snapshot,
-            range,
-            self.clipboard.trim_trailing_spaces,
-        ))
-    }
-
     /// The current selection's text, if any (for copy-on-select).
+    ///
+    /// Read from the VT engine rather than from the rendered grid, so it spans
+    /// scrollback and unwraps soft wrapping — a selection is no longer limited
+    /// to what happens to be on screen.
     pub fn selection_text(&self) -> Option<String> {
-        self.selected_text()
+        self.engine
+            .selected_text(self.clipboard.trim_trailing_spaces)
+            .filter(|s| !s.is_empty())
     }
 
     /// Translate keyboard/text/paste events into PTY bytes. `Ctrl+Shift` combos
@@ -1293,7 +1279,7 @@ impl Session {
                 // held. Windows-Terminal semantics: with a selection, copy it
                 // (and clear); with none, Ctrl+C is an interrupt.
                 egui::Event::Copy | egui::Event::Cut => {
-                    match copy_or_interrupt(self.selected_text()) {
+                    match copy_or_interrupt(self.selection_text()) {
                         CopyAction::Copy(text) => {
                             ctx.copy_text(text);
                             // `selection-clear-on-copy` — **false** by default
@@ -1963,37 +1949,6 @@ fn find_url_at(snap: &GridSnapshot, x: u16, y: u16) -> Option<String> {
     }
 }
 
-/// Extract text from a snapshot over an inclusive linear cell range, following
-/// text flow.
-///
-/// `trim` drops the trailing blanks each line is padded out to
-/// (Ghostty `clipboard-trim-trailing-spaces`). Off, a selection carries the
-/// grid's own padding — which is what you want when copying ASCII art or
-/// column-aligned output, and noise the rest of the time, hence the default on.
-fn extract_selection(snap: &GridSnapshot, range: (usize, usize), trim: bool) -> String {
-    let (a, b) = range;
-    let cols = snap.cols as usize;
-    if cols == 0 {
-        return String::new();
-    }
-    let mut lines: Vec<String> = Vec::new();
-    let mut cur = String::new();
-    for lin in a..=b {
-        let x = lin % cols;
-        if x == 0 && lin != a {
-            lines.push(std::mem::take(&mut cur));
-        }
-        if let Some(c) = snap.cell(x as u16, (lin / cols) as u16) {
-            cur.push_str(if c.text.is_empty() { " " } else { &c.text });
-        }
-    }
-    lines.push(cur);
-    if trim {
-        lines.iter_mut().for_each(|l| l.truncate(l.trim_end().len()));
-    }
-    lines.join("\n")
-}
-
 /// Map an egui key to our backend-neutral [`KeyCode`].
 /// Map an egui logical key to a backend-neutral [`KeyCode`]. `pub(crate)` so the
 /// app can resolve keybind chords from live key events with the same mapping the
@@ -2160,7 +2115,7 @@ fn is_text_producing(code: KeyCode) -> bool {
 mod tests {
     use super::{
         CommandFinish, CopyAction, KeyAction, bell_effect_due, cell_from_pos, copy_or_interrupt,
-        extract_selection, find_url_at, format_duration, grid_dims, notch_split, osc7_to_path,
+        find_url_at, format_duration, grid_dims, notch_split, osc7_to_path,
         px_offset, osc52_reduce, scroll_split, scrollbar_rows, transient_alpha,
     };
     use crate::osc52::Osc52;
@@ -2307,14 +2262,12 @@ mod tests {
         assert_eq!(p("file://HOST"), None);
     }
 
-    #[test]
-    fn selection_follows_text_flow() {
-        let s = grid(&["hello", "world"], 5);
-        assert_eq!(extract_selection(&s, (0, 6), true), "hello\nwo");
-        assert_eq!(extract_selection(&s, (0, 4), true), "hello");
-        let s2 = grid(&["hi   ", "bye  "], 5);
-        assert_eq!(extract_selection(&s2, (0, 9), true), "hi\nbye");
-    }
+    // NOTE: selection text extraction is no longer a session concern. It is read
+    // from the VT engine (which spans scrollback and unwraps soft wrapping), so
+    // the tests that used to live here — over a snapshot and a linear cell range
+    // — are now engine tests in `engine/ghostty_vt.rs`, driving real escape
+    // sequences. Keeping a grid-scanning copy here would be a second opinion
+    // about what is selected, which is the failure this codebase keeps recording.
 
     #[test]
     fn osc52_batch_keeps_only_the_last_set_and_query() {
@@ -2335,19 +2288,6 @@ mod tests {
         // …and the caller applies the set first, so a set-then-query in one
         // batch reports the value just written.
         assert_eq!(osc52_reduce(&[query("p"), query("c")]), (None, Some("c")));
-    }
-
-    #[test]
-    fn trailing_space_trim_is_configurable() {
-        // Every grid row is padded out to `cols`, so without trimming a
-        // selection carries that padding — which is exactly what you want for
-        // column-aligned output and noise otherwise.
-        let s = grid(&["hi   ", "bye  "], 5);
-        assert_eq!(extract_selection(&s, (0, 9), false), "hi   \nbye  ");
-        assert_eq!(extract_selection(&s, (0, 9), true), "hi\nbye");
-        // Interior spacing is never touched either way.
-        let s2 = grid(&["a b  "], 5);
-        assert_eq!(extract_selection(&s2, (0, 4), true), "a b");
     }
 
     #[test]

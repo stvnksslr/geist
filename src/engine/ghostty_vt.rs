@@ -11,7 +11,7 @@ use libghostty_vt::key::{Action, Encoder, Event, Key, Mods};
 use libghostty_vt::mouse;
 use libghostty_vt::paste;
 use libghostty_vt::render::{CellIteration, CellIterator, CursorVisualStyle, Dirty, RowIterator};
-use libghostty_vt::screen::{CellWide, RowSemanticPrompt};
+use libghostty_vt::screen::{CellWide, RowSemanticPrompt, TrackedGridRef};
 use libghostty_vt::style::{StyleColor, Underline};
 use libghostty_vt::terminal::{Mode, Point, PointCoordinate, PointSpace, ScrollViewport};
 use libghostty_vt::{RenderState, Terminal, TerminalOptions};
@@ -62,63 +62,46 @@ pub struct GhosttyVtEngine {
     image_cache: HashMap<u32, Arc<ImageData>>,
     /// Retained scratch: image ids seen during this frame's walk, for eviction.
     image_ids_seen: Vec<u32>,
+    /// The selection's fixed end (the drag anchor), as a **tracked** reference:
+    /// libghostty follows it through scrolling, scrollback eviction and reflow,
+    /// so a drag started ten screens ago still extends from the right cell.
+    ///
+    /// The moving end is not tracked — it is wherever the pointer is *now*, and
+    /// is resolved fresh on every update. The selection itself is owned by the
+    /// terminal (`set_selection` converts it to tracked state internally); this
+    /// anchor exists only because the binding exposes no way to read the active
+    /// selection back.
+    sel_anchor: Option<TrackedGridRef>,
+    /// Whether a selection is installed in the terminal. Mirrors the terminal's
+    /// own state, which the binding cannot be asked for.
+    selection_installed: bool,
+    /// A selection changed since the last snapshot. Forces a full rebuild, the
+    /// same insurance `viewport_moved` provides: installing a selection does not
+    /// necessarily dirty the render state, and an otherwise-idle frame taking
+    /// the clean fast path would leave the highlight unpainted.
+    selection_dirty: bool,
 }
 
 impl GhosttyVtEngine {
-    /// Convert a binding [`Selection`](libghostty_vt::selection::Selection) into
-    /// giest's inclusive viewport cell pair, **clamping** ends that lie outside
-    /// the viewport.
+    /// Start tracking the cell an untracked [`GridRef`] points at.
     ///
-    /// The clamp is what makes this usable at all: `point_from_grid_ref` in
-    /// viewport space returns `None` for a cell that has scrolled off, and a
-    /// wrapped line or a command's output very often starts above the top of the
-    /// screen. Converting in *screen* space and clamping keeps the on-screen part
-    /// of the selection, where returning `None` would make Ctrl+triple-click do
-    /// nothing most of the time. The cost is that copy only sees the visible
-    /// part — the honest limit of giest's viewport-scoped selection model, which
-    /// the full binding-selection migration would lift.
-    fn selection_to_viewport(
-        &self,
-        sel: &libghostty_vt::selection::Selection<'_>,
-    ) -> Option<((u16, u16), (u16, u16))> {
-        let rows = self.term.rows().ok()? as u32;
-        let cols = self.term.cols().ok()?;
-        // Screen-space y of the viewport's top row, so screen rows can be
-        // rebased onto it.
-        let top = self
+    /// A tracked reference is created from a *point*, not from a ref, so the ref
+    /// is resolved to screen coordinates first. Screen space (not viewport) is
+    /// deliberate: it is stable against scrolling, which is the whole reason the
+    /// anchor is tracked.
+    fn track(&self, gr: &libghostty_vt::screen::GridRef<'_>) -> Option<TrackedGridRef> {
+        let p = self
             .term
-            .point_from_grid_ref(
-                &self
-                    .term
-                    .grid_ref(Point::Viewport(PointCoordinate { x: 0, y: 0 }))
-                    .ok()?,
-                PointSpace::Screen,
-            )
-            .ok()??
-            .y;
-        let bottom = top + rows.saturating_sub(1);
+            .point_from_grid_ref(gr, PointSpace::Screen)
+            .ok()??;
+        self.term.track_grid_ref(Point::Screen(p)).ok()
+    }
 
-        let at = |gr| -> Option<PointCoordinate> {
-            self.term.point_from_grid_ref(gr, PointSpace::Screen).ok()?
-        };
-        let (s, e) = (at(&sel.start())?, at(&sel.end())?);
-        // Entirely off-screen (above or below): nothing to select.
-        if e.y < top || s.y > bottom {
-            return None;
-        }
-        // A clamped start begins at column 0 of the first visible row: the
-        // selection really does continue off the top, so starting it mid-row
-        // would misreport where it begins.
-        let (sx, sy) = if s.y < top { (0, top) } else { (s.x, s.y) };
-        let (ex, ey) = if e.y > bottom {
-            (cols.saturating_sub(1), bottom)
-        } else {
-            (e.x, e.y)
-        };
-        Some((
-            (sx.min(cols.saturating_sub(1)), (sy - top) as u16),
-            (ex.min(cols.saturating_sub(1)), (ey - top) as u16),
-        ))
+    /// Start tracking a viewport cell.
+    fn track_viewport(&self, x: u16, y: u16) -> Option<TrackedGridRef> {
+        self.term
+            .track_grid_ref(Point::Viewport(PointCoordinate { x, y: y as u32 }))
+            .ok()
     }
 
     pub fn new(cols: u16, rows: u16, max_scrollback: usize) -> Result<Self> {
@@ -161,6 +144,9 @@ impl GhosttyVtEngine {
             placements: PlacementIterator::new()?,
             image_cache: HashMap::new(),
             image_ids_seen: Vec::new(),
+            sel_anchor: None,
+            selection_installed: false,
+            selection_dirty: false,
         })
     }
 }
@@ -878,18 +864,43 @@ mod tests {
         assert_eq!(s.cursor_x, 0);
     }
 
+    /// The selected text, trimmed — what a copy would put on the clipboard.
+    fn sel_text(eng: &GhosttyVtEngine) -> Option<String> {
+        eng.selected_text(true)
+    }
+
+    /// Inclusive column range marked selected on viewport row `y`, from a fresh
+    /// snapshot — i.e. what the renderer would highlight.
+    fn sel_span(eng: &mut GhosttyVtEngine, y: u16) -> Option<(u16, u16)> {
+        let s = snap(eng);
+        let cols = s.cols;
+        let mut range: Option<(u16, u16)> = None;
+        for x in 0..cols {
+            if s.cell(x, y).is_some_and(|c| c.selected) {
+                range = Some(match range {
+                    None => (x, x),
+                    Some((a, _)) => (a, x),
+                });
+            }
+        }
+        range
+    }
+
     #[test]
     fn select_word_uses_the_terminals_own_boundaries() {
         let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
         eng.write(b"ls /usr/bin foo");
-        let sel = |x: u16| eng.select_semantic(SelectKind::Word, x, 0, &[]);
-        // Inside "ls".
-        assert_eq!(sel(1), Some(((0, 0), (1, 0))));
+        let mut word = |x: u16| {
+            assert!(eng.select_semantic(SelectKind::Word, x, 0, &[]));
+            sel_text(&eng)
+        };
+        assert_eq!(word(1).as_deref(), Some("ls"));
         // A path selects whole — slashes are not boundaries by default, which is
         // what makes double-clicking a path useful.
-        assert_eq!(sel(6), Some(((3, 0), (10, 0))));
-        // Inside "foo".
-        assert_eq!(sel(13), Some(((12, 0), (14, 0))));
+        assert_eq!(word(6).as_deref(), Some("/usr/bin"));
+        assert_eq!(word(13).as_deref(), Some("foo"));
+        // And the highlight the renderer paints matches the text.
+        assert_eq!(sel_span(&mut eng, 0), Some((12, 14)));
     }
 
     #[test]
@@ -899,31 +910,29 @@ mod tests {
         let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
         eng.write(b"ls /usr/bin foo");
         let boundaries = ['\0', ' ', '/'];
+        assert!(eng.select_semantic(SelectKind::Word, 6, 0, &boundaries));
         assert_eq!(
-            eng.select_semantic(SelectKind::Word, 6, 0, &boundaries),
-            Some(((4, 0), (6, 0))),
-            "'usr' alone, bounded by the slashes"
+            sel_text(&eng).as_deref(),
+            Some("usr"),
+            "bounded by the slashes"
         );
         // …and the same click with the defaults keeps the whole path.
-        assert_eq!(
-            eng.select_semantic(SelectKind::Word, 6, 0, &[]),
-            Some(((3, 0), (10, 0)))
-        );
+        assert!(eng.select_semantic(SelectKind::Word, 6, 0, &[]));
+        assert_eq!(sel_text(&eng).as_deref(), Some("/usr/bin"));
     }
 
     #[test]
-    fn select_line_follows_a_soft_wrapped_row() {
-        // The improvement over the old hand-rolled version, which selected one
-        // *visual* row: text longer than the grid wraps, and a triple-click has
-        // to take the whole logical line.
+    fn select_line_unwraps_a_soft_wrapped_row() {
+        // Text longer than the grid wraps, and a triple-click has to take the
+        // whole logical line — as **one** line, not as the rows it was displayed
+        // on. That unwrapping is what the engine-side read buys.
         let mut eng = GhosttyVtEngine::new(10, 4, 100).unwrap();
         eng.write(b"abcdefghijKLMNO");
-        let sel = eng
-            .select_semantic(SelectKind::Line, 2, 0, &[])
-            .expect("a line under the cursor");
-        assert_eq!(sel.0, (0, 0), "starts at the beginning of the logical line");
-        assert_eq!(sel.1.1, 1, "and continues onto the wrapped row");
-        assert!(sel.1.0 >= 4, "through the end of the text: {sel:?}");
+        assert!(eng.select_semantic(SelectKind::Line, 2, 0, &[]));
+        assert_eq!(sel_text(&eng).as_deref(), Some("abcdefghijKLMNO"));
+        // It is highlighted across both display rows.
+        assert_eq!(sel_span(&mut eng, 0), Some((0, 9)));
+        assert_eq!(sel_span(&mut eng, 1), Some((0, 4)));
     }
 
     #[test]
@@ -937,28 +946,102 @@ mod tests {
         eng.write(b"\x1b]133;D;0\x07");
         eng.write(b"\x1b]133;A\x07$ ");
         // Click on the first output row.
-        let sel = eng
-            .select_semantic(SelectKind::Output, 0, 1, &[])
-            .expect("output under the cursor");
-        assert_eq!(sel.0.1, 1, "starts at the first output row");
-        assert_eq!(sel.1.1, 2, "ends at the last output row");
-        // Clicking the prompt row itself is not output.
-        assert_eq!(eng.select_semantic(SelectKind::Output, 0, 0, &[]), None);
+        assert!(eng.select_semantic(SelectKind::Output, 0, 1, &[]));
+        assert_eq!(sel_text(&eng).as_deref(), Some("out1\nout2"));
+        // Clicking the prompt row itself is not output — and a gesture that
+        // finds nothing leaves the existing selection alone.
+        assert!(!eng.select_semantic(SelectKind::Output, 0, 0, &[]));
+        assert_eq!(sel_text(&eng).as_deref(), Some("out1\nout2"));
     }
 
     #[test]
-    fn a_semantic_selection_above_the_viewport_is_clamped_into_it() {
-        // A 2-row viewport with the output scrolled so it starts off-screen: the
-        // range has to clamp rather than vanish, or Ctrl+triple-click would do
-        // nothing in the common case.
+    fn a_selection_starting_above_the_viewport_is_kept_whole() {
+        // The old viewport-scoped model had to **clamp** a selection that began
+        // off the top of the screen, so copy only ever saw the visible part.
+        // Tracked references have no such limit: the output selected here starts
+        // three rows above a two-row viewport and still copies in full.
         let mut eng = GhosttyVtEngine::new(20, 2, 100).unwrap();
         eng.write(b"\x1b]133;A\x07$ \x1b]133;B\x07cmd\r\n");
         eng.write(b"\x1b]133;C\x07a\r\nb\r\nc\r\n");
-        let sel = eng
-            .select_semantic(SelectKind::Output, 0, 0, &[])
-            .expect("clamped, not dropped");
-        assert_eq!(sel.0, (0, 0), "the clamped start is the top-left on screen");
-        assert!(sel.1.1 < 2, "and the end stays inside the viewport");
+        assert!(eng.select_semantic(SelectKind::Output, 0, 0, &[]));
+        assert_eq!(sel_text(&eng).as_deref(), Some("a\nb\nc"));
+    }
+
+    #[test]
+    fn a_drag_selection_survives_scrolling_and_scrollback() {
+        // The core of the migration: the anchor is a tracked reference, so a
+        // selection made at the bottom of the screen still reads correctly after
+        // enough output to push it into scrollback. Viewport (col,row) pairs
+        // silently addressed *different* cells after a scroll.
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        eng.write(b"alpha\r\n");
+        eng.selection_begin(0, 0);
+        eng.selection_update(4, 0);
+        assert_eq!(sel_text(&eng).as_deref(), Some("alpha"));
+
+        for _ in 0..10 {
+            eng.write(b"filler\r\n");
+        }
+        assert_eq!(
+            sel_text(&eng).as_deref(),
+            Some("alpha"),
+            "the tracked anchor followed its row into scrollback"
+        );
+    }
+
+    #[test]
+    fn select_all_spans_scrollback_not_just_the_viewport() {
+        // The old `select_all` was `(0,0)..(cols-1, rows-1)` — the viewport and
+        // nothing else. This is the behaviour change.
+        let mut eng = GhosttyVtEngine::new(20, 2, 100).unwrap();
+        eng.write(b"one\r\ntwo\r\nthree\r\n");
+        assert!(eng.select_all());
+        let text = sel_text(&eng).expect("a selection");
+        assert!(text.contains("one"), "scrolled-off rows are included: {text:?}");
+        assert!(text.contains("three"), "as is the live row: {text:?}");
+    }
+
+    #[test]
+    fn trailing_space_trim_is_configurable() {
+        // Ghostty `clipboard-trim-trailing-spaces`: off, the selection carries
+        // the grid's own padding, which is what you want for column-aligned
+        // output and noise the rest of the time.
+        // The spaces are *written*, not just unwritten cells: the formatter emits
+        // only as far as a row was actually filled, so trailing blanks have to
+        // exist for there to be anything to trim.
+        let mut eng = GhosttyVtEngine::new(6, 2, 100).unwrap();
+        eng.write(b"hi    ");
+        eng.selection_begin(0, 0);
+        eng.selection_update(5, 0);
+        assert_eq!(eng.selected_text(true).as_deref(), Some("hi"));
+        assert_eq!(eng.selected_text(false).as_deref(), Some("hi    "));
+    }
+
+    #[test]
+    fn clearing_a_selection_leaves_no_text_and_no_highlight() {
+        let mut eng = GhosttyVtEngine::new(10, 2, 100).unwrap();
+        eng.write(b"hello");
+        eng.selection_begin(0, 0);
+        eng.selection_update(4, 0);
+        assert!(eng.selection_active());
+        assert_eq!(sel_span(&mut eng, 0), Some((0, 4)));
+
+        eng.selection_clear();
+        assert!(!eng.selection_active());
+        assert_eq!(sel_text(&eng), None);
+        assert_eq!(sel_span(&mut eng, 0), None);
+    }
+
+    #[test]
+    fn an_update_without_an_anchor_selects_nothing() {
+        // `update_selection` can arrive without a `begin` (a drag that started
+        // outside the pane). It must not install a selection from a stale or
+        // absent anchor.
+        let mut eng = GhosttyVtEngine::new(10, 2, 100).unwrap();
+        eng.write(b"hello");
+        eng.selection_update(4, 0);
+        assert!(!eng.selection_active());
+        assert_eq!(sel_text(&eng), None);
     }
 
     #[test]
@@ -1718,38 +1801,138 @@ impl TerminalEngine for GhosttyVtEngine {
     }
 
     fn select_semantic(
-        &self,
+        &mut self,
         kind: SelectKind,
         x: u16,
         y: u16,
         word_boundaries: &[char],
-    ) -> Option<((u16, u16), (u16, u16))> {
+    ) -> bool {
         use libghostty_vt::selection::{SelectLineOptions, SelectWordOptions};
 
-        let gr = self
-            .term
-            .grid_ref(Point::Viewport(PointCoordinate { x, y: y as u32 }))
-            .ok()?;
-        let sel = match kind {
-            SelectKind::Word => {
-                let mut opts = SelectWordOptions::new(gr);
-                // An empty list means "use Ghostty's defaults" — passing an empty
-                // slice would instead mean *no* boundaries, i.e. the whole line is
-                // one word.
-                if !word_boundaries.is_empty() {
-                    opts = opts.with_boundary_codepoints(word_boundaries);
-                }
-                self.term.select_word(opts).ok()?
-            }
-            // `with_semantic_prompt_boundary` stops a line selection at a prompt,
-            // so triple-clicking a command doesn't drag in the shell's output.
-            SelectKind::Line => self
+        let installed = (|| {
+            let gr = self
                 .term
-                .select_line(SelectLineOptions::new(gr).with_semantic_prompt_boundary(true))
-                .ok()?,
-            SelectKind::Output => self.term.select_output(gr).ok()?,
-        }?;
-        self.selection_to_viewport(&sel)
+                .grid_ref(Point::Viewport(PointCoordinate { x, y: y as u32 }))
+                .ok()?;
+            let sel = match kind {
+                SelectKind::Word => {
+                    let mut opts = SelectWordOptions::new(gr);
+                    // An empty list means "use Ghostty's defaults" — passing an
+                    // empty slice would instead mean *no* boundaries, i.e. the
+                    // whole line is one word.
+                    if !word_boundaries.is_empty() {
+                        opts = opts.with_boundary_codepoints(word_boundaries);
+                    }
+                    self.term.select_word(opts).ok()?
+                }
+                // `with_semantic_prompt_boundary` stops a line selection at a
+                // prompt, so triple-clicking a command doesn't drag in the
+                // shell's output.
+                SelectKind::Line => self
+                    .term
+                    .select_line(SelectLineOptions::new(gr).with_semantic_prompt_boundary(true))
+                    .ok()?,
+                SelectKind::Output => self.term.select_output(gr).ok()?,
+            }?;
+            // The anchor is the *start* of what was selected, so a drag that
+            // continues after a double-click extends from there.
+            let anchor = self.track(&sel.start());
+            self.term.set_selection(Some(&sel)).ok()?;
+            Some(anchor)
+        })();
+
+        // A gesture that finds nothing leaves the existing selection alone.
+        match installed {
+            Some(anchor) => {
+                self.sel_anchor = anchor;
+                self.selection_installed = true;
+                self.selection_dirty = true;
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn selection_begin(&mut self, x: u16, y: u16) {
+        self.sel_anchor = self.track_viewport(x, y);
+        // A fresh drag selects the single cell under the pointer until it moves.
+        self.selection_update(x, y);
+    }
+
+    fn selection_update(&mut self, x: u16, y: u16) {
+        // The anchor's tracked reference is resolved to an untracked snapshot and
+        // consumed *within this call* — the binding's untracked refs are invalid
+        // after any mutating terminal operation, and `set_selection` is one.
+        let installed = (|| {
+            let anchor = self.sel_anchor.as_ref()?;
+            if !anchor.has_value() {
+                return None;
+            }
+            let start = anchor.snapshot(&self.term).ok()??;
+            let end = self
+                .term
+                .grid_ref(Point::Viewport(PointCoordinate { x, y: y as u32 }))
+                .ok()?;
+            let sel = libghostty_vt::selection::Selection::new(start, end, false);
+            self.term.set_selection(Some(&sel)).ok()
+        })();
+        if installed.is_some() {
+            self.selection_installed = true;
+            self.selection_dirty = true;
+        } else {
+            // The anchor lost its cell (the screen was reset or its row pruned
+            // beyond recovery). Dropping the selection is the honest outcome —
+            // extending from a cell that no longer exists would select something
+            // the user never pointed at.
+            self.selection_clear();
+        }
+    }
+
+    fn selection_clear(&mut self) {
+        self.sel_anchor = None;
+        if self.selection_installed {
+            let _ = self.term.set_selection(None);
+            self.selection_dirty = true;
+        }
+        self.selection_installed = false;
+    }
+
+    fn select_all(&mut self) -> bool {
+        let installed = (|| {
+            let sel = self.term.select_all().ok()??;
+            let anchor = self.track(&sel.start());
+            self.term.set_selection(Some(&sel)).ok()?;
+            Some(anchor)
+        })();
+        match installed {
+            Some(anchor) => {
+                self.sel_anchor = anchor;
+                self.selection_installed = true;
+                self.selection_dirty = true;
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn selection_active(&self) -> bool {
+        self.selection_installed
+    }
+
+    fn selected_text(&self, trim: bool) -> Option<String> {
+        use libghostty_vt::selection::FormatOptions;
+
+        if !self.selection_installed {
+            return None;
+        }
+        // `unwrap` + `trim` is documented by the binding as Ghostty's own
+        // `Screen.selectionString()` clipboard behaviour; `trim` is the user's
+        // `clipboard-trim-trailing-spaces`. With no `with_selection`, this
+        // formats the terminal's *active* selection — the tracked one, so the
+        // read spans scrollback without giest holding any pins for it.
+        let opts = FormatOptions::new().with_unwrap(true).with_trim(trim);
+        let bytes = self.term.format_selection_alloc(None, opts).ok()??;
+        Some(String::from_utf8_lossy(&bytes).into_owned())
     }
 
     fn jump_to_prompt(&self, delta: isize) -> Option<usize> {
@@ -1885,8 +2068,12 @@ impl TerminalEngine for GhosttyVtEngine {
     }
 
     fn snapshot(&mut self, out: &mut GridSnapshot) -> Result<()> {
-        let moved = self.viewport_moved;
+        // A selection change is treated exactly like a viewport move: it may not
+        // dirty the render state, and the clean fast path below would then leave
+        // the highlight unpainted on an idle screen.
+        let moved = self.viewport_moved || self.selection_dirty;
         self.viewport_moved = false;
+        self.selection_dirty = false;
 
         // Borrows of the distinct fields below are disjoint, so the snapshot
         // (which holds &mut render_state) coexists with the iterator buffers.
@@ -1969,6 +2156,7 @@ impl TerminalEngine for GhosttyVtEngine {
             // has no explicit background, so it emits no background quad at all.
             cell.bg_explicit = false;
             cell.inverse = false;
+            cell.selected = false;
         }
 
         let default_fg = out.default_fg;
@@ -1987,6 +2175,11 @@ impl TerminalEngine for GhosttyVtEngine {
             if y >= rows as usize {
                 break;
             }
+            // The row-local selection range, asked once per row rather than per
+            // cell — which is what the C API recommends for a renderer that can
+            // work in spans, and it is where a soft-wrapped, scrollback-spanning
+            // or reflowed selection resolves to actual columns.
+            let sel = row.selection().ok().flatten();
             let mut x: usize = 0;
             let mut cells_iter = self.cells_buf.update(row)?;
             while let Some(cell) = cells_iter.next() {
@@ -2004,6 +2197,8 @@ impl TerminalEngine for GhosttyVtEngine {
                     min_contrast,
                     &mut out.cells[idx],
                 )?;
+                out.cells[idx].selected = sel
+                    .is_some_and(|s| x >= s.start_x as usize && x <= s.end_x as usize);
                 has_blink |= out.cells[idx].blink;
                 x += 1;
             }
