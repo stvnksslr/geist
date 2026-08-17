@@ -3498,12 +3498,14 @@ impl Window {
                     } else if resp.drag_started() {
                         if let Some(p) = resp.interact_pointer_pos() {
                             let c = cell_at(p, session);
-                            session.begin_selection(c);
+                            let rect = ctx.input(|i| crate::session::is_rectangle_select(&i.modifiers));
+                            session.begin_selection(c, rect);
                         }
                     } else if resp.dragged() {
                         if let Some(p) = resp.interact_pointer_pos() {
                             let c = cell_at(p, session);
-                            session.update_selection(c);
+                            let rect = ctx.input(|i| crate::session::is_rectangle_select(&i.modifiers));
+                            session.update_selection(c, rect);
                         }
                     } else if resp.clicked() {
                         let mods = ctx.input(|i| i.modifiers);
@@ -3511,7 +3513,10 @@ impl Window {
                             // Shift+click extends the current selection.
                             if let Some(p) = resp.interact_pointer_pos() {
                                 let c = cell_at(p, session);
-                                session.extend_selection(c);
+                                session.extend_selection(
+                                    c,
+                                    crate::session::is_rectangle_select(&mods),
+                                );
                             }
                         } else {
                             // Ctrl+click opens a URL under the cursor; a plain

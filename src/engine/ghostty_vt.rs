@@ -78,6 +78,10 @@ pub struct GhosttyVtEngine {
     /// leaves `GHOSTTY_TERMINAL_DATA_SELECTION` unbound). A drag doesn't need
     /// it: the end is wherever the pointer is now.
     sel_head: Option<TrackedGridRef>,
+    /// Whether the live selection is a rectangle/block. Remembered because
+    /// `adjust_selection` *rebuilds* the selection and would otherwise silently
+    /// turn a block selection back into a linear one.
+    sel_rectangle: bool,
     /// Whether a selection is installed in the terminal. Mirrors the terminal's
     /// own state, which the binding cannot be asked for.
     selection_installed: bool,
@@ -190,6 +194,7 @@ impl GhosttyVtEngine {
             image_ids_seen: Vec::new(),
             sel_anchor: None,
             sel_head: None,
+            sel_rectangle: false,
             row_anchor: None,
             selection_installed: false,
             selection_dirty: false,
@@ -1021,8 +1026,8 @@ mod tests {
         // silently addressed *different* cells after a scroll.
         let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
         eng.write(b"alpha\r\n");
-        eng.selection_begin(0, 0);
-        eng.selection_update(4, 0);
+        eng.selection_begin(0, 0, false);
+        eng.selection_update(4, 0, false);
         assert_eq!(sel_text(&eng).as_deref(), Some("alpha"));
 
         for _ in 0..10 {
@@ -1076,8 +1081,8 @@ mod tests {
         // exist for there to be anything to trim.
         let mut eng = GhosttyVtEngine::new(6, 2, 100).unwrap();
         eng.write(b"hi    ");
-        eng.selection_begin(0, 0);
-        eng.selection_update(5, 0);
+        eng.selection_begin(0, 0, false);
+        eng.selection_update(5, 0, false);
         assert_eq!(eng.selected_text(true).as_deref(), Some("hi"));
         assert_eq!(eng.selected_text(false).as_deref(), Some("hi    "));
     }
@@ -1088,8 +1093,8 @@ mod tests {
 
         let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
         eng.write(b"hello world");
-        eng.selection_begin(0, 0);
-        eng.selection_update(4, 0); // "hello"
+        eng.selection_begin(0, 0, false);
+        eng.selection_update(4, 0, false); // "hello"
         assert_eq!(sel_text(&eng).as_deref(), Some("hello"));
 
         // Read untrimmed here: trimming would hide the space the selection picks
@@ -1110,6 +1115,50 @@ mod tests {
     }
 
     #[test]
+    fn a_rectangle_drag_selects_a_block_not_a_run_of_text() {
+        // The discriminator: over three rows of text, a linear selection from
+        // (2,0) to (4,2) takes everything in between, while a block takes only
+        // columns 2..4 of each row.
+        let mut eng = GhosttyVtEngine::new(8, 3, 100).unwrap();
+        eng.write(b"abcdefg\r\nhijklmn\r\nopqrstu");
+
+        eng.selection_begin(2, 0, false);
+        eng.selection_update(4, 2, false);
+        assert_eq!(sel_text(&eng).as_deref(), Some("cdefg\nhijklmn\nopqrs"));
+
+        eng.selection_begin(2, 0, true);
+        eng.selection_update(4, 2, true);
+        assert_eq!(sel_text(&eng).as_deref(), Some("cde\njkl\nqrs"));
+
+        // The highlight the renderer paints agrees: three equal spans, not one
+        // long run.
+        assert_eq!(sel_span(&mut eng, 0), Some((2, 4)));
+        assert_eq!(sel_span(&mut eng, 1), Some((2, 4)));
+        assert_eq!(sel_span(&mut eng, 2), Some((2, 4)));
+    }
+
+    #[test]
+    fn a_rectangle_survives_adjust_and_a_word_select_clears_it() {
+        // `adjust_selection` rebuilds the selection, so the block flag has to be
+        // remembered or a shift+arrow would silently turn a block back into a
+        // run of text.
+        let mut eng = GhosttyVtEngine::new(8, 3, 100).unwrap();
+        eng.write(b"abcdefg\r\nhijklmn\r\nopqrstu");
+        eng.selection_begin(2, 0, true);
+        eng.selection_update(4, 2, true);
+        assert!(eng.selection_adjust(crate::engine::SelectionAdjust::Right).is_some());
+        let text = sel_text(&eng).expect("still selected");
+        assert!(
+            text.lines().count() == 3 && text.lines().all(|l| l.len() == 4),
+            "still a block, one column wider: {text:?}"
+        );
+
+        // A semantic selection is a run of text, so the flag must reset.
+        assert!(eng.select_semantic(SelectKind::Line, 0, 0, &[]));
+        assert_eq!(sel_text(&eng).as_deref(), Some("abcdefg"));
+    }
+
+    #[test]
     fn adjust_selection_does_nothing_without_a_selection() {
         // Upstream returns "not performed" so the key falls through to the
         // shell; giest's `performable:` gate keys off exactly this `None`.
@@ -1123,8 +1172,8 @@ mod tests {
     fn clearing_a_selection_leaves_no_text_and_no_highlight() {
         let mut eng = GhosttyVtEngine::new(10, 2, 100).unwrap();
         eng.write(b"hello");
-        eng.selection_begin(0, 0);
-        eng.selection_update(4, 0);
+        eng.selection_begin(0, 0, false);
+        eng.selection_update(4, 0, false);
         assert!(eng.selection_active());
         assert_eq!(sel_span(&mut eng, 0), Some((0, 4)));
 
@@ -1141,7 +1190,7 @@ mod tests {
         // absent anchor.
         let mut eng = GhosttyVtEngine::new(10, 2, 100).unwrap();
         eng.write(b"hello");
-        eng.selection_update(4, 0);
+        eng.selection_update(4, 0, false);
         assert!(!eng.selection_active());
         assert_eq!(sel_text(&eng), None);
     }
@@ -2045,16 +2094,20 @@ impl TerminalEngine for GhosttyVtEngine {
         })();
 
         // A gesture that finds nothing leaves the existing selection alone.
+        if installed.is_some() {
+            // Word / line / output extents are runs of text, never blocks.
+            self.sel_rectangle = false;
+        }
         self.adopt_selection(installed)
     }
 
-    fn selection_begin(&mut self, x: u16, y: u16) {
+    fn selection_begin(&mut self, x: u16, y: u16, rectangle: bool) {
         self.sel_anchor = self.track_viewport(x, y);
         // A fresh drag selects the single cell under the pointer until it moves.
-        self.selection_update(x, y);
+        self.selection_update(x, y, rectangle);
     }
 
-    fn selection_update(&mut self, x: u16, y: u16) {
+    fn selection_update(&mut self, x: u16, y: u16, rectangle: bool) {
         // The anchor's tracked reference is resolved to an untracked snapshot and
         // consumed *within this call* — the binding's untracked refs are invalid
         // after any mutating terminal operation, and `set_selection` is one.
@@ -2068,9 +2121,10 @@ impl TerminalEngine for GhosttyVtEngine {
                 .term
                 .grid_ref(Point::Viewport(PointCoordinate { x, y: y as u32 }))
                 .ok()?;
-            let sel = libghostty_vt::selection::Selection::new(start, end, false);
+            let sel = libghostty_vt::selection::Selection::new(start, end, rectangle);
             self.install_selection(&sel)
         })();
+        self.sel_rectangle = rectangle;
         if !self.adopt_selection(installed) {
             // The anchor lost its cell (the screen was reset or its row pruned
             // beyond recovery). Dropping the selection is the honest outcome —
@@ -2083,6 +2137,7 @@ impl TerminalEngine for GhosttyVtEngine {
     fn selection_clear(&mut self) {
         self.sel_anchor = None;
         self.sel_head = None;
+        self.sel_rectangle = false;
         if self.selection_installed {
             let _ = self.term.set_selection(None);
             self.selection_dirty = true;
@@ -2095,6 +2150,9 @@ impl TerminalEngine for GhosttyVtEngine {
             let sel = self.term.select_all().ok()??;
             self.install_selection(&sel)
         })();
+        if installed.is_some() {
+            self.sel_rectangle = false;
+        }
         self.adopt_selection(installed)
     }
 
@@ -2128,7 +2186,8 @@ impl TerminalEngine for GhosttyVtEngine {
                 }
                 let start = a.snapshot(&self.term).ok()??;
                 let end = h.snapshot(&self.term).ok()??;
-                let mut sel = libghostty_vt::selection::Selection::new(start, end, false);
+                let mut sel =
+                    libghostty_vt::selection::Selection::new(start, end, self.sel_rectangle);
                 sel.adjust(&self.term, how).ok()?;
                 // Read the new end's row *before* installing: installing is a
                 // mutating call and invalidates these untracked refs.

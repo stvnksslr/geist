@@ -696,20 +696,23 @@ impl Session {
         )
     }
 
-    pub fn begin_selection(&mut self, cell: (u16, u16)) {
-        self.engine.selection_begin(cell.0, cell.1);
+    /// Begin a drag selection. `rectangle` selects a block rather than a run of
+    /// text — Ghostty's ctrl+alt drag on this platform (see
+    /// [`is_rectangle_select`]).
+    pub fn begin_selection(&mut self, cell: (u16, u16), rectangle: bool) {
+        self.engine.selection_begin(cell.0, cell.1, rectangle);
     }
-    pub fn update_selection(&mut self, cell: (u16, u16)) {
-        self.engine.selection_update(cell.0, cell.1);
+    pub fn update_selection(&mut self, cell: (u16, u16), rectangle: bool) {
+        self.engine.selection_update(cell.0, cell.1, rectangle);
     }
 
     /// Extend an existing selection to `cell` (Shift+click); starts a new one
     /// if nothing is selected yet.
-    pub fn extend_selection(&mut self, cell: (u16, u16)) {
+    pub fn extend_selection(&mut self, cell: (u16, u16), rectangle: bool) {
         if self.engine.selection_active() {
-            self.engine.selection_update(cell.0, cell.1);
+            self.engine.selection_update(cell.0, cell.1, rectangle);
         } else {
-            self.begin_selection(cell);
+            self.begin_selection(cell, rectangle);
         }
     }
     pub fn clear_selection(&mut self) {
@@ -2077,6 +2080,15 @@ fn find_url_at(snap: &GridSnapshot, x: u16, y: u16) -> Option<String> {
     } else {
         None
     }
+}
+
+/// Whether these modifiers mean "select a rectangle" while dragging.
+///
+/// Ghostty's `surface_mouse.zig::isRectangleSelectState`: **ctrl+alt** on every
+/// platform but macOS (which uses a bare alt, since alt-drag there isn't spoken
+/// for). giest is Windows, so ctrl+alt.
+pub fn is_rectangle_select(m: &egui::Modifiers) -> bool {
+    (m.ctrl || m.command) && m.alt
 }
 
 /// Map an egui key to our backend-neutral [`KeyCode`].

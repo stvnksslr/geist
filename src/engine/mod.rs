@@ -554,11 +554,13 @@ pub trait TerminalEngine {
     /// its cell through scrolling, scrollback eviction and reflow — which is why
     /// selection state does not live on the app side. Engines without support do
     /// nothing (the default).
-    fn selection_begin(&mut self, _x: u16, _y: u16) {}
+    /// `rectangle` selects a block: the two cells are opposite corners rather
+    /// than the start and end of a run of text (Ghostty's ctrl+alt drag).
+    fn selection_begin(&mut self, _x: u16, _y: u16, _rectangle: bool) {}
 
     /// Move the free end of the selection to viewport cell `(x, y)`, keeping the
     /// anchor from [`Self::selection_begin`]. No-op if there is no anchor.
-    fn selection_update(&mut self, _x: u16, _y: u16) {}
+    fn selection_update(&mut self, _x: u16, _y: u16, _rectangle: bool) {}
 
     /// Clear any active selection.
     fn selection_clear(&mut self) {}
