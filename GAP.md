@@ -171,11 +171,10 @@ tab strip, palette, overlays and dialogs all derive their colors from
 light/dark preference), **window/tab/split state restore** (`window-save-state`), **quick
 (dropdown) terminal + global hotkey** — now done.)*
 
-**Input / keybinds** — `undo`/`redo`, and the `all:` trigger flag (the same gap as Tier-3 broadcast
-input). *(Everything else in this area is done: config-driven binding, leader sequences, key tables,
-`catch_all`, `chain=`, and the `global:` / `performable:` / `unconsumed:` flags.)* *(Config-driven binding, leader sequences, **key tables**, the `global:`
-and `performable:` flags, and the `write_*_file` / `set_*_title` / `toggle_*` / `text:`/`csi:`/`esc:`
-actions — now done.)*
+**Input / keybinds** — `undo`/`redo`. *(Everything else in this area is done: config-driven binding,
+leader sequences, key tables, `catch_all`, `chain=`, and all four trigger flags — `global:`,
+`performable:`, `unconsumed:` and `all:` — plus the `write_*_file` / `set_*_title` / `toggle_*` /
+`text:` / `csi:` / `esc:` actions.)*
 
 **Selection / scroll / search** — upstream's 60%-of-cell threshold for including the clicked/dragged
 cell; the double-click-*drag* word-snapping refinement; regex search. *(scrollback search plus
@@ -292,7 +291,6 @@ Effort: **S** <1d · **M** 1–3d · **L** ~1wk · **XL** multi-wk. Status: ✅ 
 | Migrate to binding selection model | `session.rs`, `engine` | ✅ | M–L | ✅ (tracked-ref anchor, scrollback-spanning, reflow-correct, plus rectangle mode and drag autoscroll — see the ledgers) |
 
 ### Tier 3 — long tail / platform-specific
-broadcast input (the `all:` trigger flag is the same gap) ·
 auto-update · about dialog /
 custom icon · AppleScript / App-Intents / Services → Windows IPC ·
 legacy-computing sprites · COLRv1 emoji · grapheme-width ·
@@ -390,7 +388,50 @@ With Phase 0 done, the remaining Tier-1 items are mostly small, registry-backed 
 27. ✅ **Named key tables**, plus the `ignore`-vs-`unbind` fix they surfaced. See the ledger.
 28. ✅ **`catch_all` and the `unconsumed:` trigger flag.** See the ledger.
 29. ✅ **`chain=` multi-action bindings.** See the ledger.
-30. Next: `all:` / broadcast input (one gap, not two), `undo`/`redo`, and the inspector.
+30. ✅ **`all:` / broadcast input** — one feature under two names. See the ledger.
+31. Next: `undo`/`redo`, and the inspector.
+
+### `all:` / broadcast input — ✅ divergences
+
+`all:ctrl+alt+k=clear_screen` applies a surface action to **every pane**, not just the focused one —
+which is the "broadcast input" line of Tier 3 and the `all:` trigger flag, one feature under two
+names.
+
+- **`Action::scope()` is ported verbatim from `Binding.zig`**, not hand-picked from what giest's
+  implementation happens to touch. Several rows are counter-intuitive and are upstream's on purpose:
+  `new_tab`, `goto_tab`, `close_tab` and `toggle_readonly` are **surface**-scoped ("relevant to the
+  surface they come from"), while `new_window`, `quit` and `reload_config` are **app**-scoped and run
+  once. A bespoke taxonomy here would be a second opinion free to drift — the failure this codebase
+  keeps catching.
+- **A second, narrower predicate is giest plumbing and says so.** `broadcasts_to_panes` is the subset
+  of surface actions whose execution touches only the focused *session*, derived by reading
+  `execute_action`'s arms. The window-structural remainder (new/close/goto tab, splits, focus moves)
+  is surface-scoped upstream but runs **once** here, because `execute_action` acts on the focused
+  pane and takes no target. *Deferred follow-up, named:* thread a target pane through
+  `execute_action`. Repeating `close_tab` per pane would also not be upstream's behaviour — there
+  each surface closes *its own* tab, where giest's closes the active one N times.
+- **Broadcast covers every pane in every tab of the window that received the key**, background tabs
+  included (upstream also broadcasts to invisible surfaces). *Divergence:* it stops at that window —
+  upstream iterates every surface in the app, but `handle_shortcuts` is a `Window` method and cannot
+  reach its siblings. The realistic multi-window ceiling here is 2–3 (see the P5 ledger).
+- **Implemented by temporarily focusing each pane**, so every action reuses the single
+  implementation in `execute_action` instead of growing a second one. Focus and the active tab are
+  restored afterwards.
+- **`all:` is dominant over the other flags, and that is upstream, not convenience.** It always
+  consumes the key (`global or all → consumed = true`, so it overrides `unconsumed:`) and is always
+  treated as performed ("all actions are always performed since they are global", so it skips
+  `performable:`). Both gates short-circuit on it identically.
+- **Sequences are rejected for `all:`** (upstream's rule, shared with `global:`), reported rather
+  than quietly bound to the last chord. But **`all:` *is* legal inside a key table** — the OS-hook
+  reason for rejecting `global:` there does not apply, so that rejection is deliberately not copied.
+- **Broadcast `paste` raises the paste-protection prompt per pane**, since each `paste_str` gates
+  independently — correct by the one-gate rule, though a background tab's prompt waits until you
+  visit it. Broadcast `text:` still respects each pane's read-only flag.
+- **Font-size actions are app-global in giest anyway** (one atlas, see the P5 ledger), so `all:` on
+  them is already all-panes — parity for free rather than by design.
+- **Related divergence, now nameable:** upstream's `global:` *implies* `all:`, so a global binding
+  broadcasts surface actions app-wide. giest's global bindings run once against the last-used
+  window. Not wired; recorded.
 
 ### `chain=` multi-action bindings — ✅ divergences
 

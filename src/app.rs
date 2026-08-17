@@ -1890,11 +1890,22 @@ impl Window {
                     // (`performed = performed or v`), so the chain counts as
                     // performed if **any** of its actions can act.
                     let performable = self.keymap.is_performable_in(&stack, &self.pending_keys);
+                    // `all:` is always treated as performed upstream, since it
+                    // isn't tied to one surface — so it skips the performable
+                    // check entirely, matching `decide_key`'s short-circuit.
+                    let all = self.keymap.is_all(&stack, &self.pending_keys);
                     self.pending_keys.clear();
                     let ctx_perform = self.perform_ctx();
                     let can = actions
                         .iter()
                         .any(|a| crate::command::can_perform(a, ctx_perform));
+                    if all {
+                        self.pop_one_shot_table();
+                        for action in actions {
+                            self.execute_action_all(ctx, action);
+                        }
+                        continue;
+                    }
                     if !performable || can {
                         // A one-shot table pops as soon as one of its bindings
                         // runs — once per *binding*, not per chained action, and
@@ -2035,6 +2046,48 @@ impl Window {
                 .is_some_and(crate::session::Session::has_selection),
             keymap: Some(&self.keymap),
             tables: &self.key_tables,
+        }
+    }
+
+    /// Run `action` for an `all:`-flagged binding.
+    ///
+    /// App-scoped actions run **once** (upstream does the same — they aren't
+    /// repeated per surface). Surface-scoped actions that giest can source to a
+    /// pane run on **every pane in every tab of this window**, including panes
+    /// in background tabs, which is what makes `all:` a broadcast-input feature.
+    ///
+    /// Two divergences from upstream, both structural and both recorded in
+    /// GAP.md: it stops at this window (upstream iterates every surface in the
+    /// app; `handle_shortcuts` is a `Window` method and cannot reach its
+    /// siblings), and the window-structural surface actions — new/close/goto
+    /// tab, splits, focus moves — run once rather than once per pane, because
+    /// `execute_action` acts on the *focused* pane and has no target parameter.
+    fn execute_action_all(&mut self, ctx: &egui::Context, action: Action) {
+        if !action.broadcasts_to_panes() {
+            self.execute_action(ctx, None, action);
+            return;
+        }
+        // Broadcast by temporarily focusing each pane, so every action reuses
+        // the single implementation in `execute_action` rather than growing a
+        // second one that could drift. Focus is restored afterwards.
+        let saved_tab = self.active_tab;
+        let mut targets: Vec<(usize, u64)> = Vec::new();
+        for (i, tab) in self.tabs.iter().enumerate() {
+            let mut ids = Vec::new();
+            tab.root.leaf_ids(&mut ids);
+            targets.extend(ids.into_iter().map(|id| (i, id)));
+        }
+        let saved_focus: Vec<u64> = self.tabs.iter().map(|t| t.focus).collect();
+        for (tab_i, leaf) in targets {
+            self.active_tab = tab_i;
+            if let Some(t) = self.tabs.get_mut(tab_i) {
+                t.focus = leaf;
+            }
+            self.execute_action(ctx, None, action.clone());
+        }
+        self.active_tab = saved_tab.min(self.tabs.len().saturating_sub(1));
+        for (t, f) in self.tabs.iter_mut().zip(saved_focus) {
+            t.focus = f;
         }
     }
 

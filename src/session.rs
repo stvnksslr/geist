@@ -1871,6 +1871,12 @@ fn decide_key(
         // working in an editor when there's nothing selected — and it has to
         // agree with the gate that runs the action, so both call `can_perform`.
         let seq = std::slice::from_ref(&chord);
+        // `all:` is dominant: upstream treats such a binding as always
+        // performed and always consuming, since it isn't tied to one surface.
+        // So it short-circuits both other flags.
+        if keymap.is_all(tables, seq) {
+            return KeyAction::Swallow;
+        }
         let unperformable = keymap.is_performable_in(tables, seq)
             && match keymap.lookup_in(tables, &chord) {
                 Some(a) => !crate::command::can_perform(&a, perform),
@@ -2504,6 +2510,23 @@ mod tests {
         assert!(!produces_text(egui::Key::ArrowLeft, &none));
         assert!(!produces_text(egui::Key::F5, &none));
         assert!(!produces_text(egui::Key::Escape, &none));
+    }
+
+    #[test]
+    fn an_all_bind_consumes_the_key_even_with_unconsumed() {
+        // Upstream: `global or all → consumed = true`. `all:` isn't tied to one
+        // surface, so it always consumes and is always treated as performed —
+        // it overrides both other flags, at both gates.
+        let km = Keymap::from_config(&[("all:unconsumed:ctrl+alt+k".into(), "clear_screen".into())]);
+        let mods = egui::Modifiers {
+            ctrl: true,
+            alt: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            super::decide_key(egui::Key::K, &mods, &km, Default::default(), &[]),
+            KeyAction::Swallow
+        );
     }
 
     #[test]

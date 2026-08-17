@@ -52,6 +52,82 @@ pub fn can_perform(action: &Action, ctx: PerformCtx<'_>) -> bool {
     }
 }
 
+/// Whether an action belongs to the **app** or to one **surface** (a pane).
+///
+/// Ghostty's `Binding.Action.scope`, and the thing `all:` dispatches on: an
+/// app-scoped action runs once, a surface-scoped one runs on every surface.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Scope {
+    App,
+    Surface,
+}
+
+impl Action {
+    /// This action's scope, **ported verbatim** from `Binding.zig`'s `scope()`
+    /// rather than judged by what giest's implementation happens to touch.
+    ///
+    /// Several rows are counter-intuitive and are upstream's on purpose:
+    /// `new_tab` / `goto_tab` / `toggle_readonly` are **surface**-scoped
+    /// (upstream: "they are relevant to the surface they come from — `new_window`
+    /// needs to be sourced to a surface so inheritance can be done correctly"),
+    /// while `new_window`, `undo`/`redo` and `quit` are **app**-scoped. A
+    /// hand-picked list here would be a second taxonomy free to drift from the
+    /// one it is copying.
+    pub fn scope(&self) -> Scope {
+        use Scope::{App, Surface};
+        match self {
+            // `ignore`/`unbind` don't really matter; upstream says app.
+            Action::Noop(_) => App,
+            // Obviously app actions.
+            Action::OpenConfig
+            | Action::ReloadConfig
+            | Action::Quit
+            | Action::ToggleQuickTerminal
+            // App, but special-cased in a surface context upstream.
+            | Action::NewWindow => App,
+            // Everything else is surface-scoped, including the "less obvious"
+            // ones upstream calls out.
+            _ => Surface,
+        }
+    }
+
+    /// Whether `all:` can broadcast this action to every pane in giest.
+    ///
+    /// A subset of [`Scope::Surface`], and the split is **giest plumbing, not
+    /// Ghostty semantics**: these are the actions whose execution touches only
+    /// the focused *session*, so running them per pane is a loop over the same
+    /// call. The window-structural remainder (new/close/goto tab, splits, focus
+    /// moves) is surface-scoped upstream but cannot be sourced to a pane here —
+    /// `execute_action` acts on the focused one — so `all:` runs those **once**.
+    /// Fixing that means threading a target pane through `execute_action`, which
+    /// is a refactor rather than a wiring change.
+    pub fn broadcasts_to_panes(&self) -> bool {
+        matches!(
+            self,
+            Action::SendText(_)
+                | Action::SendCsi(_)
+                | Action::SendEsc(_)
+                | Action::Paste
+                | Action::ClearScreen
+                | Action::ResetTerminal
+                | Action::SelectAll
+                | Action::ClearSelection
+                | Action::ToggleReadonly
+                | Action::ToggleMouseReporting
+                | Action::ScrollPageUp
+                | Action::ScrollPageDown
+                | Action::ScrollToTop
+                | Action::ScrollToBottom
+                | Action::ScrollLines(_)
+                | Action::ScrollPageFraction(_)
+                | Action::ScrollToRow(_)
+                | Action::JumpToPrompt(_)
+                | Action::AdjustSelection(_)
+                | Action::SetSurfaceTitle(_)
+        )
+    }
+}
+
 /// The `<prefix>:<payload>` actions, whose payload is taken verbatim.
 /// One table so parsing and [`Action::name`] cannot drift apart.
 type PayloadCtor = fn(Arc<str>) -> Action;

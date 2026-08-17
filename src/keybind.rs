@@ -69,6 +69,10 @@ struct Bind {
     /// Ghostty's `unconsumed:` flag: run the action **and** let the key reach
     /// the program, instead of swallowing it.
     unconsumed: bool,
+    /// Ghostty's `all:` flag: apply the action to every pane, not just the
+    /// focused one. Upstream forces consumption and skips the performable
+    /// check for these, so it overrides both other flags.
+    all: bool,
 }
 
 /// The app keymap: an ordered list of *sequence* → action bindings. A plain
@@ -219,6 +223,27 @@ impl Keymap {
         false
     }
 
+    /// Whether the binding for `keys` is flagged `all:` — its surface-scoped
+    /// actions apply to every pane rather than the focused one.
+    ///
+    /// Upstream makes this flag dominant: an `all:` binding always consumes the
+    /// key (overriding `unconsumed:`) and is always treated as performed
+    /// (skipping `performable:`), because it isn't tied to one surface.
+    pub fn is_all(&self, stack: &[TableEntry], keys: &[Chord]) -> bool {
+        for binds in self.search_order(stack) {
+            if let Some(b) = binds.iter().rev().find(|b| b.seq == keys) {
+                return b.all;
+            }
+            if binds
+                .iter()
+                .any(|b| b.seq.len() > keys.len() && &b.seq[..keys.len()] == keys)
+            {
+                return false;
+            }
+        }
+        false
+    }
+
     /// Whether the binding for `keys` is flagged `unconsumed:` — the action
     /// runs *and* the key still reaches the program.
     ///
@@ -268,6 +293,7 @@ impl Keymap {
         action: Action,
         performable: bool,
         unconsumed: bool,
+        all: bool,
     ) {
         let binds = self.binds_mut(table);
         match binds.iter_mut().find(|b| b.seq == seq) {
@@ -275,12 +301,14 @@ impl Keymap {
                 slot.actions = vec![action];
                 slot.performable = performable;
                 slot.unconsumed = unconsumed;
+                slot.all = all;
             }
             None => binds.push(Bind {
                 seq,
                 actions: vec![action],
                 performable,
                 unconsumed,
+                all,
             }),
         }
     }
@@ -385,7 +413,8 @@ impl Keymap {
             // stacking them (`global:unconsumed:ctrl+a=…`) and does not fix
             // their order, so this loops rather than testing one arrangement.
             let mut rest = trigger.as_str();
-            let (mut global, mut performable, mut unconsumed) = (false, false, false);
+            let (mut global, mut performable, mut unconsumed, mut all) =
+                (false, false, false, false);
             loop {
                 if let Some(r) = strip_flag(rest, "global") {
                     global = true;
@@ -395,6 +424,9 @@ impl Keymap {
                     rest = r;
                 } else if let Some(r) = strip_flag(rest, "unconsumed") {
                     unconsumed = true;
+                    rest = r;
+                } else if let Some(r) = strip_flag(rest, "all") {
+                    all = true;
                     rest = r;
                 } else {
                     break;
@@ -441,6 +473,13 @@ impl Keymap {
                 eprintln!("giest: ignoring keybind with unparseable trigger '{trigger}'");
                 continue;
             };
+            // Upstream: "trigger sequences are not allowed for `global:` or
+            // `all:`-prefixed triggers". Rejected rather than quietly bound to
+            // the last chord, which is what accepting it would amount to.
+            if all && seq.len() > 1 {
+                eprintln!("giest: 'all:' does not support key sequences, ignoring '{trigger}'");
+                continue;
+            }
             // `trim_start` only: a payload action carries its trailing
             // whitespace deliberately (`text:hello `), and `Action::from_name`
             // trims the names that should be trimmed itself.
@@ -458,7 +497,7 @@ impl Keymap {
             }
             match Action::from_name(a) {
                 Some(act) => {
-                    km.set(table.as_deref(), seq.clone(), act, performable, unconsumed);
+                    km.set(table.as_deref(), seq.clone(), act, performable, unconsumed, all);
                     // Only a successful plain bind becomes a chain parent.
                     chain_parent = Some((table, seq));
                 }
@@ -608,6 +647,7 @@ fn default_binds() -> Vec<Bind> {
                 actions: vec![action],
                 performable,
                 unconsumed: false,
+                all: false,
             })
         })
         .collect()
@@ -720,6 +760,59 @@ mod tests {
                 once: false,
             })
             .collect()
+    }
+
+    #[test]
+    fn action_scope_matches_upstreams_table() {
+        use crate::command::Scope;
+        // The counter-intuitive rows, which are upstream's on purpose: an
+        // action is surface-scoped when it is "relevant to the surface it comes
+        // from", even when it visibly affects the window.
+        assert_eq!(Action::NewTab.scope(), Scope::Surface);
+        assert_eq!(Action::GotoTab(1).scope(), Scope::Surface);
+        assert_eq!(Action::CloseTab.scope(), Scope::Surface);
+        assert_eq!(Action::ToggleReadonly.scope(), Scope::Surface);
+        assert_eq!(Action::SplitRight.scope(), Scope::Surface);
+        // …while these are app-scoped, so `all:` runs them once.
+        assert_eq!(Action::NewWindow.scope(), Scope::App);
+        assert_eq!(Action::Quit.scope(), Scope::App);
+        assert_eq!(Action::ReloadConfig.scope(), Scope::App);
+        assert_eq!(Action::OpenConfig.scope(), Scope::App);
+        assert_eq!(Action::ToggleQuickTerminal.scope(), Scope::App);
+        assert_eq!(Action::Noop("ignore".into()).scope(), Scope::App);
+
+        // The broadcast subset is narrower than Surface, and deliberately so:
+        // these are the ones giest can source to a pane.
+        assert!(Action::SendText("x".into()).broadcasts_to_panes());
+        assert!(Action::ClearScreen.broadcasts_to_panes());
+        assert!(Action::ScrollPageUp.broadcasts_to_panes());
+        assert!(!Action::NewTab.broadcasts_to_panes(), "window-structural");
+        assert!(!Action::NewWindow.broadcasts_to_panes(), "app-scoped");
+    }
+
+    #[test]
+    fn all_is_dominant_over_the_other_flags_and_rejects_sequences() {
+        let km = Keymap::from_config(&[("all:ctrl+alt+k".into(), "clear_screen".into())]);
+        let seq = [chord("ctrl+alt+k")];
+        assert!(km.is_all(&[], &seq));
+        assert_eq!(km.lookup(&chord("ctrl+alt+k")), Some(Action::ClearScreen));
+
+        // Stacks in any order with the others, and stays dominant.
+        for t in ["all:unconsumed:ctrl+alt+k", "unconsumed:all:ctrl+alt+k"] {
+            let km = Keymap::from_config(&[(t.into(), "clear_screen".into())]);
+            assert!(km.is_all(&[], &seq), "{t}");
+        }
+
+        // Sequences are rejected, as upstream rejects them for `global:`/`all:`.
+        let km = Keymap::from_config(&[("all:ctrl+a>n".into(), "clear_screen".into())]);
+        assert_eq!(km.lookup_seq(&[chord("ctrl+a"), chord("n")]), Lookup::None);
+
+        // Unlike `global:`, `all:` is legal inside a key table — the OS-hook
+        // reason for rejecting a global there doesn't apply.
+        let km = Keymap::from_config(&[("copy/all:j".into(), "clear_screen".into())]);
+        let s = stack(&["copy"]);
+        assert_eq!(km.lookup_in(&s, &chord("j")), Some(Action::ClearScreen));
+        assert!(km.is_all(&s, &[chord("j")]));
     }
 
     #[test]

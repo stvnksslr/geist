@@ -280,7 +280,27 @@ keybind = unconsumed:ctrl+alt+r=reload_config
 Flags stack in any order (`performable:unconsumed:ctrl+k=…`). One exception worth knowing: giest
 reserves whole modifier namespaces (`ctrl+shift+*`, `ctrl+alt+arrows`, `alt+digit`, `ctrl+=/-/0`)
 from the shell, and that still wins — `unconsumed:` on a key in one of those does not deliver it.
-`all:` is not supported.
+
+### Broadcasting to every pane (`all:`)
+
+`all:` applies an action to **every pane in every tab of the window**, not just the focused one —
+the way to type the same thing into several shells at once:
+
+```ini
+keybind = all:ctrl+alt+enter=text:\n
+keybind = all:ctrl+alt+l=clear_screen
+```
+
+- Actions that belong to the app rather than a pane (`new_window`, `quit`, `reload_config`) run
+  **once**, as they do upstream.
+- Window-structural actions (`new_tab`, `close_tab`, `goto_tab`, splits, focus moves) also run once
+  here — giest can't source them to a specific pane yet.
+- `all:` always consumes the key and always counts as performed, so it overrides `unconsumed:` and
+  `performable:` (upstream does the same).
+- It can't be used with key sequences, but it *is* allowed inside a key table.
+- Broadcasting a paste asks for confirmation per pane if `clipboard-paste-protection` triggers, and
+  a background tab's prompt waits until you switch to it.
+- It stops at the current window; other windows are not included.
 
 ### Running several actions from one key (`chain=`)
 
