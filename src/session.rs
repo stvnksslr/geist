@@ -16,7 +16,7 @@ use crate::engine::{
     CursorShape, GhosttyVtEngine, GridSnapshot, KeyCode, KeyInput, KeyMods, MouseAction,
     MouseButton, MouseInput, RowText, SelectKind, TerminalEngine,
 };
-use crate::keybind::{Chord, Keymap};
+use crate::keybind::{Chord, Keymap, Lookup};
 use crate::osc7::Osc7Scanner;
 use crate::search::{SearchHighlight, SearchState};
 use crate::osc52::{Osc52, Osc52Scanner};
@@ -1851,7 +1851,26 @@ fn decide_key(
                 None => false,
             };
         if !unperformable {
-            return KeyAction::Swallow;
+            // Ghostty's `unconsumed:` flag inverts the standing rule that a
+            // bound chord never reaches the shell: the action runs *and* the
+            // key is encoded. Only for a **complete** binding — a sequence
+            // leader is still swallowed, or the sequence could never start.
+            //
+            // It composes with `performable:` exactly as upstream stacks the
+            // prefixes: unperformable is handled above (plain fall-through, no
+            // action), performable-and-able falls here (encode *and* run).
+            //
+            // The reserved namespaces below still win, deliberately: those
+            // combos never reach the shell under any binding, so honouring
+            // `unconsumed:` there would be the one way to inject a Ctrl+Shift
+            // chord into a program.
+            if keymap.is_unconsumed(tables, seq)
+                && matches!(keymap.lookup_seq_in(tables, seq), Lookup::Action(_))
+            {
+                // Fall through to the namespace rules, then the encoder.
+            } else {
+                return KeyAction::Swallow;
+            }
         }
         // Fall through: the reserved-namespace rules below still apply.
     }
@@ -2417,6 +2436,45 @@ mod tests {
             autoscroll_rows(&mut a, 1, 0.001),
             0,
             "a fresh tick has to accumulate again"
+        );
+    }
+
+    #[test]
+    fn an_unconsumed_bind_reaches_the_shell_as_well_as_running() {
+        // `unconsumed:` inverts the standing rule that a bound chord never
+        // reaches the shell: the action runs *and* the key is encoded.
+        let km = Keymap::from_config(&[("unconsumed:ctrl+alt+k".into(), "new_tab".into())]);
+        let mods = egui::Modifiers {
+            ctrl: true,
+            alt: true,
+            ..Default::default()
+        };
+        assert!(
+            matches!(
+                super::decide_key(egui::Key::K, &mods, &km, Default::default(), &[]),
+                KeyAction::Encode(_)
+            ),
+            "the key still reaches the program"
+        );
+        // Without the flag, the same binding swallows it.
+        let km = Keymap::from_config(&[("ctrl+alt+k".into(), "new_tab".into())]);
+        assert_eq!(
+            super::decide_key(egui::Key::K, &mods, &km, Default::default(), &[]),
+            KeyAction::Swallow
+        );
+
+        // A reserved namespace still wins: those combos never reach the shell
+        // under any binding, and honouring `unconsumed:` there would be the one
+        // way to inject a Ctrl+Shift chord into a program.
+        let km = Keymap::from_config(&[("unconsumed:ctrl+shift+k".into(), "new_tab".into())]);
+        let cs = egui::Modifiers {
+            ctrl: true,
+            shift: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            super::decide_key(egui::Key::K, &cs, &km, Default::default(), &[]),
+            KeyAction::Swallow
         );
     }
 

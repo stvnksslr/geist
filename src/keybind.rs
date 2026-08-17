@@ -62,6 +62,9 @@ struct Bind {
     seq: Vec<Chord>,
     action: Action,
     performable: bool,
+    /// Ghostty's `unconsumed:` flag: run the action **and** let the key reach
+    /// the program, instead of swallowing it.
+    unconsumed: bool,
 }
 
 /// The app keymap: an ordered list of *sequence* → action bindings. A plain
@@ -160,6 +163,14 @@ impl Keymap {
             {
                 return Lookup::Pending;
             }
+            // `catch_all` is tried **inside each set**, before falling outward —
+            // which is upstream's `Set.getEvent`, and is what makes a key table
+            // modal: the table's `catch_all` shadows an exact binding in an
+            // outer table or the root, which is the whole point of putting one
+            // in a table.
+            if let Some(a) = catch_all_in(binds, keys) {
+                return Lookup::Action(a);
+            }
         }
         Lookup::None
     }
@@ -196,6 +207,26 @@ impl Keymap {
         false
     }
 
+    /// Whether the binding for `keys` is flagged `unconsumed:` — the action
+    /// runs *and* the key still reaches the program.
+    ///
+    /// Resolved through the same innermost-outward walk as the lookup, so the
+    /// flag always comes from the binding that would actually run.
+    pub fn is_unconsumed(&self, stack: &[TableEntry], keys: &[Chord]) -> bool {
+        for binds in self.search_order(stack) {
+            if let Some(b) = binds.iter().rev().find(|b| b.seq == keys) {
+                return b.unconsumed;
+            }
+            if binds
+                .iter()
+                .any(|b| b.seq.len() > keys.len() && &b.seq[..keys.len()] == keys)
+            {
+                return false;
+            }
+        }
+        false
+    }
+
     /// Whether `chord` begins any binding — a complete one *or* a sequence.
     /// This is what tells the PTY path to swallow a leader like `ctrl+a`, which
     /// on its own is bound to nothing.
@@ -218,17 +249,26 @@ impl Keymap {
 
     /// Bind `seq` to `action` in `table` (`None` = the root table), replacing
     /// any existing binding for it.
-    fn set(&mut self, table: Option<&str>, seq: Vec<Chord>, action: Action, performable: bool) {
+    fn set(
+        &mut self,
+        table: Option<&str>,
+        seq: Vec<Chord>,
+        action: Action,
+        performable: bool,
+        unconsumed: bool,
+    ) {
         let binds = self.binds_mut(table);
         match binds.iter_mut().find(|b| b.seq == seq) {
             Some(slot) => {
                 slot.action = action;
                 slot.performable = performable;
+                slot.unconsumed = unconsumed;
             }
             None => binds.push(Bind {
                 seq,
                 action,
                 performable,
+                unconsumed,
             }),
         }
     }
@@ -279,11 +319,32 @@ impl Keymap {
                 }
                 None => (None, trigger.clone()),
             };
+            // Strip the trigger flags in **any order** — upstream documents
+            // stacking them (`global:unconsumed:ctrl+a=…`) and does not fix
+            // their order, so this loops rather than testing one arrangement.
+            let mut rest = trigger.as_str();
+            let (mut global, mut performable, mut unconsumed) = (false, false, false);
+            loop {
+                if let Some(r) = strip_flag(rest, "global") {
+                    global = true;
+                    rest = r;
+                } else if let Some(r) = strip_flag(rest, "performable") {
+                    performable = true;
+                    rest = r;
+                } else if let Some(r) = strip_flag(rest, "unconsumed") {
+                    unconsumed = true;
+                    rest = r;
+                } else {
+                    break;
+                }
+            }
+            let flagless = rest.trim().to_string();
             let trigger = &trigger;
             // Ghostty's `global:` trigger flag. It is inherently unsequenceable
             // upstream too — the OS delivers one key, not a leader and a
             // follower — so a global trigger must be a single chord.
-            if let Some(rest) = strip_flag(trigger, "global") {
+            if global {
+                let rest = flagless.as_str();
                 if table.is_some() {
                     // Upstream allows `foo/global:…`, but a global chord is
                     // delivered by an OS keyboard hook that deliberately does
@@ -314,13 +375,7 @@ impl Keymap {
                 }
                 continue;
             }
-            // Ghostty's `performable:` trigger flag: bind the key only while the
-            // action can act, otherwise let it through to the shell.
-            let (trigger_rest, performable) = match strip_flag(trigger, "performable") {
-                Some(rest) => (rest.trim(), true),
-                None => (trigger.as_str(), false),
-            };
-            let Some(seq) = parse_sequence(trigger_rest) else {
+            let Some(seq) = parse_sequence(&flagless) else {
                 eprintln!("giest: ignoring keybind with unparseable trigger '{trigger}'");
                 continue;
             };
@@ -340,12 +395,40 @@ impl Keymap {
                 continue;
             }
             match Action::from_name(a) {
-                Some(act) => km.set(table.as_deref(), seq, act, performable),
+                Some(act) => km.set(table.as_deref(), seq, act, performable, unconsumed),
                 None => eprintln!("giest: ignoring keybind to unknown action '{a}'"),
             }
         }
         km
     }
+}
+
+/// The `catch_all` binding in `binds` matching this key press, if any.
+///
+/// Upstream's order (`Binding.zig`'s `Set.getEvent`): the same modifiers first,
+/// then — **only if the press had modifiers** — bare `catch_all`. A
+/// modifierless press therefore gets exactly one try, since for it the two are
+/// the same lookup.
+///
+/// Only a single chord can catch: `catch_all` describes one key press, not a
+/// sequence, so a partially-typed sequence is not caught here (see the
+/// dead-end handling for what happens then).
+fn catch_all_in(binds: &[Bind], keys: &[Chord]) -> Option<Action> {
+    let [chord] = keys else { return None };
+    let find = |mods: KeyMods| {
+        binds
+            .iter()
+            .rev()
+            .find(|b| {
+                b.seq.len() == 1 && b.seq[0].code == KeyCode::CatchAll && b.seq[0].mods == mods
+            })
+            .map(|b| b.action.clone())
+    };
+    find(chord.mods).or_else(|| {
+        (chord.mods != KeyMods::default())
+            .then(|| find(KeyMods::default()))
+            .flatten()
+    })
 }
 
 /// Split a `<table>/<binding>` trigger into its table name and the rest.
@@ -458,6 +541,7 @@ fn default_binds() -> Vec<Bind> {
                 seq: vec![c],
                 action,
                 performable,
+                unconsumed: false,
             })
         })
         .collect()
@@ -489,6 +573,12 @@ pub fn parse_chord(s: &str) -> Option<Chord> {
 /// shortcuts. Returns `None` for anything unrecognized.
 fn key_from_name(name: &str) -> Option<KeyCode> {
     use KeyCode::*;
+    // Ghostty's `catch_all` pseudo-key, checked first so it can't be mistaken
+    // for anything else. It is a *key name*, so `ctrl+catch_all` and
+    // `copy/catch_all` fall out of the existing chord and table machinery.
+    if name == "catch_all" {
+        return Some(CatchAll);
+    }
     // Single ASCII letter or digit.
     if name.len() == 1 {
         let ch = name.as_bytes()[0];
@@ -564,6 +654,66 @@ mod tests {
                 once: false,
             })
             .collect()
+    }
+
+    #[test]
+    fn catch_all_matches_only_what_is_not_otherwise_bound() {
+        let km = Keymap::from_config(&[
+            ("catch_all".into(), "scroll_page_down".into()),
+            ("ctrl+catch_all".into(), "scroll_page_up".into()),
+            ("q".into(), "new_tab".into()),
+        ]);
+        // An exact binding always wins.
+        assert_eq!(km.lookup(&chord("q")), Some(Action::NewTab));
+        // Anything else is caught, by the entry matching its modifiers…
+        assert_eq!(km.lookup(&chord("z")), Some(Action::ScrollPageDown));
+        assert_eq!(km.lookup(&chord("ctrl+z")), Some(Action::ScrollPageUp));
+        // …and a modified press falls back to the bare `catch_all` when there
+        // is no entry for its modifiers. A *modifierless* press gets one try,
+        // since for it the two lookups are the same.
+        assert_eq!(km.lookup(&chord("alt+z")), Some(Action::ScrollPageDown));
+
+        // With only a modified catch_all, an unmodified key is not caught.
+        let km = Keymap::from_config(&[("ctrl+catch_all".into(), "new_tab".into())]);
+        assert_eq!(km.lookup(&chord("ctrl+z")), Some(Action::NewTab));
+        assert_eq!(km.lookup(&chord("z")), None);
+    }
+
+    #[test]
+    fn a_tables_catch_all_shadows_outer_bindings() {
+        // `catch_all` is resolved **inside each set** before falling outward
+        // (upstream's `Set.getEvent`), which is what makes a key table modal —
+        // and is the reason to put one in a table at all.
+        let km = Keymap::from_config(&[
+            ("copy/j".into(), "scroll_page_down".into()),
+            ("copy/catch_all".into(), "ignore".into()),
+        ]);
+        let s = stack(&["copy"]);
+        assert_eq!(km.lookup_in(&s, &chord("j")), Some(Action::ScrollPageDown));
+        // The root's own binding loses to the table's catch_all.
+        assert_eq!(km.lookup(&chord("ctrl+shift+t")), Some(Action::NewTab));
+        assert!(matches!(
+            km.lookup_in(&s, &chord("ctrl+shift+t")),
+            Some(Action::Noop(_))
+        ));
+        // And it is inert outside the table.
+        assert_eq!(km.lookup(&chord("z")), None);
+    }
+
+    #[test]
+    fn trigger_flags_stack_in_any_order() {
+        // Upstream documents stacking (`global:unconsumed:…`) without fixing an
+        // order, so both spellings must parse the same.
+        for t in ["performable:unconsumed:ctrl+alt+k", "unconsumed:performable:ctrl+alt+k"] {
+            let km = Keymap::from_config(&[(t.into(), "new_tab".into())]);
+            let seq = [chord("ctrl+alt+k")];
+            assert_eq!(km.lookup(&chord("ctrl+alt+k")), Some(Action::NewTab), "{t}");
+            assert!(km.is_performable(&seq), "{t}");
+            assert!(km.is_unconsumed(&[], &seq), "{t}");
+        }
+        // A plain binding is neither.
+        let km = Keymap::from_config(&[("ctrl+alt+k".into(), "new_tab".into())]);
+        assert!(!km.is_unconsumed(&[], &[chord("ctrl+alt+k")]));
     }
 
     #[test]

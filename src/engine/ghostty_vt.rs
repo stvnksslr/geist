@@ -373,6 +373,9 @@ fn walk_placements(
 fn map_key(code: KeyCode) -> Key {
     use KeyCode::*;
     match code {
+        // A configured `catch_all` never becomes a key *event*, so it can never
+        // be encoded. Mapped to something inert rather than left to panic.
+        CatchAll => Key::Unidentified,
         A => Key::A,
         B => Key::B,
         C => Key::C,

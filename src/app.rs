@@ -1906,7 +1906,20 @@ impl Window {
                     // one that broke the sequence to the terminal, so a mistyped
                     // `ctrl+a x` still delivers both to the shell rather than
                     // silently eating them.
+                    //
+                    // Exception, and upstream's: if a `catch_all` binding would
+                    // `ignore` the breaking key, the *whole* sequence is dropped
+                    // and nothing is sent. That is what makes a modal table with
+                    // `catch_all=ignore` actually silent — otherwise a mistyped
+                    // sequence inside it would leak its keys to the program.
+                    let swallow_all = matches!(
+                        self.keymap.lookup_in(&stack, &chord),
+                        Some(crate::command::Action::Noop(ref n)) if &**n == "ignore"
+                    );
                     let flush = std::mem::take(&mut self.pending_keys);
+                    if swallow_all {
+                        continue;
+                    }
                     if flush.len() > 1
                         && let Some(s) = self.focused_session_mut()
                     {

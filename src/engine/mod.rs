@@ -250,6 +250,11 @@ pub struct KeyMods {
 /// printable text is delivered separately via [`KeyInput::text`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KeyCode {
+    /// Ghostty's `catch_all` pseudo-key: matches any key **not otherwise
+    /// bound**. It only ever appears in a configured [`Chord`](crate::keybind::Chord),
+    /// never in a real key event — nothing maps an egui key onto it, so it can
+    /// never reach the PTY encoder.
+    CatchAll,
     A,
     B,
     C,

@@ -40,6 +40,9 @@ use crate::keybind::Chord;
 pub fn vk_for(code: KeyCode) -> Option<u32> {
     use KeyCode::*;
     Some(match code {
+        // Never a real key, so it has no virtual-key code and can never match a
+        // global hotkey.
+        CatchAll => return None,
         A => 0x41,
         B => 0x42,
         C => 0x43,

@@ -171,8 +171,8 @@ tab strip, palette, overlays and dialogs all derive their colors from
 light/dark preference), **window/tab/split state restore** (`window-save-state`), **quick
 (dropdown) terminal + global hotkey** — now done.)*
 
-**Input / keybinds** — `undo`/`redo`, `catch_all`, `chain=` multi-action bindings, and the `all:`/
-`unconsumed:` trigger flags. *(Config-driven binding, leader sequences, **key tables**, the `global:`
+**Input / keybinds** — `undo`/`redo`, `chain=` multi-action bindings, and the `all:` trigger flag
+(the same gap as Tier-3 broadcast input). *(Config-driven binding, leader sequences, **key tables**, the `global:`
 and `performable:` flags, and the `write_*_file` / `set_*_title` / `toggle_*` / `text:`/`csi:`/`esc:`
 actions — now done.)*
 
@@ -291,7 +291,7 @@ Effort: **S** <1d · **M** 1–3d · **L** ~1wk · **XL** multi-wk. Status: ✅ 
 | Migrate to binding selection model | `session.rs`, `engine` | ✅ | M–L | ✅ (tracked-ref anchor, scrollback-spanning, reflow-correct, plus rectangle mode and drag autoscroll — see the ledgers) |
 
 ### Tier 3 — long tail / platform-specific
-broadcast input ·
+broadcast input (the `all:` trigger flag is the same gap) ·
 auto-update · about dialog /
 custom icon · AppleScript / App-Intents / Services → Windows IPC ·
 legacy-computing sprites · COLRv1 emoji · grapheme-width ·
@@ -387,8 +387,44 @@ With Phase 0 done, the remaining Tier-1 items are mostly small, registry-backed 
 26. ✅ **`text:`/`csi:`/`esc:`/`set_*_title:`**, on an `Action` that now owns its strings. See the
     ledger.
 27. ✅ **Named key tables**, plus the `ignore`-vs-`unbind` fix they surfaced. See the ledger.
-28. Next: `catch_all`, `chain=` multi-action bindings, the `all:`/`unconsumed:` trigger flags,
+28. ✅ **`catch_all` and the `unconsumed:` trigger flag.** See the ledger.
+29. Next: `chain=` multi-action bindings, `all:` (which is the same gap as Tier-3 broadcast input),
     `undo`/`redo`, and the inspector.
+
+### `catch_all` + the `unconsumed:` flag — ✅ divergences
+
+- **`catch_all` is a *key name*, not a side flag.** `KeyCode::CatchAll` drops into the existing chord
+  parser, so `ctrl+catch_all` and `copy/catch_all=ignore` fall out of the chord, sequence and table
+  machinery already there. It can never be produced by a real key event, so the two places that map
+  a `KeyCode` outward (the PTY encoder and the global-hotkey VK table) are explicit dead ends rather
+  than a panic waiting to happen.
+- **Resolved inside each set before falling outward** — upstream's `Set.getEvent`, read rather than
+  guessed. The consequence is the interesting one: a key table's `catch_all` shadows an *exact*
+  binding in an outer table or the root, which is what makes a table modal and is the whole reason
+  to put one in a table.
+- **Order within a set: exact → `catch_all` with the same modifiers → bare `catch_all`.** The bare
+  fallback runs only if the press had modifiers, so a modifierless press gets exactly one try (for
+  it the two lookups are the same). A table test pins all three, since the double-match is invisible.
+- **A `catch_all` that would `ignore` swallows a broken sequence whole.** Upstream: an unbound key
+  mid-sequence normally flushes every buffered key to the program, *unless* a `catch_all` would
+  ignore it — then the whole sequence is dropped silently. Without that, a mistyped sequence inside
+  a modal table would leak its keys. This is checkable only because the previous pass split `ignore`
+  from `unbind`.
+- **`unconsumed:` inverts a standing invariant of this codebase**, and both gates' comments now say
+  so: a bound chord normally never reaches the shell, and an `unconsumed:` binding runs its action
+  *and* encodes the key. Only for a **complete** binding — a sequence leader is still swallowed, or
+  the sequence could never start.
+- **A reserved namespace still beats `unconsumed:`.** `ctrl+shift+*` and friends never reach the
+  shell under any binding, so honouring the flag there would be the one way to inject a Ctrl+Shift
+  chord into a program. Documented and pinned rather than left to discover.
+- **Flags stack in any order.** Upstream documents `global:unconsumed:…` and fixes no order, so the
+  parser loops until nothing strips instead of testing one arrangement. `performable:unconsumed:`
+  composes as upstream implies: unperformable is a plain fall-through (encode, no action), otherwise
+  encode *and* run.
+- **Not done: `all:`.** It broadcasts a surface action to every pane, which is the same feature as
+  the Tier-3 "broadcast input" line — they are **one** gap, not two, and it needs a broadcast path
+  through `execute_action` rather than a parse change. `chain=` multi-action bindings are also still
+  open.
 
 ### Key tables — ✅ divergences
 
@@ -1113,7 +1149,8 @@ path instead of two that could disagree.
   they have to be delivered late, in order.
 - **An exact binding beats being a prefix**, so `ctrl+a` and `ctrl+a>n` can coexist without the
   bare chord hanging forever on a second key that could never take effect.
-- **Not done: the `all:` / `unconsumed:` trigger flags.** **`global:`, `performable:` and named key
+- **Not done: the `all:` trigger flag** (the same gap as Tier-3 broadcast input).
+  **`unconsumed:` is now done** — see its ledger. **`global:`, `performable:` and named key
   *tables* are now done** — see the quick-terminal, selection-interaction and key-table ledgers.
   `global:` is
   inherently non-sequenceable (the OS delivers one key, not a leader and a follower), which is true

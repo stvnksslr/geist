@@ -268,7 +268,35 @@ keybind = performable:ctrl+alt+k=new_tab
 ```
 
 This is how the built-in `shift+arrow` selection bindings stay out of the way when nothing is
-selected. `all:` and `unconsumed:` are not supported.
+selected.
+
+**`unconsumed:`** runs the action *and* still sends the key to the program, instead of swallowing
+it:
+
+```ini
+keybind = unconsumed:ctrl+alt+r=reload_config
+```
+
+Flags stack in any order (`performable:unconsumed:ctrl+k=…`). One exception worth knowing: giest
+reserves whole modifier namespaces (`ctrl+shift+*`, `ctrl+alt+arrows`, `alt+digit`, `ctrl+=/-/0`)
+from the shell, and that still wins — `unconsumed:` on a key in one of those does not deliver it.
+`all:` is not supported.
+
+### Catch-all bindings
+
+The special key `catch_all` matches any key **not otherwise bound**:
+
+```ini
+# Inside a copy mode, silence everything that isn't bound.
+keybind = copy/catch_all=ignore
+```
+
+- An exact binding always wins. `ctrl+catch_all` catches modified keys; a press with modifiers falls
+  back to a bare `catch_all` if there is no entry for its modifiers.
+- It is resolved **within each key table before falling outward**, so a table's `catch_all` shadows
+  your normal bindings — which is what makes a table properly modal.
+- If a key breaks a key sequence and a `catch_all` would `ignore` it, the whole sequence is dropped
+  silently instead of being flushed to the program.
 
 ### Saving and restoring the layout
 
@@ -458,8 +486,9 @@ Details worth knowing:
   (`copy/ctrl+a>n=…`).
 - The active tables are **cleared when the config reloads**, since a reload can delete a table you
   are currently in.
-- Not supported: `catch_all`, `chain=`, and `global:` inside a table (a global hotkey is delivered
-  by the OS and can't know which table is active — it's reported rather than silently bound).
+- Not supported: `chain=`, and `global:` inside a table (a global hotkey is delivered by the OS and
+  can't know which table is active — it is reported rather than silently bound). `catch_all` **is**
+  supported; see below.
 
 ### Bell, resize overlay, close confirmation
 
