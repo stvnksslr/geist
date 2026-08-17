@@ -990,6 +990,25 @@ mod tests {
     }
 
     #[test]
+    fn a_selection_survives_a_resize_that_reflows_the_text() {
+        // Reflow is where a tracked reference differs most from a coordinate: a
+        // narrower grid rewraps rows, so every cell moves. The old model had no
+        // answer at all — `fit_grid` simply left the anchor pointing at whatever
+        // was now at that (col,row).
+        let mut eng = GhosttyVtEngine::new(20, 4, 100).unwrap();
+        eng.write(b"hello wonderful world");
+        eng.select_semantic(SelectKind::Word, 6, 0, &[]);
+        assert_eq!(sel_text(&eng).as_deref(), Some("wonderful"));
+
+        eng.resize(10, 6, (8, 16)).unwrap();
+        assert_eq!(
+            sel_text(&eng).as_deref(),
+            Some("wonderful"),
+            "the selection followed its cells through the rewrap"
+        );
+    }
+
+    #[test]
     fn select_all_spans_scrollback_not_just_the_viewport() {
         // The old `select_all` was `(0,0)..(cols-1, rows-1)` — the viewport and
         // nothing else. This is the behaviour change.

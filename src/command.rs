@@ -13,6 +13,11 @@
 /// closure that produced it (the deferred-intent pattern used throughout `app.rs`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
+    /// Bind-able and does nothing, for a Ghostty action giest has no work to do
+    /// for. Rejecting the name would log an "unknown action" the user cannot act
+    /// on; mapping it onto some *other* action would silently do the wrong
+    /// thing, which is exactly what `equalize_splits` used to do.
+    Noop,
     NewTab,
     /// Open a new tab running the shell profile at this index.
     NewTabWithProfile(usize),
@@ -117,6 +122,9 @@ impl Action {
     /// shell's name).
     fn title(self) -> &'static str {
         match self {
+            // Never listed in the palette (see `CATALOG`), but `title` must be
+            // total.
+            Action::Noop => "Do Nothing",
             Action::NewTab => "New Tab",
             Action::NewTabWithProfile(_) => "New Tab with Shell",
             Action::NewWindow => "New Window",
@@ -190,6 +198,7 @@ impl Action {
     /// reachable only via the palette/menus.
     fn keybind(self) -> Option<&'static str> {
         Some(match self {
+            Action::Noop => return None,
             Action::NewTab => "Ctrl+Shift+T",
             Action::NewWindow => "Ctrl+Shift+N",
             Action::NextTab => "Ctrl+Tab",
@@ -258,6 +267,8 @@ impl Action {
     /// (`goto_tab:2`, 1-based like Ghostty).
     pub fn name(self) -> String {
         match self {
+            // Round-trips as the Ghostty name it stands in for.
+            Action::Noop => "equalize_splits".into(),
             Action::NewTab => "new_tab".into(),
             Action::NewTabWithProfile(i) => format!("new_tab_with_profile:{i}"),
             Action::NewWindow => "new_window".into(),
@@ -419,7 +430,7 @@ impl Action {
             // giest splits are always 50/50, so there is nothing to equalize.
             // Accepted as a no-op so a Ghostty config binds without an error
             // rather than logging an "unknown action" the user cannot act on.
-            "equalize_splits" => Action::ClearSelection,
+            "equalize_splits" => Action::Noop,
             "toggle_maximize" => Action::ToggleMaximize,
             "toggle_window_float_on_top" => Action::ToggleFloatOnTop,
             "toggle_background_opacity" => Action::ToggleBackgroundOpacity,
@@ -639,6 +650,21 @@ pub fn filter_commands(catalog: &[Command], query: &str) -> Vec<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn equalize_splits_binds_to_a_real_no_op() {
+        // It used to parse to `ClearSelection`, so binding a Ghostty config's
+        // `equalize_splits` silently *dropped the user's selection*. A no-op
+        // action that stands for nothing else is the only safe target, and this
+        // pins it because the wrong behaviour is invisible in a config.
+        assert_eq!(Action::from_name("equalize_splits"), Some(Action::Noop));
+        assert_ne!(
+            Action::from_name("equalize_splits"),
+            Some(Action::ClearSelection)
+        );
+        // …and it round-trips as the Ghostty name it stands in for.
+        assert_eq!(Action::Noop.name(), "equalize_splits");
+    }
 
     #[test]
     fn empty_query_matches_with_neutral_score() {

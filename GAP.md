@@ -405,6 +405,16 @@ The selection now lives in the **VT engine**, not the app. `Session`'s two viewp
   to read the active selection back (`GHOSTTY_TERMINAL_DATA_SELECTION` is unbound).
 - **`selection_installed` mirrors terminal state that cannot be queried.** Same cause. It is the
   one piece of duplicated state here, and it exists rather than a guess from "is the anchor set".
+  *Known consequence, judged not worth code:* the terminal can invalidate its own selection without
+  telling us (the alt screen has its own; a reset degrades the range), so `has_selection()` can
+  enable a Copy menu item that copies nothing. The text path stays honest either way —
+  `format_selection_alloc` returns nothing — and `Ctrl+C` copy-or-interrupt reads the actual text,
+  so it decides correctly.
+- **Fixed in passing:** `equalize_splits` parsed to `Action::ClearSelection`. giest has nothing to
+  equalize (splits are always 50/50) and the intent was a no-op, but the stand-in was a real action
+  — so binding a Ghostty config's `equalize_splits` silently *dropped the user's selection*. There
+  is now an `Action::Noop` that stands for nothing else, and a test, because in a config the wrong
+  behaviour is invisible.
 - **An anchor that loses its cell clears the selection.** Upstream's tracked pins move to the
   screen's top-left when their row is destroyed; extending a drag from a cell that no longer exists
   would select something the user never pointed at, so giest drops it instead.
@@ -431,9 +441,10 @@ The selection now lives in the **VT engine**, not the app. `Session`'s two viewp
 - **Verified by engine tests driving real escape sequences**: word/`selection-word-chars`
   boundaries by their *copied text*, a soft-wrapped triple-click returning one unwrapped line while
   highlighting two display rows, OSC 133 command output, a selection made before ten screens of
-  output still reading back correctly (the tracked-anchor case), `select_all` including a
-  scrolled-off row, trim on/off, clear, and an update with no anchor. The highlight itself is
-  **perceptual** and wants human confirmation in the running app.
+  output still reading back correctly (the tracked-anchor case), a **resize that rewraps the text**
+  leaving the selected word selected, `select_all` including a scrolled-off row, trim on/off, clear,
+  and an update with no anchor. The highlight itself is **perceptual** and wants human confirmation
+  in the running app.
 
 ### `config-file` (config includes) — ✅ divergences
 
@@ -854,7 +865,9 @@ guessed at, and the ones needing no new subsystem are now wired: `clear_screen`,
   drag-reorder path, which already clears the stale `renaming` index.
 - **`scroll_page_fractional` is stored ×100** so `Action` stays `Copy + Eq` without carrying a float.
 - **`equalize_splits` is accepted as a no-op.** giest's splits are always 50/50 so there is nothing
-  to equalize, but binding it must not log an "unknown action" a user cannot act on.
+  to equalize, but binding it must not log an "unknown action" a user cannot act on. *(It was
+  mapped onto `ClearSelection` — a real action — so it silently dropped the selection; there is now
+  an `Action::Noop`. See the selection-migration ledger.)*
 - **Not possible without changing `Action`:** `text:`, `csi:`, `esc:`, `set_tab_title:`,
   `set_surface_title:` — all carry a string, and `Action` is `Copy` so a chosen action can outlive
   the UI closure that produced it (the deferred-intent pattern used throughout `app.rs`). Making it

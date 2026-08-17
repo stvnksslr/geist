@@ -2058,6 +2058,8 @@ impl Window {
         action: Action,
     ) {
         match action {
+            // Bound, and deliberately does nothing (see `Action::Noop`).
+            Action::Noop => {}
             Action::NewTab => self.new_tab(self.default_profile),
             Action::NewWindow => {
                 // Resolve the cwd here, from *this* window's focused pane —
