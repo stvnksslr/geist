@@ -203,8 +203,11 @@ impl Keymap {
                 eprintln!("giest: ignoring keybind with unparseable trigger '{trigger}'");
                 continue;
             };
-            let a = action.trim();
-            if a.eq_ignore_ascii_case("unbind") || a.eq_ignore_ascii_case("ignore") {
+            // `trim_start` only: a payload action carries its trailing
+            // whitespace deliberately (`text:hello `), and `Action::from_name`
+            // trims the names that should be trimmed itself.
+            let a = action.trim_start();
+            if a.trim().eq_ignore_ascii_case("unbind") || a.trim().eq_ignore_ascii_case("ignore") {
                 km.unset(&seq);
                 continue;
             }

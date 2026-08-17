@@ -458,3 +458,46 @@ keybind = ctrl+shift+t=new_tab  # ignored
     // Unsupported keys left the corresponding giest behavior at its default.
     // (font-family/theme/keybind/window-decoration have no giest field.)
 }
+
+/// A `keybind` payload survives the whole config pipeline — line parse, value
+/// unquote, trigger/action split — and reaches the keymap intact.
+///
+/// The unit tests drive `Action::from_name` directly, so nothing else covers the
+/// layers above it, and each one trims something.
+#[test]
+fn keybind_payloads_survive_the_config_pipeline() {
+    use giest::command::Action;
+    use giest::keybind::{Keymap, parse_chord};
+
+    let c = cfg(concat!(
+        "keybind = ctrl+alt+a=text:hello world\n",
+        // An `=` inside the payload: the split must take the *first* one only.
+        "keybind = ctrl+alt+b=text:a=b\n",
+        // An escape that only matters if the payload reaches the action raw.
+        "keybind = ctrl+alt+c=text:\x1bOA\n",
+        "keybind = ctrl+alt+d=csi:0m\n",
+        // Quoted, to keep a trailing space: Ghostty trims a bare value the same
+        // way, so the quotes are how the space is preserved in both.
+        "keybind = \"ctrl+alt+e=text:trail \"\n",
+    ));
+    let km = Keymap::from_config(&c.keybinds);
+    let at = |t: &str| km.lookup(&parse_chord(t).expect("chord"));
+
+    assert_eq!(at("ctrl+alt+a"), Some(Action::SendText("hello world".into())));
+    assert_eq!(
+        at("ctrl+alt+b"),
+        Some(Action::SendText("a=b".into())),
+        "the trigger/action split must not eat the payload's own '='"
+    );
+    assert_eq!(
+        at("ctrl+alt+c"),
+        Some(Action::SendText("\x1bOA".into())),
+        "escapes reach the action undecoded; they are decoded at send time"
+    );
+    assert_eq!(at("ctrl+alt+d"), Some(Action::SendCsi("0m".into())));
+    assert_eq!(
+        at("ctrl+alt+e"),
+        Some(Action::SendText("trail ".into())),
+        "a quoted value keeps its trailing space"
+    );
+}

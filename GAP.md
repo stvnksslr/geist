@@ -407,9 +407,15 @@ The five actions the keybind-coverage ledger listed as "not possible without cha
   round-trip verbatim without a re-escaping pass, and it keeps the error where upstream puts it.
 - **`csi:` and `esc:` take their payloads raw** — no escape decoding at all. Upstream simply prints
   `ESC [ {s}` and `ESC {s}`. Getting this backwards would break `csi:0m`.
-- **The payload is not trimmed**, and that is deliberate: a trailing space in `text:hello ` is part
-  of the text, and trimming would silently change what `csi:0m ` sends. So these prefixes are
-  matched against the *untrimmed* config value, ahead of the trim every other action name gets.
+- **The payload keeps its trailing whitespace, and the config layers had to be checked to know
+  that.** `Action::from_name` matches these prefixes ahead of the trim every other action name gets
+  — but two layers above it were trimming as well (`config.rs`'s keybind setter and
+  `Keymap::from_config`), so the guarantee was only true of the function the unit tests called.
+  Both now `trim_start` only. What giest cannot preserve is whitespace around the whole config
+  *value*, which the line parser strips — and **upstream strips it too** (`cli/args.zig` trims the
+  value and then unquotes), so `keybind = "ctrl+k=text:hello "` is the spelling in both. That is
+  pinned by a **config-body** test in `tests/config_conformance.rs`, driving the real pipeline
+  rather than the parser in isolation, and it also covers an `=` inside the payload.
 - **`send_text` is not a paste.** It deliberately bypasses `Session::paste_str` — this is a fixed
   string from the user's own config, not clipboard content, so bracketing it or raising a
   paste-protection prompt would be wrong. It does scroll to the bottom (the user is "typing") and it
@@ -441,6 +447,10 @@ The five actions the keybind-coverage ledger listed as "not possible without cha
   closest to giest's position doesn't have it either. Windows exposes no equivalent service: there
   is no API to stop other processes reading keystrokes. Recording it as N/A rather than leaving it
   on the roadmap as a permanently-open item.
+- **`toggle_secure_input` still *binds*, as a no-op**, so a transferred Ghostty config doesn't log
+  "unknown action" at a user who can't act on it — the `equalize_splits` precedent. That needed
+  `Action::Noop` to carry the name it stands in for (it round-trips through `name()`, and two
+  unimplementable actions can't share a nameless no-op); the string-owning `Action` made it free.
 
 ### Selection interaction: `adjust_selection`, rectangle drag, autoscroll — ✅ divergences
 
@@ -982,9 +992,10 @@ renamed tab's name, and every pane's OSC 7 working directory.
   once-per-process setup (atlas, theme, profiles) and opens a session on the way; deciding before
   that would mean moving all of it. One short-lived shell is the cheaper trade.
 - **Not saved: window size/position** (`window-width`/`-height`/`-position-*` already cover that for
-  every launch), **split zoom** (a transient view; restoring one hides panes), tab colors, and the
+  every launch), **split zoom** (a transient view; restoring one hides panes), tab colors, the
   per-pane profile — every restored pane runs the default profile, since a pane doesn't record which
-  profile opened it.
+  profile opened it — and a pane's `set_surface_title` override, which belongs to the shell session
+  that is being replaced rather than to the layout.
 
 ### Clipboard permissions + paste protection — ✅
 

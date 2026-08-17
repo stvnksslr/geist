@@ -310,8 +310,10 @@ Beyond the defaults, these Ghostty actions are available to `keybind`:
 | `equalize_splits` | Accepted as a no-op: giest's splits are always 50/50, so there is nothing to equalize. It binds without error so a Ghostty config transfers cleanly. |
 | `adjust_selection:<dir>` | Move the selection's free end. All ten upstream directions: `left`, `right`, `up`, `down`, `page_up`, `page_down`, `home`, `end`, `beginning_of_line`, `end_of_line`. Bound to shift+arrows by default (as `performable:`). |
 
-These send text or set titles, and take their payload **verbatim** — nothing is trimmed, so a
-trailing space in `text:hello ` is part of the text:
+These send text or set titles. The payload keeps everything after the first `=`, including further
+`=` characters (`text:a=b` works). Whitespace around a config *value* is stripped before the payload
+is seen — Ghostty does the same — so to end a payload with a space, quote the whole value:
+`keybind = "ctrl+k=text:hello "`, or write it as `\x20` in a `text:` payload.
 
 | Action | Notes |
 | --- | --- |

@@ -2070,7 +2070,7 @@ impl Window {
     ) {
         match action {
             // Bound, and deliberately does nothing (see `Action::Noop`).
-            Action::Noop => {}
+            Action::Noop(_) => {}
             // `text:` decodes its escapes at send time, like upstream — a bad
             // escape logs and sends nothing rather than emitting the payload
             // literally. `csi:`/`esc:` payloads are raw and simply get their

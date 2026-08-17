@@ -1734,8 +1734,18 @@ const SETTERS: &[(&str, Setter)] = &[
         if v.is_empty() || v.eq_ignore_ascii_case("clear") {
             c.keybinds = d.keybinds.clone();
         } else if let Some((trigger, action)) = v.split_once('=') {
+            // Split on the **first** `=`, so a payload containing one
+            // (`text:a=b`) survives intact.
+            //
+            // The action is `trim_start`ed, not fully trimmed: an action like
+            // `text:hello ` carries its trailing space deliberately, and
+            // `Action::from_name` trims the names that *should* be trimmed
+            // itself. (The whole config value has already lost surrounding
+            // whitespace by this point — upstream trims there too — so keeping a
+            // trailing space needs the quoted form,
+            // `keybind = "ctrl+k=text:hello "`, exactly as it does in Ghostty.)
             c.keybinds
-                .push((trigger.trim().to_string(), action.trim().to_string()));
+                .push((trigger.trim().to_string(), action.trim_start().to_string()));
         } else {
             eprintln!("giest: ignoring malformed keybind (expected 'trigger=action'): {v}");
         }

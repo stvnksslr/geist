@@ -140,7 +140,7 @@ pub enum Action {
     /// for. Rejecting the name would log an "unknown action" the user cannot act
     /// on; mapping it onto some *other* action would silently do the wrong
     /// thing, which is exactly what `equalize_splits` used to do.
-    Noop,
+    Noop(Arc<str>),
     /// Move the selection's free end (Ghostty `adjust_selection:<direction>`).
     /// Bound to shift+arrows and **performable**: with no selection the key is
     /// the shell's.
@@ -265,7 +265,7 @@ impl Action {
         match self {
             // Never listed in the palette (see `CATALOG`), but `title` must be
             // total.
-            Action::Noop => "Do Nothing",
+            Action::Noop(_) => "Do Nothing",
             Action::AdjustSelection(_) => "Adjust Selection",
             Action::SendText(_) => "Send Text",
             Action::SendCsi(_) => "Send CSI Sequence",
@@ -345,7 +345,7 @@ impl Action {
     /// reachable only via the palette/menus.
     fn keybind(&self) -> Option<&'static str> {
         Some(match self {
-            Action::Noop
+            Action::Noop(_)
             | Action::AdjustSelection(_)
             | Action::SendText(_)
             | Action::SendCsi(_)
@@ -420,8 +420,7 @@ impl Action {
     /// (`goto_tab:2`, 1-based like Ghostty).
     pub fn name(&self) -> String {
         match self {
-            // Round-trips as the Ghostty name it stands in for.
-            Action::Noop => "equalize_splits".into(),
+            Action::Noop(name) => name.to_string(),
             Action::AdjustSelection(d) => format!("adjust_selection:{}", adjust_name(*d)),
             // Payloads are stored raw, so these round-trip verbatim.
             Action::SendText(s) => format!("text:{s}"),
@@ -604,7 +603,11 @@ impl Action {
             // giest splits are always 50/50, so there is nothing to equalize.
             // Accepted as a no-op so a Ghostty config binds without an error
             // rather than logging an "unknown action" the user cannot act on.
-            "equalize_splits" => Action::Noop,
+            "equalize_splits" => Action::Noop(Arc::from("equalize_splits")),
+            // macOS-only upstream and unimplementable on Windows (no API stops
+            // other processes reading keystrokes) — accepted so a transferred
+            // config binds without an "unknown action" the user cannot act on.
+            "toggle_secure_input" => Action::Noop(Arc::from("toggle_secure_input")),
             "toggle_maximize" => Action::ToggleMaximize,
             "toggle_window_float_on_top" => Action::ToggleFloatOnTop,
             "toggle_background_opacity" => Action::ToggleBackgroundOpacity,
@@ -912,13 +915,28 @@ mod tests {
         // `equalize_splits` silently *dropped the user's selection*. A no-op
         // action that stands for nothing else is the only safe target, and this
         // pins it because the wrong behaviour is invisible in a config.
-        assert_eq!(Action::from_name("equalize_splits"), Some(Action::Noop));
+        assert_eq!(
+            Action::from_name("equalize_splits"),
+            Some(Action::Noop(Arc::from("equalize_splits")))
+        );
         assert_ne!(
             Action::from_name("equalize_splits"),
             Some(Action::ClearSelection)
         );
-        // …and it round-trips as the Ghostty name it stands in for.
-        assert_eq!(Action::Noop.name(), "equalize_splits");
+        // The no-op carries the name it stands in for, so it round-trips — and
+        // so several unimplementable actions can share it without colliding.
+        assert_eq!(
+            Action::from_name("equalize_splits").unwrap().name(),
+            "equalize_splits"
+        );
+
+        // `toggle_secure_input` is macOS-only upstream and has no Windows
+        // equivalent (no API stops other processes reading keystrokes), so it
+        // binds as a no-op rather than logging "unknown action" at a user who
+        // transferred a working Ghostty config.
+        let secure = Action::from_name("toggle_secure_input").expect("binds");
+        assert_eq!(secure, Action::Noop(Arc::from("toggle_secure_input")));
+        assert_eq!(secure.name(), "toggle_secure_input");
     }
 
     #[test]
