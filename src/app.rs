@@ -1880,7 +1880,7 @@ impl Window {
                             .focused_session_mut()
                             .is_some_and(|s| s.has_selection()),
                     };
-                    if !performable || crate::command::can_perform(action, ctx_perform) {
+                    if !performable || crate::command::can_perform(&action, ctx_perform) {
                         self.execute_action(ctx, None, action);
                     }
                 }
@@ -2071,6 +2071,47 @@ impl Window {
         match action {
             // Bound, and deliberately does nothing (see `Action::Noop`).
             Action::Noop => {}
+            // `text:` decodes its escapes at send time, like upstream — a bad
+            // escape logs and sends nothing rather than emitting the payload
+            // literally. `csi:`/`esc:` payloads are raw and simply get their
+            // prefix; both also scroll to the bottom, since the user just
+            // "typed" something.
+            Action::SendText(ref s) => {
+                let decoded = crate::command::decode_escapes(s);
+                match decoded {
+                    Some(text) => {
+                        if let Some(sess) = self.focused_session_mut() {
+                            sess.send_text(&text);
+                        }
+                    }
+                    None => eprintln!("giest: invalid escape sequence in 'text:{s}'"),
+                }
+            }
+            Action::SendCsi(ref s) => {
+                let seq = format!("\x1b[{s}");
+                if let Some(sess) = self.focused_session_mut() {
+                    sess.send_text(&seq);
+                }
+            }
+            Action::SendEsc(ref s) => {
+                let seq = format!("\x1b{s}");
+                if let Some(sess) = self.focused_session_mut() {
+                    sess.send_text(&seq);
+                }
+            }
+            Action::SetTabTitle(ref s) => {
+                let name = (!s.is_empty()).then(|| s.to_string());
+                let i = self.active_tab;
+                if let Some(t) = self.tabs.get_mut(i) {
+                    t.name = name;
+                }
+            }
+            Action::SetSurfaceTitle(ref s) => {
+                let s = s.clone();
+                if let Some(sess) = self.focused_session_mut() {
+                    sess.set_title_override(&s);
+                }
+            }
             Action::AdjustSelection(dir) => {
                 let cell_h = self.cell_h;
                 if let Some(s) = self.focused_session_mut() {
@@ -2522,7 +2563,7 @@ impl Window {
                                         resp.scroll_to_me(Some(egui::Align::Center));
                                     }
                                     if resp.clicked() {
-                                        chosen = Some(cmd.action);
+                                        chosen = Some(cmd.action.clone());
                                         keep_open = false;
                                     }
                                 }
@@ -2530,7 +2571,7 @@ impl Window {
 
                         if entered {
                             if let Some(&idx) = filtered.get(state.selected) {
-                                chosen = Some(state.catalog[idx].action);
+                                chosen = Some(state.catalog[idx].action.clone());
                             }
                             keep_open = false;
                         }
@@ -4391,7 +4432,7 @@ impl App {
             return;
         }
         self.global_chords = chords;
-        self.global_actions = globals.iter().map(|(_, a)| *a).collect();
+        self.global_actions = globals.iter().map(|(_, a)| a.clone()).collect();
         // A chord whose key has no virtual-key code can't be registered; drop it
         // *and* its action together so the indices stay aligned with the hook's.
         let mut binds = Vec::new();
@@ -4400,7 +4441,7 @@ impl App {
             match crate::hotkey::GlobalBind::from_chord(chord) {
                 Some(b) => {
                     binds.push(b);
-                    actions.push(*action);
+                    actions.push(action.clone());
                 }
                 None => eprintln!("giest: global keybind key has no Windows virtual-key code"),
             }
@@ -4416,7 +4457,7 @@ impl App {
         render_state: Option<&egui_wgpu::RenderState>,
     ) {
         for i in crate::hotkey::fired() {
-            let Some(action) = self.global_actions.get(i).copied() else {
+            let Some(action) = self.global_actions.get(i).cloned() else {
                 continue;
             };
             if action == Action::ToggleQuickTerminal {

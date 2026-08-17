@@ -383,9 +383,42 @@ With Phase 0 done, the remaining Tier-1 items are mostly small, registry-backed 
 24. ✅ **`adjust_selection` + the `performable:` flag, rectangle selection, drag-past-edge
     autoscroll.** See the ledger below.
 25. ✅ **Read-only indicator**, and **secure input closed out as N/A** on Windows. See the ledger.
-26. Next: the `text:`/`csi:`/`esc:`/`set_*_title:` actions (which need `Action` to own strings — a
-    real refactor, see the keybind-coverage ledger), then key tables and the remaining trigger
-    flags (`all:`, `unconsumed:`).
+26. ✅ **`text:`/`csi:`/`esc:`/`set_*_title:`**, on an `Action` that now owns its strings. See the
+    ledger.
+27. Next: named key *tables* (`activate_key_table`), the remaining trigger flags (`all:`,
+    `unconsumed:`), `undo`/`redo`, and the inspector.
+
+### `text:` / `csi:` / `esc:` / `set_*_title:` — ✅ divergences
+
+The five actions the keybind-coverage ledger listed as "not possible without changing `Action`".
+`Action` now owns `Arc<str>` payloads and is `Clone` rather than `Copy`.
+
+- **The refactor was measured, not argued.** Dropping `Copy` produced 16 errors, all mechanical
+  (`.copied()` → `.cloned()`, `self` → `&self` on three methods, a few `.clone()`s at deferred-intent
+  sites). It was done as its own pass — everything compiling and all tests green with **no behaviour
+  change** — before a single new variant was added. The `const` action tables survived untouched,
+  which was the one thing that might have forced a bigger change.
+- **The `text:` escape grammar is ported, not invented.** Upstream runs the payload through
+  `config/string.zig`, which is **Zig string-literal escapes**: `\n \r \t \\ \' \" \xNN \u{...}`. A
+  different grammar here would produce a binding that looks right and sends the wrong bytes for a
+  real Ghostty config — `\x1b` being ESC is the whole point of the feature. A malformed escape fails
+  the *whole* payload rather than emitting it literally, which is also upstream's rule.
+- **Payloads are stored raw and decoded at send time**, like upstream. That is what makes `name()`
+  round-trip verbatim without a re-escaping pass, and it keeps the error where upstream puts it.
+- **`csi:` and `esc:` take their payloads raw** — no escape decoding at all. Upstream simply prints
+  `ESC [ {s}` and `ESC {s}`. Getting this backwards would break `csi:0m`.
+- **The payload is not trimmed**, and that is deliberate: a trailing space in `text:hello ` is part
+  of the text, and trimming would silently change what `csi:0m ` sends. So these prefixes are
+  matched against the *untrimmed* config value, ahead of the trim every other action name gets.
+- **`send_text` is not a paste.** It deliberately bypasses `Session::paste_str` — this is a fixed
+  string from the user's own config, not clipboard content, so bracketing it or raising a
+  paste-protection prompt would be wrong. It does scroll to the bottom (the user is "typing") and it
+  respects read-only, for the same reason keys do.
+- **`set_surface_title:` needed a per-pane title override**, which giest didn't have: the pane title
+  came straight from the engine. An **empty** payload clears the override and hands the title back
+  to the program — the only way to undo one.
+- Verified by tests over the escape grammar (including the malformed cases) and a round-trip over
+  every payload action, the untrimmed cases included.
 
 ### Read-only indicator, and secure input closed out as N/A — ✅ divergences
 
@@ -1003,10 +1036,9 @@ guessed at, and the ones needing no new subsystem are now wired: `clear_screen`,
   to equalize, but binding it must not log an "unknown action" a user cannot act on. *(It was
   mapped onto `ClearSelection` — a real action — so it silently dropped the selection; there is now
   an `Action::Noop`. See the selection-migration ledger.)*
-- **Not possible without changing `Action`:** `text:`, `csi:`, `esc:`, `set_tab_title:`,
-  `set_surface_title:` — all carry a string, and `Action` is `Copy` so a chosen action can outlive
-  the UI closure that produced it (the deferred-intent pattern used throughout `app.rs`). Making it
-  own strings is a real refactor, not an oversight.
+- **`text:`, `csi:`, `esc:`, `set_tab_title:`, `set_surface_title:` are now done.** They needed
+  `Action` to own strings, which it does — `Arc<str>` payloads, `Clone` instead of `Copy`. See their
+  own ledger; the refactor cost 16 mechanical errors, measured rather than estimated.
 - Still open and genuinely large: `undo`/`redo`, the inspector, key tables, and the finer-grained
   search actions (`start_search` / `navigate_search` / `search_selection`) against giest's single
   `toggle_search`.

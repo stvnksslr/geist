@@ -310,8 +310,20 @@ Beyond the defaults, these Ghostty actions are available to `keybind`:
 | `equalize_splits` | Accepted as a no-op: giest's splits are always 50/50, so there is nothing to equalize. It binds without error so a Ghostty config transfers cleanly. |
 | `adjust_selection:<dir>` | Move the selection's free end. All ten upstream directions: `left`, `right`, `up`, `down`, `page_up`, `page_down`, `home`, `end`, `beginning_of_line`, `end_of_line`. Bound to shift+arrows by default (as `performable:`). |
 
-Not available, because `Action` is a `Copy` type with no room for a string parameter:
-`text:`, `csi:`, `esc:`, `set_tab_title:`, `set_surface_title:`.
+These send text or set titles, and take their payload **verbatim** — nothing is trimmed, so a
+trailing space in `text:hello ` is part of the text:
+
+| Action | Notes |
+| --- | --- |
+| `text:<text>` | Send the text to the shell. Escapes are decoded first, using Ghostty's grammar: `\n`, `\r`, `\t`, `\\`, `\'`, `\"`, `\xNN`, `\u{...}`. So `text:\x1bOA` sends ESC O A. A malformed escape sends nothing and logs. |
+| `csi:<payload>` | Send `ESC [ <payload>` — the payload is raw, no escape decoding. `csi:0m` resets styles. |
+| `esc:<payload>` | Send `ESC <payload>`, also raw. |
+| `set_tab_title:<title>` | Rename the current tab. Empty restores the automatic title. |
+| `set_surface_title:<title>` | Override the focused pane's title, winning over the one the program sets via OSC 0/2. Empty hands it back to the program. |
+
+`text:`/`csi:`/`esc:` scroll the pane to the bottom (you just "typed"), and do nothing in a
+read-only pane. They are not pastes: `clipboard-paste-protection` doesn't apply, because the text
+comes from your own config rather than the clipboard.
 
 ### Window geometry
 

@@ -27,7 +27,7 @@ pub struct Chord {
 }
 
 /// What a key press means, given the keys already pressed in this sequence.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Lookup {
     /// A complete binding: run this.
     Action(Action),
@@ -102,7 +102,7 @@ impl Keymap {
             return Lookup::None;
         }
         if let Some(b) = self.binds.iter().rev().find(|b| b.seq == keys) {
-            return Lookup::Action(b.action);
+            return Lookup::Action(b.action.clone());
         }
         if self
             .binds
@@ -302,8 +302,8 @@ fn default_binds() -> Vec<Bind> {
         ("shift+up", Action::AdjustSelection(SelectionAdjust::Up)),
         ("shift+down", Action::AdjustSelection(SelectionAdjust::Down)),
     ];
-    let plain = DEFAULTS.iter().map(|(t, a)| (*t, *a, false));
-    let performable = PERFORMABLE.iter().map(|(t, a)| (*t, *a, true));
+    let plain = DEFAULTS.iter().map(|(t, a)| (*t, a.clone(), false));
+    let performable = PERFORMABLE.iter().map(|(t, a)| (*t, a.clone(), true));
     plain
         .chain(performable)
         .filter_map(|(t, action, performable)| {
@@ -511,7 +511,7 @@ mod tests {
             ("prompt_tab_title", Action::PromptTabTitle),
             ("quit", Action::Quit),
         ] {
-            assert_eq!(Action::from_name(name), Some(want), "{name}");
+            assert_eq!(Action::from_name(name), Some(want.clone()), "{name}");
             assert_eq!(want.name(), name, "name() must round-trip");
         }
         // Ghostty's alias for quit-by-closing-everything.
@@ -552,7 +552,7 @@ mod tests {
             Action::ScrollLines(-5),
             Action::ScrollPageFraction(50),
         ] {
-            assert_eq!(Action::from_name(&a.name()), Some(a), "{}", a.name());
+            assert_eq!(Action::from_name(&a.name()), Some(a.clone()), "{}", a.name());
         }
     }
 
@@ -564,7 +564,7 @@ mod tests {
             ("toggle_window_float_on_top", Action::ToggleFloatOnTop),
             ("toggle_background_opacity", Action::ToggleBackgroundOpacity),
         ] {
-            assert_eq!(Action::from_name(name), Some(want), "{name}");
+            assert_eq!(Action::from_name(name), Some(want.clone()), "{name}");
             assert_eq!(want.name(), name, "name() must round-trip");
         }
     }
@@ -800,7 +800,7 @@ mod tests {
             Action::ToggleFullscreen,
             Action::ScrollToRow(200),
         ] {
-            assert_eq!(Action::from_name(&a.name()), Some(a), "roundtrip {a:?}");
+            assert_eq!(Action::from_name(&a.name()), Some(a.clone()), "roundtrip {a:?}");
         }
     }
 

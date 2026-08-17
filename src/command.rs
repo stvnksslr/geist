@@ -7,6 +7,8 @@
 //! chosen `Action` onto its existing methods via `App::execute_action` —
 //! mirroring how Ghostty's palette is a thin layer over its keybind actions.
 
+use std::sync::Arc;
+
 /// The live state a *performable* binding is judged against.
 ///
 /// Deliberately a plain value rather than a borrow of the session: it is read by
@@ -23,13 +25,75 @@ pub struct PerformCtx {
 /// regardless. **One function for both gates** — a second opinion here means the
 /// key is either swallowed and does nothing, or reaches the shell *and* runs the
 /// action.
-pub fn can_perform(action: Action, ctx: PerformCtx) -> bool {
+pub fn can_perform(action: &Action, ctx: PerformCtx) -> bool {
     match action {
         // Upstream returns "not performed" with no selection, letting the key
         // fall through to the terminal (`Surface.zig`'s `.adjust_selection`).
         Action::AdjustSelection(_) => ctx.has_selection,
         _ => true,
     }
+}
+
+/// The `<prefix>:<payload>` actions, whose payload is taken verbatim.
+/// One table so parsing and [`Action::name`] cannot drift apart.
+type PayloadCtor = fn(Arc<str>) -> Action;
+const PAYLOAD_ACTIONS: &[(&str, PayloadCtor)] = &[
+    ("text:", Action::SendText),
+    ("csi:", Action::SendCsi),
+    ("esc:", Action::SendEsc),
+    ("set_tab_title:", Action::SetTabTitle),
+    ("set_surface_title:", Action::SetSurfaceTitle),
+];
+
+/// Decode a `text:` payload's escape sequences.
+///
+/// Ghostty runs these through `config/string.zig`, which is **Zig string-literal
+/// escapes**: `\n \r \t \\ \' \" \xNN \u{...}`. Ported rather than invented,
+/// because a different grammar here is silently incompatible with a real Ghostty
+/// config — the binding would "work" and send the wrong bytes.
+///
+/// Returns `None` on a malformed escape, which upstream also treats as a failure
+/// of the whole payload rather than emitting it literally.
+pub fn decode_escapes(s: &str) -> Option<String> {
+    let mut out = String::with_capacity(s.len());
+    let mut it = s.chars();
+    while let Some(c) = it.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match it.next()? {
+            'n' => out.push('\n'),
+            'r' => out.push('\r'),
+            't' => out.push('\t'),
+            '\\' => out.push('\\'),
+            '\'' => out.push('\''),
+            '"' => out.push('"'),
+            'x' => {
+                // Exactly two hex digits, and the *byte* they name — so `\x1b`
+                // is ESC. Zig requires both digits.
+                let hi = it.next()?.to_digit(16)?;
+                let lo = it.next()?.to_digit(16)?;
+                out.push(char::from_u32(hi * 16 + lo)?);
+            }
+            'u' => {
+                // `\u{1F600}` — braces required, hex inside.
+                if it.next()? != '{' {
+                    return None;
+                }
+                let mut hex = String::new();
+                loop {
+                    match it.next()? {
+                        '}' => break,
+                        d => hex.push(d),
+                    }
+                }
+                out.push(char::from_u32(u32::from_str_radix(&hex, 16).ok()?)?);
+            }
+            _ => return None,
+        }
+    }
+    Some(out)
 }
 
 /// Ghostty's `adjust_selection` parameter names, both ways.
@@ -70,7 +134,7 @@ fn adjust_from_name(s: &str) -> Option<crate::engine::SelectionAdjust> {
 /// `App`/`Session` method in `App::execute_action`; the palette never reaches
 /// into app internals itself. `Copy` so a chosen action survives past the UI
 /// closure that produced it (the deferred-intent pattern used throughout `app.rs`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
     /// Bind-able and does nothing, for a Ghostty action giest has no work to do
     /// for. Rejecting the name would log an "unknown action" the user cannot act
@@ -81,6 +145,20 @@ pub enum Action {
     /// Bound to shift+arrows and **performable**: with no selection the key is
     /// the shell's.
     AdjustSelection(crate::engine::SelectionAdjust),
+    /// Send literal text to the shell (Ghostty `text:`). The payload is stored
+    /// **raw** and its escapes are decoded at send time, exactly as upstream
+    /// does — which is also what makes `name()` round-trip without re-escaping.
+    SendText(Arc<str>),
+    /// Send `ESC [ <payload>` (Ghostty `csi:`). The payload is raw: upstream
+    /// does no escape decoding for this one.
+    SendCsi(Arc<str>),
+    /// Send `ESC <payload>` (Ghostty `esc:`). Raw, like `csi:`.
+    SendEsc(Arc<str>),
+    /// Rename the current tab (Ghostty `set_tab_title:`).
+    SetTabTitle(Arc<str>),
+    /// Override the focused pane's title (Ghostty `set_surface_title:`). An
+    /// empty value hands the title back to the program.
+    SetSurfaceTitle(Arc<str>),
     NewTab,
     /// Open a new tab running the shell profile at this index.
     NewTabWithProfile(usize),
@@ -183,12 +261,17 @@ impl Action {
     /// `Action` variant is a compile error until it gets a title (the per-profile
     /// `NewTabWithProfile` title is replaced at catalog-build time with the
     /// shell's name).
-    fn title(self) -> &'static str {
+    fn title(&self) -> &'static str {
         match self {
             // Never listed in the palette (see `CATALOG`), but `title` must be
             // total.
             Action::Noop => "Do Nothing",
             Action::AdjustSelection(_) => "Adjust Selection",
+            Action::SendText(_) => "Send Text",
+            Action::SendCsi(_) => "Send CSI Sequence",
+            Action::SendEsc(_) => "Send Escape Sequence",
+            Action::SetTabTitle(_) => "Set Tab Title",
+            Action::SetSurfaceTitle(_) => "Set Pane Title",
             Action::NewTab => "New Tab",
             Action::NewTabWithProfile(_) => "New Tab with Shell",
             Action::NewWindow => "New Window",
@@ -221,7 +304,7 @@ impl Action {
             Action::ToggleMouseReporting => "Toggle Mouse Reporting",
             Action::ToggleSearch => "Search Scrollback",
             Action::JumpToPrompt(d) => {
-                if d < 0 {
+                if *d < 0 {
                     "Jump to Previous Prompt"
                 } else {
                     "Jump to Next Prompt"
@@ -260,9 +343,15 @@ impl Action {
     /// The default keybinding label shown right-aligned in the palette (matching
     /// the bindings in `handle_shortcuts`/`decide_key`), or `None` for actions
     /// reachable only via the palette/menus.
-    fn keybind(self) -> Option<&'static str> {
+    fn keybind(&self) -> Option<&'static str> {
         Some(match self {
-            Action::Noop | Action::AdjustSelection(_) => return None,
+            Action::Noop
+            | Action::AdjustSelection(_)
+            | Action::SendText(_)
+            | Action::SendCsi(_)
+            | Action::SendEsc(_)
+            | Action::SetTabTitle(_)
+            | Action::SetSurfaceTitle(_) => return None,
             Action::NewTab => "Ctrl+Shift+T",
             Action::NewWindow => "Ctrl+Shift+N",
             Action::NextTab => "Ctrl+Tab",
@@ -284,7 +373,7 @@ impl Action {
             | Action::ToggleBackgroundOpacity
             | Action::ToggleMouseReporting => return None,
             Action::ToggleSearch => "Ctrl+Shift+F",
-            Action::JumpToPrompt(d) if d < 0 => "Ctrl+Shift+\u{2191}",
+            Action::JumpToPrompt(d) if *d < 0 => "Ctrl+Shift+\u{2191}",
             Action::JumpToPrompt(_) => "Ctrl+Shift+\u{2193}",
             Action::SplitRight => "Ctrl+Shift+D",
             Action::SplitDown => "Ctrl+Shift+E",
@@ -329,11 +418,17 @@ impl Action {
     /// `keybind = <trigger>=<name>` config lines and the inverse of
     /// [`Action::from_name`]. Parametrized actions encode the parameter
     /// (`goto_tab:2`, 1-based like Ghostty).
-    pub fn name(self) -> String {
+    pub fn name(&self) -> String {
         match self {
             // Round-trips as the Ghostty name it stands in for.
             Action::Noop => "equalize_splits".into(),
-            Action::AdjustSelection(d) => format!("adjust_selection:{}", adjust_name(d)),
+            Action::AdjustSelection(d) => format!("adjust_selection:{}", adjust_name(*d)),
+            // Payloads are stored raw, so these round-trip verbatim.
+            Action::SendText(s) => format!("text:{s}"),
+            Action::SendCsi(s) => format!("csi:{s}"),
+            Action::SendEsc(s) => format!("esc:{s}"),
+            Action::SetTabTitle(s) => format!("set_tab_title:{s}"),
+            Action::SetSurfaceTitle(s) => format!("set_surface_title:{s}"),
             Action::NewTab => "new_tab".into(),
             Action::NewTabWithProfile(i) => format!("new_tab_with_profile:{i}"),
             Action::NewWindow => "new_window".into(),
@@ -343,7 +438,7 @@ impl Action {
             Action::CloseTabsToRight => "close_tabs_to_right".into(),
             Action::NextTab => "next_tab".into(),
             Action::PrevTab => "previous_tab".into(),
-            Action::GotoTab(i) => format!("goto_tab:{}", i as u16 + 1),
+            Action::GotoTab(i) => format!("goto_tab:{}", *i as u16 + 1),
             Action::LastTab => "last_tab".into(),
             Action::SplitRight => "new_split:right".into(),
             Action::SplitDown => "new_split:down".into(),
@@ -383,7 +478,7 @@ impl Action {
             Action::SetFontSize(n) => format!("set_font_size:{n}"),
             Action::ScrollLines(n) => format!("scroll_page_lines:{n}"),
             Action::ScrollPageFraction(n) => {
-                format!("scroll_page_fractional:{}", f32::from(n) / 100.0)
+                format!("scroll_page_fractional:{}", f32::from(*n) / 100.0)
             }
             Action::Quit => "quit".into(),
             Action::PromptTabTitle => "prompt_tab_title".into(),
@@ -402,6 +497,14 @@ impl Action {
     /// `NewTabWithProfile` is intentionally not parseable (it is profile-relative
     /// and built only from the live profile list).
     pub fn from_name(s: &str) -> Option<Action> {
+        // The payload-carrying actions are matched against the **untrimmed**
+        // input: a trailing space in `text:hello ` is part of the text, and
+        // trimming `csi:0m ` would silently change the sequence sent.
+        for (prefix, make) in PAYLOAD_ACTIONS {
+            if let Some(rest) = s.strip_prefix(*prefix) {
+                return Some(make(Arc::from(rest)));
+            }
+        }
         let s = s.trim();
         if let Some(rest) = s.strip_prefix("goto_tab:") {
             // Ghostty's goto_tab is 1-based; giest indexes tabs from 0.
@@ -595,7 +698,7 @@ impl Command {
 /// The fixed command set (no per-profile rows). See [`build_catalog`] for the
 /// catalog the palette actually shows.
 pub fn base_catalog() -> Vec<Command> {
-    BASE_ACTIONS.iter().copied().map(Command::from_action).collect()
+    BASE_ACTIONS.iter().cloned().map(Command::from_action).collect()
 }
 
 /// The full palette catalog: the [`base_catalog`] plus one "New Tab with
@@ -721,6 +824,58 @@ pub fn filter_commands(catalog: &[Command], query: &str) -> Vec<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_payload_escapes_follow_ghosttys_grammar() {
+        // Ported from `config/string.zig`, which uses Zig string-literal
+        // escapes. Inventing a grammar here would produce a binding that looks
+        // right and sends the wrong bytes against a real Ghostty config.
+        let d = |s: &str| decode_escapes(s);
+        assert_eq!(d("hello").as_deref(), Some("hello"));
+        assert_eq!(d(r"a\nb").as_deref(), Some("a\nb"));
+        assert_eq!(d(r"\r\t").as_deref(), Some("\r\t"));
+        assert_eq!(d(r"\\").as_deref(), Some("\\"));
+        assert_eq!(d(r#"\'\""#).as_deref(), Some("'\""));
+        // `\x1b` is ESC — the reason this grammar matters at all.
+        assert_eq!(d(r"\x1bOA").as_deref(), Some("\x1bOA"));
+        assert_eq!(d(r"\u{1F600}").as_deref(), Some("😀"));
+        // Malformed escapes fail the whole payload rather than being emitted
+        // literally, which is upstream's behaviour too.
+        assert_eq!(d(r"\q"), None);
+        assert_eq!(d(r"\x1"), None, "\\x needs two digits");
+        // A `\u` escape without its braces (built by hand so the test source
+        // itself can't be misread as a Rust escape).
+        let no_braces = format!("{}u1F600", '\\');
+        assert_eq!(d(&no_braces), None, "the u escape needs braces");
+        assert_eq!(d("trailing\\"), None);
+    }
+
+    #[test]
+    fn payload_actions_parse_verbatim_and_round_trip() {
+        // The payload is *not* trimmed: a trailing space is part of the text,
+        // and trimming `csi:0m ` would change the sequence sent.
+        for raw in [
+            "text:hello world",
+            r"text:\x1bOA",
+            "text:trailing ",
+            "csi:0m",
+            "esc:OA",
+            "set_tab_title:build",
+            "set_surface_title:",
+        ] {
+            let a = Action::from_name(raw).unwrap_or_else(|| panic!("parsing {raw:?}"));
+            assert_eq!(a.name(), raw, "round-trip {raw:?}");
+        }
+        assert_eq!(
+            Action::from_name("csi:0m"),
+            Some(Action::SendCsi(Arc::from("0m")))
+        );
+        // An empty title payload is meaningful — it clears the override.
+        assert_eq!(
+            Action::from_name("set_surface_title:"),
+            Some(Action::SetSurfaceTitle(Arc::from("")))
+        );
+    }
 
     #[test]
     fn every_adjust_selection_direction_parses_and_round_trips() {

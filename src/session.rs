@@ -133,6 +133,9 @@ pub struct Session {
     /// once per *frame* instead would scroll at the refresh rate, which is
     /// upstream's speed at 60 Hz and more than twice it at 144 Hz.
     autoscroll_accum: f32,
+    /// Explicit pane title from `set_surface_title`, winning over the program's
+    /// own OSC 0/2 title until cleared with an empty value.
+    title_override: Option<String>,
     bell_pending: bool,
     /// egui-time deadline of the active visual bell flash, or `None` when idle.
     bell_flash_until: Option<f64>,
@@ -263,6 +266,7 @@ impl Session {
             cursor_style: config.cursor_style,
             cursor_style_blink: config.cursor_style_blink,
             autoscroll_accum: 0.0,
+            title_override: None,
             bell_pending: false,
             bell_flash_until: None,
             bell_effect_pending: false,
@@ -589,8 +593,19 @@ impl Session {
     }
 
     /// The shell-set window/tab title, if any.
+    /// The pane's title: an explicit override (Ghostty `set_surface_title`) if
+    /// one was set, otherwise whatever the program reported via OSC 0/2.
     pub fn title(&self) -> Option<String> {
-        self.engine.title()
+        self.title_override
+            .clone()
+            .or_else(|| self.engine.title())
+    }
+
+    /// Override the pane's title (Ghostty `set_surface_title`). An empty value
+    /// clears the override and hands the title back to the program, which is
+    /// the only way to undo one.
+    pub fn set_title_override(&mut self, title: &str) {
+        self.title_override = (!title.is_empty()).then(|| title.to_string());
     }
 
     /// The shell's current working directory (reported via OSC 7), as a usable
@@ -1054,6 +1069,21 @@ impl Session {
     /// were swallowed as they were typed, so if the sequence dies they have to
     /// be delivered late, in order, or `ctrl+a` followed by an unbound key would
     /// silently vanish. Ghostty flushes the same way.
+    /// Write `text` to the shell verbatim (Ghostty `text:` / `csi:` / `esc:`).
+    ///
+    /// **Not** a paste: it does not go through `paste_str`, because it isn't
+    /// clipboard content — it is a fixed string the user put in their own
+    /// config, so bracketing it or raising a paste-protection prompt for it
+    /// would be wrong. It does scroll to the bottom, since it is the user
+    /// "typing", and it respects read-only for the same reason keys do.
+    pub fn send_text(&mut self, text: &str) {
+        if text.is_empty() || self.readonly {
+            return;
+        }
+        self.scroll_target_px = 0.0;
+        let _ = self.pty.write(text.as_bytes());
+    }
+
     pub fn send_chords(&mut self, chords: &[crate::keybind::Chord]) {
         let mut bytes = Vec::new();
         for c in chords {
@@ -1810,7 +1840,7 @@ fn decide_key(
         let seq = std::slice::from_ref(&chord);
         let unperformable = keymap.is_performable(seq)
             && match keymap.lookup(&chord) {
-                Some(a) => !crate::command::can_perform(a, perform),
+                Some(a) => !crate::command::can_perform(&a, perform),
                 None => false,
             };
         if !unperformable {
