@@ -421,6 +421,20 @@ With Phase 0 done, the remaining Tier-1 items are mostly small, registry-backed 
   parser loops until nothing strips instead of testing one arrangement. `performable:unconsumed:`
   composes as upstream implies: unperformable is a plain fall-through (encode, no action), otherwise
   encode *and* run.
+- **A modifierless binding was typed *and* run — found by tracing, not by a test.** egui delivers a
+  printable key as an `Event::Key` **and** an `Event::Text`. `decide_key` swallows the Key, but the
+  Text arm wrote to the PTY unconditionally, so `copy/j=scroll_page_down` scrolled *and* typed `j`.
+  Nothing hit this before, because every binding had explicit modifiers and modified presses emit no
+  text — key tables and `catch_all` are the first way to bind a bare printable key, so **this was a
+  live bug in the key-table commit**, not just a `catch_all` concern. A swallowed press that will
+  produce text now suppresses the matching `Event::Text`. Scoped to the frame's event list, since
+  egui emits the pair back to back; and only presses that *can* produce text are counted (a
+  ctrl/alt/super combo emits none, so counting it would eat a later, unrelated character — shift is
+  deliberately not in that list, since `shift+a` types `A`). No unit test can see the event stream,
+  so the predicate is tested and the pairing is stated here.
+- **`unconsumed:` on a sequence applies to the completed binding.** The leader is still swallowed —
+  otherwise the sequence could never start — and upstream forbids sequences only for `global:`/
+  `all:`, so this is legal rather than rejected. Pinned by a test.
 - **Not done: `all:`.** It broadcasts a surface action to every pane, which is the same feature as
   the Tier-3 "broadcast input" line — they are **one** gap, not two, and it needs a broadcast path
   through `execute_action` rather than a parse change. `chain=` multi-action bindings are also still

@@ -1394,6 +1394,17 @@ impl Session {
         // deliberately excluded: they never reach the program, so clearing on
         // them would drop a selection the user is still working with.
         let mut typed = false;
+        // Printable keys arrive as an `Event::Key` **and** an `Event::Text` for
+        // the same press. A binding on a *modifierless* key — which only became
+        // possible with key tables and `catch_all` — is swallowed by the Key arm
+        // but would still be typed by the Text arm, so `copy/j=scroll_page_down`
+        // would scroll *and* type `j`. This counts the swallows that are about
+        // to produce text and skips that many Text events.
+        //
+        // Scoped to this frame's event list, so it cannot leak into the next
+        // one: egui emits the pair back to back, and anything left over is
+        // discarded when the loop ends.
+        let mut suppress_text = 0usize;
         for event in &events {
             match event {
                 // Raw wheel deltas set the scroll *target* immediately (no egui
@@ -1417,6 +1428,10 @@ impl Session {
                     self.scroll_target_px += pts * ppp;
                 }
                 egui::Event::Text(text) => {
+                    if suppress_text > 0 {
+                        suppress_text -= 1;
+                        continue;
+                    }
                     bytes.extend_from_slice(text.as_bytes());
                     typed = true;
                 }
@@ -1476,7 +1491,18 @@ impl Session {
                     // keys, which `App::handle_shortcuts` runs as actions) and
                     // text-producing keys (handled by the `Text` event) emit no
                     // bytes here.
-                    KeyAction::Swallow | KeyAction::Suppress => {}
+                    KeyAction::Swallow => {
+                        // …but a swallowed key that is *about* to produce a
+                        // `Text` event has to suppress that too, or the
+                        // character is typed anyway. Only a press that can
+                        // produce text counts: ctrl/alt/super combos emit no
+                        // `Text`, so counting them would eat a later, unrelated
+                        // character.
+                        if produces_text(*key, modifiers) {
+                            suppress_text += 1;
+                        }
+                    }
+                    KeyAction::Suppress => {}
                 },
                 _ => {}
             }
@@ -2176,6 +2202,22 @@ fn autoscroll_rows(accum: &mut f32, dir: isize, dt: f32) -> isize {
     dir * rows as isize
 }
 
+/// Whether this key press will also arrive as an `Event::Text`.
+///
+/// Only presses without ctrl/alt/super can: those modifiers suppress text entry
+/// on every platform egui runs on. Shift does not — `shift+a` types `A` — so it
+/// is deliberately not in the list. Used to keep a *swallowed* printable key
+/// from being typed anyway (see the suppression counter in `handle_input`).
+fn produces_text(key: egui::Key, m: &egui::Modifiers) -> bool {
+    if m.ctrl || m.alt || m.command || m.mac_cmd {
+        return false;
+    }
+    // A conservative allow-list: letters, digits and punctuation produce text;
+    // named keys (arrows, function keys, escape…) do not. `Key::name` is
+    // stable enough for this — a single-character name is a printable key.
+    key.name().chars().count() == 1
+}
+
 /// Whether these modifiers mean "select a rectangle" while dragging.
 ///
 /// Ghostty's `surface_mouse.zig::isRectangleSelectState`: **ctrl+alt** on every
@@ -2351,7 +2393,7 @@ fn is_text_producing(code: KeyCode) -> bool {
 mod tests {
     use super::{
         CommandFinish, CopyAction, KeyAction, bell_effect_due, cell_from_pos, copy_or_interrupt,
-        autoscroll_rows, find_url_at, format_duration, grid_dims, notch_split, osc7_to_path,
+        autoscroll_rows, find_url_at, produces_text, format_duration, grid_dims, notch_split, osc7_to_path,
         px_offset, osc52_reduce, scroll_split, scrollbar_rows, transient_alpha,
     };
     use crate::osc52::Osc52;
@@ -2437,6 +2479,31 @@ mod tests {
             0,
             "a fresh tick has to accumulate again"
         );
+    }
+
+    #[test]
+    fn only_text_producing_presses_suppress_a_text_event() {
+        // The predicate behind the double-delivery fix: a swallowed printable
+        // key must also swallow its `Event::Text`, and a swallowed *modified*
+        // combo must not — it produces no text, and counting it would eat the
+        // next unrelated character.
+        let none = egui::Modifiers::default();
+        let shift = egui::Modifiers {
+            shift: true,
+            ..Default::default()
+        };
+        let ctrl = egui::Modifiers {
+            ctrl: true,
+            ..Default::default()
+        };
+        assert!(produces_text(egui::Key::J, &none));
+        // Shift still types (`shift+a` is `A`), so it is not in the list.
+        assert!(produces_text(egui::Key::J, &shift));
+        assert!(!produces_text(egui::Key::J, &ctrl));
+        // Named keys never produce text.
+        assert!(!produces_text(egui::Key::ArrowLeft, &none));
+        assert!(!produces_text(egui::Key::F5, &none));
+        assert!(!produces_text(egui::Key::Escape, &none));
     }
 
     #[test]

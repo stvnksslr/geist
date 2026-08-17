@@ -701,6 +701,45 @@ mod tests {
     }
 
     #[test]
+    fn a_non_ignoring_catch_all_does_not_swallow_a_broken_sequence() {
+        // Upstream drops a broken sequence silently *only* when a `catch_all`
+        // would `ignore` the breaking key; any other catch_all still flushes,
+        // and its action does not run. The distinction lives in the app's
+        // dead-end branch, so what this pins is the input to that decision.
+        let ignoring = Keymap::from_config(&[
+            ("ctrl+a>n".into(), "new_tab".into()),
+            ("catch_all".into(), "ignore".into()),
+        ]);
+        assert!(matches!(
+            ignoring.lookup(&chord("x")),
+            Some(Action::Noop(ref n)) if &**n == "ignore"
+        ));
+
+        let scrolling = Keymap::from_config(&[
+            ("ctrl+a>n".into(), "new_tab".into()),
+            ("catch_all".into(), "scroll_page_down".into()),
+        ]);
+        assert_eq!(scrolling.lookup(&chord("x")), Some(Action::ScrollPageDown));
+        assert!(
+            !matches!(scrolling.lookup(&chord("x")), Some(Action::Noop(_))),
+            "not an ignore, so the sequence is flushed rather than dropped"
+        );
+    }
+
+    #[test]
+    fn unconsumed_applies_to_a_sequences_final_chord_only() {
+        // Upstream forbids sequences for `global:`/`all:` and says nothing about
+        // `unconsumed:`, so it is legal here — and applies to the binding, i.e.
+        // the completed sequence. The leader must still be swallowed, or the
+        // sequence could never start.
+        let km = Keymap::from_config(&[("unconsumed:ctrl+a>n".into(), "new_tab".into())]);
+        let (a, n) = (chord("ctrl+a"), chord("n"));
+        assert!(!km.is_unconsumed(&[], &[a]), "the leader is consumed");
+        assert!(km.is_unconsumed(&[], &[a, n]), "the complete binding is not");
+        assert_eq!(km.lookup_seq(&[a]), Lookup::Pending);
+    }
+
+    #[test]
     fn trigger_flags_stack_in_any_order() {
         // Upstream documents stacking (`global:unconsumed:…`) without fixing an
         // order, so both spellings must parse the same.
