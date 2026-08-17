@@ -47,6 +47,113 @@ struct Raster {
     min: (f32, f32),
 }
 
+/// Which synthetic styles to apply to a face's glyphs, when the configured
+/// family has no real face for the requested style (`font-synthetic-style`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Synth {
+    pub bold: bool,
+    pub italic: bool,
+}
+
+impl Synth {
+    fn any(self) -> bool {
+        self.bold || self.italic
+    }
+}
+
+/// Ghostty's synthetic-bold strength, in pixels.
+///
+/// Upstream emboldens the *outline* by `ceil(font_height * 64/2048)` in 26.6
+/// units, which works out to about `height / 32` pixels — a heuristic its
+/// comment says was tuned across many fonts. It has to scale with the size: a
+/// fixed 1px is invisible at 28px and clubby at 10px.
+fn embolden_strength(line_height: f32) -> f32 {
+    (line_height * 2.0).ceil() / 64.0
+}
+
+/// The italic shear coefficient: `tan(12°)`, upstream's angle.
+const ITALIC_SKEW: f32 = 0.212_556_5;
+
+/// Synthetic bold: dilate the coverage by `strength` pixels.
+///
+/// Upstream emboldens the glyph *outline* before rasterizing; giest has no
+/// outline access through ab_glyph, so this dilates the rasterized coverage
+/// instead — max-blended (never summed) so anti-aliased edges stay smooth
+/// rather than clipping to a hard block. Slightly chunkier than a real outline
+/// embolden, and it grows the bitmap rather than the glyph's advance, which is
+/// what a monospace cell wants anyway.
+fn embolden(src: &Raster, strength: f32) -> Raster {
+    let grow = (strength.round() as u32).max(1);
+    let (w, h) = (src.w + grow, src.h + grow);
+    let mut bitmap = vec![0u8; (w * h) as usize];
+    for dy in 0..=grow {
+        for dx in 0..=grow {
+            for y in 0..src.h {
+                for x in 0..src.w {
+                    let v = src.bitmap[(y * src.w + x) as usize];
+                    if v == 0 {
+                        continue;
+                    }
+                    let d = &mut bitmap[((y + dy) * w + (x + dx)) as usize];
+                    *d = (*d).max(v);
+                }
+            }
+        }
+    }
+    Raster {
+        bitmap,
+        w,
+        h,
+        // Growing symmetrically would shift the glyph right and down; upstream's
+        // embolden grows about the outline, so keep the original bearing and let
+        // the extra weight fall to the right and below, which is what a bold face
+        // does relative to its regular.
+        min: src.min,
+    }
+}
+
+/// Synthetic italic: shear the coverage by [`ITALIC_SKEW`] about the baseline.
+///
+/// `baseline_row` is the row within the bitmap where the baseline lies (i.e.
+/// `-min.1`): rows above it move right and any descender below moves left, so
+/// the glyph pivots on the baseline instead of leaning off the top of the cell.
+/// The buffer grows on both sides and `min.0` moves left by the descender-side
+/// growth — without that the glyph's bearing would be wrong and it would drift
+/// out of its cell.
+///
+/// Per-row integer shifts, so the slanted edges staircase slightly at small
+/// sizes. Upstream shears the outline before rasterizing and gets a clean edge.
+fn shear(src: &Raster, skew: f32, baseline_row: f32) -> Raster {
+    let shift_at = |y: u32| -> i32 { ((baseline_row - y as f32) * skew).round() as i32 };
+    let (mut lo, mut hi) = (0i32, 0i32);
+    for y in 0..src.h {
+        let s = shift_at(y);
+        lo = lo.min(s);
+        hi = hi.max(s);
+    }
+    let w = (src.w as i32 + hi - lo).max(1) as u32;
+    let mut bitmap = vec![0u8; (w * src.h) as usize];
+    for y in 0..src.h {
+        let s = shift_at(y) - lo;
+        for x in 0..src.w {
+            let v = src.bitmap[(y * src.w + x) as usize];
+            if v == 0 {
+                continue;
+            }
+            let tx = x as i32 + s;
+            if tx >= 0 && (tx as u32) < w {
+                bitmap[(y * w + tx as u32) as usize] = v;
+            }
+        }
+    }
+    Raster {
+        bitmap,
+        w,
+        h: src.h,
+        min: (src.min.0 + lo as f32, src.min.1),
+    }
+}
+
 /// Rasterize `glyph` (already scaled/positioned) from `font` into a [`Raster`],
 /// or `None` for outline-less glyphs (spaces, missing). Borrows only the font,
 /// so the caller can upload afterward without a borrow conflict.
@@ -256,14 +363,159 @@ const FONT_BOLD_ITALIC: &[u8] =
 /// built-in JetBrains Mono with the font's default OpenType features.
 #[derive(Clone, Debug, Default)]
 pub struct FontSpec {
-    /// Primary family (name or file path). `None` = built-in font.
-    pub family: Option<String>,
+    /// Families in order: the first that resolves is the primary, the rest are
+    /// a fallback chain tried before the system fonts. Empty = built-in font.
+    pub families: Vec<String>,
     /// Per-style family overrides; each falls back to `family` when `None`.
     pub family_bold: Option<String>,
     pub family_italic: Option<String>,
     pub family_bold_italic: Option<String>,
     /// OpenType feature specs (e.g. `-calt`, `ss01`, `cv01=2`) applied at shaping.
     pub features: Vec<String>,
+    /// The `adjust-*` metric modifiers.
+    pub adjust: crate::config::MetricAdjust,
+    /// Which missing styles may be synthesized (`font-synthetic-style`).
+    pub synthetic: crate::config::SyntheticStyle,
+}
+
+/// The cell and decoration metrics the renderer draws from, in physical pixels,
+/// after the `adjust-*` modifiers.
+///
+/// Mirrors Ghostty's `font.Metrics`, including its sign conventions: every
+/// *position* is measured from the **top of the cell** (so an overline sits at
+/// 0), while `ascent` is the top-to-baseline distance. Positions and thicknesses
+/// are adjusted differently on purpose — a thickness is clamped to ≥1 (an
+/// invisible line reads as a missing glyph), a position is not (zero and
+/// negative are meaningful there).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CellMetrics {
+    pub cell_w: f32,
+    pub cell_h: f32,
+    /// Top of the cell to the text baseline.
+    pub ascent: f32,
+    /// Top of the cell to the top of the underline.
+    pub underline_pos: f32,
+    pub underline_thick: f32,
+    pub strikethrough_pos: f32,
+    pub strikethrough_thick: f32,
+    pub overline_pos: f32,
+    pub overline_thick: f32,
+    /// Width of a bar cursor / thickness of an underline or hollow cursor.
+    pub cursor_thick: f32,
+    /// Height of the cursor, anchored to the bottom of the cell.
+    pub cursor_height: f32,
+    /// Thickness of the drawn box-drawing lines.
+    pub box_thick: f32,
+}
+
+/// Derive the cell and decoration metrics for a face at `px`, then apply the
+/// `adjust-*` modifiers. A free function of the raw font metrics so the whole
+/// derivation is unit-testable without a GPU or a font file.
+///
+/// `raw` is what the font says: `(advance, ascent, descent, line_gap,
+/// underline_pos_below_baseline, underline_thick, strikethrough_pos_above_baseline,
+/// strikethrough_thick)`, all already scaled to pixels.
+#[allow(clippy::too_many_arguments)]
+pub fn derive_metrics(raw: RawFontMetrics, adjust: &crate::config::MetricAdjust) -> CellMetrics {
+    // `adjust-cell-*` is applied **before** the ceil, not after. A 4% adjustment
+    // on a 9.6px advance would otherwise be entirely eaten by the rounding that
+    // already happened — the same trap `window-position-*` hit with DPI.
+    // …and the cell dimensions `ceil`, they don't round: a 6.36px advance is a
+    // 7px cell, and rounding it to 6 costs every column a pixel.
+    let cell_w = adjust.cell_width.apply(raw.advance).ceil().max(1.0);
+    let raw_h = raw.ascent - raw.descent + raw.line_gap;
+    let cell_h = adjust.cell_height.apply(raw_h).ceil().max(1.0);
+
+    // The face is *centered* in an adjusted cell rather than pinned to the top,
+    // so `adjust-cell-height` reads as line spacing (Ghostty splits the diff
+    // between the top and the bottom the same way). Half the growth goes above
+    // the text, which is why the baseline moves with it.
+    let half = ((cell_h - raw_h) / 2.0).round();
+    // `adjust-font-baseline` is documented as a distance from the *bottom* of the
+    // cell, so a positive value lifts the text — hence the subtraction.
+    let ascent = (raw.ascent + half - adjust.font_baseline.apply(0.0)).round();
+
+    let underline_thick = adjust.underline_thickness.apply_thickness(raw.underline_thick);
+    let strikethrough_thick = adjust
+        .strikethrough_thickness
+        .apply_thickness(raw.strikethrough_thick);
+    CellMetrics {
+        cell_w,
+        cell_h,
+        ascent,
+        // Font metrics give the underline as a distance *below* the baseline;
+        // positions here are from the top of the cell.
+        underline_pos: adjust
+            .underline_position
+            .apply((ascent + raw.underline_pos).round()),
+        underline_thick,
+        strikethrough_pos: adjust
+            .strikethrough_position
+            .apply((ascent - raw.strikethrough_pos).round()),
+        strikethrough_thick,
+        // Upstream's defaults: the overline sits at the very top of the cell and
+        // shares the underline's thickness, as do the box-drawing lines.
+        overline_pos: adjust.overline_position.apply(0.0),
+        overline_thick: adjust.overline_thickness.apply_thickness(underline_thick),
+        cursor_thick: adjust.cursor_thickness.apply_thickness(underline_thick),
+        cursor_height: adjust.cursor_height.apply_thickness(cell_h),
+        box_thick: adjust.box_thickness.apply_thickness(underline_thick),
+    }
+}
+
+/// Read the raw metrics from a face at `px`.
+///
+/// The cell box comes from ab_glyph (which is what rasterizes), while the
+/// underline and strikeout lines come from the **ttf-parser** face behind
+/// rustybuzz — ab_glyph exposes no `post`/`OS/2` line metrics at all. Both
+/// describe the same face, so mixing the two is safe; the alternative would be
+/// deriving the decorations from the cell box, which is what giest did before
+/// and is why underlines sat at a hardcoded 7% of the cell.
+fn raw_metrics(font: &FontRef<'static>, face: &ShapeFace<'static>, px: f32) -> RawFontMetrics {
+    let scaled = font.as_scaled(PxScale::from(px));
+    let upem = face.units_per_em() as f32;
+    let scale = if upem > 0.0 { px / upem } else { 0.0 };
+    // Fallbacks mirror Ghostty's estimates for a font that declares neither: an
+    // underline one thickness below the baseline, and a strikethrough centred on
+    // half the ex-height.
+    let underline = face.underline_metrics();
+    let strikeout = face.strikeout_metrics();
+    let underline_thick = underline.map_or(0.0, |m| m.thickness as f32 * scale).max(1.0);
+    let x_height = face.x_height().unwrap_or(0) as f32 * scale;
+    RawFontMetrics {
+        advance: scaled.h_advance(font.glyph_id(' ')),
+        ascent: scaled.ascent(),
+        descent: scaled.descent(),
+        line_gap: scaled.line_gap(),
+        // ttf-parser reports the underline position as the (negative) distance
+        // from the baseline to the line's *centre*, positive-up; we want the
+        // distance down to its top.
+        underline_pos: underline
+            .map_or(underline_thick, |m| -(m.position as f32 * scale) - underline_thick / 2.0),
+        underline_thick,
+        strikethrough_pos: strikeout
+            .map_or(x_height / 2.0, |m| m.position as f32 * scale + m.thickness as f32 * scale),
+        strikethrough_thick: strikeout
+            .map_or(underline_thick, |m| m.thickness as f32 * scale)
+            .max(1.0),
+    }
+}
+
+/// The raw, pixel-scaled metrics [`derive_metrics`] works from.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RawFontMetrics {
+    /// Advance width of a space (the monospace cell width).
+    pub advance: f32,
+    pub ascent: f32,
+    /// Negative, as fonts report it.
+    pub descent: f32,
+    pub line_gap: f32,
+    /// Distance *below* the baseline to the top of the underline.
+    pub underline_pos: f32,
+    pub underline_thick: f32,
+    /// Distance *above* the baseline to the top of the strikethrough.
+    pub strikethrough_pos: f32,
+    pub strikethrough_thick: f32,
 }
 
 /// Style index into the font table: bit 0 = bold, bit 1 = italic.
@@ -384,7 +636,18 @@ fn scan_fonts(
 }
 
 /// Resolve a font `family` + exact style to its data and face index, or `None`.
+///
+/// A `family` that names a **file** is style-checked against the file's own OS/2
+/// bits rather than accepted outright. `scan_fonts` takes a path as "use this
+/// file", which is right for the primary slot but would otherwise claim the file
+/// satisfies *every* style — so a path-configured font would report a real bold
+/// face it doesn't have, and never synthesize one.
 fn find_font(family: &str, bold: bool, italic: bool) -> Option<(&'static [u8], u32)> {
+    if Path::new(family.trim()).is_file() {
+        let (bytes, idx) = scan_fonts(family, |_| true)?;
+        let face = ttf_parser::Face::parse(bytes, idx).ok()?;
+        return (face.is_bold() == bold && face.is_italic() == italic).then_some((bytes, idx));
+    }
     scan_fonts(family, |face| face_matches(face, family, bold, italic))
 }
 
@@ -396,6 +659,10 @@ fn find_font(family: &str, bold: bool, italic: bool) -> Option<(&'static [u8], u
 fn find_regular_font(family: &str) -> Option<(&'static [u8], u32)> {
     find_font(family, false, false)
         .or_else(|| scan_fonts(family, |face| family_name_matches(face, family)))
+        // A path is an explicit choice of file: the primary slot uses it whatever
+        // its style bits say (`find_font` above only style-checks it so the
+        // *synthesis* decision is honest).
+        .or_else(|| scan_fonts(family, |_| true).filter(|_| Path::new(family.trim()).is_file()))
 }
 
 /// Resolve the four style slots (regular, bold, italic, bold-italic) to font
@@ -403,40 +670,55 @@ fn find_regular_font(family: &str) -> Option<(&'static [u8], u32)> {
 /// found is reported and ignored (the built-in font is kept rather than half
 /// applying); missing style variants of a found family fall back to that
 /// family's regular face, then to the built-in per-slot face.
-fn resolve_slots(spec: &FontSpec) -> [(&'static [u8], u32); 4] {
+/// Also decides, per slot, whether the style must be **synthesized**: a slot
+/// that fell back to a face which isn't really the requested style gets an
+/// embolden and/or a shear (unless `font-synthetic-style` disables it), which is
+/// upstream's rule — "if the font has the requested style, the font is used
+/// as-is". The decision is made from what actually resolved rather than from
+/// which config key was set, so the fallback *chain* can't quietly change it.
+fn resolve_slots(spec: &FontSpec) -> ([(&'static [u8], u32); 4], [Synth; 4]) {
     let embedded = [
         (FONT_REGULAR, 0u32),
         (FONT_BOLD, 0),
         (FONT_ITALIC, 0),
         (FONT_BOLD_ITALIC, 0),
     ];
+    let primary = spec.families.first().map(String::as_str);
     // The family for each slot: a per-style override, else the primary family.
-    fn slot_family<'a>(over: &'a Option<String>, primary: &'a Option<String>) -> Option<&'a str> {
-        over.as_deref().or(primary.as_deref())
+    fn slot_family<'a>(over: &'a Option<String>, primary: Option<&'a str>) -> Option<&'a str> {
+        over.as_deref().or(primary)
     }
     let slots = [
-        (slot_family(&spec.family, &spec.family), false, false),
-        (slot_family(&spec.family_bold, &spec.family), true, false),
-        (slot_family(&spec.family_italic, &spec.family), false, true),
-        (slot_family(&spec.family_bold_italic, &spec.family), true, true),
+        (primary, false, false),
+        (slot_family(&spec.family_bold, primary), true, false),
+        (slot_family(&spec.family_italic, primary), false, true),
+        (slot_family(&spec.family_bold_italic, primary), true, true),
     ];
 
-    let regular = slots[0].0.and_then(find_regular_font);
+    let regular = primary.and_then(find_regular_font);
     // If the primary family is set but unresolvable (and no per-style override is
     // picking up the slack), keep the built-in font entirely.
-    if spec.family.is_some()
+    if primary.is_some()
         && regular.is_none()
         && spec.family_bold.is_none()
         && spec.family_italic.is_none()
         && spec.family_bold_italic.is_none()
     {
-        if let Some(f) = spec.family.as_deref() {
+        if let Some(f) = primary {
             eprintln!("giest: font-family '{f}' not found; using the built-in font");
         }
-        return embedded;
+        return (embedded, [Synth::default(); 4]);
     }
 
     let mut out = embedded;
+    let mut synth = [Synth::default(); 4];
+    // Which styled slots found a *real* face for their style. Computed first
+    // because the bold-italic rule depends on the other two.
+    let real: [bool; 4] = std::array::from_fn(|i| {
+        let (family, bold, italic) = slots[i];
+        i == 0 || family.is_some_and(|f| find_font(f, bold, italic).is_some())
+    });
+
     for (i, (family, bold, italic)) in slots.into_iter().enumerate() {
         // Regular slot: the tolerant lookup. Styled slots: exact style → the
         // family's regular → built-in for this slot.
@@ -449,7 +731,36 @@ fn resolve_slots(spec: &FontSpec) -> [(&'static [u8], u32); 4] {
             out[i] = found;
         }
     }
-    out
+    // Nothing to synthesize when no family resolved: the built-in font has all
+    // four real styles.
+    if regular.is_none() {
+        return (out, synth);
+    }
+    if !real[1] && spec.synthetic.bold {
+        synth[1].bold = true;
+    }
+    if !real[2] && spec.synthetic.italic {
+        synth[2].italic = true;
+    }
+    if !real[3] && spec.synthetic.bold_italic {
+        // Upstream's preference order: shear the real bold if there is one, else
+        // embolden the real italic, else do both to the regular. Slot 3 already
+        // holds the family's regular here, so point it at whichever real styled
+        // face exists.
+        if real[1] {
+            out[3] = out[1];
+            synth[3].italic = true;
+        } else if real[2] {
+            out[3] = out[2];
+            synth[3].bold = true;
+        } else {
+            synth[3] = Synth {
+                bold: true,
+                italic: true,
+            };
+        }
+    }
+    (out, synth)
 }
 
 /// How a glyph should be fitted to the terminal cell. Most characters are
@@ -576,6 +887,17 @@ pub struct Atlas {
     fallback_cache: HashMap<char, Option<GlyphInfo>>,
     /// Color emoji glyphs cached by character.
     color_cache: HashMap<char, Option<GlyphInfo>>,
+    /// Sprite glyphs (box drawing / blocks / braille that giest draws itself)
+    /// cached by character. Cleared with the rest on a font resize, since a
+    /// sprite is drawn from the *cell* metrics and every one changes.
+    sprite_cache: HashMap<char, Option<GlyphInfo>>,
+    /// The `adjust-*` modifiers, kept so a font resize can re-derive.
+    adjust: crate::config::MetricAdjust,
+    /// Per-slot synthetic styling, decided once at load from what actually
+    /// resolved (see `resolve_slots`).
+    synth: [Synth; 4],
+    /// Cell and decoration metrics, after the `adjust-*` modifiers.
+    pub metrics: CellMetrics,
     /// Shaped-run cache, one map per style index, keyed by the run's text. Lets
     /// repeated frames skip rustybuzz for unchanged rows. Cleared on font resize
     /// (glyph ids change) and when it grows past `SHAPE_CACHE_CAP`.
@@ -599,7 +921,7 @@ impl Atlas {
         // Resolve the four style slots to font data + face index (built-in font
         // when unconfigured / unresolved), then build the rasterizer and shaper
         // faces over the same bytes per slot.
-        let slots = resolve_slots(spec);
+        let (slots, synth) = resolve_slots(spec);
         let face = |i: usize| -> (FontRef<'static>, ShapeFace<'static>) {
             let (bytes, idx) = slots[i];
             // The built-in fonts always parse; a resolved user font that fails to
@@ -626,6 +948,18 @@ impl Atlas {
         // Load whichever system fallback fonts are present; missing ones are
         // simply skipped (e.g. a stripped-down Windows install).
         let mut fallbacks = Vec::new();
+        // The user's own `font-family` chain comes first: a second family is
+        // configured precisely to cover what the primary lacks, so it must beat
+        // the system fonts. The primary itself is skipped — it is `fonts[0]` and
+        // this list is only consulted for characters it doesn't have.
+        for family in spec.families.iter().skip(1) {
+            match find_regular_font(family)
+                .and_then(|(bytes, idx)| FontVec::try_from_vec_and_index(bytes.to_vec(), idx).ok())
+            {
+                Some(font) => fallbacks.push(font),
+                None => eprintln!("giest: font-family '{family}' not found; skipping it"),
+            }
+        }
         for (path, index) in FALLBACK_FONTS {
             if let Ok(bytes) = std::fs::read(path) {
                 if let Ok(font) = FontVec::try_from_vec_and_index(bytes, *index) {
@@ -634,10 +968,8 @@ impl Atlas {
             }
         }
 
-        let scaled = fonts[0].as_scaled(PxScale::from(px));
-        let cell_w = scaled.h_advance(fonts[0].glyph_id(' ')).ceil();
-        let ascent = scaled.ascent();
-        let cell_h = (scaled.ascent() - scaled.descent() + scaled.line_gap()).ceil();
+        let metrics = derive_metrics(raw_metrics(&fonts[0], &shapers[0], px), &spec.adjust);
+        let (cell_w, cell_h, ascent) = (metrics.cell_w, metrics.cell_h, metrics.ascent);
 
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("glyph-atlas"),
@@ -690,6 +1022,10 @@ impl Atlas {
             cache: HashMap::new(),
             fallback_cache: HashMap::new(),
             color_cache: HashMap::new(),
+            sprite_cache: HashMap::new(),
+            adjust: spec.adjust,
+            synth,
+            metrics,
             shape_cache: (0..4).map(|_| HashMap::new()).collect(),
             pen_x: 0,
             pen_y: 0,
@@ -712,14 +1048,15 @@ impl Atlas {
     /// glyphs re-rasterize at the new size into the (reused) atlas texture.
     /// Reusing the texture keeps the existing bind group valid.
     pub fn set_px(&mut self, px: f32) {
-        let scaled = self.fonts[0].as_scaled(PxScale::from(px));
-        self.cell_w = scaled.h_advance(self.fonts[0].glyph_id(' ')).ceil();
-        self.ascent = scaled.ascent();
-        self.cell_h = (scaled.ascent() - scaled.descent() + scaled.line_gap()).ceil();
+        self.metrics = derive_metrics(raw_metrics(&self.fonts[0], &self.shapers[0], px), &self.adjust);
+        self.cell_w = self.metrics.cell_w;
+        self.ascent = self.metrics.ascent;
+        self.cell_h = self.metrics.cell_h;
         self.px = px;
         self.cache.clear();
         self.fallback_cache.clear();
         self.color_cache.clear();
+        self.sprite_cache.clear();
         // Shaped runs (glyph ids) are size-independent, so this isn't required for
         // correctness, but a font resize is a natural point to bound cache memory.
         for m in &mut self.shape_cache {
@@ -791,6 +1128,45 @@ impl Atlas {
         let info = self.rasterize(glyph_id, style, constraint, span, queue);
         self.cache.insert((glyph_id, style, constraint), info);
         info
+    }
+
+    /// A **sprite** glyph: box drawing, block elements or braille, drawn by
+    /// giest from the cell metrics rather than taken from the font.
+    ///
+    /// `None` for anything [`crate::sprite::covers`] doesn't claim, which is the
+    /// signal to fall through to the normal font path. Checked *before* the
+    /// font, matching Ghostty's `CodepointResolver` — these characters are
+    /// defined relative to the cell, so the drawn version is right in every font
+    /// and the font's is only ever right by luck.
+    pub fn sprite_glyph(&mut self, ch: char, queue: &wgpu::Queue) -> Option<GlyphInfo> {
+        if !crate::sprite::covers(ch) {
+            return None;
+        }
+        if let Some(info) = self.sprite_cache.get(&ch) {
+            return *info;
+        }
+        let info = self.rasterize_sprite(ch, queue);
+        self.sprite_cache.insert(ch, info);
+        info
+    }
+
+    /// The cell metrics a sprite is drawn against, with `adjust-box-thickness`
+    /// applied. Rounded the same way the renderer rounds a cell rect, so the
+    /// drawn tile lands on exactly the pixels the cell occupies.
+    fn sprite_metrics(&self) -> crate::sprite::Metrics {
+        crate::sprite::Metrics {
+            w: self.cell_w.ceil().max(1.0) as u32,
+            h: self.cell_h.ceil().max(1.0) as u32,
+            // Font-derived now (the underline thickness, like upstream), not a
+            // fraction of the cell height.
+            thickness: self.metrics.box_thick.max(1.0) as u32,
+        }
+    }
+
+    fn rasterize_sprite(&mut self, ch: char, queue: &wgpu::Queue) -> Option<GlyphInfo> {
+        let m = self.sprite_metrics();
+        let coverage = crate::sprite::draw(ch, m)?;
+        Some(self.upload_coverage(&coverage, m.w, m.h, queue))
     }
 
     /// Resolve `ch` the primary font lacks: prefer a COLR/CPAL color glyph
@@ -958,14 +1334,43 @@ impl Atlas {
                 let glyph = GlyphId(glyph_id)
                     .with_scale_and_position(PxScale { x: sx, y: sy }, point(0.0, 0.0));
                 let raster = outline_to_bitmap(font, glyph)?;
+                // No synthesis on a `Fill` glyph: box/block characters are drawn
+                // by `crate::sprite` anyway, and stretching one to the cell and
+                // *then* emboldening it would push it past the cell's edges and
+                // break the seamless tiling that constraint exists for.
                 Some(self.upload_fill(raster, span, fill_baseline, queue))
             }
             _ => {
                 let glyph = GlyphId(glyph_id).with_scale_and_position(self.px, point(0.0, 0.0));
                 let raster = outline_to_bitmap(&self.fonts[style], glyph)?;
+                let raster = self.synthesize(raster, style);
                 let info = self.upload(raster, queue);
                 Some(self.constrain(info, constraint, span))
             }
+        }
+    }
+
+    /// Apply this slot's synthetic styling to a rasterized glyph, if any.
+    ///
+    /// Bold before italic: emboldening a sheared bitmap would thicken it along
+    /// the slant and make the stems look uneven, which is also the order
+    /// upstream composes them in (it emboldens the outline, then skews it).
+    fn synthesize(&self, raster: Raster, style: usize) -> Raster {
+        let synth = self.synth[style];
+        if !synth.any() {
+            return raster;
+        }
+        let raster = if synth.bold {
+            embolden(&raster, embolden_strength(self.cell_h))
+        } else {
+            raster
+        };
+        if synth.italic {
+            // `min.1` is the top of the bitmap relative to the baseline (negative
+            // above it), so `-min.1` is the baseline's row within the bitmap.
+            shear(&raster, ITALIC_SKEW, -raster.min.1)
+        } else {
+            raster
         }
     }
 
@@ -1029,6 +1434,21 @@ impl Atlas {
                 *d = (*d).max(v);
             }
         }
+        self.upload_coverage(&canvas, cw, ch, queue)
+    }
+
+    /// Pack a `w × h` cell-sized coverage tile into the atlas as a `Fill` glyph.
+    ///
+    /// Shared by the stretched-font path ([`Self::upload_fill`]) and the drawn
+    /// sprites, which produce the same thing by different means: a buffer that
+    /// covers the cell exactly and is drawn at the cell origin.
+    fn upload_coverage(
+        &mut self,
+        canvas: &[u8],
+        cw: u32,
+        ch: u32,
+        queue: &wgpu::Queue,
+    ) -> GlyphInfo {
         let (ax, ay) = self.alloc(cw, ch);
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
@@ -1037,7 +1457,7 @@ impl Atlas {
                 origin: wgpu::Origin3d { x: ax, y: ay, z: 0 },
                 aspect: wgpu::TextureAspect::All,
             },
-            &canvas,
+            canvas,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(cw),
@@ -1136,12 +1556,111 @@ mod tests {
         COLOR_FONT, ColorFont, Constraint, FALLBACK_FONTS, FONT_BOLD, FONT_BOLD_ITALIC,
         FONT_ITALIC, FONT_REGULAR, Feature, FontSpec, LayerCollector, ShapeFace, classify,
         composite_color_layers, face_matches, family_name_matches, find_font, find_regular_font,
-        fit_scale, has_4char_tag, parse_features, resolve_slots,
+        derive_metrics, fit_scale, has_4char_tag, parse_features, resolve_slots, RawFontMetrics,
+        Raster, Synth, embolden, embolden_strength, shear, ITALIC_SKEW,
     };
+    use crate::config::MetricAdjust;
     use ab_glyph::{Font, FontRef, FontVec};
     use rustybuzz::ttf_parser;
     use rustybuzz::{Direction, UnicodeBuffer};
     use std::str::FromStr;
+
+    /// A plausible 14px face: 10×20 cell, underline 2px below the baseline.
+    fn raw() -> RawFontMetrics {
+        RawFontMetrics {
+            advance: 10.0,
+            ascent: 16.0,
+            descent: -4.0,
+            line_gap: 0.0,
+            underline_pos: 2.0,
+            underline_thick: 1.0,
+            strikethrough_pos: 5.0,
+            strikethrough_thick: 1.0,
+        }
+    }
+
+    #[test]
+    fn metrics_without_adjustments_follow_the_font() {
+        let m = derive_metrics(raw(), &MetricAdjust::default());
+        assert_eq!((m.cell_w, m.cell_h), (10.0, 20.0));
+        assert_eq!(m.ascent, 16.0);
+        // Positions are measured from the top of the cell.
+        assert_eq!(m.underline_pos, 18.0, "baseline 16 + 2 below it");
+        assert_eq!(m.strikethrough_pos, 11.0, "baseline 16 - 5 above it");
+        // Upstream's defaults for the metrics no font provides.
+        assert_eq!(m.overline_pos, 0.0, "the overline is the top of the cell");
+        assert_eq!(m.overline_thick, m.underline_thick);
+        assert_eq!(m.box_thick, m.underline_thick);
+        assert_eq!(m.cursor_height, m.cell_h);
+    }
+
+    #[test]
+    fn adjust_cell_height_centres_the_text_and_moves_the_decorations_with_it() {
+        // The line-spacing case: +8px of cell height puts 4 above the text.
+        let mut a = MetricAdjust::default();
+        a.cell_height = crate::config::MetricModifier::Pixels(8);
+        let m = derive_metrics(raw(), &a);
+        assert_eq!(m.cell_h, 28.0);
+        assert_eq!(m.ascent, 20.0, "half the growth goes above the baseline");
+        // The underline follows the baseline rather than staying put, or it would
+        // drift into the text as the spacing grows.
+        assert_eq!(m.underline_pos, 22.0);
+        assert_eq!(m.cell_w, 10.0, "height alone must not change the width");
+    }
+
+    #[test]
+    fn adjust_cell_width_is_applied_before_the_ceil() {
+        // The trap: with a fractional advance the ceil has already eaten a small
+        // percentage adjustment, so applying it afterwards does nothing.
+        let mut fractional = raw();
+        fractional.advance = 9.6;
+        let mut a = MetricAdjust::default();
+        a.cell_width = crate::config::MetricModifier::Percent(0.04);
+        assert_eq!(derive_metrics(fractional, &a).cell_w, 10.0);
+        // …and the same adjustment on a whole-pixel advance still moves it.
+        a.cell_width = crate::config::MetricModifier::Pixels(2);
+        assert_eq!(derive_metrics(raw(), &a).cell_w, 12.0);
+    }
+
+    #[test]
+    fn positions_and_thicknesses_adjust_independently() {
+        let mut a = MetricAdjust::default();
+        a.underline_position = crate::config::MetricModifier::Pixels(3);
+        a.underline_thickness = crate::config::MetricModifier::Pixels(2);
+        a.strikethrough_position = crate::config::MetricModifier::Pixels(-2);
+        a.overline_position = crate::config::MetricModifier::Pixels(1);
+        let m = derive_metrics(raw(), &a);
+        assert_eq!(m.underline_pos, 21.0);
+        assert_eq!(m.underline_thick, 3.0);
+        assert_eq!(m.strikethrough_pos, 9.0);
+        assert_eq!(m.overline_pos, 1.0);
+        // The overline and box thicknesses default *from* the underline's, so an
+        // underline adjustment carries into them unless they say otherwise.
+        assert_eq!(m.overline_thick, 3.0);
+        assert_eq!(m.box_thick, 3.0);
+    }
+
+    #[test]
+    fn a_thickness_can_never_be_adjusted_to_zero() {
+        let mut a = MetricAdjust::default();
+        a.underline_thickness = crate::config::MetricModifier::Percent(-1.0);
+        a.cursor_thickness = crate::config::MetricModifier::Pixels(-50);
+        let m = derive_metrics(raw(), &a);
+        assert_eq!(m.underline_thick, 1.0);
+        assert_eq!(m.cursor_thick, 1.0);
+        // A position, by contrast, may go negative — that is a real placement.
+        a.overline_position = crate::config::MetricModifier::Pixels(-3);
+        assert_eq!(derive_metrics(raw(), &a).overline_pos, -3.0);
+    }
+
+    #[test]
+    fn adjust_font_baseline_lifts_the_text_off_the_bottom() {
+        let mut a = MetricAdjust::default();
+        // Documented as a distance from the *bottom* of the cell, so a positive
+        // value moves the text up — which is a *smaller* top-to-baseline ascent.
+        a.font_baseline = crate::config::MetricModifier::Pixels(2);
+        assert_eq!(derive_metrics(raw(), &a).ascent, 14.0);
+    }
 
     #[test]
     fn color_emoji_composites_to_colored_rgba() {
@@ -1328,20 +1847,156 @@ mod tests {
         // With no family configured, every slot is the built-in JetBrains Mono.
         // (Compare by content — a `const` may be duplicated in rodata, so pointer
         // identity isn't reliable; `==` is a cheap memcmp here.)
-        let slots = resolve_slots(&FontSpec::default());
+        let (slots, synth) = resolve_slots(&FontSpec::default());
         assert!(slots[0].0 == FONT_REGULAR && slots[0].1 == 0);
         assert!(slots[1].0 == FONT_BOLD);
         assert!(slots[2].0 == FONT_ITALIC);
         assert!(slots[3].0 == FONT_BOLD_ITALIC);
+        // The built-in font has all four real styles, so nothing is synthesized.
+        assert_eq!(synth, [Synth::default(); 4]);
+    }
+
+    /// A 4×4 solid square with its baseline at the bottom row.
+    fn square() -> Raster {
+        Raster {
+            bitmap: vec![255; 16],
+            w: 4,
+            h: 4,
+            min: (0.0, -4.0),
+        }
+    }
+
+    #[test]
+    fn embolden_adds_ink_without_moving_the_glyphs_origin() {
+        let out = embolden(&square(), 1.0);
+        assert_eq!((out.w, out.h), (5, 5), "one pixel of growth on each axis");
+        assert!(out.bitmap.iter().filter(|&&v| v > 0).count() > 16, "more ink");
+        // The bearing is unchanged: the extra weight falls right/below, the way a
+        // bold face is heavier than its regular without shifting left.
+        assert_eq!(out.min, (0.0, -4.0));
+        // Corners of the original stay lit — a dilation, never a shift.
+        assert_eq!(out.bitmap[0], 255);
+    }
+
+    #[test]
+    fn embolden_max_blends_so_antialiased_edges_survive() {
+        // A single mid-grey pixel must not sum to white when the copies overlap.
+        let src = Raster {
+            bitmap: vec![128],
+            w: 1,
+            h: 1,
+            min: (0.0, 0.0),
+        };
+        let out = embolden(&src, 1.0);
+        assert!(out.bitmap.iter().all(|&v| v == 0 || v == 128));
+    }
+
+    #[test]
+    fn embolden_strength_scales_with_the_font_size() {
+        // A fixed pixel amount would be invisible when large and clubby when
+        // small, so upstream ties it to the height (~height/32).
+        let small = embolden_strength(10.0);
+        let large = embolden_strength(40.0);
+        assert!(large > small, "{small} vs {large}");
+        assert!((large / small - 4.0).abs() < 0.2, "roughly linear");
+    }
+
+    #[test]
+    fn shear_leans_the_glyph_about_its_baseline() {
+        // A tall bar: rows above the baseline move right, and by more the higher
+        // they are.
+        let src = Raster {
+            bitmap: vec![255; 10],
+            w: 1,
+            h: 10,
+            min: (0.0, -10.0),
+        };
+        let out = shear(&src, ITALIC_SKEW, 10.0);
+        let lit_x = |row: u32| (0..out.w).find(|&x| out.bitmap[(row * out.w + x) as usize] > 0);
+        let top = lit_x(0).expect("top row is lit");
+        let bottom = lit_x(9).expect("bottom row is lit");
+        assert!(top > bottom, "the top leans right of the bottom");
+        // …by about tan(12°) of the height.
+        assert!(((top - bottom) as f32 - 10.0 * ITALIC_SKEW).abs() <= 1.0);
+        assert_eq!(out.h, src.h, "shearing never changes the height");
+    }
+
+    #[test]
+    fn shear_moves_the_bearing_when_a_descender_swings_left() {
+        // With the baseline above the bitmap's bottom, the descender rows shift
+        // *left* — and the bearing has to follow, or the glyph walks out of its
+        // cell instead of leaning inside it.
+        let src = Raster {
+            bitmap: vec![255; 8],
+            w: 1,
+            h: 8,
+            min: (0.0, -4.0),
+        };
+        let out = shear(&src, ITALIC_SKEW, 4.0);
+        assert!(out.min.0 < 0.0, "the bearing moved left with the descender");
+    }
+
+    #[test]
+    fn a_family_missing_a_style_synthesizes_it_unless_disabled() {
+        // A path to the embedded *regular* face: every styled slot must fall back
+        // to it, which is exactly the "family has no bold" case. No dependence on
+        // which system fonts happen to be installed.
+        let dir = std::env::temp_dir().join("giest-synth-test");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("regular-only.ttf");
+        std::fs::write(&path, FONT_REGULAR).expect("write font");
+        let family = path.to_string_lossy().to_string();
+
+        let spec = FontSpec {
+            families: vec![family.clone()],
+            ..Default::default()
+        };
+        let (_, synth) = resolve_slots(&spec);
+        assert_eq!(synth[0], Synth::default(), "regular is never synthesized");
+        assert!(synth[1].bold && !synth[1].italic, "bold is emboldened");
+        assert!(synth[2].italic && !synth[2].bold, "italic is sheared");
+        assert!(
+            synth[3].bold && synth[3].italic,
+            "with neither real style, bold-italic gets both"
+        );
+
+        // `font-synthetic-style = false` turns all three off; the slots then just
+        // use the regular face as-is, which is upstream's documented behaviour.
+        let spec = FontSpec {
+            families: vec![family.clone()],
+            synthetic: crate::config::SyntheticStyle {
+                bold: false,
+                italic: false,
+                bold_italic: false,
+            },
+            ..Default::default()
+        };
+        let (_, synth) = resolve_slots(&spec);
+        assert_eq!(synth, [Synth::default(); 4]);
+
+        // The flags are independent: disabling `bold` leaves bold-italic alone.
+        let spec = FontSpec {
+            families: vec![family],
+            synthetic: crate::config::SyntheticStyle {
+                bold: false,
+                italic: true,
+                bold_italic: true,
+            },
+            ..Default::default()
+        };
+        let (_, synth) = resolve_slots(&spec);
+        assert_eq!(synth[1], Synth::default(), "bold synthesis is off");
+        assert!(synth[3].bold && synth[3].italic, "bold-italic is untouched");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
     fn unknown_family_falls_back_to_embedded() {
         let spec = FontSpec {
-            family: Some("This Font Surely Does Not Exist 9000".into()),
+            families: vec!["This Font Surely Does Not Exist 9000".into()],
             ..Default::default()
         };
-        let slots = resolve_slots(&spec);
+        let (slots, _) = resolve_slots(&spec);
         assert!(
             slots[0].0 == FONT_REGULAR,
             "an unresolvable family keeps the built-in font"

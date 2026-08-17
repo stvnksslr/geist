@@ -48,8 +48,6 @@ const DECO_CURLY: u32 = 2;
 
 /// Background tint for scrollback-search matches; the *current* (navigated) match
 /// uses the brighter shade so it stands out among the others.
-const SEARCH_MATCH_BG: Rgb = Rgb::new(0x53, 0x49, 0x1a);
-const SEARCH_CURRENT_BG: Rgb = Rgb::new(0xc2, 0x9c, 0x22);
 
 impl Instance {
     fn solid(rect: [f32; 4], color: [f32; 4]) -> Self {
@@ -177,6 +175,13 @@ pub struct TermFrame {
     pub selection_bg: Rgb,
     /// Text color over a selection; `None` keeps each cell's own foreground.
     pub selection_fg: Option<Rgb>,
+    /// Scrollback-search highlight colors (`search-*`), for an ordinary match
+    /// and for the current one. `TerminalColor` rather than `Rgb` because
+    /// upstream lets these defer to the cell's own fg/bg.
+    pub search_bg: crate::config::TerminalColor,
+    pub search_fg: crate::config::TerminalColor,
+    pub search_selected_bg: crate::config::TerminalColor,
+    pub search_selected_fg: crate::config::TerminalColor,
     /// `background-opacity`. Cells on the *default* background emit no quad, so
     /// the translucent window fill painted behind the grid is what actually
     /// carries this; the renderer needs the value only for
@@ -368,6 +373,18 @@ pub(crate) fn bg_alpha(
         return if opacity_cells { opacity } else { 1.0 };
     }
     0.0
+}
+
+/// Whether a cell's text is a "covering" glyph — one that fills its cell
+/// completely, so the background should be painted in the *foreground* color and
+/// the cell reads as a single solid rectangle.
+///
+/// Exactly Ghostty's `renderer/cell.zig::isCovering`, which is **U+2588 FULL
+/// BLOCK and nothing else** — deliberately narrow, and worth resisting the urge
+/// to extend to `▉▊▋` or the half blocks, which do *not* cover their cell and
+/// would then paint their empty part in the foreground color.
+pub(crate) fn is_covering(text: &str) -> bool {
+    text == "\u{2588}"
 }
 
 /// Build the per-cell search-highlight mask for a viewport (`0` none, `1` match,
@@ -1117,8 +1134,10 @@ impl GpuResources {
     fn build_instances(&mut self, frame: &TermFrame, queue: &wgpu::Queue) {
         let cw = self.atlas.cell_w;
         let ch = self.atlas.cell_h;
-        let ascent = self.atlas.ascent;
-        let line_h = (ch * 0.07).max(1.0);
+        // Decoration geometry comes from the font (and the `adjust-*` keys), not
+        // from a fraction of the cell — see `atlas::derive_metrics`.
+        let met = self.atlas.metrics;
+        let line_h = met.underline_thick;
 
         // Move the reusable scratch out of `self` (so the atlas can be borrowed
         // alongside) and clear it; capacity carries over from previous frames.
@@ -1270,6 +1289,19 @@ impl GpuResources {
                     } else {
                         (cell.fg, cell.bg)
                     };
+                    // Ghostty's `isCovering`: a cell whose glyph fills it entirely
+                    // takes the *foreground* as its background, so the two agree
+                    // and the cell reads as one solid rectangle (which is what
+                    // makes padding extension work). Upstream applies it as
+                    // `inverse != isCovering` on the style colors; here `cell.fg`
+                    // already has `inverse` applied, and both sides of that XOR
+                    // land on the same answer — `bg = cell.fg` — so the swap is
+                    // written once. Not applied to a selected or cursor cell,
+                    // matching upstream's non-selected-only arm: a selection must
+                    // keep its own background.
+                    if !is_cursor_cell && !selected && is_covering(&cell.text) {
+                        bg = fg;
+                    }
                     if selected && !is_cursor_cell {
                         bg = frame.selection_bg;
                     }
@@ -1281,11 +1313,11 @@ impl GpuResources {
                         let idx = y as usize * snap.cols as usize + x as usize;
                         match search_mask.get(idx).copied().unwrap_or(0) {
                             2 => {
-                                bg = SEARCH_CURRENT_BG;
+                                bg = frame.search_selected_bg.resolve(cell.fg, cell.bg);
                                 searched = true;
                             }
                             1 => {
-                                bg = SEARCH_MATCH_BG;
+                                bg = frame.search_bg.resolve(cell.fg, cell.bg);
                                 searched = true;
                             }
                             _ => {}
@@ -1319,8 +1351,8 @@ impl GpuResources {
                     let deco_alpha = if cell.faint { frame.faint_opacity } else { 1.0 };
                     let deco_hidden = cell.blink && pane.blink_hidden;
                     if !deco_hidden && cell.underline != UnderlineStyle::None {
-                        // Top of the underline line, just below the baseline.
-                        let uy = (cell_top + ascent + line_h).round();
+                        // Top of the underline, from the top of the cell.
+                        let uy = (cell_top + met.underline_pos).round();
                         let uc = self.color(cell.underline_color.unwrap_or(fg), deco_alpha);
                         match cell.underline {
                             UnderlineStyle::Single => {
@@ -1366,16 +1398,16 @@ impl GpuResources {
                         }
                     }
                     if !deco_hidden && cell.overline {
-                        let oy = cell_top.round();
+                        let oy = (cell_top + met.overline_pos).round();
                         glyphs.push(Instance::solid(
-                            [cell_left, oy, cw, line_h],
+                            [cell_left, oy, cw, met.overline_thick],
                             self.color(fg, deco_alpha),
                         ));
                     }
                     if !deco_hidden && cell.strikethrough {
-                        let y = (cell_top + ch * 0.5).round();
+                        let y = (cell_top + met.strikethrough_pos).round();
                         glyphs.push(Instance::solid(
-                            [cell_left, y, cw, line_h],
+                            [cell_left, y, cw, met.strikethrough_thick],
                             self.color(fg, deco_alpha),
                         ));
                     }
@@ -1410,8 +1442,21 @@ impl GpuResources {
                             filled_block && x == snap.cursor_x && yu == snap.cursor_y;
                         let lin = yu as usize * snap.cols as usize + x as usize;
                         let selected = pane.selection.is_some_and(|(a, b)| lin >= a && lin <= b);
+                        // A search match overrides the text color too — the bg
+                        // pass already recolored the cell, and leaving the glyph
+                        // at its own fg is how a match ends up unreadable
+                        // (yellow-on-yellow) with a themed foreground.
+                        let searched = if search_mask.is_empty() {
+                            0
+                        } else {
+                            search_mask.get(lin).copied().unwrap_or(0)
+                        };
                         if is_cursor_cell {
                             cell.bg
+                        } else if searched == 2 {
+                            frame.search_selected_fg.resolve(cell.fg, cell.bg)
+                        } else if searched == 1 {
+                            frame.search_fg.resolve(cell.fg, cell.bg)
                         } else if selected {
                             frame.selection_fg.unwrap_or(cell.fg)
                         } else {
@@ -1468,7 +1513,16 @@ impl GpuResources {
                         // glyph id 0 (.notdef) means the primary font lacks this
                         // character; resolve it from the fallback chain (color
                         // emoji → mode 2, monochrome → mode 1).
-                        let placed: Option<(_, u32)> = if sg.glyph_id != 0 {
+                        // Box drawing / blocks / braille are drawn by giest from
+                        // the cell metrics, and win over the font — the same
+                        // precedence Ghostty's `CodepointResolver` gives its
+                        // sprite face. A font's versions are drawn to its em box,
+                        // so they leave seams between cells at any line spacing.
+                        let placed: Option<(_, u32)> = if let Some(g) =
+                            self.atlas.sprite_glyph(ch_first, queue)
+                        {
+                            Some((g, 1))
+                        } else if sg.glyph_id != 0 {
                             self.atlas
                                 .glyph(sg.glyph_id, r.style, constraint, span, queue)
                                 .map(|g| (g, 1))
@@ -1516,23 +1570,31 @@ impl GpuResources {
             let cur_left = ox + snap.cursor_x as f32 * cw;
             let cur_top = oy + snap.cursor_y as f32 * ch + shift;
             let cur_color = self.color(snap.cursor_color, cursor_alpha);
+            // `adjust-cursor-height` shortens the cursor from the **top**, so it
+            // stays sitting on the text baseline area rather than floating —
+            // upstream places the cursor sprite by its bearing from the bottom of
+            // the cell, which comes out the same way.
+            let cur_h = met.cursor_height.min(ch);
+            let cur_y = cur_top + ch - cur_h;
+            let t = met.cursor_thick;
             if hollow_block {
-                // Four 1px edges forming an outline around the cursor cell.
-                let t = 1.0_f32;
-                cursors.push(Instance::solid([cur_left, cur_top, cw, t], cur_color));
+                // Four edges forming an outline around the cursor cell.
+                cursors.push(Instance::solid([cur_left, cur_y, cw, t], cur_color));
                 cursors.push(Instance::solid(
-                    [cur_left, cur_top + ch - t, cw, t],
+                    [cur_left, cur_y + cur_h - t, cw, t],
                     cur_color,
                 ));
-                cursors.push(Instance::solid([cur_left, cur_top, t, ch], cur_color));
+                cursors.push(Instance::solid([cur_left, cur_y, t, cur_h], cur_color));
                 cursors.push(Instance::solid(
-                    [cur_left + cw - t, cur_top, t, ch],
+                    [cur_left + cw - t, cur_y, t, cur_h],
                     cur_color,
                 ));
             } else if cursor_visible && !filled_block {
                 let rect = match snap.cursor_shape {
-                    CursorShape::Bar => [cur_left, cur_top, (cw * 0.12).max(1.0), ch],
-                    _ => [cur_left, cur_top + ch - 2.0, cw, 2.0], // Underline
+                    // A bar is `cursor-thickness` wide; an underline is that tall,
+                    // sitting on the bottom of the cell.
+                    CursorShape::Bar => [cur_left, cur_y, t, cur_h],
+                    _ => [cur_left, cur_top + ch - t, cw, t],
                 };
                 cursors.push(Instance::solid(rect, cur_color));
             }
@@ -1918,7 +1980,10 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ImageLayer, bg_alpha, build_search_mask, image_layer, image_rect, image_uv, image_visible, split_draws};
+    use super::{
+        ImageLayer, bg_alpha, build_search_mask, image_layer, image_rect, image_uv, image_visible,
+        is_covering, split_draws,
+    };
     use crate::engine::ImagePlacement;
     use crate::search::SearchHighlight;
 
@@ -2060,6 +2125,19 @@ mod tests {
         // With `background-opacity-cells`, only the explicit-bg branch changes.
         assert_eq!(bg_alpha(false, false, true, o, true), o);
         assert_eq!(bg_alpha(false, false, false, o, true), 0.0);
+    }
+
+    #[test]
+    fn is_covering_is_the_full_block_and_nothing_else() {
+        assert!(is_covering("\u{2588}"), "U+2588 FULL BLOCK covers its cell");
+        // The partial blocks leave part of the cell empty, so painting their
+        // background in the foreground colour would fill in the gap they exist to
+        // show. Upstream lists only the full block, and so does this.
+        for t in [
+            "\u{2589}", "\u{258C}", "\u{2580}", "\u{2584}", "\u{2591}", "\u{2593}", "a", " ", "",
+        ] {
+            assert!(!is_covering(t), "{t:?}");
+        }
     }
 
     #[test]

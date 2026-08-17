@@ -7,8 +7,9 @@ the Zig core / `Config.zig`), and the Rust binding `vendor/libghostty-rs/` (to j
 the terminal data already exists and just needs wiring).
 
 **Headline finding.** giest has a strong, correct *spine* — real VT engine, splits, tabs, ligatures,
-emoji, smooth scroll, command palette — but it covers a fraction of Ghostty's ~250 config options and
-~90 keybind actions, with little of the macOS app's UX breadth. The encouraging part: **much of the gap
+emoji, smooth scroll, command palette — but it covered a fraction of Ghostty's config surface and
+~90 keybind actions, with little of the macOS app's UX breadth. *(Measured since: **94 of Ghostty's
+187 config keys** are now supported — see the config-surface ledger for the re-runnable audit.)* The encouraging part: **much of the gap
 is plumbing, not greenfield.** libghostty-vt already surfaces underline styles, faint/overline, OSC 8
 hyperlinks, OSC 133 semantic-prompt marks, kitty graphics, the bell, and a rich selection model — data
 giest's single per-cell chokepoint (`engine/ghostty_vt.rs::copy_cell`) historically discarded.
@@ -63,10 +64,9 @@ giest's single per-cell chokepoint (`engine/ghostty_vt.rs::copy_cell`) historica
   review. A neutral `FontSpec` threads from `Config` through `render::init`/`build_resources` into
   `Atlas::new`. *Applied at startup — `font-family`/`font-feature` need a restart (config reload re-applies
   colors/size, not fonts).*
-  **Deferred (documented divergences):** `font-family` fallback **chains** (multiple families for glyph
-  coverage); **synthetic** bold/italic + the `font-synthetic-style` / `font-style*` keys (giest uses real
-  faces or the regular fallback, no faux slant/embolden); and `font-feature` values with **spaces around
-  `=`** (`cv01 = 2`) — rustybuzz's `Feature::from_str` rejects those (Ghostty accepts them), a rare form.
+  **`font-family` chains and synthetic bold/italic are now done** — see their ledger entry below.
+  **Still deferred:** `font-feature` values with **spaces around `=`** (`cv01 = 2`) — rustybuzz's
+  `Feature::from_str` rejects those (Ghostty accepts them), a rare form.
 - **Scrollback search** ✅ (Tier-2) `Ctrl+Shift+F` opens a top-bar overlay over the focused pane: the
   engine reads the whole screen (scrollback + viewport) to text with a char→column map
   (`engine::screen_text` / `RowText`); the pure `search.rs` finds matches (case-insensitive substring,
@@ -155,13 +155,14 @@ and a configured `font-family` / `font-feature = -calt`; curly-underline thickne
 OSC 4/5/13-19 color *queries*. *(OSC 8 hyperlinks, OSC 133 prompts, styled underlines, OSC 10/11/12
 dynamic colors incl. query replies — now done.)*
 
-**Rendering / fonts** — `font-family` fallback *chains* (multiple families) + synthetic bold/italic
-(`font-synthetic-style`); `font-variation`; **custom shaders**; `adjust-cell-*`
-metrics; box-drawing/powerline/braille sprite synthesis; COLRv1 emoji; Ghostty's `isCovering` rule
-(full-block glyphs opaque under transparency).
-*(`font-family` (+bold/italic), `font-feature`/ligature toggle, `minimum-contrast`,
+**Rendering / fonts** — `font-variation`; `adjust-icon-height`; legacy-computing sprites;
+COLRv1 emoji.
+*(`font-family` (+ fallback chains, per-style overrides, **synthetic bold/italic**),
+`font-feature`/ligature toggle, `minimum-contrast`,
 `bold-is-bright`/`bold-color`, `cursor-style`/`-blink`, **transparency + background-opacity**,
-blur (Windows acrylic), `faint-opacity`, `cursor-opacity`, unfocused-split dimming — now done.)*
+blur (Windows acrylic), `faint-opacity`, `cursor-opacity`, unfocused-split dimming, **custom
+shaders**, **box-drawing/block/braille/powerline sprites**, the **`adjust-*` metric family** and
+`isCovering` — now done.)*
 
 **Window / UI** — titlebar/decoration styles; settings UI; inspector; about dialog; custom app icons.
 *(fullscreen toggle, split zoom, tab drag-reorder, resize overlay, confirm-close-surface,
@@ -175,8 +176,10 @@ light/dark preference), **window/tab/split state restore** (`window-save-state`)
 set_*_title, toggle_*, send raw text/esc/csi, undo/redo, …). *(Config-driven binding + several actions
 are now done.)*
 
-**Selection / scroll / search** — semantic selection; `adjust_selection`; binding-backed (reflow-correct)
-selection (would also give search cross-wrap matches + drift-free match tracking). *(scrollback search — now done.)*
+**Selection / scroll / search** — `adjust_selection`; fully binding-backed (reflow-correct,
+scrollback-spanning) selection, which would also give search cross-wrap matches + drift-free match
+tracking. *(scrollback search, **semantic selection** (word / wrapped line / command output) — now
+done.)*
 
 **Shell integration** — OSC 133 C/D (command output marks → duration, notify-on-command-finish).
 *(OSC 133 A/B prompt marks now injected; `tab-inherit-working-directory` now honored — new tabs inherit
@@ -186,8 +189,9 @@ multi-window lands.)*
 **Clipboard / security** — secure-input indicator; readonly mode. *(`clipboard-read`/`-write`
 permission prompts, paste-protection confirmation and `clipboard-trim-trailing-spaces` — now done.)*
 
-**Config / theming** — `palette-generate`/`harmonious`, config `include`/conditional, the ~230 remaining
-options. *(theme/theme-file now done.)*
+**Config / theming** — `palette-generate`/`harmonious`, config `include`/conditional (`config-file`),
+and the **93 upstream keys still unsupported** (mostly `gtk-*`, `macos-*`, `linux-*` — see the
+config-surface ledger). *(theme/theme-file now done.)*
 
 **Notifications / bell** — desktop notifications (OSC 9/777/99); Win taskbar progress (OSC 9;4);
 `bell-audio-volume` (needs a real audio backend — `PlaySoundW` has no volume knob).
@@ -207,7 +211,7 @@ upstream patch · — pure giest concern.
 | Underline style+color, faint, blink, overline, invisible *(now wired)* | OSC 9/777/99 notifications | font-family / atlas multi-face |
 | OSC 8 hyperlink URIs *(now wired)* | OSC 9;4 progress | background opacity/blur/image |
 | OSC 133 semantic-prompt marks *(now wired)* | OSC 10/11/12 dynamic colors | custom shaders |
-| Kitty graphics (images, placements; cargo feature) | OSC 52 read *(now wired, security-gated)* | box/powerline/braille sprites, COLRv1 |
+| Kitty graphics (images, placements; cargo feature) | OSC 52 read *(now wired, security-gated)* | COLRv1 emoji, synthetic bold/italic |
 | Kitty keyboard (auto-applied) | scrollback regex search (build w/ `TrackedGridRef`) | multi-window, quick terminal, fullscreen |
 | Bell `on_bell` *(now wired)*, color-scheme, scrollbar geometry *(deliberately unused — see below)* | | resize overlay, settings UI |
 | Rich selection model (`selection.rs`) | | |
@@ -282,13 +286,13 @@ Effort: **S** <1d · **M** 1–3d · **L** ~1wk · **XL** multi-wk. Status: ✅ 
 | Clipboard permission + paste protection | `session.rs`, `app.rs`, `config.rs`, `osc52.rs` | ✋ | M | ✅ |
 | Desktop notifications + notify-on-command-finish | `osc_notify.rs`, `notify.rs`, `osc133.rs`, `profiles.rs`, `session.rs`, `app.rs` | ✋ | M | ✅ (both halves; cmd can't report an exit code — see the ledger) |
 | Real scrollbar widget | `scrollbar.rs`, `app.rs`, `session.rs` | ✅ | M | ✅ |
-| Migrate to binding selection model | `session.rs`, `engine` | ✅ | M–L | ⬜ |
+| Migrate to binding selection model | `session.rs`, `engine` | ✅ | M–L | ◐ (semantic selection done; scrollback-spanning ranges still open) |
 
 ### Tier 3 — long tail / platform-specific
 readonly mode · secure-input indicator · broadcast input ·
 auto-update · about dialog /
 custom icon · AppleScript / App-Intents / Services → Windows IPC ·
-box-drawing/powerline/braille sprites · COLRv1 emoji · grapheme-width / `adjust-cell-*` ·
+legacy-computing sprites · COLRv1 emoji · grapheme-width ·
 window decorations / titlebar / colorspace · settings UI · inspector. *(all ⬜)*
 
 **Done from this tier:** window geometry (`window-width`/`-height` in cells, `window-position-x`/`-y`)
@@ -360,9 +364,270 @@ With Phase 0 done, the remaining Tier-1 items are mostly small, registry-backed 
     parser the notifications just built and is squarely Windows-native. See the ledger below.
 13. ✅ **Session / window state restore** — `window-save-state`, a new `state.rs`. See the ledger below.
 14. ✅ **Quick (dropdown) terminal + `global:` keybinds** — `quickterm.rs`, `hotkey.rs`. See below.
-15. Next: **migrating to the binding's selection model** (which would also give search cross-wrap
-    matches and drift-free match tracking), then the Tier-3 long tail (box-drawing/powerline
-    sprites, `adjust-cell-*`, readonly/secure-input indicators, settings UI).
+15. ✅ **Sprite glyphs** — box drawing (complete), blocks, braille and the geometric powerline
+    separators drawn from the cell metrics (`sprite.rs`), plus `adjust-box-thickness`. See below.
+16. ✅ **The `adjust-*` metric family + `isCovering`** — font-derived decoration metrics, all
+    twelve keys. See the ledger below.
+17. ✅ **Font fallback chains + synthetic bold/italic** — repeatable `font-family`,
+    `font-synthetic-style`. See the ledger below.
+18. ✅ **Semantic selection** — word / soft-wrapped line / command output from the binding, plus
+    `selection-word-chars`. See the ledger below.
+19. ✅ **Config-surface batch** — 11 keys found by a measured key diff. See the ledger below.
+20. Next: `config-file` (include) — the "config include/conditional" line in §1 — then the **full**
+    selection migration (scrollback-spanning selections, search cross-wrap matches), the readonly /
+    secure-input indicators, and `enquiry-response` (behind a ConPTY probe).
+
+### Sprite glyphs (box drawing, blocks, braille, powerline) — ✅ divergences
+
+giest now draws U+2500–257F (complete), U+2580–259F, U+2800–28FF and the geometric powerline
+separators itself, ported from Ghostty's `font/sprite/draw/{box,block,braille,powerline}.zig`,
+with `adjust-box-thickness`.
+
+- **The drawn glyph beats the font**, which is upstream's precedence too (`CodepointResolver`
+  checks its sprite face before any font lookup, after only the explicit codepoint overrides).
+  These characters are defined relative to the *cell* and a font draws them relative to its *em
+  box*, so the font's version is only ever right by luck — and is wrong for everybody at any line
+  spacing. giest already stretched the font's versions to the cell (`Constraint::Fill`), so this is
+  a sharpness/correctness change rather than a new capability, but it also covers fonts that lack
+  the characters entirely.
+- **The arm table was transcribed mechanically, not by hand.** 109 intersection characters × four
+  arms is exactly where one typo yields a single subtly wrong corner nobody notices for months, so
+  `LINES` was generated from upstream's `linesChar` call sites.
+- **Ghostty's asymmetric `Fraction.min`/`max` is preserved deliberately.** At an odd cell size the
+  two halves of a quadrant character *overlap* by one pixel rather than one being a pixel smaller:
+  an overlap is invisible (both sides opaque), a gap is a visible seam. "Simplifying" both to a
+  plain round is how quadrants end up with a hairline between them — a test pins it.
+- **`box_thickness` is derived from the cell height (`h/12`, min 1)**, where upstream derives it
+  from the font's underline thickness — giest's atlas doesn't carry that metric. Same shape of
+  rule, same tuning knob (`adjust-box-thickness`), and it can never round to zero, since an
+  invisible line reads as a missing glyph rather than a thin one.
+- **Second pass: the anti-aliased half.** U+256D–2570 rounded corners, U+2571–2573 diagonals and
+  the geometric powerline separators (U+E0B0–E0BF, E0D2, E0D4) are now drawn too — **U+2500–257F is
+  complete**. Two primitives cover all of it: a **distance-field stroke**
+  (`clamp(thick/2 + 0.5 - d, 0, 1)`, which is exact to within a pixel and needs no cap/join
+  geometry) and an 8×8-supersampled **polygon fill**.
+  - *Divergence:* the distance field gives **round caps and joins** where Ghostty butt-caps and
+    mitres, so a thin chevron's point is rounded by `thick/2`. Sub-pixel at the 1–2px thickness a
+    cell implies; a cap/join system would be a lot of machinery for it.
+  - *Divergence:* each right-facing separator is drawn by **mirroring** its left-facing twin, where
+    upstream spells some of them out as their own polygon. The supersample grid isn't symmetric
+    about the cell centre, so the two spellings differ by a few coverage levels along the
+    hypotenuse — a `` and a `` meeting in a prompt would have visibly different edges. A
+    test asserts the pairs are exact mirrors.
+  - E0B5/E0B7's stroke is Ghostty's `innerStrokePath`, approximated as **stroke ∩ fill**: the curve
+    bulges to exactly the cell edge, so a centred stroke would hang half outside and clip flat.
+  - Two constants that look unifiable and are not: the arcs' control fraction `s = 0.25` and the
+    half-circles' `(√2−1)·4/3`. Different curves, both intentional.
+  - **These change appearance for existing users** — previously the font's `╭` and ``, now drawn.
+- **Not ported, deliberately, so they still come from the font:** the *stylized* powerline symbols
+  (U+E0C0+, E0D0/E0D1/E0D3 — flames, hexagons, ice), which upstream doesn't draw either, and the
+  legacy-computing symbols. Ghostty's `super_light` weight goes with the last of those and is
+  therefore unused here.
+- **Ghostty's `isCovering` rule is now done, and it is much narrower than this ledger previously
+  claimed.** Reading `renderer/cell.zig` + `generic.zig` rather than trusting the earlier summary:
+  it covers **U+2588 FULL BLOCK and nothing else**, and it changes only the cell's *background
+  colour* — to the foreground, so the glyph and its background agree and the cell reads as one
+  solid rectangle (which is what makes padding extension work). It does **not** force opacity:
+  upstream's bg-alpha block never consults it, so a full block on a default background still emits
+  no quad under `background-opacity`. giest applies it in the same place and the same way, and
+  **not** to a selected or cursor cell — upstream's non-selected-only arm, without which a
+  selection would lose its own background. The earlier "full-block glyphs render opaque under
+  transparency" framing described a mechanism upstream doesn't have.
+- **A cell too small for a dashed line draws a solid one** rather than nothing — upstream's
+  fallback, and the right one: an empty cell reads as an unsupported character.
+- **The whole `adjust-*` family is now implemented** — see its own ledger entry below.
+- **Verified by computed capture, not by eye** (per CLAUDE.md), DPI-aware with
+  `PrintWindow(…, 3)`. A `┌──┐ │ │ └──┘` box printed by a startup script measured as an exact
+  rectangle: the top and bottom rules are **single unbroken runs** `x = 4..214` — no gap at any of
+  the 21 cell boundaries — and the sides are unbroken `y = 117..157`, spanning both rules and the
+  full height of the middle row. The corners contribute their two arms and nothing else.
+  Then the discriminating probe, since a stretched font glyph could also be continuous:
+  `adjust-box-thickness = 3` turned the 1px rules into 4px rules, still centred, which nothing on
+  the font path can do.
+  The **rounded** box was measured the same way: rules unbroken `x = 6..212` (2px narrower than the
+  square box at each end — the curve pulling away from the corner), the left side unbroken
+  `y = 99..135` on the same column `│` uses, 21 partial-coverage pixels in the corner proving the
+  anti-aliased path actually ran, and the same 1px → 4px thickness response.
+  *Line thickness and the corner radius are matters of taste (like the curly underline) and still
+  want human eyeballing.*
+
+### Config-surface batch (11 keys) — ✅ divergences
+
+Chosen by **measuring** the gap rather than guessing, and the audit is re-runnable:
+
+```sh
+# upstream keys                                    # giest keys
+grep -oE '^@"[a-z0-9-]+"' ghostty-src/src/config/Config.zig | tr -d '@"' | sort -u
+grep -oE '\("[a-z0-9-]+", \|' src/config.rs | grep -oE '"[a-z0-9-]+"' | tr -d '"' | sort -u
+```
+
+**187 upstream keys; giest now sets 102, of which 94 are upstream's** (the rest are giest-specific,
+e.g. `text-gamma`). That replaces the "~250 options / ~230 remaining" estimates this document opened
+with, which were never counted.
+
+Landed: `working-directory`, `window-new-tab-position`, `window-padding-balance`,
+`split-divider-color`, `search-background`/`-foreground`, `search-selected-background`/`-foreground`,
+`selection-clear-on-typing`, `selection-clear-on-copy`.
+
+- **Three defaults change giest's existing behaviour**, all toward upstream:
+  `window-new-tab-position` defaults to **`current`** (giest always appended), `selection-clear-on-copy`
+  defaults to **false** (giest cleared on every copy), and search matches now use Ghostty's amber
+  (`#FFE082` / `#F2A57E` for the current one) instead of giest's own darker pair.
+- **A mid-list tab insert is a new instance of this repo's stale-index trap.** `window-new-tab-position
+  = current` inserts before the end, shifting every later tab — so `renaming` and `tab_drag`, which
+  hold tab *indices*, are cleared at the insert like they are at every other mutation point. The
+  index arithmetic is a pure `new_tab_index` with tests rather than a comment.
+- **The search *foreground* keys needed a hook that didn't exist.** giest only ever recolored a
+  match's background; the glyph pass had overrides for the cursor and selection but not for search,
+  so a themed foreground could leave a match unreadable on the amber. Both `search-*` colors also
+  accept upstream's `cell-foreground` / `cell-background` keywords, resolved per cell.
+- **`split-divider-color` is applied to every chrome hairline**, not just the split gutter. giest
+  derives one `divider` color for the gutter, the tab-strip edge and the palette rows; honoring the
+  key for only one of them would leave a single stripe a different color from the rest.
+- **`working-directory` folded into the *existing* cwd decision** rather than adding a second one:
+  inherited (per the `*-inherit-working-directory` key for that surface) → `working-directory` →
+  the process's own directory. That also changes the state-restore fallback — a saved directory that
+  no longer exists now lands on `working-directory`.
+- **`selection-clear-on-typing` counts only input the program receives.** App shortcuts and reserved
+  combos are excluded: they never reach the shell, so clearing on them would drop a selection the
+  user is still working with. IME preedit (which upstream also clears on) doesn't exist in giest.
+- **Not attempted: `enquiry-response`.** ENQ is handled by Ghostty's *app* layer, not the terminal
+  core, so libghostty-vt's read-only stream almost certainly drops it — and a bare `0x05` may not
+  survive ConPTY at all. Per this repo's own rule, that needs a `tests/conpty_passthrough.rs` probe
+  *first*; wiring it on the assumption that the bytes arrive is exactly the mistake kitty graphics
+  cost an afternoon to learn.
+- **Verified**: parse tests per key, table tests for the two pure helpers (`balance_padding`,
+  `new_tab_index`), and `working-directory` end-to-end through a free oracle — with
+  `window-save-state = always`, the state file written at quit records the cwd the shell *itself*
+  reported via OSC 7, which came back as the configured directory. Search colors and padding balance
+  are visual and want eyeballing.
+
+### Semantic selection — ✅ divergences
+
+Double-click (word), triple-click (logical line) and Ctrl+triple-click (command output) now come
+from the binding's selection model, plus `selection-word-chars`. Ghostty's click-count mapping was
+read off `Surface.zig` rather than guessed.
+
+- **The hand-rolled version was replaced, not layered on.** `session.rs` had its own `is_word_char` /
+  `word_bounds` scan over the rendered grid; keeping it as a fallback would leave two sources free to
+  disagree about what a word is — the exact failure mode this repo keeps documenting. Its tests went
+  with it, replaced by engine-driven ones.
+- **Line selection now follows soft wrapping** (and stops at a prompt via
+  `with_semantic_prompt_boundary`). The old version selected one *visual* row, so triple-clicking a
+  command longer than the window gave you a fragment of it.
+- **No lifetime crosses the engine trait.** `Selection`/`GridRef` borrow the terminal and giest's
+  selection outlives any frame, so the trait returns plain viewport cell pairs and the binding types
+  stay inside `engine/ghostty_vt.rs`. That is what makes this slice cheap where the full selection
+  migration is not.
+- **Off-viewport ends are clamped, not dropped.** `point_from_grid_ref` returns `None` in viewport
+  space for a cell that has scrolled off, and a wrapped line or a command's output very often starts
+  above the top of the screen — so the conversion runs in *screen* space and clamps. Returning
+  `None` would make Ctrl+triple-click do nothing in the common case. The cost, stated plainly: copy
+  only sees the visible part. **giest's selection model stays viewport-scoped**; scrollback-spanning
+  selections still need the full migration (which is also why `select_all` is unchanged — the
+  binding's version returns a scrollback-spanning range this model can't hold).
+- **A semantic selection that finds nothing leaves the existing one alone** rather than clearing it,
+  so a stray double-click on blank space doesn't discard what the user had.
+- **`selection-word-chars` replaces the engine's list rather than adding to it**, which is upstream's
+  behaviour, and NUL is prepended (always a boundary upstream). Parsed by **character**, not byte —
+  upstream's own default list contains `│` (U+2502), which a byte loop would split into three bogus
+  boundaries. `\t`, `\n` and `\\` are honoured; other Zig escapes upstream accepts are not.
+- **Not done: the double-click-*drag* refinement.** The binding exposes `select_word_between` with a
+  both-directions recipe (upstream uses it at `Surface.zig:4713`) so dragging from one word to
+  another snaps to whole words; giest still extends by cell after the initial double-click.
+- **Not matched: upstream checks for a link under the cursor *before* word selection** on
+  double-click, so double-clicking a URL selects the whole link. giest has `hyperlink_at` and could,
+  but the double-click path doesn't consult it yet.
+- **Verified by engine tests driving real sequences** — word boundaries with and without a custom
+  list (the discriminator proving the config threads through), a soft-wrapped line returning both
+  rows, and `select_output` over real OSC 133 `A`/`B`/`C`/`D` marks excluding the prompt row, plus
+  the clamping case. *The click wiring itself is not separately verified live* — a synthesized
+  double-click probe was inconclusive — so double-click/triple-click behaviour in the running app
+  wants a human check.
+
+### Font fallback chains + synthetic styles — ✅ divergences
+
+`font-family` is now repeatable (a fallback chain) and `font-synthetic-style` synthesizes a missing
+bold or italic, closing the two divergences the original font-family entry deferred.
+
+- **The synthesis decision is made from what actually resolved**, not from which config key was set:
+  a styled slot that had to fall back to a face whose OS/2 bits say it isn't that style gets
+  synthesized. That is upstream's rule ("if the font has the requested style, the font is used
+  as-is"), and it means the fallback chain can't quietly change the decision.
+- **Bold-italic follows upstream's preference order**: slant a real bold if there is one, else
+  thicken a real italic, else do both to the regular.
+- **`font-synthetic-style` reuses the `bell-features` packed-struct grammar** — bare bool sets all
+  three, a list starts from the defaults, `no-` prefix, one unknown token rejects the value. The
+  three flags are **independent**, which upstream flags as the easy mistake: `no-bold` does not
+  disable bold-italic. Pinned by a test, because "I turned bold off and it's still synthesized"
+  reads as a bug.
+- **Synthesis is a bitmap post-process, not an outline transform.** ab_glyph exposes no outline
+  editing, so bold dilates the rasterized coverage (max-blended, so anti-aliased edges survive) and
+  italic shears it per row. Both are pure `Raster → Raster` functions, so they're unit-testable like
+  `sprite.rs`. Divergences: the dilation is slightly chunkier than upstream's outline embolden, and
+  the per-row integer shifts staircase the slanted edges a little at small sizes.
+- **The constants are ported, not guessed**: the embolden strength is upstream's `height/32`
+  heuristic (it *has* to scale with size — a fixed pixel is invisible at 28px and clubby at 10px),
+  and the shear is `tan(12°)`, upstream's angle.
+- **The shear pivots on the baseline** and moves the glyph's bearing when a descender swings left,
+  without which the glyph walks out of its cell rather than leaning inside it.
+- **`Fill` glyphs are never synthesized.** Emboldening a glyph already stretched to the cell would
+  push it past the edges and break the seamless tiling that constraint exists for. Box drawing is
+  drawn by `sprite.rs` anyway.
+- **Fixed in passing:** a `font-family` given as a *file path* was accepted for **every** style slot,
+  so a path-configured font claimed to have a real bold face it didn't have — and would never
+  synthesize one. `find_font` now style-checks a path against its own OS/2 bits, while
+  `find_regular_font` still takes the file as an explicit choice for the primary slot.
+- **Fallback faces stay style-less**: the chain (and the system fonts behind it) is consulted by
+  character, with no style, so synthetic bold does not reach a fallback glyph — bold CJK renders
+  regular. Pre-existing shape of the fallback mechanism, not new.
+- **Verified live**, with a discriminating probe that doesn't depend on which system fonts are
+  installed: the embedded *regular-only* TTF is written to a temp file and used as `font-family`,
+  which forces every styled slot to fall back. Against `font-synthetic-style = false`, bold gained
+  **+62% ink** and a pixel of height, while the italic line's glyph tops moved **3–4px right of
+  their bottoms** across a ~14px band (14 × tan(12°) ≈ 3.0px) versus upright with synthesis off.
+  Plain text was byte-identical in both — the control. *Weight and slant are taste calls and want
+  human eyeballing.* The chain ordering itself is covered by the slot tests rather than measured.
+
+### `adjust-*` metrics + `isCovering` — ✅ divergences
+
+All twelve `adjust-*` keys giest can act on (`-cell-width`, `-cell-height`, `-font-baseline`,
+`-underline-position`/`-thickness`, `-strikethrough-*`, `-overline-*`, `-cursor-thickness`,
+`-cursor-height`, `-box-thickness`), plus `isCovering` (see the sprite ledger).
+
+- **Decorations now come from the font, not from a fraction of the cell.** giest previously drew
+  every line at `cell_h * 0.07`, the underline at `ascent + that`, and the strikethrough at exactly
+  half the cell. They are now derived from the face's `post`/`OS/2` line metrics like upstream, so
+  **underline and strikethrough placement changes for existing users** — it should look better, but
+  it is a visible change.
+- **The metrics come from two libraries at once.** ab_glyph gives the cell box (it is what
+  rasterizes), while the underline/strikeout lines come from the **ttf-parser** face behind
+  rustybuzz — ab_glyph exposes no line metrics at all. Both describe the same face, so mixing is
+  safe; the alternative was the hardcoded fractions above.
+- **Sign conventions are upstream's**: positions are measured from the **top of the cell** (so the
+  overline's default position is literally 0), and `ascent` is top-to-baseline. Fonts report the
+  underline as a distance *below* the baseline and the strikeout as one *above* it, so the
+  conversions differ in sign — that is the kind of thing a test has to pin, and does.
+- **A thickness `ceil`s and clamps to ≥1; a position rounds and does not clamp.** Zero and negative
+  are meaningful placements, so putting positions through the thickness helper would silently
+  discard half the useful range. `MetricModifier::apply` therefore does *no* rounding at all and the
+  three kinds round at their own call sites.
+- **`adjust-cell-*` is applied before the `ceil`, and that is load-bearing** — found by measuring,
+  not by reasoning. A 6.36px advance is a 7px cell; rounding the adjusted value first turned it into
+  a **6px** cell, costing every column a pixel with no adjustment configured at all. Same trap class
+  as the `window-position-*` DPI division. A test pins it with a fractional advance.
+- **`adjust-cell-height` re-centres the text** (half the growth above the baseline) and carries the
+  underline/strikethrough with it, so it reads as line spacing rather than as text glued to the top
+  of a taller cell. Ghostty splits the diff the same way.
+- **`adjust-cursor-height` shortens the cursor from the top**, leaving it sitting on the bottom of
+  the cell — which is where upstream's bearing-placed cursor sprite ends up.
+- **Not implemented:** `adjust-icon-height` (giest has no icon-height constraint to adjust; Nerd
+  Font icons use the generic `Fit` path) and `font-variation`.
+- **Verified**: the derivation is unit-tested against a synthetic face (14 → 24px cell for `= 10`,
+  the baseline and underline both moving by 5), and live — a printed box's row pitch grew from 40px
+  to ~59–60px across two rows under `adjust-cell-height = 10`, i.e. ~+10px per row as configured.
+  The live edges are ±1px ambiguous; the unit tests are the exact evidence. *Underline and cursor
+  appearance want human eyeballing.*
 
 ### Quick terminal + global keybinds — ✅ divergences
 

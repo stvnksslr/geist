@@ -11,9 +11,8 @@ so keys are transposable with a real Ghostty config:
   inline comments.
 - `palette` is **repeatable** — one `palette = <index>=#rrggbb` line per entry.
 - An **empty value** (`key =`) resets that key to its built-in default.
-- **Every key is optional**, and keys giest doesn't support (e.g. `font-family`,
-  `theme`) are ignored with a warning — so a full Ghostty config can be dropped
-  in and the supported subset applies.
+- **Every key is optional**, and unsupported keys are ignored with a warning —
+  so a full Ghostty config can be dropped in and the supported subset applies.
 
 ## Full annotated example
 
@@ -51,6 +50,10 @@ palette = 8=#666a73
 | `foreground` / `background` | `#rrggbb` | Default fg/bg, applied via `engine.apply_theme`. |
 | `cursor-color` | `#rrggbb` | Cursor color; omit to defer to the program/engine default. |
 | `window-padding-x` / `window-padding-y` | float | Per-pane inset in logical points (wraps every split, not just the window edge). Defaults to Ghostty's `2`; the scrollbar overlays rather than reserving space, so the padding doesn't have to make room for it. |
+| `working-directory` | path | Where new terminals start when nothing is inherited: an absolute path, `~/...`, `home`, or `inherit` (the directory giest itself was launched from — the default). |
+| `window-new-tab-position` | enum | `current` (default) inserts the new tab after the focused one; `end` appends. |
+| `window-padding-balance` | enum | Share out the leftover space the grid can't fill: `false` (default) leaves it all at the right/bottom, `true` balances but caps the top, `equal` balances every side. |
+| `split-divider-color` | color | The hairline between splits (and the other chrome hairlines); unset derives one from the theme. |
 | `window-theme` | enum | Light/dark mode for the **chrome** (tab strip, command palette, overlays, dialogs): `auto` (default) derives it from `background`, so the chrome matches your terminal; `dark`/`light` force it. giest never follows the OS theme — that is what used to render a light tab strip over a dark terminal. Colors and accents come from `foreground`/`background`/`palette`, so a theme change restyles the chrome too. |
 | `text-gamma` | float (0.5–3.0) | Anti-aliasing gamma passed to the shader; >1 thickens light-on-dark text. **giest-specific** — Ghostty has no equivalent. |
 | `scrollback-limit` | int | Max scrollback **lines** retained per pane. Note: Ghostty's `scrollback-limit` is in *bytes*; giest's VT engine takes a line count, so the key matches but the unit differs. |
@@ -88,6 +91,89 @@ backdrop or the taskbar attention flash, which need a window handle only the fir
 `close_window` has no default binding: Windows already delivers Alt+F4 to the window, which giest
 answers with the close confirmation. Bind it explicitly with `keybind = alt+f4=close_window` if you
 want the action as well.
+
+### Box drawing, blocks and braille
+
+giest **draws** these characters itself rather than taking them from the font, like Ghostty:
+
+- U+2500–257F box drawing, complete: the intersections `─│┌┐└┘├┬┼╋═║╔╗…`, the dashed lines, the
+  rounded corners `╭╮╯╰` and the diagonals `╱╲╳`
+- U+2580–259F block elements, shades and quadrants (`█▀▄▌▐░▒▓▖▗▘▝…`)
+- U+2800–28FF braille
+- U+E0B0–E0BF powerline separators (the solid and thin chevrons, the half-circles and the corner
+  triangles) plus E0D2 / E0D4
+
+They are *defined* relative to the character cell, while a font draws its versions relative to its
+em box — so with any line spacing at all, a font's `│` stops short of the cell edges and a column of
+them shows a dashed seam. Drawing from the cell metrics makes a box continuous by construction, in
+every font, including fonts that don't have these characters at all. The drawn versions **win over
+the font**, which is also what upstream does.
+
+Powerline separators are drawn even if your font has no Nerd Font patch, so a prompt that uses them
+works with any font. Not drawn, so still taken from the font: the *stylized* powerline symbols
+(U+E0C0 and up — flames, hexagons, ice), which upstream doesn't draw either, and the
+legacy-computing symbols.
+
+### Selection
+
+Double-click, triple-click and Ctrl+triple-click ask the **VT engine** for the extent, so they agree
+with Ghostty rather than with a second opinion computed from the drawn grid:
+
+- **Double-click** selects the word, using the terminal's own boundary rules.
+- **Triple-click** selects the logical line, **following soft wrapping** — a command longer than the
+  window selects whole instead of one screen row of itself — and stops at a shell prompt.
+- **Ctrl+triple-click** selects the *output* of the command that produced that row, delimited by its
+  OSC 133 marks (so it needs a shell that marks its prompts: PowerShell and cmd do, via the hooks
+  giest injects).
+
+| Key | Type | Notes |
+| --- | --- | --- |
+| `selection-word-chars` | string | Characters that end a word for double-click selection. Each character in the value is one boundary; `\t` is honoured. Unset uses the engine's defaults (Ghostty's list: space, tab, `'"│`|:;,()[]{}<>$`). Setting it **replaces** the list rather than adding to it. |
+| `selection-clear-on-typing` | bool (default `true`) | Clear the selection when you type into the shell. App shortcuts don't count — only input the program actually receives. |
+| `selection-clear-on-copy` | bool (default `false`) | Clear the selection after an explicit copy. Never applies to `copy-on-select`. |
+| `search-background` / `-foreground` | color | Colors for a scrollback-search match. Also accept `cell-foreground` / `cell-background` to defer to the cell's own colors. |
+| `search-selected-background` / `-foreground` | color | Same, for the match you're currently on. |
+
+A selection that starts above the visible area — a wrapped line scrolled off the top, or almost any
+command output — is **clamped to the viewport**, and copying gets the visible part. giest's selection
+model is viewport-scoped; selections spanning scrollback are a known gap.
+
+### Fonts, fallback chains and synthetic styles
+
+| Key | Type | Notes |
+| --- | --- | --- |
+| `font-family` | repeatable string | A family name or a path to a font file. **Repeat it to build a fallback chain**: the first that resolves is the primary font (it sets the cell metrics), and the rest are searched, in order, for characters it lacks — ahead of the system fonts. An empty value clears the list. |
+| `font-family-bold` / `-italic` / `-bold-italic` | string | Per-style overrides; each falls back to the primary family. |
+| `font-feature` | repeatable | OpenType features, e.g. `-calt` to drop programming ligatures. |
+| `font-synthetic-style` | bool or list | Whether a missing style may be **synthesized** from the face you have: bold by thickening it, italic by slanting it 12°. `false` disables all three; a list starts from the defaults, so `no-bold` disables only bold — note that it does **not** disable `bold-italic`, which you must turn off by name. |
+
+Synthesis only happens when your family genuinely lacks the style: if the font has a real bold face,
+it is used as-is. For bold-italic with no real face, giest slants a real bold if there is one, else
+thickens a real italic, else does both to the regular — upstream's preference order.
+
+Font selection is applied **at startup**; changing any of these keys needs a restart (a config
+reload re-applies colors and sizes, not fonts).
+
+### Font and cell metric adjustments (`adjust-*`)
+
+Every `adjust-*` key is a **delta, not a setting**: `1` means one pixel *more* than the font implies,
+`20%` means a fifth bigger, `-1` one less. (`adjust-cell-height = 2` does not make a 2px cell.)
+
+| Key | Adjusts |
+| --- | --- |
+| `adjust-cell-width` / `adjust-cell-height` | The character cell. `adjust-cell-height` is how you get **line spacing** — the text is re-centred in the taller cell, and the underline and strikethrough move with it. |
+| `adjust-font-baseline` | Distance from the bottom of the cell to the text baseline; a positive value lifts the text. |
+| `adjust-underline-position` / `-thickness` | The underline. Positions are measured from the **top of the cell**. |
+| `adjust-strikethrough-position` / `-thickness` | The strikethrough. |
+| `adjust-overline-position` / `-thickness` | The overline (at the top of the cell by default). |
+| `adjust-cursor-thickness` | Bar-cursor width, underline-cursor and hollow-cursor line width. |
+| `adjust-cursor-height` | Cursor height; a shorter cursor sits on the bottom of the cell. |
+| `adjust-box-thickness` | Thickness of the drawn box-drawing lines. |
+
+Thicknesses are clamped to at least 1px — a zero-thickness line is invisible, which reads as a
+missing glyph rather than as too aggressive a setting. Positions are **not** clamped: zero and
+negative are meaningful placements there. Not implemented: `adjust-icon-height` and
+`adjust-cursor-*`'s interaction with `font-variation`.
 
 ### Quick terminal (dropdown) and global keybinds
 

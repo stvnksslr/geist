@@ -935,7 +935,14 @@ impl Window {
         let (cell_w, cell_h) = render::init(render_state, px, config.text_gamma, &font_spec(&config));
 
         let (profiles, default_profile) = profiles::detect(config.shell.as_deref());
-        let first = Session::new(&cc.egui_ctx, &config, &profiles[default_profile], None)?;
+        // The very first session predates the `Window`, so it resolves
+        // `working-directory` directly (nothing can be inherited yet).
+        let first = Session::new(
+            &cc.egui_ctx,
+            &config,
+            &profiles[default_profile],
+            config.working_directory.as_deref(),
+        )?;
 
         let keymap = Keymap::from_config(&config.keybinds);
 
@@ -1493,6 +1500,13 @@ impl Window {
             .profiles
             .get(idx)
             .unwrap_or(&self.profiles[self.default_profile]);
+        // One cwd decision, in priority order: an inherited directory (when the
+        // `*-inherit-working-directory` key for this surface allows it and the
+        // shell reported one), else `working-directory`, else the process's own.
+        // Kept here rather than at each call site so the three inherit paths and
+        // the state-restore path can't drift — a restored directory that no
+        // longer exists now lands on `working-directory` too.
+        let cwd = cwd.or(self.config.working_directory.as_deref());
         Session::new(&self.egui_ctx, &self.config, profile, cwd)
             .map_err(|e| eprintln!("giest: failed to open session: {e}"))
             .ok()
@@ -1517,8 +1531,20 @@ impl Window {
             .flatten();
         if let Some(s) = self.spawn_session(idx, cwd.as_deref()) {
             let id = self.alloc_id();
-            self.tabs.push(Tab::leaf(id, s));
-            self.active_tab = self.tabs.len() - 1;
+            let at = new_tab_index(
+                self.config.new_tab_position,
+                self.active_tab,
+                self.tabs.len(),
+            );
+            self.tabs.insert(at, Tab::leaf(id, s));
+            self.active_tab = at;
+            // An insert *before* the end shifts every later tab, so anything
+            // holding a tab index is now pointing at the wrong tab. Every other
+            // mutation point in this file clears these for the same reason; a
+            // mid-list insert is a new one, introduced by
+            // `window-new-tab-position = current`.
+            self.renaming = None;
+            self.tab_drag = None;
         }
     }
 
@@ -3346,7 +3372,16 @@ impl Window {
         for leaf in leaves.iter_mut() {
             // The pane occupies `leaf.rect`; the grid is inset by the padding so
             // text clears the pane's edges (window border or split divider alike).
-            let prect = leaf.rect.shrink2(pad);
+            // `window-padding-balance` then shares out the leftover space — the
+            // remainder of dividing the pane by whole cells, which otherwise all
+            // piles up on the right and bottom.
+            let prect = balance_pane(
+                leaf.rect.shrink2(pad),
+                self.config.window_padding_balance,
+                self.cell_w,
+                self.cell_h,
+                ctx.pixels_per_point().max(1.0),
+            );
             let leaf_rect = leaf.rect;
             let leaf_id = leaf.id;
             let is_focus = leaf_id == focus_id;
@@ -3427,7 +3462,14 @@ impl Window {
                     if resp.triple_clicked() {
                         if let Some(p) = resp.interact_pointer_pos() {
                             let c = cell_at(p, session);
-                            session.select_line(c);
+                            // Ctrl+triple-click selects the command's *output*
+                            // rather than the line, matching Ghostty's
+                            // `Surface.zig` click-count handling.
+                            if ctx.input(|i| i.modifiers.ctrl) {
+                                session.select_output(c);
+                            } else {
+                                session.select_line(c);
+                            }
                         }
                     } else if resp.double_clicked() {
                         if let Some(p) = resp.interact_pointer_pos() {
@@ -3812,6 +3854,10 @@ impl Window {
                 panes: frames,
                 selection_bg: sel_bg,
                 selection_fg: sel_fg,
+                search_bg: self.config.search_bg,
+                search_fg: self.config.search_fg,
+                search_selected_bg: self.config.search_selected_bg,
+                search_selected_fg: self.config.search_selected_fg,
                 background_opacity,
                 background_opacity_cells,
                 faint_opacity,
@@ -4373,7 +4419,16 @@ impl App {
             return;
         }
         self.last_state = crate::state::SavedState {
-            windows: self.windows.iter().map(Window::capture_state).collect(),
+            // The quick terminal is excluded: it is summoned by a hotkey and has
+            // its own chrome and geometry, so restoring it as an ordinary window
+            // would hand the user a decorated window they never opened — the
+            // same reason split zoom isn't saved.
+            windows: self
+                .windows
+                .iter()
+                .filter(|w| !w.quick)
+                .map(Window::capture_state)
+                .collect(),
         };
     }
 
@@ -4680,6 +4735,41 @@ fn retire_window<W>(mut windows: Vec<W>, idx: usize, focused: usize) -> (Vec<W>,
     (windows, focused.min(last))
 }
 
+/// Apply `window-padding-balance` to a pane's grid rect.
+///
+/// The grid fits a whole number of cells, so dividing the pane leaves a
+/// remainder on each axis — by default all of it sits to the right of and below
+/// the text. Balancing moves half of it to the other side. Cell metrics are in
+/// physical pixels while the rect is in points, hence the `ppp` conversion; the
+/// arithmetic itself lives in `config::balance_padding`, where it is table-tested.
+fn balance_pane(
+    rect: egui::Rect,
+    mode: crate::config::PaddingBalance,
+    cell_w: f32,
+    cell_h: f32,
+    ppp: f32,
+) -> egui::Rect {
+    if mode == crate::config::PaddingBalance::None {
+        return rect;
+    }
+    let (cw, ch) = ((cell_w / ppp).max(1.0), (cell_h / ppp).max(1.0));
+    let (lx, _) = crate::config::balance_padding(mode, rect.width() % cw, cw);
+    let (ly, _) = crate::config::balance_padding(mode, rect.height() % ch, ch);
+    egui::Rect::from_min_max(rect.min + egui::vec2(lx, ly), rect.max)
+}
+
+/// Where a new tab is inserted, given `window-new-tab-position`.
+///
+/// `current` means *after* the focused tab, not at it — a pure function so the
+/// off-by-one has a test rather than a comment. Clamped to `len`, so it is
+/// always a valid `Vec::insert` index even if the focus is somehow stale.
+fn new_tab_index(pos: crate::config::NewTabPosition, active: usize, len: usize) -> usize {
+    match pos {
+        crate::config::NewTabPosition::End => len,
+        crate::config::NewTabPosition::Current => (active + 1).min(len),
+    }
+}
+
 /// Which slot a tab dragged to pointer-x `x` should land in, given this frame's
 /// tab rects: the number of tabs whose horizontal **centre** is left of `x`.
 ///
@@ -4802,11 +4892,13 @@ fn install_ui_fallback_font(ctx: &egui::Context) {
 /// config reload (the atlas isn't rebuilt there).
 fn font_spec(config: &Config) -> render::FontSpec {
     render::FontSpec {
-        family: config.font_family.clone(),
+        families: config.font_family.clone(),
         family_bold: config.font_family_bold.clone(),
         family_italic: config.font_family_italic.clone(),
         family_bold_italic: config.font_family_bold_italic.clone(),
         features: config.font_features.clone(),
+        adjust: config.adjust,
+        synthetic: config.font_synthetic_style,
     }
 }
 
@@ -4995,7 +5087,7 @@ fn truncate_to_width(title: &str, suffix: &str, max: f32, w: impl Fn(&str) -> f3
 mod tests {
     use super::{
         Dir, Node, Tab, capture_node_with, cycle_pick, dim_alpha, drop_index, highlight_job,
-        keep_only_tab, nav_dir,
+        keep_only_tab, nav_dir, new_tab_index,
         overlay_anchor, preview_text, reap_tabs, reorder_tabs, retire_window, split_rect,
         truncate_tabs_to_right, truncate_to_width,
     };
@@ -5070,6 +5162,20 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn new_tab_index_inserts_after_the_focused_tab_or_at_the_end() {
+        use crate::config::NewTabPosition::{Current, End};
+        // `current` means *after* the focused tab, not at it.
+        assert_eq!(new_tab_index(Current, 0, 3), 1);
+        assert_eq!(new_tab_index(Current, 2, 3), 3);
+        assert_eq!(new_tab_index(End, 0, 3), 3);
+        assert_eq!(new_tab_index(End, 2, 3), 3);
+        // Both are valid `Vec::insert` indices even from an empty list or a
+        // stale focus, so a mid-list insert can never panic.
+        assert_eq!(new_tab_index(Current, 0, 0), 0);
+        assert_eq!(new_tab_index(Current, 9, 3), 3);
     }
 
     #[test]

@@ -498,4 +498,40 @@ pub trait TerminalEngine {
     fn jump_to_prompt(&self, _delta: isize) -> Option<usize> {
         None
     }
+
+    /// **Semantic selection**: the extent of the word / line / command output at
+    /// viewport cell `(x, y)`, as an inclusive pair of viewport cells.
+    ///
+    /// These are the double-click, triple-click and Ctrl+triple-click gestures,
+    /// resolved by the VT engine rather than by scanning the rendered grid — so
+    /// a word ends where the terminal says it does (`word_boundaries`, the
+    /// user's `selection-word-chars`), a line follows **soft wrapping** across
+    /// rows, and a command's output is delimited by its OSC 133 marks.
+    ///
+    /// A selection may begin above the viewport (a wrapped line whose first row
+    /// has scrolled off; command output usually). Such an end is **clamped**
+    /// into the viewport, because giest's selection model is viewport-scoped —
+    /// see the `SelectKind::Output` note. Engines without support return `None`.
+    fn select_semantic(
+        &self,
+        _kind: SelectKind,
+        _x: u16,
+        _y: u16,
+        _word_boundaries: &[char],
+    ) -> Option<((u16, u16), (u16, u16))> {
+        None
+    }
+}
+
+/// Which semantic extent [`TerminalEngine::select_semantic`] should find.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelectKind {
+    /// The word under the cell (double-click).
+    Word,
+    /// The logical line under the cell, following soft wrapping (triple-click).
+    Line,
+    /// The output of the command that produced this row, from its OSC 133 marks
+    /// (Ctrl+triple-click). Usually starts above the viewport, so the returned
+    /// range is clamped to what is on screen.
+    Output,
 }

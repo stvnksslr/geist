@@ -35,6 +35,7 @@ pub mod scrollbar;
 pub mod search;
 pub mod session;
 pub mod shader;
+pub mod sprite;
 pub mod state;
 pub mod synthetic;
 pub mod taskbar;

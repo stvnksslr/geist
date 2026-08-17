@@ -152,6 +152,199 @@ fn parse_bell_features(value: &str) -> Option<BellFeatures> {
     Some(out)
 }
 
+/// The user's home directory (`%USERPROFILE%`, else `%HOMEDRIVE%%HOMEPATH%`).
+fn home_dir() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("USERPROFILE") {
+        return Some(PathBuf::from(p));
+    }
+    let drive = std::env::var_os("HOMEDRIVE")?;
+    let path = std::env::var_os("HOMEPATH")?;
+    Some(PathBuf::from(drive).join(path))
+}
+
+/// Resolve one `search-*` color: empty resets, a bad value keeps the current one
+/// (and says so, since a silently ignored colour looks like the key not working).
+fn terminal_color(v: &str, current: TerminalColor, default: TerminalColor) -> TerminalColor {
+    if v.is_empty() {
+        return default;
+    }
+    TerminalColor::parse(v).unwrap_or_else(|| {
+        eprintln!("giest: ignoring unparseable color '{v}'");
+        current
+    })
+}
+
+/// A color that may instead defer to the cell's own colors. Ghostty's
+/// `TerminalColor`, used by the search-highlight keys.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TerminalColor {
+    Color(Rgb),
+    /// The cell's foreground color.
+    CellForeground,
+    /// The cell's background color.
+    CellBackground,
+}
+
+impl TerminalColor {
+    pub fn parse(v: &str) -> Option<Self> {
+        match v.trim().to_ascii_lowercase().as_str() {
+            "cell-foreground" => Some(Self::CellForeground),
+            "cell-background" => Some(Self::CellBackground),
+            _ => parse_color(v).map(Self::Color),
+        }
+    }
+
+    /// Resolve against the cell's own colors.
+    pub fn resolve(self, cell_fg: Rgb, cell_bg: Rgb) -> Rgb {
+        match self {
+            Self::Color(c) => c,
+            Self::CellForeground => cell_fg,
+            Self::CellBackground => cell_bg,
+        }
+    }
+}
+
+/// Where a new tab is inserted. Ghostty `window-new-tab-position`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum NewTabPosition {
+    /// Immediately after the focused tab (upstream's default).
+    #[default]
+    Current,
+    /// At the end of the tab strip.
+    End,
+}
+
+/// How leftover space is distributed around the grid. Ghostty
+/// `window-padding-balance`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum PaddingBalance {
+    /// No balancing: the leftover space all falls to the right/bottom.
+    #[default]
+    None,
+    /// Balance, but cap the *top* padding so text doesn't float, pushing the
+    /// excess to the bottom.
+    Balanced,
+    /// Balance equally on all sides, with no cap on the top.
+    Equal,
+}
+
+/// Split the leftover pixels on one axis into (leading, trailing) padding.
+///
+/// A pure function so the three modes can be table-tested. `Balanced` caps the
+/// leading side at half the *cell* size, which is what stops a nearly-full extra
+/// row of space from being parked above the first line — upstream's rule, and
+/// the reason `Equal` exists as a separate value for people who want it split
+/// down the middle regardless.
+pub fn balance_padding(mode: PaddingBalance, leftover: f32, cell: f32) -> (f32, f32) {
+    let leftover = leftover.max(0.0);
+    match mode {
+        PaddingBalance::None => (0.0, leftover),
+        PaddingBalance::Equal => {
+            let lead = (leftover / 2.0).floor();
+            (lead, leftover - lead)
+        }
+        PaddingBalance::Balanced => {
+            let lead = (leftover / 2.0).floor().min((cell / 2.0).floor());
+            (lead, leftover - lead)
+        }
+    }
+}
+
+/// Parse `selection-word-chars`: every character in the value becomes a word
+/// boundary.
+///
+/// Iterates **characters, not bytes** — Ghostty's own default list contains `│`
+/// (U+2502), so a byte loop would split it into three bogus boundaries. The
+/// escape `\t` is honoured (upstream accepts Zig string escapes; `\t` is the one
+/// that appears in its documented default), and `\\` yields a literal backslash.
+///
+/// NUL is always a boundary upstream and is prepended here, since a caller that
+/// passes an explicit list replaces the engine's defaults wholesale.
+fn parse_word_chars(v: &str) -> Vec<char> {
+    let mut out = vec!['\0'];
+    let mut chars = v.chars();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\\' => match chars.next() {
+                Some('t') => out.push('\t'),
+                Some('n') => out.push('\n'),
+                Some('\\') => out.push('\\'),
+                // An unknown escape keeps both characters rather than eating one
+                // silently — the user can see what happened.
+                Some(other) => {
+                    out.push('\\');
+                    out.push(other);
+                }
+                None => out.push('\\'),
+            },
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// Which styles may be *synthesized* when the configured family has no real
+/// face for them. Ghostty `font-synthetic-style`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SyntheticStyle {
+    pub bold: bool,
+    pub italic: bool,
+    pub bold_italic: bool,
+}
+
+impl SyntheticStyle {
+    fn all(on: bool) -> Self {
+        Self {
+            bold: on,
+            italic: on,
+            bold_italic: on,
+        }
+    }
+}
+
+impl Default for SyntheticStyle {
+    /// All three on, like upstream.
+    fn default() -> Self {
+        Self::all(true)
+    }
+}
+
+/// Parse `font-synthetic-style`, which has the same packed-struct grammar as
+/// `bell-features`: a bare bool sets every flag, a list starts from the
+/// *defaults* (so it replaces rather than accumulates), `no-` turns one off, and
+/// a single unknown token rejects the whole value.
+///
+/// The three flags are **independent**, which upstream calls out as the easy
+/// mistake: `no-bold` does not disable bold-italic. Mirrored here, and pinned by
+/// a test, because "I turned bold off and bold-italic is still synthesized"
+/// looks like a bug rather than the documented behaviour.
+fn parse_synthetic_style(value: &str) -> Option<SyntheticStyle> {
+    let v = value.trim();
+    match v {
+        "1" | "t" | "true" => return Some(SyntheticStyle::all(true)),
+        "0" | "f" | "false" => return Some(SyntheticStyle::all(false)),
+        _ => {}
+    }
+    let mut out = SyntheticStyle::default();
+    for tok in v.split(',') {
+        let tok = tok.trim();
+        if tok.is_empty() {
+            continue;
+        }
+        let (name, on) = match tok.strip_prefix("no-") {
+            Some(rest) => (rest, false),
+            None => (tok, true),
+        };
+        match name.to_ascii_lowercase().as_str() {
+            "bold" => out.bold = on,
+            "italic" => out.italic = on,
+            "bold-italic" => out.bold_italic = on,
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
 /// Wheel-distance multipliers. Ghostty `mouse-scroll-multiplier`.
 ///
 /// Two numbers because the devices are different animals: a wheel emits chunky
@@ -374,6 +567,96 @@ pub fn needs_confirm(mode: ConfirmClose, busy: Option<bool>) -> bool {
     }
 }
 
+/// An `adjust-*` metric adjustment: Ghostty's `MetricModifier`.
+///
+/// The values are **deltas, not settings** — `1` means "one more pixel than the
+/// font/cell implies", and `20%` means "a fifth bigger". That trips people up
+/// (a `1` looks like it should set the value to 1), so it is spelled out in the
+/// guide as well as here.
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub enum MetricModifier {
+    /// Unset: use the derived value unchanged.
+    #[default]
+    None,
+    /// Add this many pixels (may be negative).
+    Pixels(i32),
+    /// Change by this percentage (`20%` → `0.20`, `-15%` → `-0.15`).
+    Percent(f32),
+}
+
+impl MetricModifier {
+    pub fn parse(v: &str) -> Option<Self> {
+        let s = v.trim();
+        if let Some(p) = s.strip_suffix('%') {
+            return p.trim().parse::<f32>().ok().map(|v| Self::Percent(v / 100.0));
+        }
+        s.parse::<i32>().ok().map(Self::Pixels)
+    }
+
+    /// Apply to a derived value: exact arithmetic, **no rounding and no clamp**.
+    ///
+    /// Rounding belongs to the caller, because the three kinds of metric round
+    /// differently and doing it here silently corrupted one of them: a cell width
+    /// is `ceil`ed (a 6.36px advance is a 7px cell), so rounding first turns it
+    /// into a 6px cell and every column loses a pixel. Positions round to
+    /// nearest, thicknesses ceil — see [`Self::apply_thickness`].
+    pub fn apply(self, value: f32) -> f32 {
+        match self {
+            MetricModifier::None => value,
+            MetricModifier::Pixels(p) => value + p as f32,
+            MetricModifier::Percent(p) => value + value * p,
+        }
+    }
+
+    /// Apply to a *thickness*: `ceil`ed and clamped to at least 1, exactly as
+    /// upstream's `@max(1, @ceil(...))`.
+    ///
+    /// The clamp is load-bearing: a thickness of zero is an invisible line,
+    /// which reads as the character being missing rather than as the adjustment
+    /// being too aggressive. Positions are deliberately *not* clamped this way —
+    /// zero and negative are meaningful placements there.
+    pub fn apply_thickness(self, value: f32) -> f32 {
+        self.apply(value).ceil().max(1.0)
+    }
+}
+
+/// Resolve one `adjust-*` value: empty resets to the default, a malformed value
+/// is reported and keeps the previous one (Ghostty makes it a config error; giest
+/// has no error UI, so it says so and carries on).
+fn adjust_value(v: &str, current: MetricModifier, default: MetricModifier) -> MetricModifier {
+    if v.is_empty() {
+        return default;
+    }
+    match MetricModifier::parse(v) {
+        Some(m) => m,
+        None => {
+            eprintln!("giest: ignoring adjustment '{v}' (expected a number like '1', '-2' or '20%')");
+            current
+        }
+    }
+}
+
+/// The whole `adjust-*` family. Ghostty's `ModifierSet`, as a plain struct: the
+/// set is fixed and small, and a struct makes every consumer a field access that
+/// the compiler checks rather than a map lookup that can silently miss.
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub struct MetricAdjust {
+    pub cell_width: MetricModifier,
+    pub cell_height: MetricModifier,
+    /// Distance from the bottom of the cell to the text baseline.
+    pub font_baseline: MetricModifier,
+    pub underline_position: MetricModifier,
+    pub underline_thickness: MetricModifier,
+    pub strikethrough_position: MetricModifier,
+    pub strikethrough_thickness: MetricModifier,
+    pub overline_position: MetricModifier,
+    pub overline_thickness: MetricModifier,
+    pub cursor_thickness: MetricModifier,
+    pub cursor_height: MetricModifier,
+    /// Thickness of the drawn box-drawing lines (see [`crate::sprite`]).
+    pub box_thickness: MetricModifier,
+}
+
 /// Whether the window/tab/split layout survives a quit. Ghostty
 /// `window-save-state`, whose values are `default` / `never` / `always`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -568,10 +851,42 @@ pub struct Config {
     /// Logical font size in points (scaled by the display DPI for the atlas).
     /// Ghostty `font-size`.
     pub font_points: f32,
-    /// Primary font family (name or file path); `None` keeps the built-in
-    /// JetBrains Mono. Ghostty `font-family`. *(Applied at startup; changing it
-    /// needs a restart — config reload re-applies colors/size, not the font.)*
-    pub font_family: Option<String>,
+    /// Font families (names or file paths), in order: the first that resolves is
+    /// the primary and the rest form a **fallback chain** for characters it
+    /// lacks, ahead of the system fonts. Empty keeps the built-in JetBrains
+    /// Mono. Ghostty `font-family`, which is repeatable for the same reason.
+    /// *(Applied at startup; changing it needs a restart — config reload
+    /// re-applies colors/size, not the font.)*
+    pub font_family: Vec<String>,
+    /// Whether missing styles may be synthesized. Ghostty
+    /// `font-synthetic-style`.
+    pub font_synthetic_style: SyntheticStyle,
+    /// Codepoints that end a word for double-click selection. Empty means the
+    /// VT engine's own defaults. Ghostty `selection-word-chars`.
+    pub selection_word_chars: Vec<char>,
+    /// Clear the selection when the user types into the terminal. Ghostty
+    /// `selection-clear-on-typing` (default true).
+    pub selection_clear_on_typing: bool,
+    /// Clear the selection after an explicit copy. Ghostty
+    /// `selection-clear-on-copy` (default false); never applies to
+    /// `copy-on-select`, which upstream exempts by name.
+    pub selection_clear_on_copy: bool,
+    /// Highlight colors for scrollback-search matches. Ghostty `search-*`.
+    pub search_bg: TerminalColor,
+    pub search_fg: TerminalColor,
+    pub search_selected_bg: TerminalColor,
+    pub search_selected_fg: TerminalColor,
+    /// Color of the gutter between splits; `None` derives one from the chrome.
+    /// Ghostty `split-divider-color`.
+    pub split_divider_color: Option<Rgb>,
+    /// Where a new tab is inserted. Ghostty `window-new-tab-position`.
+    pub new_tab_position: NewTabPosition,
+    /// How leftover space around the grid is distributed. Ghostty
+    /// `window-padding-balance`.
+    pub window_padding_balance: PaddingBalance,
+    /// Directory new terminals start in when nothing is inherited. `None` =
+    /// the process's own directory. Ghostty `working-directory`.
+    pub working_directory: Option<PathBuf>,
     /// Per-style family overrides; each `None` falls back to `font_family`.
     /// Ghostty `font-family-bold` / `-italic` / `-bold-italic`.
     pub font_family_bold: Option<String>,
@@ -715,6 +1030,8 @@ pub struct Config {
     /// Whether the window/tab/split layout is saved on exit and restored at the
     /// next launch. Ghostty `window-save-state`.
     pub window_save_state: WindowSaveState,
+    /// The `adjust-*` font/cell metric adjustments.
+    pub adjust: MetricAdjust,
     /// Which screen edge the quick terminal drops from. Ghostty
     /// `quick-terminal-position`.
     pub quick_terminal_position: crate::quickterm::Position,
@@ -805,7 +1122,24 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             font_points: 16.0,
-            font_family: None,
+            font_family: Vec::new(),
+            font_synthetic_style: SyntheticStyle::default(),
+            // Empty = "use the engine's defaults", which are Ghostty's own list.
+            // Storing the default list here instead would duplicate it, and the
+            // two copies would drift the first time upstream changed one.
+            selection_word_chars: Vec::new(),
+            selection_clear_on_typing: true,
+            selection_clear_on_copy: false,
+            // Upstream's defaults: an amber match, a warmer current match, both
+            // with black text.
+            search_bg: TerminalColor::Color(Rgb::new(0xFF, 0xE0, 0x82)),
+            search_fg: TerminalColor::Color(Rgb::new(0, 0, 0)),
+            search_selected_bg: TerminalColor::Color(Rgb::new(0xF2, 0xA5, 0x7E)),
+            search_selected_fg: TerminalColor::Color(Rgb::new(0, 0, 0)),
+            split_divider_color: None,
+            new_tab_position: NewTabPosition::default(),
+            window_padding_balance: PaddingBalance::default(),
+            working_directory: None,
             font_family_bold: None,
             font_family_italic: None,
             font_family_bold_italic: None,
@@ -852,6 +1186,7 @@ impl Default for Config {
             osc_color_report_format: OscColorReportFormat::Bits16,
             confirm_close: ConfirmClose::WhenBusy,
             window_save_state: WindowSaveState::Default,
+            adjust: MetricAdjust::default(),
             quick_terminal_position: crate::quickterm::Position::Top,
             quick_terminal_size: crate::quickterm::QuickSize::default(),
             // Ghostty's non-macOS default. A global hotkey is the only way back
@@ -1007,8 +1342,84 @@ const SETTERS: &[(&str, Setter)] = &[
             }
         }
     }),
-    ("font-family", |c, v, d| {
-        c.font_family = opt_string(v, &d.font_family)
+    // Repeatable, like `palette` and `keybind`: each line appends to the
+    // fallback chain. An empty value resets the whole list, which is the only
+    // way to undo an earlier line (Ghostty's RepeatableString does the same).
+    ("font-family", |c, v, _d| {
+        if v.is_empty() {
+            c.font_family.clear();
+        } else {
+            c.font_family.push(v.to_string());
+        }
+    }),
+    ("selection-clear-on-typing", |c, v, d| {
+        c.selection_clear_on_typing = parse_bool(v, d.selection_clear_on_typing)
+    }),
+    ("selection-clear-on-copy", |c, v, d| {
+        c.selection_clear_on_copy = parse_bool(v, d.selection_clear_on_copy)
+    }),
+    ("search-background", |c, v, d| {
+        c.search_bg = terminal_color(v, c.search_bg, d.search_bg)
+    }),
+    ("search-foreground", |c, v, d| {
+        c.search_fg = terminal_color(v, c.search_fg, d.search_fg)
+    }),
+    ("search-selected-background", |c, v, d| {
+        c.search_selected_bg = terminal_color(v, c.search_selected_bg, d.search_selected_bg)
+    }),
+    ("search-selected-foreground", |c, v, d| {
+        c.search_selected_fg = terminal_color(v, c.search_selected_fg, d.search_selected_fg)
+    }),
+    ("split-divider-color", |c, v, d| {
+        c.split_divider_color = match v {
+            "" => d.split_divider_color,
+            _ => parse_color(v).or(c.split_divider_color),
+        }
+    }),
+    ("window-new-tab-position", |c, v, d| {
+        c.new_tab_position = match v.to_ascii_lowercase().as_str() {
+            "" => d.new_tab_position,
+            "current" => NewTabPosition::Current,
+            "end" => NewTabPosition::End,
+            _ => c.new_tab_position,
+        }
+    }),
+    ("window-padding-balance", |c, v, d| {
+        c.window_padding_balance = match v.to_ascii_lowercase().as_str() {
+            "" => d.window_padding_balance,
+            "false" | "no" | "off" | "0" => PaddingBalance::None,
+            "true" | "yes" | "on" | "1" => PaddingBalance::Balanced,
+            "equal" => PaddingBalance::Equal,
+            _ => c.window_padding_balance,
+        }
+    }),
+    ("working-directory", |c, v, d| {
+        c.working_directory = match v {
+            "" => d.working_directory.clone(),
+            // `inherit` is the launching process's directory, which is exactly
+            // what `None` already means here.
+            "inherit" => None,
+            "home" => home_dir(),
+            _ => match v.strip_prefix("~/").or_else(|| v.strip_prefix(r"~\")) {
+                Some(rest) => home_dir().map(|h| h.join(rest)),
+                None => Some(PathBuf::from(v)),
+            },
+        }
+    }),
+    ("selection-word-chars", |c, v, d| {
+        c.selection_word_chars = match v {
+            "" => d.selection_word_chars.clone(),
+            _ => parse_word_chars(v),
+        }
+    }),
+    ("font-synthetic-style", |c, v, d| {
+        c.font_synthetic_style = match v {
+            "" => d.font_synthetic_style,
+            _ => parse_synthetic_style(v).unwrap_or_else(|| {
+                eprintln!("giest: ignoring invalid font-synthetic-style '{v}'");
+                c.font_synthetic_style
+            }),
+        }
     }),
     ("font-family-bold", |c, v, d| {
         c.font_family_bold = opt_string(v, &d.font_family_bold)
@@ -1266,6 +1677,61 @@ const SETTERS: &[(&str, Setter)] = &[
             "always" => ConfirmClose::Always,
             _ => c.confirm_close,
         }
+    }),
+    // The `adjust-*` family. One entry per key rather than a shared prefix
+    // handler: the table is the registry, and a typo'd key should be reported as
+    // unsupported rather than silently matching a prefix and going nowhere.
+    ("adjust-cell-width", |c, v, d| {
+        c.adjust.cell_width = adjust_value(v, c.adjust.cell_width, d.adjust.cell_width)
+    }),
+    ("adjust-cell-height", |c, v, d| {
+        c.adjust.cell_height = adjust_value(v, c.adjust.cell_height, d.adjust.cell_height)
+    }),
+    ("adjust-font-baseline", |c, v, d| {
+        c.adjust.font_baseline = adjust_value(v, c.adjust.font_baseline, d.adjust.font_baseline)
+    }),
+    ("adjust-underline-position", |c, v, d| {
+        c.adjust.underline_position =
+            adjust_value(v, c.adjust.underline_position, d.adjust.underline_position)
+    }),
+    ("adjust-underline-thickness", |c, v, d| {
+        c.adjust.underline_thickness = adjust_value(
+            v,
+            c.adjust.underline_thickness,
+            d.adjust.underline_thickness,
+        )
+    }),
+    ("adjust-strikethrough-position", |c, v, d| {
+        c.adjust.strikethrough_position = adjust_value(
+            v,
+            c.adjust.strikethrough_position,
+            d.adjust.strikethrough_position,
+        )
+    }),
+    ("adjust-strikethrough-thickness", |c, v, d| {
+        c.adjust.strikethrough_thickness = adjust_value(
+            v,
+            c.adjust.strikethrough_thickness,
+            d.adjust.strikethrough_thickness,
+        )
+    }),
+    ("adjust-overline-position", |c, v, d| {
+        c.adjust.overline_position =
+            adjust_value(v, c.adjust.overline_position, d.adjust.overline_position)
+    }),
+    ("adjust-overline-thickness", |c, v, d| {
+        c.adjust.overline_thickness =
+            adjust_value(v, c.adjust.overline_thickness, d.adjust.overline_thickness)
+    }),
+    ("adjust-cursor-thickness", |c, v, d| {
+        c.adjust.cursor_thickness =
+            adjust_value(v, c.adjust.cursor_thickness, d.adjust.cursor_thickness)
+    }),
+    ("adjust-cursor-height", |c, v, d| {
+        c.adjust.cursor_height = adjust_value(v, c.adjust.cursor_height, d.adjust.cursor_height)
+    }),
+    ("adjust-box-thickness", |c, v, d| {
+        c.adjust.box_thickness = adjust_value(v, c.adjust.box_thickness, d.adjust.box_thickness)
     }),
     ("quick-terminal-position", |c, v, d| {
         c.quick_terminal_position = match v {
@@ -2183,6 +2649,207 @@ mod tests {
     }
 
     #[test]
+    fn search_colors_default_to_ghosttys_and_accept_cell_keywords() {
+        let c = Config::default();
+        assert_eq!(
+            c.search_bg,
+            TerminalColor::Color(Rgb::new(0xFF, 0xE0, 0x82))
+        );
+        assert_eq!(c.search_fg, TerminalColor::Color(Rgb::new(0, 0, 0)));
+        assert_eq!(
+            c.search_selected_bg,
+            TerminalColor::Color(Rgb::new(0xF2, 0xA5, 0x7E))
+        );
+        // The two keywords defer to the cell rather than naming a color.
+        assert_eq!(
+            parsed("search-background = cell-foreground").search_bg,
+            TerminalColor::CellForeground
+        );
+        assert_eq!(
+            parsed("search-foreground = cell-background").search_fg,
+            TerminalColor::CellBackground
+        );
+        // X11 names work here like every other color key.
+        assert_eq!(
+            parsed("search-selected-background = red").search_selected_bg,
+            TerminalColor::Color(Rgb::new(0xFF, 0, 0))
+        );
+        let (fg, bg) = (Rgb::new(1, 2, 3), Rgb::new(4, 5, 6));
+        assert_eq!(TerminalColor::CellForeground.resolve(fg, bg), fg);
+        assert_eq!(TerminalColor::CellBackground.resolve(fg, bg), bg);
+        assert_eq!(TerminalColor::Color(fg).resolve(bg, bg), fg);
+    }
+
+    #[test]
+    fn padding_balance_shares_out_the_leftover_space() {
+        use PaddingBalance::*;
+        // Off: everything falls to the trailing edge, which is giest's old
+        // (and Ghostty's default) behaviour.
+        assert_eq!(balance_padding(None, 9.0, 20.0), (0.0, 9.0));
+        // Equal: split down the middle, odd pixel to the trailing side.
+        assert_eq!(balance_padding(Equal, 9.0, 20.0), (4.0, 5.0));
+        // Balanced: same, until the leading half would exceed half a cell —
+        // upstream's cap, which is what stops a nearly-whole extra row of space
+        // from being parked above the first line.
+        assert_eq!(balance_padding(Balanced, 9.0, 20.0), (4.0, 5.0));
+        assert_eq!(balance_padding(Balanced, 19.0, 20.0), (9.0, 10.0));
+        assert_eq!(balance_padding(Balanced, 30.0, 20.0), (10.0, 20.0), "capped");
+        assert_eq!(balance_padding(Equal, 30.0, 20.0), (15.0, 15.0), "uncapped");
+        // Nothing to share out, and a negative leftover can't invert the rect.
+        assert_eq!(balance_padding(Equal, 0.0, 20.0), (0.0, 0.0));
+        assert_eq!(balance_padding(Equal, -4.0, 20.0), (0.0, 0.0));
+    }
+
+    #[test]
+    fn the_new_config_keys_parse() {
+        assert_eq!(
+            parsed("window-new-tab-position = end").new_tab_position,
+            NewTabPosition::End
+        );
+        // Upstream's default is `current`, not `end` — giest used to always
+        // append, so this changes where a new tab lands.
+        assert_eq!(Config::default().new_tab_position, NewTabPosition::Current);
+        assert_eq!(
+            parsed("window-padding-balance = true").window_padding_balance,
+            PaddingBalance::Balanced
+        );
+        assert_eq!(
+            parsed("window-padding-balance = equal").window_padding_balance,
+            PaddingBalance::Equal
+        );
+        assert_eq!(
+            Config::default().window_padding_balance,
+            PaddingBalance::None
+        );
+        assert_eq!(
+            parsed("split-divider-color = #ff8800").split_divider_color,
+            Some(Rgb::new(0xFF, 0x88, 0x00))
+        );
+        assert_eq!(Config::default().split_divider_color, None);
+        // Ghostty's defaults, one of which giest previously had backwards:
+        // it cleared the selection on every copy.
+        assert!(Config::default().selection_clear_on_typing);
+        assert!(!Config::default().selection_clear_on_copy);
+        assert!(parsed("selection-clear-on-copy = true").selection_clear_on_copy);
+        assert!(!parsed("selection-clear-on-typing = false").selection_clear_on_typing);
+    }
+
+    #[test]
+    fn working_directory_resolves_its_special_values() {
+        // `inherit` is the launching process's directory, which is what `None`
+        // already means downstream.
+        assert_eq!(parsed("working-directory = inherit").working_directory, None);
+        assert_eq!(Config::default().working_directory, None);
+        assert_eq!(
+            parsed(r"working-directory = C:\src").working_directory,
+            Some(PathBuf::from(r"C:\src"))
+        );
+        // `home` and `~/` need a home directory to exist; on a machine that has
+        // one they resolve under it.
+        if let Some(home) = home_dir() {
+            assert_eq!(parsed("working-directory = home").working_directory, Some(home.clone()));
+            assert_eq!(
+                parsed("working-directory = ~/src").working_directory,
+                Some(home.join("src"))
+            );
+        }
+    }
+
+    #[test]
+    fn selection_word_chars_parses_characters_not_bytes() {
+        // Empty by default = "the engine's own boundaries", so the list isn't
+        // duplicated here where it could drift from upstream's.
+        assert!(Config::default().selection_word_chars.is_empty());
+
+        let c = parsed("selection-word-chars =  \t'\"|:,()[]{}<>$").selection_word_chars;
+        // NUL is always a boundary upstream, and an explicit list replaces the
+        // engine's defaults wholesale — so it has to be prepended here.
+        assert_eq!(c[0], '\0');
+        assert!(c.contains(&'(') && c.contains(&'$') && c.contains(&':'));
+
+        // A multi-byte boundary (upstream's own default list contains U+2502)
+        // must survive as one character, not three.
+        let c = parsed("selection-word-chars = │").selection_word_chars;
+        assert_eq!(c, vec!['\0', '│']);
+
+        // `\t` is an escape, as in Ghostty's documented default.
+        let c = parsed(r"selection-word-chars = \t").selection_word_chars;
+        assert_eq!(c, vec!['\0', '\t']);
+        let c = parsed(r"selection-word-chars = \\").selection_word_chars;
+        assert_eq!(c, vec!['\0', '\\']);
+
+        // An empty value resets to the default (the engine's list).
+        assert!(
+            parsed("selection-word-chars = abc\nselection-word-chars =")
+                .selection_word_chars
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn font_synthetic_style_has_the_packed_struct_grammar() {
+        // On by default, all three.
+        assert_eq!(Config::default().font_synthetic_style, SyntheticStyle::all(true));
+        // A bare bool sets every flag.
+        assert_eq!(
+            parsed("font-synthetic-style = false").font_synthetic_style,
+            SyntheticStyle::all(false)
+        );
+        assert_eq!(
+            parsed("font-synthetic-style = true").font_synthetic_style,
+            SyntheticStyle::all(true)
+        );
+        // A list starts from the *defaults*, so `no-bold` disables only bold —
+        // upstream calls this out as the easy mistake, and it must not be
+        // "helpfully" extended to bold-italic.
+        let s = parsed("font-synthetic-style = no-bold").font_synthetic_style;
+        assert!(!s.bold && s.italic && s.bold_italic);
+        let s = parsed("font-synthetic-style = no-bold,no-italic").font_synthetic_style;
+        assert!(!s.bold && !s.italic && s.bold_italic);
+        assert!(!parsed("font-synthetic-style = no-bold-italic").font_synthetic_style.bold_italic);
+        // One unknown token rejects the whole value rather than half-applying it.
+        assert_eq!(
+            parsed("font-synthetic-style = no-bold,nope").font_synthetic_style,
+            SyntheticStyle::all(true)
+        );
+        // An empty value resets to the default.
+        assert_eq!(
+            parsed("font-synthetic-style = false\nfont-synthetic-style =").font_synthetic_style,
+            SyntheticStyle::all(true)
+        );
+    }
+
+    #[test]
+    fn adjust_metrics_are_deltas_not_settings() {
+        // The trap the upstream docs call out: `1` adds a pixel, it does not set
+        // the value to 1.
+        assert_eq!(MetricModifier::parse("1"), Some(MetricModifier::Pixels(1)));
+        assert_eq!(MetricModifier::parse("-2"), Some(MetricModifier::Pixels(-2)));
+        assert_eq!(
+            MetricModifier::parse("20%"),
+            Some(MetricModifier::Percent(0.2))
+        );
+        assert_eq!(MetricModifier::parse("nope"), None);
+
+        assert_eq!(MetricModifier::None.apply(4.0), 4.0);
+        assert_eq!(MetricModifier::Pixels(1).apply(4.0), 5.0);
+        assert_eq!(MetricModifier::Percent(0.5).apply(4.0), 6.0);
+        // Clamped to at least 1: a zero-thickness line is invisible, which reads
+        // as a missing glyph rather than a too-aggressive setting.
+        assert_eq!(MetricModifier::Pixels(-10).apply_thickness(2.0), 1.0);
+        assert_eq!(MetricModifier::Percent(-1.0).apply_thickness(8.0), 1.0);
+        // …but a *position* is not clamped: zero and negative are meaningful
+        // there (an overline sits at 0 by definition).
+        assert_eq!(MetricModifier::Pixels(-10).apply(2.0), -8.0);
+
+        assert_eq!(
+            parsed("adjust-box-thickness = 2").adjust.box_thickness,
+            MetricModifier::Pixels(2)
+        );
+        assert_eq!(Config::default().adjust, MetricAdjust::default());
+    }
+
+    #[test]
     fn window_save_state_parses_and_only_always_restores() {
         assert_eq!(Config::default().window_save_state, WindowSaveState::Default);
         assert_eq!(
@@ -2859,7 +3526,7 @@ mod tests {
              font-feature = -calt\n\
              font-feature = ss01, cv01",
         );
-        assert_eq!(c.font_family.as_deref(), Some("Cascadia Code"));
+        assert_eq!(c.font_family, vec!["Cascadia Code"]);
         assert_eq!(c.font_family_bold.as_deref(), Some("Cascadia Code SemiBold"));
         assert_eq!(c.font_family_italic.as_deref(), Some("Cascadia Code Italic"));
         assert_eq!(c.font_family_bold_italic, None);
@@ -2870,9 +3537,18 @@ mod tests {
         assert_eq!(parsed("font-feature = liga off").font_features, vec!["liga off"]);
 
         // Defaults and resets.
-        assert_eq!(Config::default().font_family, None);
+        assert!(Config::default().font_family.is_empty());
         assert!(Config::default().font_features.is_empty());
-        assert_eq!(parsed("font-family = Foo\nfont-family =").font_family, None);
+        assert!(
+            parsed("font-family = Foo\nfont-family =")
+                .font_family
+                .is_empty()
+        );
+        // Repeatable: each line appends to the fallback chain, in order.
+        assert_eq!(
+            parsed("font-family = Foo\nfont-family = Bar").font_family,
+            vec!["Foo", "Bar"]
+        );
         // Only an empty value resets; `clear` is not special (stored as a literal
         // token the shaper later drops — matching Ghostty).
         assert!(parsed("font-feature = -calt\nfont-feature =").font_features.is_empty());

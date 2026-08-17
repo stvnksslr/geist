@@ -205,7 +205,15 @@ pub fn chrome(cfg: &Config) -> Chrome {
         panel_fill: c32(panel),
         window_fill: surface(0.09),
         extreme_bg: surface(0.03),
-        divider: surface(0.16),
+        // `split-divider-color` overrides the derived hairline. Upstream applies
+        // it to the split divider only, but giest's `divider` is one color for
+        // every hairline (gutter, tab-strip edge, palette rows) — honoring it
+        // for all of them keeps the chrome coherent rather than leaving one
+        // stripe a different color from the rest.
+        divider: match cfg.split_divider_color {
+            Some(c) => Color32::from_rgb(c.r, c.g, c.b),
+            None => surface(0.16),
+        },
         text: c32(ink),
         weak_text: c32(mix(ink, base, 0.45)),
         accent: c32(accent),

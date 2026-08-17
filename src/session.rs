@@ -14,7 +14,7 @@ use crate::config::{
 use crate::decscusr::DecscusrScanner;
 use crate::engine::{
     CursorShape, GhosttyVtEngine, GridSnapshot, KeyCode, KeyInput, KeyMods, MouseAction,
-    MouseButton, MouseInput, RowText, TerminalEngine,
+    MouseButton, MouseInput, RowText, SelectKind, TerminalEngine,
 };
 use crate::keybind::{Chord, Keymap};
 use crate::osc7::Osc7Scanner;
@@ -148,6 +148,15 @@ pub struct Session {
     /// rather than per frame, so a config reload must push them (`apply_config`).
     resize_overlay: ResizeOverlay,
     resize_overlay_duration_ms: u64,
+    /// Word-boundary codepoints for double-click selection
+    /// (`selection-word-chars`); empty = the engine's own defaults. Held here
+    /// rather than read from a `Config` because a selection happens on a click,
+    /// not in a pass that has the config to hand.
+    selection_word_chars: Vec<char>,
+    /// `selection-clear-on-typing` / `-on-copy`. Consulted in the input loop, so
+    /// they are pushed here rather than read from a `Config` (see `apply_config`).
+    selection_clear_on_typing: bool,
+    selection_clear_on_copy: bool,
     /// Clipboard permissions and paste protection. Consulted at paste and pump
     /// time rather than per frame, so a config reload must push it
     /// (see `apply_config`).
@@ -256,6 +265,9 @@ impl Session {
             sized_once: false,
             resize_overlay: config.resize_overlay,
             resize_overlay_duration_ms: config.resize_overlay_duration_ms,
+            selection_word_chars: config.selection_word_chars.clone(),
+            selection_clear_on_typing: config.selection_clear_on_typing,
+            selection_clear_on_copy: config.selection_clear_on_copy,
             clipboard: config.clipboard,
             pending_clipboard: None,
             scrollbar_shown_until: None,
@@ -702,16 +714,43 @@ impl Session {
     }
 
     /// Select the whole word under `cell` (double-click).
+    ///
+    /// Resolved by the VT engine, so word boundaries are the terminal's own
+    /// (honouring `selection-word-chars`) rather than a second opinion computed
+    /// from the rendered grid. The old hand-rolled scan was *replaced* rather
+    /// than kept as a fallback: two selection sources would be free to disagree
+    /// about what a word is, which is the failure this codebase keeps
+    /// documenting elsewhere.
     pub fn select_word(&mut self, cell: (u16, u16)) {
-        let (l, r) = word_bounds(&self.snapshot, cell.0, cell.1);
-        self.sel_anchor = Some((l, cell.1));
-        self.sel_head = Some((r, cell.1));
+        self.select_semantic(SelectKind::Word, cell);
     }
 
-    /// Select the entire visual row under `cell` (triple-click).
+    /// Select the logical line under `cell` (triple-click) — which **follows
+    /// soft wrapping**, so a command longer than the window selects whole rather
+    /// than one screen row of itself.
     pub fn select_line(&mut self, cell: (u16, u16)) {
-        self.sel_anchor = Some((0, cell.1));
-        self.sel_head = Some((self.cols.saturating_sub(1), cell.1));
+        self.select_semantic(SelectKind::Line, cell);
+    }
+
+    /// Select the output of the command that produced this row
+    /// (Ctrl+triple-click, as upstream), delimited by its OSC 133 marks.
+    /// A no-op in a shell that doesn't mark its prompts.
+    pub fn select_output(&mut self, cell: (u16, u16)) {
+        self.select_semantic(SelectKind::Output, cell);
+    }
+
+    fn select_semantic(&mut self, kind: SelectKind, cell: (u16, u16)) {
+        let Some((a, b)) =
+            self.engine
+                .select_semantic(kind, cell.0, cell.1, &self.selection_word_chars)
+        else {
+            // Nothing there (an empty cell, or a shell with no prompt marks):
+            // leave any existing selection alone rather than clearing it, so a
+            // stray double-click doesn't discard what the user had.
+            return;
+        };
+        self.sel_anchor = Some(a);
+        self.sel_head = Some(b);
     }
 
     /// Select the entire visible viewport (right-click menu "Select All").
@@ -794,6 +833,9 @@ impl Session {
         let _ = self
             .engine
             .set_image_storage_limit(config.image_storage_limit as u64);
+        self.selection_word_chars = config.selection_word_chars.clone();
+        self.selection_clear_on_typing = config.selection_clear_on_typing;
+        self.selection_clear_on_copy = config.selection_clear_on_copy;
         self.cursor_style = config.cursor_style;
         self.cursor_style_blink = config.cursor_style_blink;
         // Consulted at pump/resize time rather than per frame, so these need an
@@ -1203,6 +1245,11 @@ impl Session {
         let cell_h_pts = (cell_h / ppp).max(1.0);
 
         let mut bytes: Vec<u8> = Vec::new();
+        // Whether this frame typed anything *into the shell*, for
+        // `selection-clear-on-typing`. App shortcuts and reserved combos are
+        // deliberately excluded: they never reach the program, so clearing on
+        // them would drop a selection the user is still working with.
+        let mut typed = false;
         for event in &events {
             match event {
                 // Raw wheel deltas set the scroll *target* immediately (no egui
@@ -1225,7 +1272,10 @@ impl Session {
                     };
                     self.scroll_target_px += pts * ppp;
                 }
-                egui::Event::Text(text) => bytes.extend_from_slice(text.as_bytes()),
+                egui::Event::Text(text) => {
+                    bytes.extend_from_slice(text.as_bytes());
+                    typed = true;
+                }
                 // Routed through `paste_str` like every other paste path, so
                 // protection can't be bypassed by using the keyboard. It writes
                 // to the PTY itself (or raises a confirmation and writes
@@ -1246,7 +1296,13 @@ impl Session {
                     match copy_or_interrupt(self.selected_text()) {
                         CopyAction::Copy(text) => {
                             ctx.copy_text(text);
-                            self.clear_selection();
+                            // `selection-clear-on-copy` — **false** by default
+                            // upstream, where giest used to clear
+                            // unconditionally. Keeping the selection lets you
+                            // see what was copied and act on it again.
+                            if self.selection_clear_on_copy {
+                                self.clear_selection();
+                            }
                         }
                         CopyAction::Interrupt => bytes.push(0x03),
                     }
@@ -1259,6 +1315,7 @@ impl Session {
                 } => match decide_key(*key, modifiers, keymap) {
                     KeyAction::Encode(input) => {
                         bytes.extend_from_slice(&self.engine.encode_key(&input));
+                        typed = true;
                     }
                     // Reserved app combos (Ctrl+Shift/Ctrl+Tab/Ctrl-zoom, and
                     // anything bound in the keymap — including the scrollback
@@ -1290,6 +1347,9 @@ impl Session {
                 self.scroll_target_px = 0.0;
             }
             let _ = self.pty.write(&bytes);
+        }
+        if typed && self.selection_clear_on_typing {
+            self.clear_selection();
         }
 
         // Ease the on-screen position toward the target and commit it to the
@@ -1859,52 +1919,6 @@ fn px_offset(rel: f32, ppp: f32) -> u32 {
     (rel * ppp).max(0.0) as u32
 }
 
-/// Whether `ch` counts as part of a word for double-click selection. Word
-/// boundaries are whitespace and a small set of shell/bracket punctuation;
-/// path/URL characters (`/ . - _ : @ ~`) stay part of the word so a whole path
-/// or flag selects in one double-click.
-fn is_word_char(ch: char) -> bool {
-    !ch.is_whitespace()
-        && !matches!(
-            ch,
-            '(' | ')'
-                | '['
-                | ']'
-                | '{'
-                | '}'
-                | '<'
-                | '>'
-                | '|'
-                | '&'
-                | ';'
-                | ','
-                | '"'
-                | '\''
-                | '`'
-        )
-}
-
-/// Expand from cell `(x, y)` to the inclusive `[left, right]` column span of the
-/// word it sits in. A non-word cell yields just itself.
-fn word_bounds(snap: &GridSnapshot, x: u16, y: u16) -> (u16, u16) {
-    let is_word = |cx: u16| {
-        snap.cell(cx, y)
-            .and_then(|c| c.text.chars().next())
-            .is_some_and(is_word_char)
-    };
-    if !is_word(x) {
-        return (x, x);
-    }
-    let mut l = x;
-    while l > 0 && is_word(l - 1) {
-        l -= 1;
-    }
-    let mut r = x;
-    while r + 1 < snap.cols && is_word(r + 1) {
-        r += 1;
-    }
-    (l, r)
-}
 
 /// Find a URL spanning column `x` on row `y`: expand over the contiguous
 /// non-whitespace token under the cursor, strip trailing punctuation, and
@@ -2147,7 +2161,7 @@ mod tests {
     use super::{
         CommandFinish, CopyAction, KeyAction, bell_effect_due, cell_from_pos, copy_or_interrupt,
         extract_selection, find_url_at, format_duration, grid_dims, notch_split, osc7_to_path,
-        px_offset, osc52_reduce, scroll_split, scrollbar_rows, transient_alpha, word_bounds,
+        px_offset, osc52_reduce, scroll_split, scrollbar_rows, transient_alpha,
     };
     use crate::osc52::Osc52;
     use crate::engine::{Cell, GridSnapshot, KeyCode, KeyInput, KeyMods};
@@ -2334,29 +2348,6 @@ mod tests {
         // Interior spacing is never touched either way.
         let s2 = grid(&["a b  "], 5);
         assert_eq!(extract_selection(&s2, (0, 4), true), "a b");
-    }
-
-    #[test]
-    fn word_bounds_expands_over_word_chars() {
-        // "ls /usr/bin foo" on a 16-wide row.
-        let s = grid(&["ls /usr/bin foo "], 16);
-        // Click inside "ls" (col 0..1).
-        assert_eq!(word_bounds(&s, 1, 0), (0, 1));
-        // Click inside the path "/usr/bin" (cols 3..10) — slashes stay in-word.
-        assert_eq!(word_bounds(&s, 6, 0), (3, 10));
-        // Click on a space is its own (empty) selection.
-        assert_eq!(word_bounds(&s, 2, 0), (2, 2));
-        // Click inside "foo" (cols 12..14).
-        assert_eq!(word_bounds(&s, 13, 0), (12, 14));
-    }
-
-    #[test]
-    fn word_bounds_stops_at_bracket_punctuation() {
-        let s = grid(&["a(bc)d", "     "], 6);
-        // '(' and ')' are separators, so "bc" is bounded by them.
-        assert_eq!(word_bounds(&s, 3, 0), (2, 3));
-        // 'a' alone before '('.
-        assert_eq!(word_bounds(&s, 0, 0), (0, 0));
     }
 
     #[test]

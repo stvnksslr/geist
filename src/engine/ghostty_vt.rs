@@ -18,7 +18,7 @@ use libghostty_vt::{RenderState, Terminal, TerminalOptions};
 
 use super::{
     BoldColor, Cell, CursorShape, GridSnapshot, ImageData, ImagePlacement, KeyCode, KeyInput,
-    MouseAction, MouseButton, MouseInput, Rgb, TerminalEngine, UnderlineStyle,
+    MouseAction, MouseButton, MouseInput, Rgb, SelectKind, TerminalEngine, UnderlineStyle,
 };
 
 /// Shared sink for bytes libghostty wants written back to the PTY. The
@@ -65,6 +65,62 @@ pub struct GhosttyVtEngine {
 }
 
 impl GhosttyVtEngine {
+    /// Convert a binding [`Selection`](libghostty_vt::selection::Selection) into
+    /// giest's inclusive viewport cell pair, **clamping** ends that lie outside
+    /// the viewport.
+    ///
+    /// The clamp is what makes this usable at all: `point_from_grid_ref` in
+    /// viewport space returns `None` for a cell that has scrolled off, and a
+    /// wrapped line or a command's output very often starts above the top of the
+    /// screen. Converting in *screen* space and clamping keeps the on-screen part
+    /// of the selection, where returning `None` would make Ctrl+triple-click do
+    /// nothing most of the time. The cost is that copy only sees the visible
+    /// part — the honest limit of giest's viewport-scoped selection model, which
+    /// the full binding-selection migration would lift.
+    fn selection_to_viewport(
+        &self,
+        sel: &libghostty_vt::selection::Selection<'_>,
+    ) -> Option<((u16, u16), (u16, u16))> {
+        let rows = self.term.rows().ok()? as u32;
+        let cols = self.term.cols().ok()?;
+        // Screen-space y of the viewport's top row, so screen rows can be
+        // rebased onto it.
+        let top = self
+            .term
+            .point_from_grid_ref(
+                &self
+                    .term
+                    .grid_ref(Point::Viewport(PointCoordinate { x: 0, y: 0 }))
+                    .ok()?,
+                PointSpace::Screen,
+            )
+            .ok()??
+            .y;
+        let bottom = top + rows.saturating_sub(1);
+
+        let at = |gr| -> Option<PointCoordinate> {
+            self.term.point_from_grid_ref(gr, PointSpace::Screen).ok()?
+        };
+        let (s, e) = (at(&sel.start())?, at(&sel.end())?);
+        // Entirely off-screen (above or below): nothing to select.
+        if e.y < top || s.y > bottom {
+            return None;
+        }
+        // A clamped start begins at column 0 of the first visible row: the
+        // selection really does continue off the top, so starting it mid-row
+        // would misreport where it begins.
+        let (sx, sy) = if s.y < top { (0, top) } else { (s.x, s.y) };
+        let (ex, ey) = if e.y > bottom {
+            (cols.saturating_sub(1), bottom)
+        } else {
+            (e.x, e.y)
+        };
+        Some((
+            (sx.min(cols.saturating_sub(1)), (sy - top) as u16),
+            (ex.min(cols.saturating_sub(1)), (ey - top) as u16),
+        ))
+    }
+
     pub fn new(cols: u16, rows: u16, max_scrollback: usize) -> Result<Self> {
         // Kitty `f=100` (PNG) transmissions are rejected until a decoder is
         // installed on *this* thread; see `png_decode::install`.
@@ -362,7 +418,7 @@ mod tests {
     use super::{Compression, GhosttyVtEngine, ImageFormat, to_rgba};
     use crate::engine::{
         GridSnapshot, KeyCode, KeyInput, KeyMods, MouseAction, MouseButton, MouseInput, Rgb,
-        TerminalEngine, UnderlineStyle,
+        SelectKind, TerminalEngine, UnderlineStyle,
     };
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -820,6 +876,89 @@ mod tests {
         assert_eq!(s.cell(1, 0).unwrap().text, "i");
         assert_eq!(s.cursor_y, 1);
         assert_eq!(s.cursor_x, 0);
+    }
+
+    #[test]
+    fn select_word_uses_the_terminals_own_boundaries() {
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        eng.write(b"ls /usr/bin foo");
+        let sel = |x: u16| eng.select_semantic(SelectKind::Word, x, 0, &[]);
+        // Inside "ls".
+        assert_eq!(sel(1), Some(((0, 0), (1, 0))));
+        // A path selects whole — slashes are not boundaries by default, which is
+        // what makes double-clicking a path useful.
+        assert_eq!(sel(6), Some(((3, 0), (10, 0))));
+        // Inside "foo".
+        assert_eq!(sel(13), Some(((12, 0), (14, 0))));
+    }
+
+    #[test]
+    fn selection_word_chars_changes_where_a_word_ends() {
+        // The discriminator that the config actually threads through to the
+        // engine: with `/` as a boundary, the path splits into its components.
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        eng.write(b"ls /usr/bin foo");
+        let boundaries = ['\0', ' ', '/'];
+        assert_eq!(
+            eng.select_semantic(SelectKind::Word, 6, 0, &boundaries),
+            Some(((4, 0), (6, 0))),
+            "'usr' alone, bounded by the slashes"
+        );
+        // …and the same click with the defaults keeps the whole path.
+        assert_eq!(
+            eng.select_semantic(SelectKind::Word, 6, 0, &[]),
+            Some(((3, 0), (10, 0)))
+        );
+    }
+
+    #[test]
+    fn select_line_follows_a_soft_wrapped_row() {
+        // The improvement over the old hand-rolled version, which selected one
+        // *visual* row: text longer than the grid wraps, and a triple-click has
+        // to take the whole logical line.
+        let mut eng = GhosttyVtEngine::new(10, 4, 100).unwrap();
+        eng.write(b"abcdefghijKLMNO");
+        let sel = eng
+            .select_semantic(SelectKind::Line, 2, 0, &[])
+            .expect("a line under the cursor");
+        assert_eq!(sel.0, (0, 0), "starts at the beginning of the logical line");
+        assert_eq!(sel.1.1, 1, "and continues onto the wrapped row");
+        assert!(sel.1.0 >= 4, "through the end of the text: {sel:?}");
+    }
+
+    #[test]
+    fn select_output_covers_the_commands_output_not_its_prompt() {
+        // OSC 133: A = prompt start, B = command start, C = output start,
+        // D = command end. Driven as real escape sequences, like the kitty tests.
+        let mut eng = GhosttyVtEngine::new(20, 6, 100).unwrap();
+        eng.write(b"\x1b]133;A\x07$ ");
+        eng.write(b"\x1b]133;B\x07echo hi\r\n");
+        eng.write(b"\x1b]133;C\x07out1\r\nout2\r\n");
+        eng.write(b"\x1b]133;D;0\x07");
+        eng.write(b"\x1b]133;A\x07$ ");
+        // Click on the first output row.
+        let sel = eng
+            .select_semantic(SelectKind::Output, 0, 1, &[])
+            .expect("output under the cursor");
+        assert_eq!(sel.0.1, 1, "starts at the first output row");
+        assert_eq!(sel.1.1, 2, "ends at the last output row");
+        // Clicking the prompt row itself is not output.
+        assert_eq!(eng.select_semantic(SelectKind::Output, 0, 0, &[]), None);
+    }
+
+    #[test]
+    fn a_semantic_selection_above_the_viewport_is_clamped_into_it() {
+        // A 2-row viewport with the output scrolled so it starts off-screen: the
+        // range has to clamp rather than vanish, or Ctrl+triple-click would do
+        // nothing in the common case.
+        let mut eng = GhosttyVtEngine::new(20, 2, 100).unwrap();
+        eng.write(b"\x1b]133;A\x07$ \x1b]133;B\x07cmd\r\n");
+        eng.write(b"\x1b]133;C\x07a\r\nb\r\nc\r\n");
+        let sel = eng
+            .select_semantic(SelectKind::Output, 0, 0, &[])
+            .expect("clamped, not dropped");
+        assert_eq!(sel.0, (0, 0), "the clamped start is the top-left on screen");
+        assert!(sel.1.1 < 2, "and the end stays inside the viewport");
     }
 
     #[test]
@@ -1576,6 +1715,41 @@ impl TerminalEngine for GhosttyVtEngine {
         let mut buf = [0u8; 2048];
         let n = gr.hyperlink_uri(&mut buf).ok()?;
         (n > 0).then(|| String::from_utf8_lossy(&buf[..n]).into_owned())
+    }
+
+    fn select_semantic(
+        &self,
+        kind: SelectKind,
+        x: u16,
+        y: u16,
+        word_boundaries: &[char],
+    ) -> Option<((u16, u16), (u16, u16))> {
+        use libghostty_vt::selection::{SelectLineOptions, SelectWordOptions};
+
+        let gr = self
+            .term
+            .grid_ref(Point::Viewport(PointCoordinate { x, y: y as u32 }))
+            .ok()?;
+        let sel = match kind {
+            SelectKind::Word => {
+                let mut opts = SelectWordOptions::new(gr);
+                // An empty list means "use Ghostty's defaults" — passing an empty
+                // slice would instead mean *no* boundaries, i.e. the whole line is
+                // one word.
+                if !word_boundaries.is_empty() {
+                    opts = opts.with_boundary_codepoints(word_boundaries);
+                }
+                self.term.select_word(opts).ok()?
+            }
+            // `with_semantic_prompt_boundary` stops a line selection at a prompt,
+            // so triple-clicking a command doesn't drag in the shell's output.
+            SelectKind::Line => self
+                .term
+                .select_line(SelectLineOptions::new(gr).with_semantic_prompt_boundary(true))
+                .ok()?,
+            SelectKind::Output => self.term.select_output(gr).ok()?,
+        }?;
+        self.selection_to_viewport(&sel)
     }
 
     fn jump_to_prompt(&self, delta: isize) -> Option<usize> {
