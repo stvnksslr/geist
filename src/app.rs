@@ -1870,8 +1870,19 @@ impl Window {
             self.pending_keys.push(chord);
             match self.keymap.lookup_seq(&self.pending_keys) {
                 crate::keybind::Lookup::Action(action) => {
+                    // A `performable:` binding only counts while its action can
+                    // act; otherwise the key was already left to the shell by
+                    // `decide_key`, and running it here would do both.
+                    let performable = self.keymap.is_performable(&self.pending_keys);
                     self.pending_keys.clear();
-                    self.execute_action(ctx, None, action);
+                    let ctx_perform = crate::command::PerformCtx {
+                        has_selection: self
+                            .focused_session_mut()
+                            .is_some_and(|s| s.has_selection()),
+                    };
+                    if !performable || crate::command::can_perform(action, ctx_perform) {
+                        self.execute_action(ctx, None, action);
+                    }
                 }
                 // A leader: swallow and wait. `decide_key` keeps the shell from
                 // seeing these too, so nothing leaks mid-sequence.
@@ -2060,6 +2071,12 @@ impl Window {
         match action {
             // Bound, and deliberately does nothing (see `Action::Noop`).
             Action::Noop => {}
+            Action::AdjustSelection(dir) => {
+                let cell_h = self.cell_h;
+                if let Some(s) = self.focused_session_mut() {
+                    s.adjust_selection(dir, cell_h);
+                }
+            }
             Action::NewTab => self.new_tab(self.default_profile),
             Action::NewWindow => {
                 // Resolve the cwd here, from *this* window's focused pane —

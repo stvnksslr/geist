@@ -72,6 +72,12 @@ pub struct GhosttyVtEngine {
     /// anchor exists only because the binding exposes no way to read the active
     /// selection back.
     sel_anchor: Option<TrackedGridRef>,
+    /// The selection's moving end, tracked for the same reason as the anchor —
+    /// but only because `adjust_selection` has to *rebuild* the selection to
+    /// move it, and the terminal's own copy cannot be read back (the binding
+    /// leaves `GHOSTTY_TERMINAL_DATA_SELECTION` unbound). A drag doesn't need
+    /// it: the end is wherever the pointer is now.
+    sel_head: Option<TrackedGridRef>,
     /// Whether a selection is installed in the terminal. Mirrors the terminal's
     /// own state, which the binding cannot be asked for.
     selection_installed: bool,
@@ -106,6 +112,40 @@ impl GhosttyVtEngine {
         self.term
             .track_grid_ref(Point::Viewport(PointCoordinate { x, y: y as u32 }))
             .ok()
+    }
+
+    /// Track both ends of `sel` and install it as the terminal's selection.
+    ///
+    /// Order is load-bearing: the ends are tracked **before** `set_selection`,
+    /// which is a mutating call that invalidates every untracked reference —
+    /// including the two inside `sel`.
+    #[expect(clippy::type_complexity, reason = "two pins, returned together")]
+    fn install_selection(
+        &self,
+        sel: &libghostty_vt::selection::Selection<'_>,
+    ) -> Option<(Option<TrackedGridRef>, Option<TrackedGridRef>)> {
+        let ends = (self.track(&sel.start()), self.track(&sel.end()));
+        self.term.set_selection(Some(sel)).ok()?;
+        Some(ends)
+    }
+
+    /// Take ownership of the pins from a successful [`Self::install_selection`],
+    /// marking the frame dirty. Returns whether anything was installed, which is
+    /// what every selection entry point reports back.
+    fn adopt_selection(
+        &mut self,
+        installed: Option<(Option<TrackedGridRef>, Option<TrackedGridRef>)>,
+    ) -> bool {
+        match installed {
+            Some((anchor, head)) => {
+                self.sel_anchor = anchor;
+                self.sel_head = head;
+                self.selection_installed = true;
+                self.selection_dirty = true;
+                true
+            }
+            None => false,
+        }
     }
 
     pub fn new(cols: u16, rows: u16, max_scrollback: usize) -> Result<Self> {
@@ -149,6 +189,7 @@ impl GhosttyVtEngine {
             image_cache: HashMap::new(),
             image_ids_seen: Vec::new(),
             sel_anchor: None,
+            sel_head: None,
             row_anchor: None,
             selection_installed: false,
             selection_dirty: false,
@@ -1039,6 +1080,43 @@ mod tests {
         eng.selection_update(5, 0);
         assert_eq!(eng.selected_text(true).as_deref(), Some("hi"));
         assert_eq!(eng.selected_text(false).as_deref(), Some("hi    "));
+    }
+
+    #[test]
+    fn adjust_selection_moves_the_free_end_and_leaves_the_anchor() {
+        use crate::engine::SelectionAdjust as A;
+
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        eng.write(b"hello world");
+        eng.selection_begin(0, 0);
+        eng.selection_update(4, 0); // "hello"
+        assert_eq!(sel_text(&eng).as_deref(), Some("hello"));
+
+        // Read untrimmed here: trimming would hide the space the selection picks
+        // up as it crosses the gap, which is the thing being measured.
+        let raw = |e: &GhosttyVtEngine| e.selected_text(false);
+
+        // Right extends; the anchor stays put.
+        assert!(eng.selection_adjust(A::Right).is_some());
+        assert_eq!(raw(&eng).as_deref(), Some("hello "));
+        assert!(eng.selection_adjust(A::Right).is_some());
+        assert_eq!(raw(&eng).as_deref(), Some("hello w"));
+        // Left takes it back.
+        assert!(eng.selection_adjust(A::Left).is_some());
+        assert_eq!(raw(&eng).as_deref(), Some("hello "));
+        // End of line reaches the last cell of the row.
+        assert!(eng.selection_adjust(A::EndOfLine).is_some());
+        assert_eq!(sel_text(&eng).as_deref(), Some("hello world"));
+    }
+
+    #[test]
+    fn adjust_selection_does_nothing_without_a_selection() {
+        // Upstream returns "not performed" so the key falls through to the
+        // shell; giest's `performable:` gate keys off exactly this `None`.
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        eng.write(b"hello");
+        assert_eq!(eng.selection_adjust(crate::engine::SelectionAdjust::Right), None);
+        assert!(!eng.selection_active());
     }
 
     #[test]
@@ -1963,23 +2041,11 @@ impl TerminalEngine for GhosttyVtEngine {
                     .ok()?,
                 SelectKind::Output => self.term.select_output(gr).ok()?,
             }?;
-            // The anchor is the *start* of what was selected, so a drag that
-            // continues after a double-click extends from there.
-            let anchor = self.track(&sel.start());
-            self.term.set_selection(Some(&sel)).ok()?;
-            Some(anchor)
+            self.install_selection(&sel)
         })();
 
         // A gesture that finds nothing leaves the existing selection alone.
-        match installed {
-            Some(anchor) => {
-                self.sel_anchor = anchor;
-                self.selection_installed = true;
-                self.selection_dirty = true;
-                true
-            }
-            None => false,
-        }
+        self.adopt_selection(installed)
     }
 
     fn selection_begin(&mut self, x: u16, y: u16) {
@@ -2003,12 +2069,9 @@ impl TerminalEngine for GhosttyVtEngine {
                 .grid_ref(Point::Viewport(PointCoordinate { x, y: y as u32 }))
                 .ok()?;
             let sel = libghostty_vt::selection::Selection::new(start, end, false);
-            self.term.set_selection(Some(&sel)).ok()
+            self.install_selection(&sel)
         })();
-        if installed.is_some() {
-            self.selection_installed = true;
-            self.selection_dirty = true;
-        } else {
+        if !self.adopt_selection(installed) {
             // The anchor lost its cell (the screen was reset or its row pruned
             // beyond recovery). Dropping the selection is the honest outcome —
             // extending from a cell that no longer exists would select something
@@ -2019,6 +2082,7 @@ impl TerminalEngine for GhosttyVtEngine {
 
     fn selection_clear(&mut self) {
         self.sel_anchor = None;
+        self.sel_head = None;
         if self.selection_installed {
             let _ = self.term.set_selection(None);
             self.selection_dirty = true;
@@ -2029,19 +2093,59 @@ impl TerminalEngine for GhosttyVtEngine {
     fn select_all(&mut self) -> bool {
         let installed = (|| {
             let sel = self.term.select_all().ok()??;
-            let anchor = self.track(&sel.start());
-            self.term.set_selection(Some(&sel)).ok()?;
-            Some(anchor)
+            self.install_selection(&sel)
         })();
-        match installed {
-            Some(anchor) => {
-                self.sel_anchor = anchor;
-                self.selection_installed = true;
-                self.selection_dirty = true;
-                true
+        self.adopt_selection(installed)
+    }
+
+    fn selection_adjust(&mut self, how: super::SelectionAdjust) -> Option<u32> {
+        use libghostty_vt::selection::Adjustment;
+
+        let how = match how {
+            super::SelectionAdjust::Left => Adjustment::Left,
+            super::SelectionAdjust::Right => Adjustment::Right,
+            super::SelectionAdjust::Up => Adjustment::Up,
+            super::SelectionAdjust::Down => Adjustment::Down,
+            super::SelectionAdjust::PageUp => Adjustment::PageUp,
+            super::SelectionAdjust::PageDown => Adjustment::PageDown,
+            super::SelectionAdjust::Home => Adjustment::Home,
+            super::SelectionAdjust::End => Adjustment::End,
+            super::SelectionAdjust::BeginningOfLine => Adjustment::BeginningOfLine,
+            super::SelectionAdjust::EndOfLine => Adjustment::EndOfLine,
+        };
+
+        // Rebuild the selection from both tracked ends, move its end, reinstall.
+        // The terminal owns the live selection but cannot be asked for it, which
+        // is the whole reason the head is tracked at all.
+        let (installed, end_row) = {
+            let out = (|| {
+                if !self.selection_installed {
+                    return None;
+                }
+                let (a, h) = (self.sel_anchor.as_ref()?, self.sel_head.as_ref()?);
+                if !a.has_value() || !h.has_value() {
+                    return None;
+                }
+                let start = a.snapshot(&self.term).ok()??;
+                let end = h.snapshot(&self.term).ok()??;
+                let mut sel = libghostty_vt::selection::Selection::new(start, end, false);
+                sel.adjust(&self.term, how).ok()?;
+                // Read the new end's row *before* installing: installing is a
+                // mutating call and invalidates these untracked refs.
+                let row = self
+                    .term
+                    .point_from_grid_ref(&sel.end(), PointSpace::Screen)
+                    .ok()
+                    .flatten()
+                    .map(|p| p.y);
+                self.install_selection(&sel).map(|pins| (pins, row))
+            })();
+            match out {
+                Some((pins, row)) => (Some(pins), row),
+                None => (None, None),
             }
-            None => false,
-        }
+        };
+        self.adopt_selection(installed).then_some(end_row).flatten()
     }
 
     fn selection_active(&self) -> bool {

@@ -17,7 +17,7 @@
 //! even for unbound combos, matching giest's long-standing host behavior.
 
 use crate::command::Action;
-use crate::engine::{KeyCode, KeyMods};
+use crate::engine::{KeyCode, KeyMods, SelectionAdjust};
 
 /// A key combination: the required modifiers plus the (non-modifier) key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,6 +38,20 @@ pub enum Lookup {
     None,
 }
 
+/// One binding: a key sequence, the action it runs, and whether it is
+/// *performable*.
+///
+/// A performable binding only counts when the action can actually do something
+/// right now; otherwise the key falls through to the shell. Ghostty's
+/// `performable:` trigger flag, and the reason `shift+left` still sends its
+/// normal escape sequence when there is no selection to adjust.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Bind {
+    seq: Vec<Chord>,
+    action: Action,
+    performable: bool,
+}
+
 /// The app keymap: an ordered list of *sequence* → action bindings. A plain
 /// `ctrl+shift+t` is simply a sequence of length one, so single chords and
 /// multi-key sequences (`ctrl+a>n`) share one lookup path. Later entries win
@@ -45,7 +59,7 @@ pub enum Lookup {
 /// reverse.
 #[derive(Clone, Debug)]
 pub struct Keymap {
-    binds: Vec<(Vec<Chord>, Action)>,
+    binds: Vec<Bind>,
     /// `global:` bindings — chords that fire even when giest isn't focused.
     /// Kept **out** of `binds` on purpose: they are delivered by the OS-level
     /// hook ([`crate::hotkey`]) whether or not giest has focus, so putting them
@@ -87,17 +101,35 @@ impl Keymap {
         if keys.is_empty() {
             return Lookup::None;
         }
-        if let Some((_, a)) = self.binds.iter().rev().find(|(seq, _)| seq == keys) {
-            return Lookup::Action(*a);
+        if let Some(b) = self.binds.iter().rev().find(|b| b.seq == keys) {
+            return Lookup::Action(b.action);
         }
         if self
             .binds
             .iter()
-            .any(|(seq, _)| seq.len() > keys.len() && &seq[..keys.len()] == keys)
+            .any(|b| b.seq.len() > keys.len() && &b.seq[..keys.len()] == keys)
         {
             return Lookup::Pending;
         }
         Lookup::None
+    }
+
+    /// Whether the binding for `keys` is *performable* — i.e. it only applies
+    /// when its action can currently do something, and otherwise the key belongs
+    /// to the shell.
+    ///
+    /// The caller answers "can it?" itself, because that depends on live state
+    /// (a selection, say) this module deliberately knows nothing about. **Both**
+    /// gates must consult it: the one that decides whether the shell sees the
+    /// key, and the one that runs the action. Checking only the first sends the
+    /// key to the shell *and* runs the action; only the second swallows the key
+    /// and does nothing.
+    pub fn is_performable(&self, keys: &[Chord]) -> bool {
+        self.binds
+            .iter()
+            .rev()
+            .find(|b| b.seq == keys)
+            .is_some_and(|b| b.performable)
     }
 
     /// Whether `chord` begins any binding — a complete one *or* a sequence.
@@ -113,16 +145,23 @@ impl Keymap {
     }
 
     /// Bind `seq` to `action`, replacing any existing binding for it.
-    fn set(&mut self, seq: Vec<Chord>, action: Action) {
-        match self.binds.iter_mut().find(|(s, _)| *s == seq) {
-            Some(slot) => slot.1 = action,
-            None => self.binds.push((seq, action)),
+    fn set(&mut self, seq: Vec<Chord>, action: Action, performable: bool) {
+        match self.binds.iter_mut().find(|b| b.seq == seq) {
+            Some(slot) => {
+                slot.action = action;
+                slot.performable = performable;
+            }
+            None => self.binds.push(Bind {
+                seq,
+                action,
+                performable,
+            }),
         }
     }
 
     /// Remove any binding for `seq` (Ghostty's `unbind`).
     fn unset(&mut self, seq: &[Chord]) {
-        self.binds.retain(|(s, _)| s != seq);
+        self.binds.retain(|b| b.seq != seq);
     }
 
     /// Build the keymap from the built-in defaults plus the user's `keybind`
@@ -154,7 +193,13 @@ impl Keymap {
                 }
                 continue;
             }
-            let Some(seq) = parse_sequence(trigger) else {
+            // Ghostty's `performable:` trigger flag: bind the key only while the
+            // action can act, otherwise let it through to the shell.
+            let (trigger_rest, performable) = match strip_flag(trigger, "performable") {
+                Some(rest) => (rest.trim(), true),
+                None => (trigger.as_str(), false),
+            };
+            let Some(seq) = parse_sequence(trigger_rest) else {
                 eprintln!("giest: ignoring keybind with unparseable trigger '{trigger}'");
                 continue;
             };
@@ -164,7 +209,7 @@ impl Keymap {
                 continue;
             }
             match Action::from_name(a) {
-                Some(act) => km.set(seq, act),
+                Some(act) => km.set(seq, act, performable),
                 None => eprintln!("giest: ignoring keybind to unknown action '{a}'"),
             }
         }
@@ -195,7 +240,7 @@ pub fn parse_sequence(s: &str) -> Option<Vec<Chord>> {
 
 /// The built-in default bindings, mirroring the host shortcuts giest has always
 /// had. Every trigger here parses and sits inside an app-reserved namespace.
-fn default_binds() -> Vec<(Vec<Chord>, Action)> {
+fn default_binds() -> Vec<Bind> {
     const DEFAULTS: &[(&str, Action)] = &[
         ("ctrl+shift+t", Action::NewTab),
         // Ghostty's non-Darwin default for `new_window`.
@@ -244,9 +289,30 @@ fn default_binds() -> Vec<(Vec<Chord>, Action)> {
         ("shift+home", Action::ScrollToTop),
         ("shift+end", Action::ScrollToBottom),
     ];
-    DEFAULTS
-        .iter()
-        .filter_map(|(t, a)| parse_chord(t).map(|c| (vec![c], *a)))
+    // Ghostty binds shift+arrows to `adjust_selection`, and **performable** —
+    // with no selection the key is the shell's, which is what keeps shift+arrow
+    // working in editors. It also binds shift+home/end/pageup/pagedown to
+    // adjust_selection, but only on macOS: on every other platform the viewport
+    // scrolling bindings above are registered *after* them and win. giest is
+    // Windows, so those four stay scroll bindings — matching upstream, not
+    // diverging from it.
+    const PERFORMABLE: &[(&str, Action)] = &[
+        ("shift+left", Action::AdjustSelection(SelectionAdjust::Left)),
+        ("shift+right", Action::AdjustSelection(SelectionAdjust::Right)),
+        ("shift+up", Action::AdjustSelection(SelectionAdjust::Up)),
+        ("shift+down", Action::AdjustSelection(SelectionAdjust::Down)),
+    ];
+    let plain = DEFAULTS.iter().map(|(t, a)| (*t, *a, false));
+    let performable = PERFORMABLE.iter().map(|(t, a)| (*t, *a, true));
+    plain
+        .chain(performable)
+        .filter_map(|(t, action, performable)| {
+            parse_chord(t).map(|c| Bind {
+                seq: vec![c],
+                action,
+                performable,
+            })
+        })
         .collect()
 }
 
@@ -341,6 +407,35 @@ fn key_from_name(name: &str) -> Option<KeyCode> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shift_arrows_are_performable_adjust_selection_binds() {
+        // Ghostty's defaults, and the flag is what keeps shift+arrow usable in
+        // an editor: with no selection the key belongs to the shell.
+        let km = Keymap::default();
+        assert_eq!(
+            km.lookup(&chord("shift+left")),
+            Some(Action::AdjustSelection(SelectionAdjust::Left))
+        );
+        assert!(km.is_performable(&[chord("shift+down")]));
+        // The scroll binds next to them are *not* performable — they always act.
+        assert_eq!(km.lookup(&chord("shift+pageup")), Some(Action::ScrollPageUp));
+        assert!(!km.is_performable(&[chord("shift+pageup")]));
+    }
+
+    #[test]
+    fn the_performable_trigger_flag_parses_and_can_be_unbound() {
+        let km = Keymap::from_config(&[("performable:ctrl+alt+k".into(), "new_tab".into())]);
+        assert_eq!(km.lookup(&chord("ctrl+alt+k")), Some(Action::NewTab));
+        assert!(km.is_performable(&[chord("ctrl+alt+k")]));
+        // A plain binding of the same chord clears the flag rather than keeping
+        // a stale one.
+        let km = Keymap::from_config(&[
+            ("performable:ctrl+alt+k".into(), "new_tab".into()),
+            ("ctrl+alt+k".into(), "new_tab".into()),
+        ]);
+        assert!(!km.is_performable(&[chord("ctrl+alt+k")]));
+    }
 
     #[test]
     fn a_global_trigger_binds_globally_and_not_in_the_ordinary_keymap() {

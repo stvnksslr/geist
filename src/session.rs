@@ -721,6 +721,29 @@ impl Session {
         self.engine.selection_active()
     }
 
+    /// Move the selection's free end (Ghostty `adjust_selection`), scrolling the
+    /// new end into view — upstream does the same, and without it a selection
+    /// extended past the viewport grows invisibly.
+    pub fn adjust_selection(&mut self, how: crate::engine::SelectionAdjust, cell_h: f32) {
+        let Some(end_row) = self.engine.selection_adjust(how) else {
+            return;
+        };
+        let (top, bottom) = (self.viewport_top_row(), self.viewport_bottom_row());
+        if end_row >= top && end_row <= bottom {
+            return;
+        }
+        // Put the end on the nearest edge rather than centring it: this fires on
+        // every keypress of a held shift+arrow, and re-centring each time would
+        // make the view lurch.
+        let scrollback = self.engine.scrollback_rows() as u32;
+        let target_top = if end_row < top {
+            end_row
+        } else {
+            end_row.saturating_sub(self.rows.saturating_sub(1) as u32)
+        };
+        self.scroll_target_px = scrollback.saturating_sub(target_top) as f32 * cell_h;
+    }
+
     /// Select the whole word under `cell` (double-click).
     ///
     /// Resolved by the VT engine, so word boundaries are the terminal's own
@@ -1379,7 +1402,14 @@ impl Session {
                     pressed: true,
                     modifiers,
                     ..
-                } => match decide_key(*key, modifiers, keymap) {
+                } => match decide_key(
+                    *key,
+                    modifiers,
+                    keymap,
+                    crate::command::PerformCtx {
+                        has_selection: self.engine.selection_active(),
+                    },
+                ) {
                     KeyAction::Encode(input) => {
                         bytes.extend_from_slice(&self.engine.encode_key(&input));
                         typed = true;
@@ -1730,7 +1760,12 @@ enum KeyAction {
 /// (for page scrolling), and the active `keymap`. Pure: depends only on its
 /// arguments (the keymap is config-derived data), so every gating branch is
 /// unit-testable. Mirrors the Windows-Terminal/Ghostty host bindings.
-fn decide_key(key: egui::Key, modifiers: &egui::Modifiers, keymap: &Keymap) -> KeyAction {
+fn decide_key(
+    key: egui::Key,
+    modifiers: &egui::Modifiers,
+    keymap: &Keymap,
+    perform: crate::command::PerformCtx,
+) -> KeyAction {
     let Some(code) = map_egui_key(key) else {
         return KeyAction::Suppress;
     };
@@ -1742,11 +1777,25 @@ fn decide_key(key: egui::Key, modifiers: &egui::Modifiers, keymap: &Keymap) -> K
     // `starts_binding`, not `lookup`: the *leader* of a sequence (`ctrl+a` in
     // `ctrl+a>n`) is bound to no action of its own, so a plain lookup would let
     // it straight through to the shell and the sequence would never start.
-    if keymap.starts_binding(&Chord {
+    let chord = Chord {
         mods: key_mods(modifiers),
         code,
-    }) {
-        return KeyAction::Swallow;
+    };
+    if keymap.starts_binding(&chord) {
+        // A `performable:` binding whose action can't act right now is *not* a
+        // binding: the key belongs to the shell. This is what keeps shift+arrow
+        // working in an editor when there's nothing selected — and it has to
+        // agree with the gate that runs the action, so both call `can_perform`.
+        let seq = std::slice::from_ref(&chord);
+        let unperformable = keymap.is_performable(seq)
+            && match keymap.lookup(&chord) {
+                Some(a) => !crate::command::can_perform(a, perform),
+                None => false,
+            };
+        if !unperformable {
+            return KeyAction::Swallow;
+        }
+        // Fall through: the reserved-namespace rules below still apply.
     }
     // Ctrl+Shift is the app's namespace; the shell never sees it. The clipboard
     // combos (Ctrl+Shift+C/V/X) arrive as Copy/Paste/Cut events handled
@@ -2250,7 +2299,39 @@ mod tests {
     /// exactly the host shortcuts the namespace gating already reserves, so it
     /// does not alter any of these assertions.
     fn decide_key(key: egui::Key, modifiers: &egui::Modifiers, _rows: u16) -> KeyAction {
-        super::decide_key(key, modifiers, &Keymap::default())
+        super::decide_key(key, modifiers, &Keymap::default(), Default::default())
+    }
+
+    #[test]
+    fn a_performable_bind_reaches_the_shell_only_when_it_cannot_act() {
+        // shift+left is `adjust_selection:left`, performable. With a selection
+        // it is the app's; without one it is the shell's — which is what keeps
+        // shift+arrow working in an editor. Silent either way if it's wrong:
+        // swallowed-and-inert, or delivered *and* acted on.
+        let km = Keymap::default();
+        let shift = egui::Modifiers {
+            shift: true,
+            ..Default::default()
+        };
+        let with = crate::command::PerformCtx {
+            has_selection: true,
+        };
+        let without = crate::command::PerformCtx {
+            has_selection: false,
+        };
+        assert_eq!(
+            super::decide_key(egui::Key::ArrowLeft, &shift, &km, with),
+            KeyAction::Swallow
+        );
+        assert!(matches!(
+            super::decide_key(egui::Key::ArrowLeft, &shift, &km, without),
+            KeyAction::Encode(_)
+        ));
+        // A non-performable bind on the same modifier is unaffected.
+        assert_eq!(
+            super::decide_key(egui::Key::PageUp, &shift, &km, without),
+            KeyAction::Swallow
+        );
     }
 
     #[test]
@@ -2265,17 +2346,17 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            super::decide_key(egui::Key::A, &ctrl, &km),
+            super::decide_key(egui::Key::A, &ctrl, &km, Default::default()),
             KeyAction::Swallow
         );
         // An unrelated ctrl chord is still the shell's.
         assert!(matches!(
-            super::decide_key(egui::Key::Q, &ctrl, &km),
+            super::decide_key(egui::Key::Q, &ctrl, &km, Default::default()),
             KeyAction::Encode(_)
         ));
         // …and with no sequence bound, ctrl+a goes to the shell as before.
         assert!(matches!(
-            super::decide_key(egui::Key::A, &ctrl, &Keymap::default()),
+            super::decide_key(egui::Key::A, &ctrl, &Keymap::default(), Default::default()),
             KeyAction::Encode(_)
         ));
     }
@@ -2476,7 +2557,7 @@ mod tests {
         // so the shell never sees the key (the app runs the action instead).
         let km = Keymap::from_config(&[("ctrl+a".to_string(), "new_tab".to_string())]);
         assert_eq!(
-            super::decide_key(egui::Key::A, &mods(true, false, false), &km),
+            super::decide_key(egui::Key::A, &mods(true, false, false), &km, Default::default()),
             KeyAction::Swallow
         );
     }

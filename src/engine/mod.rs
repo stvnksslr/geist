@@ -563,6 +563,15 @@ pub trait TerminalEngine {
     /// Clear any active selection.
     fn selection_clear(&mut self) {}
 
+    /// Move the selection's free end (Ghostty `adjust_selection`), returning the
+    /// end's new absolute screen row so the caller can scroll it into view.
+    ///
+    /// `None` when there is no selection — which the caller must treat as "not
+    /// performed", letting the key reach the shell, exactly as upstream does.
+    fn selection_adjust(&mut self, _how: SelectionAdjust) -> Option<u32> {
+        None
+    }
+
     /// Select everything the terminal holds — **including scrollback**, not just
     /// the viewport. Returns whether anything was selected.
     fn select_all(&mut self) -> bool {
@@ -583,6 +592,24 @@ pub trait TerminalEngine {
     fn selected_text(&self, _trim: bool) -> Option<String> {
         None
     }
+}
+
+/// How to move a selection's free end (Ghostty `adjust_selection`). Mirrors the
+/// binding's `Adjustment`, which is where the semantics of each move live — they
+/// are content-aware (`Left` skips to the previous *non-empty* cell, wrapping
+/// upward), not simple cursor arithmetic.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelectionAdjust {
+    Left,
+    Right,
+    Up,
+    Down,
+    PageUp,
+    PageDown,
+    Home,
+    End,
+    BeginningOfLine,
+    EndOfLine,
 }
 
 /// Which semantic extent [`TerminalEngine::select_semantic`] should find.

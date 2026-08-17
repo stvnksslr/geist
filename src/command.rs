@@ -7,6 +7,65 @@
 //! chosen `Action` onto its existing methods via `App::execute_action` —
 //! mirroring how Ghostty's palette is a thin layer over its keybind actions.
 
+/// The live state a *performable* binding is judged against.
+///
+/// Deliberately a plain value rather than a borrow of the session: it is read by
+/// the gate that decides whether the shell sees a key and by the gate that runs
+/// the action, and those sit on opposite sides of the app.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PerformCtx {
+    pub has_selection: bool,
+}
+
+/// Whether `action` can do anything right now.
+///
+/// Only consulted for bindings flagged `performable:`; everything else runs
+/// regardless. **One function for both gates** — a second opinion here means the
+/// key is either swallowed and does nothing, or reaches the shell *and* runs the
+/// action.
+pub fn can_perform(action: Action, ctx: PerformCtx) -> bool {
+    match action {
+        // Upstream returns "not performed" with no selection, letting the key
+        // fall through to the terminal (`Surface.zig`'s `.adjust_selection`).
+        Action::AdjustSelection(_) => ctx.has_selection,
+        _ => true,
+    }
+}
+
+/// Ghostty's `adjust_selection` parameter names, both ways.
+fn adjust_name(d: crate::engine::SelectionAdjust) -> &'static str {
+    use crate::engine::SelectionAdjust as A;
+    match d {
+        A::Left => "left",
+        A::Right => "right",
+        A::Up => "up",
+        A::Down => "down",
+        A::PageUp => "page_up",
+        A::PageDown => "page_down",
+        A::Home => "home",
+        A::End => "end",
+        A::BeginningOfLine => "beginning_of_line",
+        A::EndOfLine => "end_of_line",
+    }
+}
+
+fn adjust_from_name(s: &str) -> Option<crate::engine::SelectionAdjust> {
+    use crate::engine::SelectionAdjust as A;
+    Some(match s {
+        "left" => A::Left,
+        "right" => A::Right,
+        "up" => A::Up,
+        "down" => A::Down,
+        "page_up" => A::PageUp,
+        "page_down" => A::PageDown,
+        "home" => A::Home,
+        "end" => A::End,
+        "beginning_of_line" => A::BeginningOfLine,
+        "end_of_line" => A::EndOfLine,
+        _ => return None,
+    })
+}
+
 /// A single thing the palette can do. Every variant maps to an existing
 /// `App`/`Session` method in `App::execute_action`; the palette never reaches
 /// into app internals itself. `Copy` so a chosen action survives past the UI
@@ -18,6 +77,10 @@ pub enum Action {
     /// on; mapping it onto some *other* action would silently do the wrong
     /// thing, which is exactly what `equalize_splits` used to do.
     Noop,
+    /// Move the selection's free end (Ghostty `adjust_selection:<direction>`).
+    /// Bound to shift+arrows and **performable**: with no selection the key is
+    /// the shell's.
+    AdjustSelection(crate::engine::SelectionAdjust),
     NewTab,
     /// Open a new tab running the shell profile at this index.
     NewTabWithProfile(usize),
@@ -125,6 +188,7 @@ impl Action {
             // Never listed in the palette (see `CATALOG`), but `title` must be
             // total.
             Action::Noop => "Do Nothing",
+            Action::AdjustSelection(_) => "Adjust Selection",
             Action::NewTab => "New Tab",
             Action::NewTabWithProfile(_) => "New Tab with Shell",
             Action::NewWindow => "New Window",
@@ -198,7 +262,7 @@ impl Action {
     /// reachable only via the palette/menus.
     fn keybind(self) -> Option<&'static str> {
         Some(match self {
-            Action::Noop => return None,
+            Action::Noop | Action::AdjustSelection(_) => return None,
             Action::NewTab => "Ctrl+Shift+T",
             Action::NewWindow => "Ctrl+Shift+N",
             Action::NextTab => "Ctrl+Tab",
@@ -269,6 +333,7 @@ impl Action {
         match self {
             // Round-trips as the Ghostty name it stands in for.
             Action::Noop => "equalize_splits".into(),
+            Action::AdjustSelection(d) => format!("adjust_selection:{}", adjust_name(d)),
             Action::NewTab => "new_tab".into(),
             Action::NewTabWithProfile(i) => format!("new_tab_with_profile:{i}"),
             Action::NewWindow => "new_window".into(),
@@ -348,6 +413,12 @@ impl Action {
         }
         if let Some(rest) = s.strip_prefix("move_tab:") {
             return rest.parse::<i8>().ok().map(Action::MoveTab);
+        }
+        // All ten upstream directions are accepted even though only the four
+        // arrows are bound by default on this platform — a config may use any,
+        // and the binding implements all ten.
+        if let Some(rest) = s.strip_prefix("adjust_selection:") {
+            return adjust_from_name(rest.trim()).map(Action::AdjustSelection);
         }
         if let Some(rest) = s.strip_prefix("set_font_size:") {
             // Ghostty takes a float; giest's font size is whole points, so round
