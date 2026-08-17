@@ -186,8 +186,9 @@ selection / drag-past-edge autoscroll** — now all done.)*
 the focused pane's cwd, like splits. `window-inherit-working-directory` is recognized but inert until
 multi-window lands.)*
 
-**Clipboard / security** — secure-input indicator; readonly mode. *(`clipboard-read`/`-write`
-permission prompts, paste-protection confirmation and `clipboard-trim-trailing-spaces` — now done.)*
+**Clipboard / security** — nothing outstanding. *(`clipboard-read`/`-write` permission prompts,
+paste-protection confirmation, `clipboard-trim-trailing-spaces` and **readonly mode + its
+indicator** — now done; **secure input is N/A on Windows**, see its ledger.)*
 
 **Config / theming** — `palette-generate`/`harmonious`, conditional configuration,
 and the **92 upstream keys still unsupported** (mostly `gtk-*`, `macos-*`, `linux-*` — see the
@@ -286,10 +287,10 @@ Effort: **S** <1d · **M** 1–3d · **L** ~1wk · **XL** multi-wk. Status: ✅ 
 | Clipboard permission + paste protection | `session.rs`, `app.rs`, `config.rs`, `osc52.rs` | ✋ | M | ✅ |
 | Desktop notifications + notify-on-command-finish | `osc_notify.rs`, `notify.rs`, `osc133.rs`, `profiles.rs`, `session.rs`, `app.rs` | ✋ | M | ✅ (both halves; cmd can't report an exit code — see the ledger) |
 | Real scrollbar widget | `scrollbar.rs`, `app.rs`, `session.rs` | ✅ | M | ✅ |
-| Migrate to binding selection model | `session.rs`, `engine` | ✅ | M–L | ✅ (tracked-ref anchor, scrollback-spanning, reflow-correct — see the ledger; rectangle mode + autoscroll deferred) |
+| Migrate to binding selection model | `session.rs`, `engine` | ✅ | M–L | ✅ (tracked-ref anchor, scrollback-spanning, reflow-correct, plus rectangle mode and drag autoscroll — see the ledgers) |
 
 ### Tier 3 — long tail / platform-specific
-readonly mode · secure-input indicator · broadcast input ·
+broadcast input ·
 auto-update · about dialog /
 custom icon · AppleScript / App-Intents / Services → Windows IPC ·
 legacy-computing sprites · COLRv1 emoji · grapheme-width ·
@@ -381,9 +382,32 @@ With Phase 0 done, the remaining Tier-1 items are mostly small, registry-backed 
 23. ✅ **Search cross-wrap matches + drift-free tracking.** See the ledger below.
 24. ✅ **`adjust_selection` + the `performable:` flag, rectangle selection, drag-past-edge
     autoscroll.** See the ledger below.
-25. Next: the readonly / secure-input indicators, the remaining trigger flags (`all:`,
-    `unconsumed:`), key tables, and the `text:`/`csi:`/`esc:` actions (which need `Action` to own
-    strings — a real refactor, see the keybind-coverage ledger).
+25. ✅ **Read-only indicator**, and **secure input closed out as N/A** on Windows. See the ledger.
+26. Next: the `text:`/`csi:`/`esc:`/`set_*_title:` actions (which need `Action` to own strings — a
+    real refactor, see the keybind-coverage ledger), then key tables and the remaining trigger
+    flags (`all:`, `unconsumed:`).
+
+### Read-only indicator, and secure input closed out as N/A — ✅ divergences
+
+- **`toggle_readonly` had no user-visible effect.** It set the flag and printed to *stderr*, which
+  nobody running a GUI ever sees — so a read-only pane was indistinguishable from a hung shell,
+  which is the one thing the feature must not look like. There is now a persistent `READ-ONLY`
+  badge in the pane's bottom-right corner.
+- **Painter-only, and persistent.** An egui widget in the corner would eat clicks meant for the
+  terminal (the standing rule for every overlay here), and the state doesn't fade the way the resize
+  overlay does, so there is no repaint request and no alpha ramp. It is inset past the scrollbar's
+  hot band so the two never overlap, and bottom-right so it misses the resize overlay's default
+  centre.
+- **The *warn* accent, not danger.** Read-only is a mode the user asked for, not an error. Colors
+  come from `theme.rs` like every other chrome element, so it follows `window-theme` and the
+  palette.
+- **Secure input is Not Applicable on Windows, and that is measured rather than assumed.** Upstream
+  documents the feature as macOS-only ("Ghostty on macOS will automatically enable the Secure Input
+  feature…"), it wraps the macOS-specific `EnableSecureEventInput`, and the **GTK apprt lists
+  `secure_input` under "Unimplemented"** (`apprt/gtk/class/application.zig`) — so the platform
+  closest to giest's position doesn't have it either. Windows exposes no equivalent service: there
+  is no API to stop other processes reading keystrokes. Recording it as N/A rather than leaving it
+  on the roadmap as a permanently-open item.
 
 ### Selection interaction: `adjust_selection`, rectangle drag, autoscroll — ✅ divergences
 
@@ -957,7 +981,8 @@ All five Ghostty keys, with Ghostty's defaults: `clipboard-paste-protection = tr
   only — all policy is in `Session::handle_osc52` — and the reply is always ST-terminated.
 - **`clipboard-trim-trailing-spaces` was previously hardcoded on** (`extract_selection` always
   trimmed); it is now the configurable default.
-- Not done, and still listed above: the secure-input indicator and readonly mode.
+- Readonly mode and its indicator are now done, and secure input is recorded as N/A on Windows —
+  see their ledger.
 
 ### Keybind action coverage — ◐
 

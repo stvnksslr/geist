@@ -2119,9 +2119,11 @@ impl Window {
                 }
             }
             Action::ToggleReadonly => {
+                // The badge drawn over the pane is the feedback; this used to
+                // only print to stderr, which nobody running a GUI ever sees —
+                // so toggling read-only was indistinguishable from a hung shell.
                 if let Some(s) = self.focused_session_mut() {
-                    let ro = s.toggle_readonly();
-                    eprintln!("giest: pane is now {}", if ro { "read-only" } else { "writable" });
+                    s.toggle_readonly();
                 }
             }
             Action::MoveTab(delta) => self.move_tab_by(delta),
@@ -3388,6 +3390,9 @@ impl Window {
         // (pane rect, "COLS x ROWS", fade alpha) for any pane showing the
         // grid-size overlay after a resize.
         let mut resize_overlays: Vec<(egui::Rect, String, f32)> = Vec::new();
+        // Panes in read-only mode, which get a persistent badge — without one,
+        // `toggle_readonly` looks exactly like a hung shell.
+        let mut readonly_panes: Vec<egui::Rect> = Vec::new();
         for leaf in leaves.iter_mut() {
             // The pane occupies `leaf.rect`; the grid is inset by the padding so
             // text clears the pane's edges (window border or split divider alike).
@@ -3430,6 +3435,9 @@ impl Window {
                 ));
             }
             session.fit_grid(prect, ppp, cw, ch, now);
+            if session.readonly() {
+                readonly_panes.push(leaf_rect);
+            }
             if let Some(a) = session.resize_overlay_alpha(now) {
                 let (cols, rows) = session.grid_size();
                 // Label format matches Ghostty's overlay exactly.
@@ -4021,6 +4029,29 @@ impl Window {
                 ui.painter()
                     .galley(text_rect.min, galley, self.chrome.text);
             }
+        }
+
+        // Read-only badge: persistent (the state is), painter-only (a widget
+        // here would eat clicks meant for the terminal), and bottom-right so it
+        // doesn't collide with the resize overlay's default centre or the
+        // scrollbar's right edge band. No repaint request — nothing animates.
+        for rect in &readonly_panes {
+            let font = egui::FontId::proportional(12.0);
+            let galley = ui.painter().layout_no_wrap(
+                "READ-ONLY".to_string(),
+                font,
+                self.chrome.on_accent,
+            );
+            // Inset past the scrollbar's hot band so the two never overlap.
+            let anchor = rect.right_bottom() + egui::vec2(-(SCROLLBAR_HOT_W + 8.0), -8.0);
+            let text_rect = egui::Align2::RIGHT_BOTTOM.anchor_size(anchor, galley.size());
+            let pill = text_rect.expand2(egui::vec2(7.0, 3.0));
+            let r = egui::CornerRadius::same(theme::RADIUS_MD);
+            // The warn accent, not danger: read-only is a mode the user asked
+            // for, not an error.
+            ui.painter().rect_filled(pill, r, self.chrome.accent_warn);
+            ui.painter()
+                .galley(text_rect.min, galley, self.chrome.on_accent);
         }
 
         // Scrollbars, painted last so a bar over an unfocused split stays

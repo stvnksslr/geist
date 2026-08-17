@@ -300,7 +300,7 @@ Beyond the defaults, these Ghostty actions are available to `keybind`:
 | --- | --- |
 | `clear_screen` | Clears the screen **and** the scrollback. |
 | `copy_title_to_clipboard` | The shell-set title of the focused pane. |
-| `toggle_readonly` | Stops keys reaching the shell. Scrolling, selection and copy still work — the point is a pane you can read without disturbing. |
+| `toggle_readonly` | Stops keys reaching the shell. Scrolling, selection and copy still work — the point is a pane you can read without disturbing. A `READ-ONLY` badge sits in the pane's corner while it's on, so it can't be mistaken for a hung shell. |
 | `move_tab:N` | Move the current tab N places; clamped at the ends, not wrapped. |
 | `set_font_size:N` | Absolute size in points. A fractional value rounds. |
 | `scroll_page_lines:N` | Scroll N lines (negative scrolls up). |
