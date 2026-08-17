@@ -415,10 +415,14 @@ needed.
   block. The engine remembers it because `adjust_selection` rebuilds the selection — without that a
   shift+arrow would silently turn a block back into a run of text — and word/line/output selections
   reset it, those extents being runs of text by definition.
-- **Drag-past-the-edge autoscroll ticks per frame with a repaint request.** Upstream uses a 15 ms
-  timer, which is one row per frame at 60 Hz. The repaint is the load-bearing part: egui reports the
-  drag every frame, but with the pointer parked outside the pane nothing else would schedule those
-  frames and the scroll would stall after one row.
+- **Drag-past-the-edge autoscroll is rate-limited to upstream's 15 ms per row, not one row per
+  frame.** Per-frame ticking happens to equal upstream at 60 Hz and runs at more than twice its
+  speed on a 144 Hz display — a divergence no screenshot or hand-drag would ever reveal, so the
+  rate lives in a pure `autoscroll_rows` with a table test instead. A long stall is clamped (it must
+  not bank a hundred rows and jump the viewport) and leaving the edge resets the accumulator, so
+  re-entering starts a fresh tick rather than firing a burst. The repaint request is the other
+  load-bearing part: egui reports the drag every frame, but with the pointer parked outside the pane
+  nothing else would schedule those frames and the scroll would stall after one row.
   *Divergence:* the selection end is resolved against the frame's *current* viewport, so it trails
   the scroll by one frame and catches up on the next tick — structurally the same one-frame lag the
   scrollbar drag documents.
@@ -430,8 +434,13 @@ needed.
   (read untrimmed, so the space it crosses is visible), adjust with no selection reports "not
   performed", a block selection takes three equal column spans where a linear one takes everything
   between, a block survives an adjust and is cleared by a word select, plus keymap tests for the
-  flag and a `decide_key` test pinning both halves of the performable rule. **The autoscroll itself
-  is interaction, not logic, and is unverified — it wants a human drag.**
+  flag, a `decide_key` test pinning both halves of the performable rule, a round-trip test over all
+  ten `adjust_selection:` names (the *config* path the default binds never exercise), and the
+  autoscroll rate table.
+  **One assumption is unverified and needs a human drag:** that egui reports `dragged()` on frames
+  with no pointer movement. The whole parked-pointer autoscroll rests on it. Drag past the bottom
+  edge and *hold still* — it must keep scrolling; if it stalls after a row, the fix is to poll the
+  pointer state rather than the drag response.
 
 ### Search: cross-wrap matches + drift-free tracking — ✅ divergences
 

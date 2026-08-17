@@ -128,6 +128,11 @@ pub struct Session {
     /// Deliberately separate from `bell_effect_pending`: `bell_flash_alpha`
     /// *consumes* this flag, so a single flag shared with the audible path would
     /// silently drop either the beep or the flash depending on call order.
+    /// Seconds accumulated toward the next drag-autoscroll row. Ghostty ticks a
+    /// **15 ms timer** while the pointer is held past the pane's edge; ticking
+    /// once per *frame* instead would scroll at the refresh rate, which is
+    /// upstream's speed at 60 Hz and more than twice it at 144 Hz.
+    autoscroll_accum: f32,
     bell_pending: bool,
     /// egui-time deadline of the active visual bell flash, or `None` when idle.
     bell_flash_until: Option<f64>,
@@ -257,6 +262,7 @@ impl Session {
             osc_color_report_format: config.osc_color_report_format,
             cursor_style: config.cursor_style,
             cursor_style_blink: config.cursor_style_blink,
+            autoscroll_accum: 0.0,
             bell_pending: false,
             bell_flash_until: None,
             bell_effect_pending: false,
@@ -717,6 +723,18 @@ impl Session {
     }
     pub fn clear_selection(&mut self) {
         self.engine.selection_clear();
+    }
+
+    /// Advance the drag-autoscroll clock by `dt` seconds and return how many
+    /// rows to scroll in `dir` (`-1` up, `+1` down).
+    ///
+    /// Ghostty's timer is 15 ms per row, so this is rate rather than refresh
+    /// rate: one row per frame would match upstream at 60 Hz and run at more
+    /// than twice its speed on a 144 Hz display. The accumulator is reset when
+    /// the drag leaves the edge, so re-entering starts a fresh tick instead of
+    /// firing a burst of banked rows.
+    pub fn autoscroll_step(&mut self, dir: isize, dt: f32) -> isize {
+        autoscroll_rows(&mut self.autoscroll_accum, dir, dt)
     }
 
     /// Whether this pane currently has a selection.
@@ -2082,6 +2100,26 @@ fn find_url_at(snap: &GridSnapshot, x: u16, y: u16) -> Option<String> {
     }
 }
 
+/// Rows to autoscroll this frame, advancing `accum` by `dt` seconds.
+///
+/// Pure so the rate can be table-tested: a per-frame tick would be *upstream's*
+/// speed at 60 Hz and over twice it at 144 Hz, and that is not something a
+/// screenshot or a hand-drag would ever reveal.
+fn autoscroll_rows(accum: &mut f32, dir: isize, dt: f32) -> isize {
+    /// Ghostty's `selection_scroll_ms` (`termio/Thread.zig`).
+    const TICK: f32 = 0.015;
+    if dir == 0 {
+        *accum = 0.0;
+        return 0;
+    }
+    // Clamp: a stalled frame (or the first frame after a breakpoint) must not
+    // bank a hundred rows and jump the viewport.
+    *accum = (*accum + dt).min(TICK * 8.0);
+    let rows = (*accum / TICK).floor();
+    *accum -= rows * TICK;
+    dir * rows as isize
+}
+
 /// Whether these modifiers mean "select a rectangle" while dragging.
 ///
 /// Ghostty's `surface_mouse.zig::isRectangleSelectState`: **ctrl+alt** on every
@@ -2257,7 +2295,7 @@ fn is_text_producing(code: KeyCode) -> bool {
 mod tests {
     use super::{
         CommandFinish, CopyAction, KeyAction, bell_effect_due, cell_from_pos, copy_or_interrupt,
-        find_url_at, format_duration, grid_dims, notch_split, osc7_to_path,
+        autoscroll_rows, find_url_at, format_duration, grid_dims, notch_split, osc7_to_path,
         px_offset, osc52_reduce, scroll_split, scrollbar_rows, transient_alpha,
     };
     use crate::osc52::Osc52;
@@ -2312,6 +2350,37 @@ mod tests {
     /// does not alter any of these assertions.
     fn decide_key(key: egui::Key, modifiers: &egui::Modifiers, _rows: u16) -> KeyAction {
         super::decide_key(key, modifiers, &Keymap::default(), Default::default())
+    }
+
+    #[test]
+    fn drag_autoscroll_ticks_at_ghosttys_rate_not_the_refresh_rate() {
+        // 15 ms per row (Ghostty's `selection_scroll_ms`), so the speed is the
+        // same on any display — the point of rate-limiting instead of ticking
+        // once per frame.
+        let mut a = 0.0f32;
+        // 60 Hz: one row per frame, which is where the two happen to agree.
+        assert_eq!(autoscroll_rows(&mut a, -1, 1.0 / 60.0), -1);
+        assert_eq!(autoscroll_rows(&mut a, -1, 1.0 / 60.0), -1);
+
+        // 144 Hz: not every frame, and the same rows per second.
+        a = 0.0;
+        let ticks: isize = (0..144).map(|_| autoscroll_rows(&mut a, 1, 1.0 / 144.0)).sum();
+        assert!(
+            (65..=67).contains(&ticks),
+            "≈66 rows in a second, not 144: {ticks}"
+        );
+
+        // A stalled frame cannot bank an unbounded jump.
+        a = 0.0;
+        assert!(autoscroll_rows(&mut a, 1, 10.0) <= 8, "a long pause is clamped");
+
+        // Leaving the edge resets, so re-entering doesn't fire a burst.
+        assert_eq!(autoscroll_rows(&mut a, 0, 1.0), 0);
+        assert_eq!(
+            autoscroll_rows(&mut a, 1, 0.001),
+            0,
+            "a fresh tick has to accumulate again"
+        );
     }
 
     #[test]

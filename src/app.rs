@@ -3507,16 +3507,25 @@ impl Window {
                             let rect = ctx.input(|i| crate::session::is_rectangle_select(&i.modifiers));
                             // Dragging past the top or bottom edge scrolls, so a
                             // selection can run into the scrollback without
-                            // letting go. Upstream ticks one row every 15 ms
-                            // while the button is held; a repaint request per
-                            // frame is the same cadence at 60 Hz. The repaint is
-                            // what keeps it ticking with the pointer parked —
+                            // letting go. Rate-limited to Ghostty's 15 ms per
+                            // row rather than one row per frame, which would run
+                            // at the display's refresh rate. The repaint request
+                            // is what keeps it ticking with the pointer parked —
                             // egui reports the drag every frame, but nothing
                             // else would schedule those frames.
-                            let above = p.y < prect.min.y;
-                            let below = p.y > prect.max.y;
-                            if above || below {
-                                session.scroll_lines(if above { -1 } else { 1 }, ch);
+                            let dir = if p.y < prect.min.y {
+                                -1
+                            } else if p.y > prect.max.y {
+                                1
+                            } else {
+                                0
+                            };
+                            let dt = ctx.input(|i| i.stable_dt);
+                            let rows = session.autoscroll_step(dir, dt);
+                            if rows != 0 {
+                                session.scroll_lines(rows, ch);
+                            }
+                            if dir != 0 {
                                 ctx.request_repaint();
                             }
                             // The cell is resolved against *this* frame's

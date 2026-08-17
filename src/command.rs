@@ -723,6 +723,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn every_adjust_selection_direction_parses_and_round_trips() {
+        // The default binds construct the action directly, so nothing else here
+        // exercises the *config* path — and a typo in the prefix arm would only
+        // ever show up as "unknown action" for a user typing
+        // `keybind = shift+left=adjust_selection:left`.
+        use crate::engine::SelectionAdjust as A;
+        const ALL: &[(&str, A)] = &[
+            ("left", A::Left),
+            ("right", A::Right),
+            ("up", A::Up),
+            ("down", A::Down),
+            ("page_up", A::PageUp),
+            ("page_down", A::PageDown),
+            ("home", A::Home),
+            ("end", A::End),
+            ("beginning_of_line", A::BeginningOfLine),
+            ("end_of_line", A::EndOfLine),
+        ];
+        for (name, dir) in ALL {
+            let parsed = Action::from_name(&format!("adjust_selection:{name}"));
+            assert_eq!(parsed, Some(Action::AdjustSelection(*dir)), "parsing {name}");
+            // Round-trips, which is what keeps the two name tables in sync.
+            assert_eq!(parsed.unwrap().name(), format!("adjust_selection:{name}"));
+        }
+        assert_eq!(Action::from_name("adjust_selection:sideways"), None);
+        assert_eq!(Action::from_name("adjust_selection:"), None);
+    }
+
+    #[test]
     fn equalize_splits_binds_to_a_real_no_op() {
         // It used to parse to `ClearSelection`, so binding a Ghostty config's
         // `equalize_splits` silently *dropped the user's selection*. A no-op
