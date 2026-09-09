@@ -38,14 +38,16 @@
 //! no seam and no overlap at any cell size, which only cell-derived geometry
 //! gives you.
 //!
+//! …and its *diagonal* families, which reuse the polygon fill the rounded
+//! corners already needed: **U+1FB3C–1FB67** smooth mosaics, **U+1FB68–1FB6F**
+//! edge triangles, **U+1FB9A–1FB9F** opposed and shaded triangles, and
+//! **U+1FBA0–1FBAF** the corner diagonal lines.
+//!
 //! Deliberately *not* ported, so they still come from the font: the stylized
 //! powerline symbols (E0C0+, E0D0/E0D1/E0D3 — flames, hexagons, ice), which
-//! upstream doesn't draw either; and the **diagonal** half of legacy computing
-//! (U+1FB3C–1FB6F smooth mosaics, U+1FB98–1FB9F fills and triangles,
-//! U+1FBA0–1FBAF diagonal box drawing, the separated blocks and the segmented
-//! digits). Those need polygon work rather than rectangles, and the boundary is
-//! drawn where it is because everything on this side of it shares one
-//! primitive.
+//! upstream doesn't draw either; and, from legacy computing, the diagonal
+//! *fills* (U+1FB98/1FB99), the separated blocks and the segmented digits —
+//! repeating patterns and digit segments rather than a shape.
 
 /// Cell metrics a sprite is drawn against, in **physical pixels**.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -199,6 +201,22 @@ impl Canvas {
 
     fn fill_poly(&mut self, pts: &[Point]) {
         let cov = fill_coverage(pts, self.w, self.h);
+        self.merge(&cov);
+    }
+
+    /// [`Self::fill_poly`] at partial coverage — a shaded shape.
+    ///
+    /// The shade **scales** the polygon's own coverage rather than replacing
+    /// it, which is what keeps the anti-aliased edge anti-aliased: filling at a
+    /// flat value would give a shape with a hard, aliased boundary at half
+    /// brightness. Like `░▒▓`, the shade is coverage rather than a dither, so
+    /// it stays even at any cell size.
+    fn fill_poly_shaded(&mut self, pts: &[Point], shade: u8) {
+        let scale = f64::from(shade) / 255.0;
+        let cov: Vec<f64> = fill_coverage(pts, self.w, self.h)
+            .into_iter()
+            .map(|v| v * scale)
+            .collect();
         self.merge(&cov);
     }
 
@@ -366,7 +384,10 @@ pub fn covers(ch: char) -> bool {
         // fills. The diagonal ones (smooth mosaics, the triangles, the diagonal
         // box-drawing) stay on the font for now — see this module's header.
         | 0x1FB00..=0x1FB3B    // sextants
+        | 0x1FB3C..=0x1FB6F    // smooth mosaics + the edge triangles
         | 0x1FB70..=0x1FB97    // eighth/quarter blocks and their shades
+        | 0x1FB9A..=0x1FB9F    // opposed and shaded triangles
+        | 0x1FBA0..=0x1FBAF    // corner diagonal lines, and the light/heavy cross
         | 0x1CD00..=0x1CDE5    // octants (the supplement block)
     )
 }
@@ -385,6 +406,10 @@ pub fn draw(ch: char, m: Metrics) -> Option<Vec<u8>> {
         0x2800..=0x28FF => draw_braille(&mut c, m, cp),
         0xE0B0..=0xE0BF | 0xE0D2 | 0xE0D4 => draw_powerline(&mut c, m, cp),
         0x1FB00..=0x1FB3B => draw_sextant(&mut c, m, cp),
+        0x1FB3C..=0x1FB67 => draw_smooth_mosaic(&mut c, m, cp),
+        0x1FB68..=0x1FB6F | 0x1FB9A..=0x1FB9F | 0x1FBA0..=0x1FBAF => {
+            draw_diagonal_legacy(&mut c, m, cp)
+        }
         0x1CD00..=0x1CDE5 => draw_octant(&mut c, m, cp),
         0x1FB70..=0x1FB97 => draw_legacy_block(&mut c, m, cp),
         _ => return None,
@@ -439,6 +464,16 @@ enum Corner {
     Tr,
     Bl,
     Br,
+}
+
+/// One side of the cell, for the shapes anchored to an edge rather than a
+/// corner (upstream's `Edge`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Edge {
+    Top,
+    Left,
+    Bottom,
+    Right,
 }
 
 /// A rounded corner (`╭╮╯╰`): a straight arm, a quarter-turn, another arm.
@@ -895,6 +930,325 @@ fn frac_max(f: f64, size: u32) -> i32 {
     ((f * size as f64).round()) as i32
 }
 
+/// The 10 boundary points a smooth mosaic can turn at, as a bitmask.
+///
+/// Upstream's `SmoothMosaic`, in its bit order: the four corners, the two side
+/// points at a third and two thirds of the height, and the two edge midpoints
+/// top and bottom. A mosaic is the closed polygon through whichever are set,
+/// walked anticlockwise from the top-left.
+const M_TL: u16 = 1 << 0;
+const M_UL: u16 = 1 << 1;
+const M_LL: u16 = 1 << 2;
+const M_BL: u16 = 1 << 3;
+const M_BC: u16 = 1 << 4;
+const M_BR: u16 = 1 << 5;
+const M_LR: u16 = 1 << 6;
+const M_UR: u16 = 1 << 7;
+const M_TR: u16 = 1 << 8;
+const M_TC: u16 = 1 << 9;
+
+/// The smooth-mosaic patterns for U+1FB3C–1FB67, as upstream writes them: four
+/// rows of three characters, `#` for a filled cell.
+///
+/// **Extracted from Ghostty's source rather than transcribed** — 44 patterns of
+/// four lines is exactly the kind of table where a single wrong character is
+/// invisible in review and produces one subtly wrong glyph. Upstream's own
+/// comment on it: "Hand written lookup table for these shapes since I couldn't
+/// determine any sort of mathematical pattern in the codepoints." The `\` and
+/// `/` characters are visual aids for the diagonal and read as empty.
+const SMOOTH_MOSAICS: [[&str; 4]; 44] = [
+    // U+1FB3C
+    [r"...", r"...", r"#..", r"##."],
+    // U+1FB3D
+    [r"...", r"...", r"#\.", r"###"],
+    // U+1FB3E
+    [r"...", r"#..", r"#\.", r"##."],
+    // U+1FB3F
+    [r"...", r"#..", r"##.", r"###"],
+    // U+1FB40
+    [r"#..", r"#..", r"##.", r"##."],
+    // U+1FB41
+    [r"/##", r"###", r"###", r"###"],
+    // U+1FB42
+    [r"./#", r"###", r"###", r"###"],
+    // U+1FB43
+    [r".##", r".##", r"###", r"###"],
+    // U+1FB44
+    [r"..#", r".##", r"###", r"###"],
+    // U+1FB45
+    [r".##", r".##", r".##", r"###"],
+    // U+1FB46
+    [r"...", r"./#", r"###", r"###"],
+    // U+1FB47
+    [r"...", r"...", r"..#", r".##"],
+    // U+1FB48
+    [r"...", r"...", r"./#", r"###"],
+    // U+1FB49
+    [r"...", r"..#", r"./#", r".##"],
+    // U+1FB4A
+    [r"...", r"..#", r".##", r"###"],
+    // U+1FB4B
+    [r"..#", r"..#", r".##", r".##"],
+    // U+1FB4C
+    [r"##\", r"###", r"###", r"###"],
+    // U+1FB4D
+    [r"#\.", r"###", r"###", r"###"],
+    // U+1FB4E
+    [r"##.", r"##.", r"###", r"###"],
+    // U+1FB4F
+    [r"#..", r"##.", r"###", r"###"],
+    // U+1FB50
+    [r"##.", r"##.", r"##.", r"###"],
+    // U+1FB51
+    [r"...", r"#\.", r"###", r"###"],
+    // U+1FB52
+    [r"###", r"###", r"###", r"\##"],
+    // U+1FB53
+    [r"###", r"###", r"###", r".\#"],
+    // U+1FB54
+    [r"###", r"###", r".##", r".##"],
+    // U+1FB55
+    [r"###", r"###", r".##", r"..#"],
+    // U+1FB56
+    [r"###", r".##", r".##", r".##"],
+    // U+1FB57
+    [r"##.", r"#..", r"...", r"..."],
+    // U+1FB58
+    [r"###", r"#/.", r"...", r"..."],
+    // U+1FB59
+    [r"##.", r"#/.", r"#..", r"..."],
+    // U+1FB5A
+    [r"###", r"##.", r"#..", r"..."],
+    // U+1FB5B
+    [r"##.", r"##.", r"#..", r"#.."],
+    // U+1FB5C
+    [r"###", r"###", r"#/.", r"..."],
+    // U+1FB5D
+    [r"###", r"###", r"###", r"##/"],
+    // U+1FB5E
+    [r"###", r"###", r"###", r"#/."],
+    // U+1FB5F
+    [r"###", r"###", r"##.", r"##."],
+    // U+1FB60
+    [r"###", r"###", r"##.", r"#.."],
+    // U+1FB61
+    [r"###", r"##.", r"##.", r"##."],
+    // U+1FB62
+    [r".##", r"..#", r"...", r"..."],
+    // U+1FB63
+    [r"###", r".\#", r"...", r"..."],
+    // U+1FB64
+    [r".##", r".\#", r"..#", r"..."],
+    // U+1FB65
+    [r"###", r".##", r"..#", r"..."],
+    // U+1FB66
+    [r".##", r".##", r"..#", r"..#"],
+    // U+1FB67
+    [r"###", r"###", r".\#", r"..."],
+];
+
+/// Turn a smooth-mosaic pattern into its perimeter bitmask.
+///
+/// Upstream's `SmoothMosaic.from`. The four corners are read straight off, but
+/// the six *mid*-edge points are included only when they are a genuine corner of
+/// the shape — a point colinear with its two neighbours would add a redundant
+/// vertex, and for the polygon fill a redundant vertex on a diagonal edge is a
+/// visible notch rather than a no-op.
+fn mosaic_mask(rows: &[&str; 4]) -> u16 {
+    let on = |r: usize, c: usize| rows[r].as_bytes()[c] == b'#';
+    let mut m = 0u16;
+    if on(0, 0) {
+        m |= M_TL;
+    }
+    if on(1, 0) && (!on(0, 0) || !on(2, 0)) {
+        m |= M_UL;
+    }
+    if on(2, 0) && (!on(1, 0) || !on(3, 0)) {
+        m |= M_LL;
+    }
+    if on(3, 0) {
+        m |= M_BL;
+    }
+    if on(3, 1) && (!on(3, 0) || !on(3, 2)) {
+        m |= M_BC;
+    }
+    if on(3, 2) {
+        m |= M_BR;
+    }
+    if on(2, 2) && (!on(3, 2) || !on(1, 2)) {
+        m |= M_LR;
+    }
+    if on(1, 2) && (!on(2, 2) || !on(0, 2)) {
+        m |= M_UR;
+    }
+    if on(0, 2) {
+        m |= M_TR;
+    }
+    if on(0, 1) && (!on(0, 2) || !on(0, 0)) {
+        m |= M_TC;
+    }
+    m
+}
+
+/// Smooth mosaics — U+1FB3C–1FB67.
+fn draw_smooth_mosaic(c: &mut Canvas, m: Metrics, cp: u32) {
+    let mask = mosaic_mask(&SMOOTH_MOSAICS[(cp - 0x1FB3C) as usize]);
+    let (w, h) = (f64::from(m.w), f64::from(m.h));
+    let (third, two_thirds) = (h / 3.0, h * 2.0 / 3.0);
+    let (cx, cy_top, cy_bot) = (w / 2.0, 0.0, h);
+    // Anticlockwise around the perimeter, matching upstream's path order — the
+    // winding has to be consistent or a shape spanning both sides self-cancels.
+    let pts: Vec<Point> = [
+        (M_TL, (0.0, 0.0)),
+        (M_UL, (0.0, third)),
+        (M_LL, (0.0, two_thirds)),
+        (M_BL, (0.0, h)),
+        (M_BC, (cx, cy_bot)),
+        (M_BR, (w, h)),
+        (M_LR, (w, two_thirds)),
+        (M_UR, (w, third)),
+        (M_TR, (w, 0.0)),
+        (M_TC, (cx, cy_top)),
+    ]
+    .into_iter()
+    .filter(|(bit, _)| mask & bit != 0)
+    .map(|(_, p)| p)
+    .collect();
+    if pts.len() >= 3 {
+        c.fill_poly(&pts);
+    }
+}
+
+/// A triangle from one edge of the cell to its centre — upstream's
+/// `edgeTriangle`, the shape behind U+1FB6C–1FB6F.
+fn edge_triangle(m: Metrics, edge: Edge) -> [Point; 3] {
+    let (w, h) = (f64::from(m.w), f64::from(m.h));
+    let (cx, cy) = ((w / 2.0).round(), (h / 2.0).round());
+    let (a, b) = match edge {
+        Edge::Top => ((w, 0.0), (0.0, 0.0)),
+        Edge::Left => ((0.0, 0.0), (0.0, h)),
+        Edge::Bottom => ((0.0, h), (w, h)),
+        Edge::Right => ((w, h), (w, 0.0)),
+    };
+    [(cx, cy), a, b]
+}
+
+/// The cell **minus** an [`edge_triangle`], as a polygon.
+///
+/// Upstream draws the triangle and inverts the canvas; expressing the
+/// complement directly is the same shape without needing an invert-and-clip on
+/// a canvas that has neither. It is a pentagon: from the centre out to one
+/// corner of the opposite edge, around the outside, and back.
+fn edge_triangle_inverse(m: Metrics, edge: Edge) -> [Point; 5] {
+    let (w, h) = (f64::from(m.w), f64::from(m.h));
+    let (cx, cy) = ((w / 2.0).round(), (h / 2.0).round());
+    let (tl, tr, br, bl) = ((0.0, 0.0), (w, 0.0), (w, h), (0.0, h));
+    match edge {
+        // The triangle sits on the left edge, so what is left of the cell runs
+        // from the centre around the right-hand side.
+        Edge::Left => [(cx, cy), tl, tr, br, bl],
+        Edge::Top => [(cx, cy), tr, br, bl, tl],
+        Edge::Right => [(cx, cy), br, bl, tl, tr],
+        Edge::Bottom => [(cx, cy), bl, tl, tr, br],
+    }
+}
+
+/// Half the cell, cut by a diagonal, with the right angle at `corner`.
+fn corner_triangle(m: Metrics, corner: Corner) -> [Point; 3] {
+    let (w, h) = (f64::from(m.w), f64::from(m.h));
+    let (tl, tr, br, bl) = ((0.0, 0.0), (w, 0.0), (w, h), (0.0, h));
+    match corner {
+        Corner::Tl => [tl, bl, tr],
+        Corner::Tr => [tl, br, tr],
+        Corner::Br => [tr, bl, br],
+        Corner::Bl => [tl, bl, br],
+    }
+}
+
+/// U+1FB68–1FB6F (edge triangles and their inverses), U+1FB9A–1FB9F (opposed
+/// pairs and the medium-shaded corner triangles) and U+1FBA0–1FBAF (the corner
+/// diagonal lines).
+fn draw_diagonal_legacy(c: &mut Canvas, m: Metrics, cp: u32) {
+    const MEDIUM: u8 = 0x80;
+    match cp {
+        0x1FB68 => c.fill_poly(&edge_triangle_inverse(m, Edge::Left)),
+        0x1FB69 => c.fill_poly(&edge_triangle_inverse(m, Edge::Top)),
+        0x1FB6A => c.fill_poly(&edge_triangle_inverse(m, Edge::Right)),
+        0x1FB6B => c.fill_poly(&edge_triangle_inverse(m, Edge::Bottom)),
+        0x1FB6C => c.fill_poly(&edge_triangle(m, Edge::Left)),
+        0x1FB6D => c.fill_poly(&edge_triangle(m, Edge::Top)),
+        0x1FB6E => c.fill_poly(&edge_triangle(m, Edge::Right)),
+        0x1FB6F => c.fill_poly(&edge_triangle(m, Edge::Bottom)),
+        // Opposed pairs: two triangles meeting at the centre.
+        0x1FB9A => {
+            c.fill_poly(&edge_triangle(m, Edge::Top));
+            c.fill_poly(&edge_triangle(m, Edge::Bottom));
+        }
+        0x1FB9B => {
+            c.fill_poly(&edge_triangle(m, Edge::Left));
+            c.fill_poly(&edge_triangle(m, Edge::Right));
+        }
+        // Medium-shaded corner triangles. Shaded by scaling the filled
+        // coverage rather than by a dither, the same rule `░▒▓` follows — and
+        // the reason it has to be a separate merge rather than a fill at half
+        // value: the polygon fill anti-aliases its own edges, so the shade has
+        // to multiply that coverage, not replace it.
+        0x1FB9C => c.fill_poly_shaded(&corner_triangle(m, Corner::Tl), MEDIUM),
+        0x1FB9D => c.fill_poly_shaded(&corner_triangle(m, Corner::Tr), MEDIUM),
+        0x1FB9E => c.fill_poly_shaded(&corner_triangle(m, Corner::Br), MEDIUM),
+        0x1FB9F => c.fill_poly_shaded(&corner_triangle(m, Corner::Bl), MEDIUM),
+        // Corner diagonal lines: strokes from an edge midpoint to the two
+        // adjacent side midpoints, one per named corner.
+        0x1FBA0..=0x1FBAE => {
+            // Upstream's centre rounds *up* on an odd cell (`n / 2 + n % 2`),
+            // which is what makes the four diagonals of U+1FBAE meet at one
+            // pixel rather than in a two-pixel knot.
+            let (w, h) = (f64::from(m.w), f64::from(m.h));
+            let cx = f64::from(m.w / 2 + m.w % 2);
+            let cy = f64::from(m.h / 2 + m.h % 2);
+            let thick = f64::from(m.line(Weight::Light));
+            let corners = CORNER_DIAGONALS[(cp - 0x1FBA0) as usize];
+            for (bit, from, to) in [
+                (0b0001u8, (cx, 0.0), (0.0, cy)),  // tl
+                (0b0010, (cx, 0.0), (w, cy)),      // tr
+                (0b0100, (cx, h), (0.0, cy)),      // bl
+                (0b1000, (cx, h), (w, cy)),        // br
+            ] {
+                if corners & bit != 0 {
+                    c.stroke(&[from, to], thick);
+                }
+            }
+        }
+        // U+1FBAF is not a diagonal at all: a light horizontal through a heavy
+        // vertical, which the box-drawing code already draws.
+        0x1FBAF => draw_box(c, m, 0x2542),
+        _ => {}
+    }
+}
+
+/// Which corners each of U+1FBA0–1FBAE lights up, as `tl|tr|bl|br` bits.
+///
+/// Written out rather than derived: the block's order is
+/// singles, then opposite-edge pairs, then diagonal pairs, then triples, then
+/// all four — a sequence with no arithmetic behind it.
+const CORNER_DIAGONALS: [u8; 15] = [
+    0b0001, // 🮠 tl
+    0b0010, // 🮡 tr
+    0b0100, // 🮢 bl
+    0b1000, // 🮣 br
+    0b0101, // 🮤 tl bl
+    0b1010, // 🮥 tr br
+    0b1100, // 🮦 bl br
+    0b0011, // 🮧 tl tr
+    0b1001, // 🮨 tl br
+    0b0110, // 🮩 tr bl
+    0b1110, // 🮪 tr bl br
+    0b1101, // 🮫 tl bl br
+    0b1011, // 🮬 tl tr br
+    0b0111, // 🮭 tl tr bl
+    0b1111, // 🮮 all four
+];
+
 /// Fill one cell of a `cols × rows` subdivision of the cell.
 ///
 /// The min/max fraction rule (see [`frac_min`] / [`frac_max`]) is what makes a
@@ -1302,6 +1656,137 @@ mod tests {
     }
 
     // --- Symbols for Legacy Computing ------------------------------------
+
+    #[test]
+    fn a_mosaic_mask_drops_redundant_midpoints() {
+        // The rule that makes the polygon fill correct: a side midpoint is a
+        // vertex only when the shape actually turns there. A point colinear
+        // with its neighbours would add a vertex on a straight edge, which the
+        // fill renders as a notch rather than ignoring.
+        // A full left column turns at neither midpoint…
+        let m = mosaic_mask(&["#..", "#..", "#..", "#.."]);
+        assert_eq!(m & (M_UL | M_LL), 0, "colinear midpoints must be dropped");
+        assert_eq!(m & (M_TL | M_BL), M_TL | M_BL, "the corners stay");
+        // …but a shape that starts partway down the side turns at the upper one.
+        let m = mosaic_mask(&["...", "#..", "#..", "#.."]);
+        assert_eq!(m & M_UL, M_UL);
+        assert_eq!(m & M_LL, 0);
+    }
+
+    #[test]
+    fn the_smooth_mosaic_table_is_the_whole_range() {
+        // Extracted from upstream rather than transcribed, so what needs
+        // asserting is that the extraction covers the block and every pattern
+        // is well-formed.
+        assert_eq!(SMOOTH_MOSAICS.len(), 0x1FB67 - 0x1FB3C + 1);
+        for (i, rows) in SMOOTH_MOSAICS.iter().enumerate() {
+            for r in rows {
+                assert_eq!(r.len(), 3, "pattern {i} row is not 3 wide");
+            }
+            // Three points minimum, or there is no polygon to fill — a mosaic
+            // that degenerated in extraction would silently render as nothing.
+            let mask = mosaic_mask(rows);
+            assert!(
+                mask.count_ones() >= 3,
+                "pattern {i} has only {} vertices",
+                mask.count_ones()
+            );
+        }
+    }
+
+    #[test]
+    fn every_smooth_mosaic_draws_something() {
+        let m = Metrics { w: 12, h: 26, thickness: 2 };
+        for cp in 0x1FB3Cu32..=0x1FB67 {
+            let ch = char::from_u32(cp).expect("valid");
+            let b = buf(ch, m);
+            assert!(
+                b.iter().any(|&v| v > 0),
+                "U+{cp:04X} rendered as nothing"
+            );
+            assert!(
+                b.iter().any(|&v| v < 0xFF),
+                "U+{cp:04X} filled the whole cell"
+            );
+        }
+    }
+
+    #[test]
+    fn a_smooth_mosaic_is_the_wedge_its_pattern_describes() {
+        // U+1FB3C is `... / ... / #.. / ##.` — a wedge from two thirds down the
+        // left edge to the middle of the bottom. Computed corners, not a glance.
+        let m = Metrics { w: 16, h: 30, thickness: 2 };
+        let b = buf('\u{1FB3C}', m);
+        // Deep inside the wedge, and well outside it.
+        assert_eq!(at(&b, m, 0, 29), 0xFF, "bottom-left corner is inside");
+        assert_eq!(at(&b, m, 15, 29), 0x00, "bottom-right is outside");
+        assert_eq!(at(&b, m, 0, 0), 0x00, "the top is untouched");
+        // The left edge only starts being covered two thirds of the way down.
+        assert_eq!(at(&b, m, 0, 19), 0x00);
+        assert!(at(&b, m, 0, 22) > 0);
+    }
+
+    #[test]
+    fn an_edge_triangle_and_its_inverse_partition_the_cell() {
+        // These two *do* partition — unlike the block mosaics above, they share
+        // one exact boundary and the polygon fill computes real areas, so the
+        // coverages sum. That is what makes the pair safe to draw as two
+        // polygons instead of upstream's fill-then-invert.
+        let m = Metrics { w: 15, h: 29, thickness: 2 };
+        for (tri, inv) in [
+            ('\u{1FB6C}', '\u{1FB68}'),
+            ('\u{1FB6D}', '\u{1FB69}'),
+            ('\u{1FB6E}', '\u{1FB6A}'),
+            ('\u{1FB6F}', '\u{1FB6B}'),
+        ] {
+            let a = buf(tri, m);
+            let b = buf(inv, m);
+            for (n, (pa, pb)) in a.iter().zip(b.iter()).enumerate() {
+                let sum = u16::from(*pa) + u16::from(*pb);
+                assert!(
+                    sum.abs_diff(0xFF) <= 1,
+                    "{tri:?}/{inv:?} pixel {n}: {pa} + {pb} = {sum}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_shaded_corner_triangle_is_half_lit_inside_and_dark_outside() {
+        let m = Metrics { w: 16, h: 32, thickness: 2 };
+        let b = buf('\u{1FB9C}', m); // upper-left half, medium shade
+        assert_eq!(at(&b, m, 0, 0), 0x80, "well inside");
+        assert_eq!(at(&b, m, 15, 31), 0x00, "well outside");
+        // No pixel is fully lit: it is a *shade*, and a flat fill at half value
+        // would also have to alias its edge, which this does not.
+        assert!(b.iter().all(|&v| v <= 0x80));
+    }
+
+    #[test]
+    fn the_corner_diagonal_table_covers_every_nonempty_combination() {
+        // U+1FBA0–1FBAE is all 15 non-empty subsets of the four corners, in the
+        // block's own order (singles, pairs, triples, all). Written out rather
+        // than derived, so the assertion is that nothing is missing or doubled.
+        let mut seen = CORNER_DIAGONALS.to_vec();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen, (1u8..=15).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn the_four_way_diagonal_meets_at_one_point() {
+        // U+1FBAE draws all four; upstream rounds the centre *up* on an odd
+        // cell so they cross at a single pixel rather than in a knot. The
+        // centre column must be lit on the centre row, and the corners dark.
+        let m = Metrics { w: 15, h: 31, thickness: 1 };
+        let b = buf('\u{1FBAE}', m);
+        let (cx, cy) = (15 / 2 + 1, 31 / 2 + 1);
+        assert!(at(&b, m, cx - 1, 0) > 0, "the top vertex is drawn");
+        assert!(at(&b, m, 0, cy - 1) > 0, "the left vertex is drawn");
+        assert_eq!(at(&b, m, 0, 0), 0x00, "the corners stay empty");
+        assert_eq!(at(&b, m, 14, 30), 0x00);
+    }
+
 
     #[test]
     fn the_sextant_index_skips_exactly_the_two_halves() {

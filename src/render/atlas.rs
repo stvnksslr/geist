@@ -850,7 +850,9 @@ pub fn classify(ch: char) -> Constraint {
         // consulted, but the two tables should agree about what tiles the cell —
         // narrowing `sprite::covers` later would otherwise silently start
         // centring them instead.
-        0x1FB00..=0x1FB3B | 0x1FB70..=0x1FB97 | 0x1CD00..=0x1CDE5 => Constraint::Fill,
+        0x1FB00..=0x1FB6F | 0x1FB70..=0x1FB97 | 0x1FB9A..=0x1FBAF | 0x1CD00..=0x1CDE5 => {
+            Constraint::Fill
+        }
         // Powerline separators/arrows must touch cell edges — matched before the
         // broad PUA Fit arm below so they stay Fill.
         0xE0B0..=0xE0D4 => Constraint::Fill,
@@ -2240,6 +2242,8 @@ mod tests {
         assert_eq!(classify('\u{1FB00}'), Constraint::Fill, "sextant");
         assert_eq!(classify('\u{1CD00}'), Constraint::Fill, "octant");
         assert_eq!(classify('\u{1FB82}'), Constraint::Fill, "upper quarter block");
+        assert_eq!(classify('\u{1FB3C}'), Constraint::Fill, "smooth mosaic");
+        assert_eq!(classify('\u{1FBA0}'), Constraint::Fill, "corner diagonal");
         assert_eq!(
             classify('\u{E0B0}'),
             Constraint::Fill,

@@ -145,6 +145,8 @@ giest **draws** these characters itself rather than taking them from the font, l
   image renderers (`chafa`, `timg`, `viu`) draw pictures with
 - **U+1FB70–1FB97** — the eighth and quarter blocks, their L-shaped corners and the medium-shaded
   halves
+- **U+1FB3C–1FB6F** smooth mosaics and edge triangles, **U+1FB9A–1FB9F** opposed and shaded
+  triangles, and **U+1FBA0–1FBAF** the corner diagonal lines
 
 They are *defined* relative to the character cell, while a font draws its versions relative to its
 em box — so with any line spacing at all, a font's `│` stops short of the cell edges and a column of
@@ -162,10 +164,9 @@ Powerline separators are drawn even if your font has no Nerd Font patch, so a pr
 works with any font.
 
 Not drawn, so still taken from the font: the *stylized* powerline symbols (U+E0C0 and up — flames,
-hexagons, ice), which upstream doesn't draw either; and the **diagonal** half of the legacy-computing
-block — U+1FB3C–1FB6F smooth mosaics, U+1FB98–1FB9F fills and triangles, U+1FBA0–1FBAF diagonal box
-drawing, the separated blocks and the segmented digits. Those need polygon work rather than
-rectangles; everything drawn above shares a single primitive, which is where the line is drawn.
+hexagons, ice), which upstream doesn't draw either; and, from legacy computing, the diagonal *fills*
+(U+1FB98/1FB99), the separated blocks and the segmented digits — repeating patterns and digit
+segments rather than a shape.
 
 ### Selection
 

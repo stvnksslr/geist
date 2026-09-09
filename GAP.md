@@ -154,15 +154,16 @@ and a configured `font-family` / `font-feature = -calt`; curly-underline thickne
 OSC 4/5/13-19 color *queries*. *(OSC 8 hyperlinks, OSC 133 prompts, styled underlines, OSC 10/11/12
 dynamic colors incl. query replies — now done.)*
 
-**Rendering / fonts** — COLRv1 emoji; the *diagonal* half of legacy computing (smooth mosaics,
-triangles, diagonal box drawing).
+**Rendering / fonts** — COLRv1 emoji; from legacy computing, the diagonal *fills*, the separated
+blocks and the segmented digits.
 *(`font-family` (+ fallback chains, per-style overrides, **synthetic bold/italic**),
 `font-feature`/ligature toggle, **`font-variation`** and its three per-style siblings, `minimum-contrast`,
 `bold-is-bright`/`bold-color`, `cursor-style`/`-blink`, **transparency + background-opacity**,
 blur (Windows acrylic), `faint-opacity`, `cursor-opacity`, unfocused-split dimming, **custom
 shaders**, **box-drawing/block/braille/powerline sprites**, the **legacy-computing mosaics**
-(sextants, octants, eighth blocks), the **`adjust-*` metric family** *in full* (including
-`adjust-icon-height`) and `isCovering` — now done.)*
+(sextants, octants, eighth blocks, smooth mosaics, triangles and the corner diagonals), the
+**`adjust-*` metric family** *in full* (including `adjust-icon-height`) and `isCovering` — now
+done.)*
 
 **Window / UI** — titlebar/decoration styles; settings UI; about dialog; custom app icons.
 *(the **inspector** is now done — see its ledger.)*
@@ -408,10 +409,11 @@ With Phase 0 done, the remaining Tier-1 items are mostly small, registry-backed 
 35. ✅ **`adjust-icon-height`** — the last of the `adjust-*` family. See the ledger below.
 36. ✅ **Legacy-computing mosaics** — sextants, octants and the eighth/quarter blocks. See the
     ledger below.
-37. Next: Tier 3 — COLRv1 emoji, the diagonal half of legacy computing, window
-    decorations/titlebar, a settings UI.
+37. ✅ **The diagonal legacy-computing families** — smooth mosaics, edge triangles, shaded corner
+    triangles and the corner diagonal lines. See the ledger below.
+38. Next: Tier 3 — COLRv1 emoji, window decorations/titlebar, a settings UI, the about dialog.
 
-### Legacy-computing mosaics + `adjust-icon-height` — ✅ divergences
+### Legacy computing (mosaics *and* diagonals) + `adjust-icon-height` — ✅ divergences
 
 Two Tier-3 items that finish what was already built. `adjust-icon-height` completes the `adjust-*`
 family; the mosaics extend `sprite.rs` with the families that share its existing primitive.
@@ -450,12 +452,37 @@ halves, the checkerboards and the heavy horizontal fill. ~330 characters.
   construction.** Box-drawing, block and Powerline glyphs are drawn procedurally from the cell
   metrics rather than rasterized, so they never consult the icon ceiling — no exception needed.
 
-**Divergences:**
+**The diagonal families, added after the rectangle ones** (U+1FB3C–1FB67 smooth mosaics,
+U+1FB68–1FB6F edge triangles, U+1FB9A–1FB9F opposed and shaded triangles, U+1FBA0–1FBAF corner
+diagonal lines — 74 more characters). They reuse the supersampled polygon fill the rounded corners
+already needed, so no new primitive was required.
 
-- **The diagonal half of legacy computing is not drawn** and still comes from the font:
-  U+1FB3C–1FB6F smooth mosaics, U+1FB98–1FB9F fills and triangles, U+1FBA0–1FBAF diagonal box
-  drawing, the separated blocks and the segmented digits. Those need polygon work; everything ported
-  here shares one rectangle primitive, and the boundary is drawn where that stops.
+- **The mosaic table was extracted from Ghostty's source, not transcribed.** 44 patterns of four
+  three-character rows is exactly the shape of table where one wrong character is invisible in
+  review and produces a single subtly wrong glyph. A script pulled them out and checked the
+  codepoints were contiguous across the whole range before anything was written down. Upstream's own
+  note on the table: "Hand written lookup table for these shapes since I couldn't determine any sort
+  of mathematical pattern in the codepoints."
+- **A mid-edge point is a vertex only when the shape turns there.** Upstream's `SmoothMosaic.from`
+  guards each of the six side points with "…and its neighbours aren't both filled". Skipping that
+  would put a redundant vertex on a straight edge, which a polygon fill renders as a notch rather
+  than ignoring. It has its own test, because the shapes it breaks are a minority of the 44.
+- **The four inverse triangles are drawn as polygons, not by inverting the canvas.** Upstream fills
+  the triangle, inverts, then re-clips to the cell; the complement of an edge triangle within a
+  rectangle is just a pentagon, and giest's canvas has neither invert nor clip. Verified by the
+  property that matters: the triangle and its inverse sum to exactly full coverage at every pixel —
+  which they do, unlike the *block* mosaics, because they share one exact boundary and the fill
+  computes real areas.
+- **A shaded triangle scales the polygon's coverage rather than filling at a flat value.** Filling
+  at half brightness would give a shape with a hard, aliased edge; multiplying keeps the
+  anti-aliasing and matches how `░▒▓` already work.
+- **The corner-diagonal centre rounds *up* on an odd cell** (`n / 2 + n % 2`, upstream's), which is
+  what makes all four diagonals of `🮮` cross at one pixel instead of in a two-pixel knot.
+
+**Still not drawn**, so still from the font: the diagonal *fills* (U+1FB98/1FB99), the separated
+blocks and the segmented digits — repeating patterns and digit segments rather than a shape.
+
+**Other divergences:**
 - **U+1FB93 is claimed and drawn empty.** It is an unassigned hole in the block; upstream draws
   nothing there too, and the alternative is a tofu box for a codepoint that has no character.
 - **The checkerboards use upstream's aspect-corrected grid** (four columns, `round(4·h/w)` rows) so
@@ -464,7 +491,10 @@ halves, the checkerboards and the heavy horizontal fill. ~330 characters.
 **Verified**: `cargo test` — the sextant sequence in full, the octant table's shape and two spot
 entries, exact pixel coverage for a sextant and an octant, the no-seam property at six awkward cell
 sizes, the eighth-block positions, the shade being coverage rather than a dither, and
-`adjust-icon-height` moving the ceiling and nothing else. **Wants a human look**: an actual image
+`adjust-icon-height` moving the ceiling and nothing else. For the diagonals: the whole extracted
+table's shape, the redundant-midpoint rule, every one of the 44 mosaics rendering something that
+isn't the whole cell, one mosaic's wedge by computed corners, the triangle/inverse partition at
+every edge, and the 15 corner-diagonal combinations being exactly the non-empty subsets. **Wants a human look**: an actual image
 piped through `chafa` — the geometry is proven, how it reads is not.
 
 ### `font-variation` (variable fonts) — ✅ divergences
