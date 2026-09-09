@@ -30,6 +30,7 @@ classDiagram
         profiles: Vec~Profile~
     }
     class Tab {
+        id: u64
         root: Node
         focus: u64
         name: Option~String~
@@ -50,10 +51,43 @@ classDiagram
 
 - `split_leaf` — replace the focused leaf with a `Split` of the old pane + a new
   leaf.
-- `remove_leaf` / `prune_dead` — drop a leaf (closed, or its shell exited),
-  collapsing a split into its surviving child.
+- `detach_leaf` / `attach_at` — take a leaf *out of* the tree and put it back
+  where it was. `detach_leaf` collapses the split that lost a child into its
+  survivor (what a close does) and hands back the removed subtree with a
+  `PaneSlot` — the path to its old parent, the axis, and which side it was on;
+  `attach_at` re-creates that split. This is the pair `undo` is built on: the
+  pane is *moved*, so its shell keeps running the whole time.
+- `prune` — drop every leaf whose shell exited, collapsing splits. Unlike
+  `detach_leaf` this one really discards, because there is nothing left to keep.
 - `collect` — divide a rect by each split's axis (1px gutter) and emit a `Leaf`
   (id, session, rect) per pane.
+
+Tabs carry a stable `id` from the same monotonic counter as the leaf ids. Every
+*index* into `tabs` goes stale on a reorder or a reap (see CLAUDE.md), which is
+survivable for state held within a frame; an undo entry outlives far more than a
+frame, so it addresses tabs by id.
+
+## Undo and redo
+
+`App` owns one [`undo::UndoStack`](../../src/undo.rs) spanning every window —
+app-scoped rather than per-window because a *window* close is itself undoable,
+and a stack living on the window that closed would go with it.
+
+Its entries are `UndoOp`s, and the vocabulary is deliberately symmetric: three
+`Restore*` variants that own removed panes/tabs/windows (**with their sessions
+still alive**) and three `Remove*` variants that take them back out. Applying
+either kind returns the op that reverses it, and the stack files that return
+value onto the opposite pile — so `undo`, `redo`, and undoing a *creation* are
+all the same two code paths walked in different directions, with no third
+"opposite of this" free to drift.
+
+Windows raise them the same way they raise everything else app-scoped: a
+`AppRequest::Record(op)` on the per-pass `requests` vector, which is also how a
+removed `Tab<Session>` gets out of the window that closed it.
+
+Entries expire on `undo-timeout` (default 5 s) and `App::ui` prunes them every
+pass, not just when undo is used — an expired entry is holding shells open, and
+they should end when it does.
 
 ```mermaid
 flowchart TB

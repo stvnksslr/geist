@@ -8,7 +8,7 @@ the terminal data already exists and just needs wiring).
 
 **Headline finding.** giest has a strong, correct *spine* — real VT engine, splits, tabs, ligatures,
 emoji, smooth scroll, command palette — but it covered a fraction of Ghostty's config surface and
-~90 keybind actions, with little of the macOS app's UX breadth. *(Measured since: **94 of Ghostty's
+~90 keybind actions, with little of the macOS app's UX breadth. *(Measured since: **96 of Ghostty's
 187 config keys** are now supported — see the config-surface ledger for the re-runnable audit.)* The encouraging part: **much of the gap
 is plumbing, not greenfield.** libghostty-vt already surfaces underline styles, faint/overline, OSC 8
 hyperlinks, OSC 133 semantic-prompt marks, kitty graphics, the bell, and a rich selection model — data
@@ -171,10 +171,12 @@ tab strip, palette, overlays and dialogs all derive their colors from
 light/dark preference), **window/tab/split state restore** (`window-save-state`), **quick
 (dropdown) terminal + global hotkey** — now done.)*
 
-**Input / keybinds** — `undo`/`redo`. *(Everything else in this area is done: config-driven binding,
-leader sequences, key tables, `catch_all`, `chain=`, and all four trigger flags — `global:`,
-`performable:`, `unconsumed:` and `all:` — plus the `write_*_file` / `set_*_title` / `toggle_*` /
-`text:` / `csi:` / `esc:` actions.)*
+**Input / keybinds** — nothing outstanding. *(Everything in this area is done: config-driven
+binding, leader sequences, key tables, `catch_all`, `chain=`, all four trigger flags — `global:`,
+`performable:`, `unconsumed:` and `all:` — the `write_*_file` / `set_*_title` / `toggle_*` /
+`text:` / `csi:` / `esc:` actions, and now **`undo`/`redo` + `undo-timeout`**. The only remaining
+gaps against upstream's action union are the ones that need a subsystem giest doesn't have: the
+inspector, and the finer-grained search actions.)*
 
 **Selection / scroll / search** — upstream's 60%-of-cell threshold for including the clicked/dragged
 cell; the double-click-*drag* word-snapping refinement; regex search. *(scrollback search plus
@@ -192,7 +194,7 @@ paste-protection confirmation, `clipboard-trim-trailing-spaces` and **readonly m
 indicator** — now done; **secure input is N/A on Windows**, see its ledger.)*
 
 **Config / theming** — `palette-generate`/`harmonious`, conditional configuration,
-and the **92 upstream keys still unsupported** (mostly `gtk-*`, `macos-*`, `linux-*` — see the
+and the **91 upstream keys still unsupported** (mostly `gtk-*`, `macos-*`, `linux-*` — see the
 config-surface ledger). *(theme/theme-file now done.)*
 
 **Notifications / bell** — desktop notifications (OSC 9/777/99); Win taskbar progress (OSC 9;4);
@@ -389,7 +391,86 @@ With Phase 0 done, the remaining Tier-1 items are mostly small, registry-backed 
 28. ✅ **`catch_all` and the `unconsumed:` trigger flag.** See the ledger.
 29. ✅ **`chain=` multi-action bindings.** See the ledger.
 30. ✅ **`all:` / broadcast input** — one feature under two names. See the ledger.
-31. Next: `undo`/`redo`, and the inspector.
+31. ✅ **`undo`/`redo` + `undo-timeout`** — close and creation both reversible, with the shells
+    still running. See the ledger below.
+32. Next: the inspector, and the finer-grained search actions.
+
+### `undo` / `redo` — ✅ divergences
+
+`Ctrl+Shift+Z` / `Ctrl+Shift+Y`, backed by a new `src/undo.rs`: a two-stack manager whose entries
+**expire** on `undo-timeout` (Ghostty's key, default 5 s, `0` disables). Undoable: close split /
+tab / window, close other tabs, close tabs to the right, and — as upstream also does — the
+*creations*: new split / tab / window, whose undo closes them again. That is Ghostty's whole set
+minus `move_split` (giest has no split move) and the app-quitting `close_all_windows`.
+
+- **A restore is lossless, and that is the whole design.** Ghostty's undo retains the live
+  `SurfaceView` tree, so undoing a close brings back the *running* terminal. giest does the same
+  by construction: `Node::detach_leaf` **moves** the removed subtree into the undo entry (where
+  `remove_leaf` used to drop it — that function is gone, its one caller converted), and closed tabs
+  and windows are moved rather than dropped too. Scrollback, the running command and the cwd all
+  come back. It is also why entries must expire: **an undo entry holds live processes**.
+- **The inverse is produced by performing, not by a table.** `App::apply_undo_op` returns the op
+  that reverses what it just did, and `UndoStack` files that return value onto the *opposite* stack
+  based on the phase it is in — exactly `NSUndoManager`'s `isUndoing`/`isRedoing` rule. So undo,
+  redo, and undoing a creation are one implementation walked in different directions; there is no
+  second opinion about what "the opposite" is, which is the failure mode a hand-written redo table
+  has. The six ops pair off: `RestorePane`/`RemovePane`, `RestoreTabs`/`RemoveTabs`,
+  `RestoreWindow`/`RemoveWindow`.
+- **A closed pane's slot is a path, not a neighbour.** The sibling a removed pane collapses into may
+  be a whole subtree, so naming one of its leaves wouldn't say which ancestor to wrap. `PaneSlot`
+  carries the root-downwards path to the old *parent split*, its axis and which side the pane was
+  on. If the layout changed under the entry and the path no longer resolves, `attach_at` attaches
+  at the deepest point it can reach rather than declining — a pane restored in the wrong place is
+  recoverable; a dropped one takes a running shell with it.
+- **Tabs needed a stable identity.** Everything in `app.rs` addresses tabs by *index*, and this
+  repo's recorded trap is that a reorder or a reap invalidates one. That is survivable for state
+  held within a frame; an undo entry outlives far more than a frame. `Tab` now carries an `id` from
+  the same per-window counter as the leaf ids (reusing a leaf's number, which cannot collide with
+  another tab's), and every undo op addresses tabs by it.
+- **`reap_dead` is the one close that is deliberately *not* undoable.** A window whose last shell
+  exited has nothing to restore, and an entry would hold a window of dead panes. `AppRequest::CloseWindow`
+  therefore carries an `undoable` flag rather than being one shape for both callers.
+- **Closing the last tab is re-routed rather than double-recorded.** It used to remove the tab and
+  then ask for the window to close, which would have produced *two* entries (a tab restore into a
+  window that no longer exists, and a window restore). It now hands the close straight to the
+  window path with the tab still in place, so there is one entry: the whole window.
+- **Undo can never quit giest.** Undoing the creation of what is now the only window would have to
+  close it, which is how giest exits; `RemoveWindow` declines instead. Same rule for `RemoveTabs`
+  when it would empty a window — that is a *window* close, a different op with a different entry,
+  and silently escalating into one would surprise.
+
+**Divergences from upstream:**
+
+- **A restored window comes back as an ordinary child window**, at the position and size it had
+  (a one-shot `place_geom` consumed on the next pass, the same mechanism the root-slot rehost uses),
+  rather than reclaiming the root viewport slot. Reclaiming it would move a *different* window on
+  screen — the one that slid into slot 0 when this one closed — which is a worse surprise than the
+  window coming back stacked.
+- **No action names.** Upstream sets "Undo Close Tab" etc. because macOS shows it in the Edit menu.
+  giest has no Edit menu, so the palette lists a plain `Undo` / `Redo` and the names aren't carried.
+- **The stacks are capped at 64 entries**, oldest dropped. Upstream has no cap and documents that a
+  long `undo-timeout` grows the stack without bound; here that is unbounded *processes*, so the cap
+  reaches the same end the timeout would have.
+- **A shortened `undo-timeout` retires existing entries at the next prune**, rather than at the
+  deadline they were recorded with. That is what makes `undo-timeout = 0` mean "off" the moment the
+  config reloads, which is what a user turning it off is asking for.
+- **A session sitting in an undo entry is not pumped.** Its PTY output buffers in the reader
+  channel and is drained when it is restored, so nothing is lost; over the default 5 s window that
+  is a few kilobytes. Ghostty's undone surfaces keep rendering, since they are only detached from a
+  view hierarchy.
+- **The triggers are `ctrl+shift+z` / `ctrl+shift+y`**, not upstream's `super+z` / `super+shift+z`
+  (and upstream's second `super+shift+t` undo binding, which is macOS's "reopen closed tab"
+  convention — `ctrl+shift+t` is already `new_tab` here). Bare `ctrl+z` is deliberately left unbound:
+  it is the shell's. Both are `performable:` like upstream, so an empty stack hands the key to the
+  shell rather than swallowing it — which needed `PerformCtx` to carry a new `UndoState`, mirrored
+  onto each window every pass because the gate runs inside `session::decide_key`, which has no route
+  back to `App`.
+
+**Verified**: `cargo test` — the manager's ordering, phase and expiry rules (`src/undo.rs`, 8
+tests), the `detach_leaf`/`attach_at` round-trip including a nested path and the changed-layout
+fallback, and the two tab helpers now returning what they closed with the slots to put it back in.
+The end-to-end restore is structural rather than visual, but a window coming back on screen at its
+old geometry wants a human look.
 
 ### `all:` / broadcast input — ✅ divergences
 
@@ -904,7 +985,7 @@ grep -oE '^@"[a-z0-9-]+"' ghostty-src/src/config/Config.zig | tr -d '@"' | sort 
 grep -oE '\("[a-z0-9-]+", \|' src/config.rs | grep -oE '"[a-z0-9-]+"' | tr -d '"' | sort -u
 ```
 
-**187 upstream keys; giest now sets 103, of which 95 are upstream's** (`config-file` since) (the rest are giest-specific,
+**187 upstream keys; giest now sets 104, of which 96 are upstream's** (`config-file`, then `undo-timeout`, since) (the rest are giest-specific,
 e.g. `text-gamma`). That replaces the "~250 options / ~230 remaining" estimates this document opened
 with, which were never counted.
 
@@ -1216,9 +1297,9 @@ guessed at, and the ones needing no new subsystem are now wired: `clear_screen`,
 - **`text:`, `csi:`, `esc:`, `set_tab_title:`, `set_surface_title:` are now done.** They needed
   `Action` to own strings, which it does — `Arc<str>` payloads, `Clone` instead of `Copy`. See their
   own ledger; the refactor cost 16 mechanical errors, measured rather than estimated.
-- Still open and genuinely large: `undo`/`redo`, the inspector, and the finer-grained
-  search actions (`start_search` / `navigate_search` / `search_selection`) against giest's single
-  `toggle_search`.
+- **`undo`/`redo` are now done** — see their own ledger below.
+- Still open: the inspector, and the finer-grained search actions (`start_search` /
+  `navigate_search` / `search_selection`) against giest's single `toggle_search`.
 
 ### Keybind sequences — ◐ divergences
 

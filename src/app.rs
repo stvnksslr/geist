@@ -23,6 +23,13 @@ use crate::theme;
 /// payload `T` (the app uses `Session`; tests use a lightweight stand-in) so the
 /// tree's structural logic is unit-testable without spawning a shell.
 struct Tab<T> {
+    /// Stable identity, drawn from the same per-window counter as the leaf ids.
+    ///
+    /// Tabs are addressed by *index* everywhere they are addressed within one
+    /// pass — a reorder or a reap invalidates an index, which is why every
+    /// mutation point clears the ones held across frames. An undo entry outlives
+    /// far more than a frame, so it holds this instead.
+    id: u64,
     root: Node<T>,
     /// Id of the focused leaf.
     focus: u64,
@@ -38,8 +45,12 @@ struct Tab<T> {
 }
 
 impl<T> Tab<T> {
+    /// A one-pane tab. `id` names both the tab and its single leaf: the ids come
+    /// from one monotonic per-window counter, so reusing the value for the tab
+    /// costs nothing and cannot collide with another tab's.
     fn leaf(id: u64, payload: T) -> Self {
         Self {
+            id,
             root: Node::Leaf { id, payload },
             focus: id,
             name: None,
@@ -186,26 +197,91 @@ impl<T> Node<T> {
         }
     }
 
-    /// Remove leaf `target`, collapsing a split that loses a child into its
-    /// surviving child. Returns the new subtree (`None` if it became empty).
-    fn remove_leaf(self, target: u64) -> Option<Node<T>> {
-        match self {
-            Node::Leaf { id, .. } if id == target => None,
-            Node::Split {
+    /// Remove leaf `target` and hand it back with enough context to put it
+    /// exactly where it was — the primitive behind undoing a closed split.
+    ///
+    /// The pane is *moved* out rather than dropped, so its shell keeps running
+    /// while the undo entry holds it (Ghostty's undo does the same, retaining
+    /// the live `SurfaceView`). [`Node::prune`] is the discarding counterpart,
+    /// for panes whose shell already exited. Returns the surviving
+    /// subtree, plus a [`PaneSlot`] describing where the removed leaf sat and
+    /// the leaf itself.
+    ///
+    /// The slot's path names the **parent split**, because that is what the
+    /// sibling collapses into: after the removal, the subtree that replaced the
+    /// parent is at exactly that path. A `None` slot means `target` wasn't a
+    /// child of any split here — the caller closes the tab instead of a pane.
+    fn detach_leaf(self, target: u64) -> (Option<Node<T>>, Detached<T>) {
+        let Node::Split {
+            vertical,
+            first,
+            second,
+        } = self
+        else {
+            // A bare leaf (or `Empty`): nothing to collapse into.
+            return (Some(self), None);
+        };
+        let in_first = first.contains(target);
+        let (child, sibling) = if in_first {
+            (*first, *second)
+        } else {
+            (*second, *first)
+        };
+        if matches!(&child, Node::Leaf { id, .. } if *id == target) {
+            let slot = PaneSlot {
+                path: Vec::new(),
                 vertical,
-                first,
-                second,
-            } => match (first.remove_leaf(target), second.remove_leaf(target)) {
-                (Some(a), Some(b)) => Some(Node::Split {
-                    vertical,
-                    first: Box::new(a),
-                    second: Box::new(b),
-                }),
-                (Some(n), None) | (None, Some(n)) => Some(n),
-                (None, None) => None,
-            },
-            other => Some(other),
+                first: in_first,
+            };
+            return (Some(sibling), Some((slot, child)));
         }
+        let (rebuilt, taken) = child.detach_leaf(target);
+        // Prepend this level's step, so the path reads root-downwards.
+        let taken = taken.map(|(mut slot, node)| {
+            slot.path.insert(0, in_first);
+            (slot, node)
+        });
+        let node = match rebuilt {
+            Some(c) => {
+                let (f, s) = if in_first { (c, sibling) } else { (sibling, c) };
+                Node::Split {
+                    vertical,
+                    first: Box::new(f),
+                    second: Box::new(s),
+                }
+            }
+            None => sibling,
+        };
+        (Some(node), taken)
+    }
+
+    /// Put a subtree back at `slot`, re-creating the split it was removed from.
+    ///
+    /// Walks the slot's path to the subtree that took the old parent's place and
+    /// wraps it in a split again, on the original axis and the original side. If
+    /// the path no longer resolves to a split — the layout changed under the
+    /// undo entry — it attaches at the deepest point it *could* reach rather
+    /// than giving up: a pane restored in the wrong place is recoverable; a
+    /// dropped one takes a running shell with it.
+    fn attach_at(&mut self, slot: &PaneSlot, node: Node<T>) {
+        let mut cur = self;
+        for step in &slot.path {
+            let Node::Split { first, second, .. } = cur else {
+                break;
+            };
+            cur = if *step { first } else { second };
+        }
+        let sibling = std::mem::replace(cur, Node::Empty);
+        let (first, second) = if slot.first {
+            (node, sibling)
+        } else {
+            (sibling, node)
+        };
+        *cur = Node::Split {
+            vertical: slot.vertical,
+            first: Box::new(first),
+            second: Box::new(second),
+        };
     }
 
     /// Drop leaves for which `dead` returns true, collapsing splits. `None` if
@@ -322,6 +398,7 @@ fn reap_tabs<T>(
     let mut new_active = 0;
     for (i, tab) in tabs.into_iter().enumerate() {
         let Tab {
+            id,
             root,
             focus,
             name,
@@ -340,6 +417,7 @@ fn reap_tabs<T>(
             // A zoom on a pruned-away pane is stale; only keep it if it survived.
             let zoomed = zoomed.filter(|id| root.contains(*id));
             survivors.push(Tab {
+                id,
                 root,
                 focus,
                 name,
@@ -355,13 +433,31 @@ fn reap_tabs<T>(
 /// Keep only `tabs[keep]` (Ghostty's "Close Other Tabs"), returning it at index 0
 /// with the active selection on it. A no-op when `keep` is out of range. Pure core
 /// of [`App::close_other_tabs`], split out so the reselection is testable.
-fn keep_only_tab<T>(mut tabs: Vec<Tab<T>>, keep: usize, active: usize) -> (Vec<Tab<T>>, usize) {
+///
+/// The third element is what was closed, as `(original index, tab)` in ascending
+/// order — the shape an undo entry needs to put them back where they were. The
+/// tabs are handed back rather than dropped, so their shells keep running.
+fn keep_only_tab<T>(
+    tabs: Vec<Tab<T>>,
+    keep: usize,
+    active: usize,
+) -> (Vec<Tab<T>>, usize, ClosedTabs<T>) {
     if keep >= tabs.len() {
-        return (tabs, active);
+        return (tabs, active, Vec::new());
     }
-    tabs.swap(0, keep);
-    tabs.truncate(1);
-    (tabs, 0)
+    let mut kept = Vec::with_capacity(1);
+    let mut closed = Vec::with_capacity(tabs.len() - 1);
+    // A partition rather than the swap-and-truncate this used to be: the swap
+    // discarded which slot each closed tab came from, which is exactly what a
+    // restore needs.
+    for (i, tab) in tabs.into_iter().enumerate() {
+        if i == keep {
+            kept.push(tab);
+        } else {
+            closed.push((i, tab));
+        }
+    }
+    (kept, 0, closed)
 }
 
 /// Drop every tab after `idx` (Ghostty's "Close Tabs to the Right"), clamping the
@@ -370,14 +466,70 @@ fn truncate_tabs_to_right<T>(
     mut tabs: Vec<Tab<T>>,
     idx: usize,
     active: usize,
-) -> (Vec<Tab<T>>, usize) {
+) -> (Vec<Tab<T>>, usize, ClosedTabs<T>) {
     if idx + 1 < tabs.len() {
-        tabs.truncate(idx + 1);
+        let closed = tabs
+            .split_off(idx + 1)
+            .into_iter()
+            .enumerate()
+            .map(|(k, t)| (idx + 1 + k, t))
+            .collect();
         let active = active.min(tabs.len() - 1);
-        (tabs, active)
+        (tabs, active, closed)
     } else {
-        (tabs, active)
+        (tabs, active, Vec::new())
     }
+}
+
+/// Re-insert closed tabs at the indices they came from, ascending, and return
+/// their ids plus the selection to leave behind.
+///
+/// The inverse of [`keep_only_tab`] / [`truncate_tabs_to_right`] and of a plain
+/// `close_tab`, and pure for the same reason they are: the index arithmetic is
+/// the part that can be off by one. Ascending order is what makes the naive
+/// insert correct — everything before a slot is already back in place, so the
+/// slot means what it meant when the tab was closed.
+///
+/// `active` is the selection from *before* the close, which is also the right
+/// one after: restoring the original order restores the original indices.
+fn reinsert_tabs<T>(
+    tabs: &mut Vec<Tab<T>>,
+    closed: ClosedTabs<T>,
+    active: usize,
+) -> (Vec<u64>, usize) {
+    let mut ids = Vec::with_capacity(closed.len());
+    for (at, tab) in closed {
+        ids.push(tab.id);
+        tabs.insert(at.min(tabs.len()), tab);
+    }
+    (ids, active.min(tabs.len().saturating_sub(1)))
+}
+
+/// Remove the tabs with `ids`, handing them back with the slots they came from.
+///
+/// `None` when the ids name every tab there is: a window with no tabs is a
+/// *closed window*, which is a different operation with a different undo entry,
+/// and quietly escalating into one would surprise. Unknown ids are skipped —
+/// the tab was already closed some other way.
+fn remove_tabs_by_id<T>(
+    tabs: &mut Vec<Tab<T>>,
+    ids: &[u64],
+    active: usize,
+) -> Option<(ClosedTabs<T>, usize)> {
+    let mut at: Vec<usize> = ids
+        .iter()
+        .filter_map(|id| tabs.iter().position(|t| t.id == *id))
+        .collect();
+    at.sort_unstable();
+    at.dedup();
+    if at.is_empty() || at.len() >= tabs.len() {
+        return None;
+    }
+    // Back-to-front, so the earlier indices stay valid while removing; then
+    // ascending again, which is the order `reinsert_tabs` needs.
+    let mut closed: ClosedTabs<T> = at.iter().rev().map(|&i| (i, tabs.remove(i))).collect();
+    closed.reverse();
+    Some((closed, active.min(tabs.len() - 1)))
 }
 
 /// Snapshot a split tree for `window-save-state`, marking the leaf with id
@@ -418,6 +570,28 @@ fn capture_node(node: &Node<Session>, focus: u64) -> crate::state::SavedNode {
         s.pwd().map(|p| p.display().to_string())
     })
 }
+
+/// Where a pane sat in its tab's split tree, so a removed one can go back.
+///
+/// A *path plus an axis and a side*, rather than a neighbour's id: the sibling a
+/// removed pane collapsed into may itself be a whole subtree, and naming one of
+/// its leaves would not say which ancestor to wrap.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PaneSlot {
+    /// Root-downwards steps to the parent split's position, `true` = first child.
+    path: Vec<bool>,
+    /// The axis that split was on.
+    vertical: bool,
+    /// Whether the removed pane was that split's *first* child.
+    first: bool,
+}
+
+/// A pane taken out of a split tree: where it was, and the subtree itself.
+type Detached<T> = Option<(PaneSlot, Node<T>)>;
+
+/// Tabs removed from a window, each with the index it came from, ascending.
+/// The shape an undo entry re-inserts from.
+type ClosedTabs<T> = Vec<(usize, Tab<T>)>;
 
 /// One laid-out pane: a focusable leaf with its payload and screen rect.
 struct Leaf<'a, T> {
@@ -573,7 +747,20 @@ pub struct Window {
     shader_last_time: f32,
     /// Frames rendered with shaders active, for `iFrame`.
     shader_frame: i32,
+    /// Whether the app's undo/redo stacks have anything on them, mirrored here
+    /// every pass by [`App::ui`]. The `performable:` gate that decides whether
+    /// `ctrl+shift+z` is the app's key or the shell's runs inside
+    /// `session::decide_key`, which has no route back to [`App`].
+    undo_state: crate::command::UndoState,
+    /// Geometry to command this window onto on its next pass, then forget.
+    ///
+    /// Set when `undo` re-opens a closed window: a restored window has to come
+    /// back where it was, and its `ViewportBuilder` can't say so — the builder
+    /// is rebuilt and compared every pass, so a position in it would either be
+    /// re-sent forever or fight the user's next drag.
+    place_geom: Option<(egui::Pos2, egui::Vec2)>,
 }
+
 
 /// Process-wide one-slot cache of the decoded `background-image`, keyed by its
 /// resolved path.
@@ -654,17 +841,66 @@ fn load_bg_image(cfg: &Config) -> Option<Arc<crate::bgimage::BgImage>> {
     }
 }
 
+/// A structural change with a known inverse, held so `undo` can take it back.
+///
+/// The vocabulary is deliberately **symmetric**: every op has a counterpart that
+/// undoes it, and performing either one records that counterpart (see
+/// [`crate::undo`]). So undoing a close and undoing a *creation* are the same
+/// two code paths run in opposite directions, and there is no third
+/// implementation of "the opposite of this" to drift.
+///
+/// The `Restore*` variants **own live sessions**: the shells they hold keep
+/// running while the entry does, which is what makes an undo lossless — and
+/// exactly why entries expire.
+enum UndoOp {
+    /// Put a removed pane subtree back into a tab, where it was.
+    ///
+    /// The subtree is boxed because a `Node::Leaf` holds a whole `Session`
+    /// inline: unboxed it would make every `UndoOp` — and so every
+    /// `AppRequest` — as large as a session.
+    RestorePane {
+        window: u64,
+        tab: u64,
+        slot: PaneSlot,
+        node: Box<Node<Session>>,
+    },
+    /// Take that pane back out again (also: undo a `new_split`).
+    RemovePane { window: u64, tab: u64, leaf: u64 },
+    /// Re-insert closed tabs at their old indices, in ascending order.
+    RestoreTabs {
+        window: u64,
+        tabs: Vec<(usize, Tab<Session>)>,
+        /// The tab to leave selected — an index into the window *after* the
+        /// re-insertion, so it survives the shifting the inserts cause.
+        active: usize,
+    },
+    /// Close those tabs again (also: undo a `new_tab`), by tab id.
+    RemoveTabs { window: u64, ids: Vec<u64> },
+    /// Re-open a closed window, with every shell in it still running.
+    RestoreWindow { window: Box<Window> },
+    /// Close it again (also: undo a `new_window`).
+    RemoveWindow { window: u64 },
+}
+
 /// Something only [`App`] can do, raised from inside a window's pass.
-#[derive(Clone, Debug, PartialEq, Eq)]
 enum AppRequest {
     /// Open a window, with the working directory already resolved from the
     /// raising window's focused pane (Ghostty resolves it from the previously
     /// focused surface, not from the new one's parent).
     NewWindow(Option<std::path::PathBuf>),
     /// Retire the raising window. Quits giest when it's the last one.
-    CloseWindow,
+    ///
+    /// `undoable` is false for the one path that must never be reversible: a
+    /// window whose last shell *exited*. There is nothing to restore — the
+    /// processes are gone — and an undo entry would hold a window of dead panes.
+    CloseWindow { undoable: bool },
     /// Show or hide the quick terminal, creating it on first use.
     ToggleQuickTerminal,
+    /// File `op` as the reverse of a change this window just made.
+    Record(UndoOp),
+    /// Ghostty `undo` / `redo`.
+    Undo,
+    Redo,
 }
 
 /// The whole application: every open window, plus the little state that has to
@@ -691,6 +927,11 @@ pub struct App {
     /// when they actually changed (a config reload). Re-registering every frame
     /// would take a lock on the OS input path 60 times a second.
     global_chords: Vec<crate::keybind::Chord>,
+    /// Ghostty `undo` / `redo`. App-scoped rather than per-window because a
+    /// *window* close is itself undoable — a stack living on the window that
+    /// closed would go with it. Its entries own the removed panes, tabs and
+    /// windows, shells still running, until they expire.
+    undo: crate::undo::UndoStack<UndoOp>,
 }
 
 /// The kind of surface being created, for the working-directory inheritance
@@ -1027,6 +1268,8 @@ impl Window {
             shader_epoch: std::time::Instant::now(),
             shader_last_time: 0.0,
             shader_frame: 0,
+            undo_state: crate::command::UndoState::default(),
+            place_geom: None,
         };
         app.apply_backdrop();
         Ok(app)
@@ -1322,6 +1565,8 @@ impl Window {
             shader_epoch: std::time::Instant::now(),
             shader_last_time: 0.0,
             shader_frame: 0,
+            undo_state: crate::command::UndoState::default(),
+            place_geom: None,
         })
     }
 
@@ -1363,7 +1608,10 @@ impl Window {
                 continue;
             };
             let focus = focus.unwrap_or_else(|| root.first_leaf_id());
+            let id = next;
+            next += 1;
             tabs.push(Tab {
+                id,
                 root,
                 focus,
                 name: st.name.clone(),
@@ -1546,6 +1794,13 @@ impl Window {
             );
             self.tabs.insert(at, Tab::leaf(id, s));
             self.active_tab = at;
+            // Ghostty registers an undo for `new_tab` too: the reverse of making
+            // a tab is closing it. It goes through the same `RemoveTabs` path a
+            // redo would, so "close this tab" has one implementation.
+            self.requests.push(AppRequest::Record(UndoOp::RemoveTabs {
+                window: self.window_id,
+                ids: vec![id],
+            }));
             // An insert *before* the end shifts every later tab, so anything
             // holding a tab index is now pointing at the wrong tab. Every other
             // mutation point in this file clears these for the same reason; a
@@ -1565,12 +1820,19 @@ impl Window {
             .flatten();
         if let Some(s) = self.spawn_session(self.default_profile, cwd.as_deref()) {
             let id = self.alloc_id();
+            let window = self.window_id;
             let tab = &mut self.tabs[self.active_tab];
             let focus = tab.focus;
+            let tab_id = tab.id;
             tab.root.split_leaf(focus, vertical, id, s);
             tab.focus = id;
             // A new split changes the layout, so any zoom is no longer meaningful.
             tab.zoomed = None;
+            self.requests.push(AppRequest::Record(UndoOp::RemovePane {
+                window,
+                tab: tab_id,
+                leaf: id,
+            }));
         }
     }
 
@@ -1701,7 +1963,7 @@ impl Window {
                 // come straight back as another `close_requested()` and re-open
                 // this dialog forever.
                 self.closing = true;
-                self.requests.push(AppRequest::CloseWindow);
+                self.requests.push(AppRequest::CloseWindow { undoable: true });
             }
         }
     }
@@ -1709,19 +1971,32 @@ impl Window {
     /// Close the focused pane; closing the last pane closes the tab, and the
     /// last tab closes the window.
     fn close_focused(&mut self) {
+        let window = self.window_id;
         let tab = &mut self.tabs[self.active_tab];
         if tab.leaf_count() > 1 {
-            let focus = tab.focus;
+            let (focus, id) = (tab.focus, tab.id);
             let root = std::mem::replace(&mut tab.root, Node::Empty);
-            tab.root = root.remove_leaf(focus).unwrap_or(Node::Empty);
+            // `detach_leaf`, not `remove_leaf`: the pane is *moved* into the undo
+            // entry with its shell still running, so an undo puts the same
+            // terminal back rather than a fresh one.
+            let (rest, taken) = root.detach_leaf(focus);
+            tab.root = rest.unwrap_or(Node::Empty);
             tab.focus = tab.root.first_leaf_id();
             // Closing a pane changes the layout; drop any (now stale) zoom.
             tab.zoomed = None;
+            if let Some((slot, node)) = taken {
+                self.requests.push(AppRequest::Record(UndoOp::RestorePane {
+                    window,
+                    tab: id,
+                    slot,
+                    node: Box::new(node),
+                }));
+            }
         } else if self.tabs.len() > 1 {
-            self.tabs.remove(self.active_tab);
-            self.active_tab = self.active_tab.min(self.tabs.len() - 1);
+            // The last pane of a tab *is* the tab; one path, one undo entry.
+            self.close_tab(self.active_tab);
         } else {
-            self.requests.push(AppRequest::CloseWindow);
+            self.requests.push(AppRequest::CloseWindow { undoable: true });
         }
     }
 
@@ -1790,38 +2065,65 @@ impl Window {
         self.renaming = None;
     }
 
+    /// Record `tabs` (index → tab, ascending) as restorable by `undo`, with the
+    /// selection that was active before the close.
+    ///
+    /// The tabs are **moved** in, shells and all; the entry keeps them running
+    /// until it expires. `active` is the pre-close index, which is also the
+    /// right post-restore one: re-inserting at the same indices reproduces the
+    /// original order, so the tab the user was on is back where it was.
+    fn record_closed_tabs(&mut self, active: usize, tabs: ClosedTabs<Session>) {
+        if tabs.is_empty() {
+            return;
+        }
+        self.requests.push(AppRequest::Record(UndoOp::RestoreTabs {
+            window: self.window_id,
+            tabs,
+            active,
+        }));
+    }
+
     /// Close tab `idx`; closing the last tab closes the window.
     fn close_tab(&mut self, idx: usize) {
         if idx >= self.tabs.len() {
             return;
         }
-        self.tabs.remove(idx);
+        // The last tab *is* the window. Hand the close to the window path with
+        // the tab still in place, so the undo entry is one restorable window
+        // rather than a tab pointing at a window that no longer exists.
+        if self.tabs.len() == 1 {
+            self.requests.push(AppRequest::CloseWindow { undoable: true });
+            return;
+        }
+        let active = self.active_tab;
+        let tab = self.tabs.remove(idx);
         if self.active_tab > idx {
             self.active_tab -= 1;
         }
-        if self.tabs.is_empty() {
-            self.requests.push(AppRequest::CloseWindow);
-        } else {
-            self.active_tab = self.active_tab.min(self.tabs.len() - 1);
-        }
+        self.active_tab = self.active_tab.min(self.tabs.len() - 1);
+        self.record_closed_tabs(active, vec![(idx, tab)]);
     }
 
     /// Close every tab except `keep`, leaving it focused (Ghostty's "Close Other
     /// Tabs"). A no-op if `keep` is out of range; always leaves one tab.
     fn close_other_tabs(&mut self, keep: usize) {
+        let was_active = self.active_tab;
         let tabs = std::mem::take(&mut self.tabs);
-        let (tabs, active) = keep_only_tab(tabs, keep, self.active_tab);
+        let (tabs, active, closed) = keep_only_tab(tabs, keep, self.active_tab);
         self.tabs = tabs;
         self.active_tab = active;
+        self.record_closed_tabs(was_active, closed);
     }
 
     /// Close every tab to the right of `idx` (Ghostty's "Close Tabs to the
     /// Right"), clamping the active tab into the survivors.
     fn close_tabs_to_right(&mut self, idx: usize) {
+        let was_active = self.active_tab;
         let tabs = std::mem::take(&mut self.tabs);
-        let (tabs, active) = truncate_tabs_to_right(tabs, idx, self.active_tab);
+        let (tabs, active, closed) = truncate_tabs_to_right(tabs, idx, self.active_tab);
         self.tabs = tabs;
         self.active_tab = active;
+        self.record_closed_tabs(was_active, closed);
     }
 
     /// Remove panes whose shell has exited; drop tabs that become empty and
@@ -1834,7 +2136,7 @@ impl Window {
             reap_tabs(tabs, self.active_tab, &mut |s: &Session| !s.is_alive());
         self.tabs = survivors;
         if self.tabs.is_empty() {
-            self.requests.push(AppRequest::CloseWindow);
+            self.requests.push(AppRequest::CloseWindow { undoable: false });
             return false;
         }
         if self.tabs.len() != before {
@@ -2046,6 +2348,7 @@ impl Window {
                 .is_some_and(crate::session::Session::has_selection),
             keymap: Some(&self.keymap),
             tables: &self.key_tables,
+            undo: self.undo_state,
         }
     }
 
@@ -2327,7 +2630,11 @@ impl Window {
                     s.scroll_lines(lines.round() as isize, ch);
                 }
             }
-            Action::Quit => self.requests.push(AppRequest::CloseWindow),
+            // Both are app-scoped: the stack spans every window, because a
+            // *window* close is one of the things it can take back.
+            Action::Undo => self.requests.push(AppRequest::Undo),
+            Action::Redo => self.requests.push(AppRequest::Redo),
+            Action::Quit => self.requests.push(AppRequest::CloseWindow { undoable: true }),
             Action::PromptTabTitle => {
                 let i = self.active_tab;
                 if let Some(t) = self.tabs.get(i) {
@@ -3410,6 +3717,7 @@ impl Window {
         // The key-table stack the focused pane resolves keys against — the same
         // one `handle_shortcuts` uses, cloned for the same borrow reason.
         let tables = self.key_tables.clone();
+        let undo_state = self.undo_state;
         let bell_border = self.config.bell.border;
         let now = ctx.input(|i| i.time);
         let active_tab = self.active_tab;
@@ -3553,7 +3861,7 @@ impl Window {
         if !palette_open && !search_open {
             leaves[focus_idx]
                 .payload
-                .handle_input(ctx, tracking, ch, &keymap, &tables);
+                .handle_input(ctx, tracking, ch, &keymap, &tables, undo_state);
         } else if search_open {
             // The search overlay owns the keyboard, so input (and its scroll
             // easing) is skipped — but keep the viewport easing toward the match
@@ -4369,6 +4677,15 @@ impl Window {
     ) -> Vec<AppRequest> {
         let ctx = ui.ctx().clone();
 
+        // A window `undo` just re-opened: put it back where it was. Sent as
+        // viewport commands rather than built into `child_builder`, which is
+        // rebuilt and diffed every pass — a position in there would be re-sent
+        // forever and fight the user's next drag.
+        if let Some((pos, size)) = self.place_geom.take() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+        }
+
         // Record where this window is, for the root-slot rehost on retire.
         self.geom = ctx.input(|i| {
             let vp = i.viewport();
@@ -4420,7 +4737,7 @@ impl Window {
                 // No confirmation wanted: close now. For the root this is the
                 // path eframe would have taken anyway; for a child it's what
                 // actually retires the window.
-                self.requests.push(AppRequest::CloseWindow);
+                self.requests.push(AppRequest::CloseWindow { undoable: true });
             }
         }
 
@@ -4516,6 +4833,7 @@ impl Window {
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Result<Self> {
         let first = Window::first(cc, 0)?;
+        let undo = crate::undo::UndoStack::new(first.config.undo_timeout_ms);
         let mut app = Self {
             windows: vec![first],
             focused: 0,
@@ -4523,6 +4841,7 @@ impl App {
             last_state: crate::state::SavedState::default(),
             global_actions: Vec::new(),
             global_chords: Vec::new(),
+            undo,
         };
         app.restore_state();
         app.sync_global_binds(&cc.egui_ctx);
@@ -4796,19 +5115,162 @@ impl App {
     /// Requests are keyed by [`Window::window_id`], not by slot: retiring one
     /// window renumbers the rest, so an index captured during the pass would
     /// point at the wrong window by the time we got here.
-    fn apply_requests(&mut self, ctx: &egui::Context, requests: Vec<(u64, AppRequest)>) {
+    fn apply_requests(&mut self, ctx: &egui::Context, now: f64, requests: Vec<(u64, AppRequest)>) {
         for (id, req) in requests {
             match req {
-                AppRequest::CloseWindow => self.retire(ctx, id),
-                AppRequest::NewWindow(cwd) => self.spawn_window(ctx, cwd.as_deref()),
+                AppRequest::CloseWindow { undoable } => self.retire(ctx, now, id, undoable),
+                AppRequest::NewWindow(cwd) => self.spawn_window(ctx, now, cwd.as_deref()),
                 AppRequest::ToggleQuickTerminal => self.toggle_quick_terminal(ctx),
+                AppRequest::Record(op) => self.undo.record(now, op),
+                AppRequest::Undo => self.undo_or_redo(ctx, now, false),
+                AppRequest::Redo => self.undo_or_redo(ctx, now, true),
+            }
+        }
+    }
+
+    /// Ghostty `undo` / `redo`: take the newest entry off the stack, apply it,
+    /// and file the operation that reverses *that* onto the opposite stack.
+    ///
+    /// The inverse comes from applying, not from a table — [`App::apply_undo_op`]
+    /// returns it — so undo and redo are one implementation walked in either
+    /// direction. An op that can no longer apply (its window closed in the
+    /// meantime) records nothing and is simply gone.
+    fn undo_or_redo(&mut self, ctx: &egui::Context, now: f64, redo: bool) {
+        let op = if redo {
+            self.undo.begin_redo(now)
+        } else {
+            self.undo.begin_undo(now)
+        };
+        if let Some(op) = op {
+            if let Some(inverse) = self.apply_undo_op(ctx, op) {
+                self.undo.record(now, inverse);
+            }
+            ctx.request_repaint();
+        }
+        // Unconditional: leaving the stack in its undoing phase would file the
+        // user's next ordinary close as a *redo*.
+        self.undo.end();
+    }
+
+    fn window_mut(&mut self, id: u64) -> Option<&mut Window> {
+        self.windows.iter_mut().find(|w| w.window_id == id)
+    }
+
+    /// Apply one undoable operation, returning the operation that undoes it.
+    ///
+    /// Every arm is the exact inverse of the one paired with it, which is what
+    /// lets an entry bounce between the two stacks indefinitely. `None` means
+    /// the op no longer applies — its window or tab is gone — and the entry
+    /// dies with whatever it was holding.
+    fn apply_undo_op(&mut self, ctx: &egui::Context, op: UndoOp) -> Option<UndoOp> {
+        match op {
+            UndoOp::RestorePane {
+                window,
+                tab,
+                slot,
+                node,
+            } => {
+                let w = self.window_mut(window)?;
+                let i = w.tabs.iter().position(|t| t.id == tab)?;
+                let leaf = node.first_leaf_id();
+                w.tabs[i].root.attach_at(&slot, *node);
+                // Focus the pane that just came back, and surface its tab: an
+                // undo the user cannot see is indistinguishable from one that
+                // did nothing.
+                w.tabs[i].focus = leaf;
+                w.tabs[i].zoomed = None;
+                w.active_tab = i;
+                Some(UndoOp::RemovePane { window, tab, leaf })
+            }
+            UndoOp::RemovePane { window, tab, leaf } => {
+                let w = self.window_mut(window)?;
+                let i = w.tabs.iter().position(|t| t.id == tab)?;
+                // The last pane in a tab isn't a pane operation at all — it is
+                // the tab. Rather than silently widening the op, decline: the
+                // entry only ever described one split.
+                if w.tabs[i].leaf_count() <= 1 {
+                    return None;
+                }
+                let root = std::mem::replace(&mut w.tabs[i].root, Node::Empty);
+                let (rest, taken) = root.detach_leaf(leaf);
+                w.tabs[i].root = rest.unwrap_or(Node::Empty);
+                w.tabs[i].focus = w.tabs[i].root.first_leaf_id();
+                w.tabs[i].zoomed = None;
+                w.active_tab = i;
+                let (slot, node) = taken?;
+                Some(UndoOp::RestorePane {
+                    window,
+                    tab,
+                    slot,
+                    node: Box::new(node),
+                })
+            }
+            UndoOp::RestoreTabs {
+                window,
+                tabs,
+                active,
+            } => {
+                let w = self.window_mut(window)?;
+                let (ids, active) = reinsert_tabs(&mut w.tabs, tabs, active);
+                w.active_tab = active;
+                // Mid-list inserts move every later tab; anything holding an
+                // index is now pointing at the wrong one.
+                w.renaming = None;
+                w.tab_drag = None;
+                Some(UndoOp::RemoveTabs { window, ids })
+            }
+            UndoOp::RemoveTabs { window, ids } => {
+                let w = self.window_mut(window)?;
+                let active = w.active_tab;
+                let (tabs, now_active) = remove_tabs_by_id(&mut w.tabs, &ids, active)?;
+                w.active_tab = now_active;
+                w.renaming = None;
+                w.tab_drag = None;
+                // The op that puts them back carries the selection from *before*
+                // this removal, not the clamped one — that is what the restore
+                // is undoing.
+                Some(UndoOp::RestoreTabs {
+                    window,
+                    tabs,
+                    active,
+                })
+            }
+            UndoOp::RestoreWindow { window } => {
+                let mut w = *window;
+                let id = w.window_id;
+                // Slot 0 belongs to whichever window holds it now: the root
+                // viewport was rehosted when this one closed, and taking it back
+                // would move a window the user never asked to move.
+                w.is_root = false;
+                w.place_geom = w.geom;
+                // Clear the close latches the window was carrying when it went.
+                // `closing` is what stops a confirmed close's own
+                // `ViewportCommand::Close` re-opening the dialog forever — left
+                // set on a restored window it would swallow every *later* close
+                // request too, leaving a window the × can't shut.
+                w.closing = false;
+                w.confirm = None;
+                self.windows.push(w);
+                ctx.request_repaint();
+                Some(UndoOp::RemoveWindow { window: id })
+            }
+            UndoOp::RemoveWindow { window } => {
+                // Closing the last window quits giest, and an undo must never be
+                // able to end the process.
+                if self.windows.len() <= 1 {
+                    return None;
+                }
+                let w = self.take_window(ctx, window)?;
+                Some(UndoOp::RestoreWindow {
+                    window: Box::new(w),
+                })
             }
         }
     }
 
     /// Open a new window, cloned from the focused one (falling back to the root)
     /// so it inherits the live config, profiles and font metrics.
-    fn spawn_window(&mut self, ctx: &egui::Context, cwd: Option<&std::path::Path>) {
+    fn spawn_window(&mut self, ctx: &egui::Context, now: f64, cwd: Option<&std::path::Path>) {
         let from = self.focused.min(self.windows.len().saturating_sub(1));
         let Some(src) = self.windows.get(from) else {
             return;
@@ -4818,15 +5280,42 @@ impl App {
         if let Some(w) = src.sibling(id, cwd) {
             self.next_window_id += 1;
             self.windows.push(w);
+            // Upstream registers an undo for `new_window` too — undoing a
+            // creation closes it, through the same path a redo of a close uses.
+            self.undo.record(now, UndoOp::RemoveWindow { window: id });
             ctx.request_repaint();
         }
     }
 
     /// Close the window with `id`, quitting giest when it was the last one.
-    fn retire(&mut self, ctx: &egui::Context, id: u64) {
-        let Some(idx) = self.windows.iter().position(|w| w.window_id == id) else {
+    ///
+    /// `undoable` is what separates a user's close from a window whose last
+    /// shell exited: the first keeps the window (and its running panes) alive in
+    /// an undo entry, the second has nothing left to keep.
+    fn retire(&mut self, ctx: &egui::Context, now: f64, id: u64, undoable: bool) {
+        let Some(window) = self.take_window(ctx, id) else {
             return;
         };
+        // Never after the *last* window: the process is on its way out, and an
+        // entry would only hold its shells open through the shutdown.
+        if undoable && !self.windows.is_empty() {
+            self.undo.record(
+                now,
+                UndoOp::RestoreWindow {
+                    window: Box::new(window),
+                },
+            );
+        }
+    }
+
+    /// Remove the window with `id` and hand it back, still whole.
+    ///
+    /// The retire path proper, shared with `undo`: dropping the returned window
+    /// is an ordinary close, keeping it is an undoable one. Closing the last
+    /// window still ends the process — that decision belongs to the removal, not
+    /// to what the caller does with the result.
+    fn take_window(&mut self, ctx: &egui::Context, id: u64) -> Option<Window> {
+        let idx = self.windows.iter().position(|w| w.window_id == id)?;
         // Capture *before* the removal: closing the last window is how giest
         // quits, so this is the only moment the exiting layout still exists.
         self.snapshot_state();
@@ -4835,14 +5324,14 @@ impl App {
         let rehost_to = (idx == 0).then(|| self.windows.get(1).and_then(|w| w.geom)).flatten();
 
         let windows = std::mem::take(&mut self.windows);
-        let (windows, focused) = retire_window(windows, idx, self.focused);
+        let (windows, focused, removed) = retire_window(windows, idx, self.focused);
         self.windows = windows;
         self.focused = focused;
 
         if self.windows.is_empty() {
             // The last window went: closing the root viewport ends the process.
             ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Close);
-            return;
+            return removed;
         }
         // Slot 0 is by definition the root viewport. If the old root was the one
         // retired, a survivor has just slid into that slot — move the native root
@@ -4862,6 +5351,7 @@ impl App {
             }
         }
         ctx.request_repaint();
+        removed
     }
 }
 
@@ -4920,6 +5410,22 @@ impl eframe::App for App {
         for w in &mut self.windows {
             w.pump_all(now, &mut notifications);
         }
+
+        // Retire undo entries every pass, not only when undo is used: an expired
+        // entry is holding shells open, and they should end when it does. The
+        // timeout is re-read here rather than pushed on reload — `reload_config`
+        // is a `Window` method and the stack is the app's.
+        if let Some(w) = self.windows.first() {
+            self.undo.set_timeout(w.config.undo_timeout_ms);
+        }
+        self.undo.expire(now);
+        let undo_state = crate::command::UndoState {
+            can_undo: self.undo.can_undo(),
+            can_redo: self.undo.can_redo(),
+        };
+        for w in &mut self.windows {
+            w.undo_state = undo_state;
+        }
         self.raise_notifications(notifications);
         self.update_progress();
 
@@ -4968,7 +5474,7 @@ impl eframe::App for App {
             self.focused = i;
         }
 
-        self.apply_requests(&ctx, requests);
+        self.apply_requests(&ctx, now, requests);
         // After the requests, so a `global:` binding sees the layout this pass
         // produced rather than the previous one's.
         self.sync_global_binds(&ctx);
@@ -4983,19 +5489,25 @@ impl eframe::App for App {
 /// Split out from [`App`] — like `reap_tabs` and `reorder_tabs` — so the
 /// reselection logic is testable without spawning a shell. Out-of-range `idx` is
 /// a no-op rather than a panic, matching the other window/tab helpers.
-fn retire_window<W>(mut windows: Vec<W>, idx: usize, focused: usize) -> (Vec<W>, usize) {
+fn retire_window<W>(
+    mut windows: Vec<W>,
+    idx: usize,
+    focused: usize,
+) -> (Vec<W>, usize, Option<W>) {
     if idx >= windows.len() {
-        return (windows, focused);
+        return (windows, focused, None);
     }
-    windows.remove(idx);
+    // Handed back, not dropped: an undoable close keeps the window (and every
+    // shell in it) alive in the undo entry.
+    let removed = windows.remove(idx);
     if windows.is_empty() {
-        return (windows, 0);
+        return (windows, 0, Some(removed));
     }
     // A focus past the removed slot shifts down; a focus *on* it lands on the
     // window that took its place (clamped at the end).
     let focused = if focused > idx { focused - 1 } else { focused };
     let last = windows.len() - 1;
-    (windows, focused.min(last))
+    (windows, focused.min(last), Some(removed))
 }
 
 /// Apply `window-padding-balance` to a pane's grid rect.
@@ -5351,7 +5863,8 @@ mod tests {
     use super::{
         Dir, Node, Tab, capture_node_with, cycle_pick, dim_alpha, drop_index, highlight_job,
         keep_only_tab, nav_dir, new_tab_index,
-        overlay_anchor, preview_text, reap_tabs, reorder_tabs, retire_window, split_rect,
+        overlay_anchor, preview_text, reap_tabs, reinsert_tabs, remove_tabs_by_id, reorder_tabs,
+        retire_window, split_rect,
         truncate_tabs_to_right, truncate_to_width,
     };
     use crate::config::ResizeOverlayPosition as P;
@@ -5363,19 +5876,23 @@ mod tests {
         let w = || vec![10, 11, 12, 13];
         // Dropping a window before the focused one shifts focus down by one, so
         // the *same* window stays focused.
-        let (v, f) = retire_window(w(), 0, 2);
+        let (v, f, out) = retire_window(w(), 0, 2);
         assert_eq!(v, vec![11, 12, 13]);
         assert_eq!(v[f], 12);
+        // The removed window is handed back, not dropped — that is what lets an
+        // undoable close keep it (and its shells) alive.
+        assert_eq!(out, Some(10));
         // Dropping one after it leaves focus alone.
-        let (v, f) = retire_window(w(), 3, 1);
+        let (v, f, out) = retire_window(w(), 3, 1);
         assert_eq!(v, vec![10, 11, 12]);
         assert_eq!(v[f], 11);
+        assert_eq!(out, Some(13));
         // Dropping the focused window lands on whatever took its slot.
-        let (v, f) = retire_window(w(), 1, 1);
+        let (v, f, _) = retire_window(w(), 1, 1);
         assert_eq!(v, vec![10, 12, 13]);
         assert_eq!(v[f], 12);
         // Dropping the focused *last* window clamps back onto the new last.
-        let (v, f) = retire_window(w(), 3, 3);
+        let (v, f, _) = retire_window(w(), 3, 3);
         assert_eq!(v, vec![10, 11, 12]);
         assert_eq!(v[f], 12);
     }
@@ -5383,16 +5900,18 @@ mod tests {
     #[test]
     fn retire_window_on_the_last_one_empties_the_list() {
         // An empty list is how `App` knows to quit giest.
-        let (v, f) = retire_window(vec![10], 0, 0);
+        let (v, f, out) = retire_window(vec![10], 0, 0);
         assert!(v.is_empty());
         assert_eq!(f, 0);
+        assert_eq!(out, Some(10));
     }
 
     #[test]
     fn retire_window_ignores_out_of_range() {
-        let (v, f) = retire_window(vec![10, 11], 9, 1);
+        let (v, f, out) = retire_window(vec![10, 11], 9, 1);
         assert_eq!(v, vec![10, 11]);
         assert_eq!(f, 1);
+        assert_eq!(out, None);
     }
 
     #[test]
@@ -5567,6 +6086,25 @@ mod tests {
     fn leaf(id: u64, payload: u32) -> Node<u32> {
         Node::Leaf { id, payload }
     }
+    /// The tree's shape and leaf ids as a string, so two trees can be compared
+    /// without `Node` needing `PartialEq` over a payload it is generic in.
+    fn shape(n: &Node<u32>) -> String {
+        match n {
+            Node::Leaf { id, .. } => format!("{id}"),
+            Node::Split {
+                vertical,
+                first,
+                second,
+            } => format!(
+                "({}{}{})",
+                shape(first),
+                if *vertical { "|" } else { "/" },
+                shape(second)
+            ),
+            Node::Empty => "_".into(),
+        }
+    }
+
     fn split(vertical: bool, first: Node<u32>, second: Node<u32>) -> Node<u32> {
         Node::Split {
             vertical,
@@ -5657,6 +6195,7 @@ mod tests {
         // Tab zoomed on pane 2; pane 2's shell exits → zoom must drop, not dangle.
         let root = split(true, leaf(1, 1), leaf(2, 0));
         let tabs = vec![Tab {
+            id: 1,
             root,
             focus: 1,
             name: None,
@@ -5672,6 +6211,7 @@ mod tests {
     fn reap_tabs_keeps_zoom_when_zoomed_pane_survives() {
         let root = split(true, leaf(1, 1), leaf(2, 0));
         let tabs = vec![Tab {
+            id: 1,
             root,
             focus: 1,
             name: None,
@@ -5697,13 +6237,59 @@ mod tests {
     }
 
     #[test]
-    fn remove_leaf_collapses_into_sibling() {
+    fn detach_leaf_collapses_into_sibling_and_hands_the_pane_back() {
         let root = split(true, leaf(1, 1), leaf(2, 1));
-        let after = root.remove_leaf(2).expect("one leaf survives");
+        let (after, taken) = root.detach_leaf(2);
+        let after = after.expect("one leaf survives");
         assert_eq!(after.leaf_count(), 1);
         assert!(after.contains(1) && !after.contains(2));
-        // Removing the only leaf empties the tree.
-        assert!(leaf(1, 1).remove_leaf(1).is_none());
+        // The removed pane is *handed back*, not dropped — that is what keeps
+        // its shell running inside the undo entry.
+        let (slot, node) = taken.expect("the closed pane comes back");
+        assert!(node.contains(2));
+        assert_eq!(slot.path, Vec::<bool>::new());
+        assert!(slot.vertical);
+        assert!(!slot.first); // it was the *second* child
+    }
+
+    #[test]
+    fn detach_then_attach_restores_the_original_tree() {
+        // A nested tree, so the slot's path has to carry more than one step:
+        // [1 | (2 / 3)]. Closing 2 collapses its split into 3.
+        let build = || split(true, leaf(1, 1), split(false, leaf(2, 1), leaf(3, 1)));
+        let (after, taken) = build().detach_leaf(2);
+        let mut after = after.expect("survivors");
+        let (slot, node) = taken.expect("the closed pane");
+        // The parent split was the root's second child, one step down.
+        assert_eq!(slot.path, vec![false]);
+        assert!(!slot.vertical);
+        assert!(slot.first);
+        // Undo: put it back, and the tree is indistinguishable from the original.
+        after.attach_at(&slot, node);
+        assert_eq!(shape(&after), shape(&build()));
+    }
+
+    #[test]
+    fn attach_at_falls_back_to_the_deepest_reachable_point() {
+        // The layout changed under the undo entry: the path names a split that
+        // is now a bare leaf. Restoring in the wrong place beats dropping a
+        // running shell, so it attaches where it can.
+        let (after, taken) = split(true, leaf(1, 1), split(false, leaf(2, 1), leaf(3, 1)))
+            .detach_leaf(2);
+        let (slot, node) = taken.expect("the closed pane");
+        let mut other = split(true, leaf(9, 1), leaf(8, 1));
+        drop(after);
+        other.attach_at(&slot, node);
+        assert_eq!(other.leaf_count(), 3);
+        assert!(other.contains(2));
+    }
+
+    #[test]
+    fn detach_leaf_declines_a_bare_leaf() {
+        // The last pane in a tab isn't a split; the caller closes the tab.
+        let (after, taken) = leaf(1, 1).detach_leaf(1);
+        assert!(taken.is_none());
+        assert_eq!(after.expect("unchanged").leaf_count(), 1);
     }
 
     #[test]
@@ -5933,6 +6519,7 @@ mod tests {
         // A split tab whose focused leaf (2) dies keeps the tab, refocusing the survivor.
         let root = split(true, leaf(1, 1), leaf(2, 0));
         let tabs = vec![Tab {
+            id: 1,
             root,
             focus: 2,
             name: None,
@@ -5948,18 +6535,22 @@ mod tests {
     #[test]
     fn keep_only_tab_collapses_to_one_and_selects_it() {
         let tabs = vec![Tab::leaf(1, 0u32), Tab::leaf(2, 0u32), Tab::leaf(3, 0u32)];
-        let (survivors, active) = keep_only_tab(tabs, 1, 2);
+        let (survivors, active, closed) = keep_only_tab(tabs, 1, 2);
         assert_eq!(survivors.len(), 1);
         assert_eq!(active, 0);
         assert_eq!(survivors[0].focus, 2); // the kept tab's leaf id
+        // What was closed comes back with the slot each tab came from, in
+        // ascending order — the shape `undo` re-inserts from.
+        assert_eq!(closed.iter().map(|(i, t)| (*i, t.id)).collect::<Vec<_>>(), vec![(0, 1), (2, 3)]);
     }
 
     #[test]
     fn keep_only_tab_is_noop_when_out_of_range() {
         let tabs = vec![Tab::leaf(1, 0u32), Tab::leaf(2, 0u32)];
-        let (survivors, active) = keep_only_tab(tabs, 5, 1);
+        let (survivors, active, closed) = keep_only_tab(tabs, 5, 1);
         assert_eq!(survivors.len(), 2);
         assert_eq!(active, 1);
+        assert!(closed.is_empty());
     }
 
     #[test]
@@ -5971,25 +6562,95 @@ mod tests {
             Tab::leaf(3, 0u32),
             Tab::leaf(4, 0u32),
         ];
-        let (survivors, active) = truncate_tabs_to_right(tabs, 1, 3);
+        let (survivors, active, closed) = truncate_tabs_to_right(tabs, 1, 3);
         assert_eq!(survivors.len(), 2);
         assert_eq!(active, 1);
+        assert_eq!(closed.iter().map(|(i, t)| (*i, t.id)).collect::<Vec<_>>(), vec![(2, 3), (3, 4)]);
     }
 
     #[test]
     fn truncate_tabs_to_right_keeps_active_when_left_of_cut() {
         let tabs = vec![Tab::leaf(1, 0u32), Tab::leaf(2, 0u32), Tab::leaf(3, 0u32)];
-        let (survivors, active) = truncate_tabs_to_right(tabs, 1, 0);
+        let (survivors, active, closed) = truncate_tabs_to_right(tabs, 1, 0);
         assert_eq!(survivors.len(), 2);
         assert_eq!(active, 0);
+        assert_eq!(closed.len(), 1);
     }
 
     #[test]
     fn truncate_tabs_to_right_is_noop_at_last_tab() {
         let tabs = vec![Tab::leaf(1, 0u32), Tab::leaf(2, 0u32)];
-        let (survivors, active) = truncate_tabs_to_right(tabs, 1, 1);
+        let (survivors, active, closed) = truncate_tabs_to_right(tabs, 1, 1);
         assert_eq!(survivors.len(), 2);
         assert_eq!(active, 1);
+        assert!(closed.is_empty());
+    }
+
+    #[test]
+    fn closing_and_reinserting_tabs_is_a_round_trip() {
+        // "Close other tabs" on the middle of three, then undo. The kept tab has
+        // to end up selected *and* back in the middle.
+        let tabs = vec![Tab::leaf(1, 0u32), Tab::leaf(2, 0u32), Tab::leaf(3, 0u32)];
+        let was_active = 1;
+        let (mut survivors, active, closed) = keep_only_tab(tabs, 1, was_active);
+        assert_eq!(active, 0);
+        let (ids, active) = reinsert_tabs(&mut survivors, closed, was_active);
+        assert_eq!(ids, vec![1, 3]);
+        assert_eq!(
+            survivors.iter().map(|t| t.id).collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        assert_eq!(active, 1); // still the tab that was kept
+    }
+
+    #[test]
+    fn reinserting_tabs_closed_from_the_right_restores_the_order() {
+        let tabs = vec![
+            Tab::leaf(1, 0u32),
+            Tab::leaf(2, 0u32),
+            Tab::leaf(3, 0u32),
+            Tab::leaf(4, 0u32),
+        ];
+        let (mut survivors, _, closed) = truncate_tabs_to_right(tabs, 1, 3);
+        let (ids, active) = reinsert_tabs(&mut survivors, closed, 3);
+        assert_eq!(ids, vec![3, 4]);
+        assert_eq!(
+            survivors.iter().map(|t| t.id).collect::<Vec<_>>(),
+            vec![1, 2, 3, 4]
+        );
+        assert_eq!(active, 3);
+    }
+
+    #[test]
+    fn remove_tabs_by_id_is_the_inverse_of_reinsert() {
+        let mut tabs = vec![Tab::leaf(1, 0u32), Tab::leaf(2, 0u32), Tab::leaf(3, 0u32)];
+        // Redo of the "close other tabs" undo above: take 1 and 3 back out.
+        let (closed, active) = remove_tabs_by_id(&mut tabs, &[1, 3], 1).expect("two of three");
+        assert_eq!(
+            closed.iter().map(|(i, t)| (*i, t.id)).collect::<Vec<_>>(),
+            vec![(0, 1), (2, 3)]
+        );
+        assert_eq!(tabs.iter().map(|t| t.id).collect::<Vec<_>>(), vec![2]);
+        assert_eq!(active, 0);
+        // …and putting them back lands exactly where they started.
+        let (_, active) = reinsert_tabs(&mut tabs, closed, 1);
+        assert_eq!(tabs.iter().map(|t| t.id).collect::<Vec<_>>(), vec![1, 2, 3]);
+        assert_eq!(active, 1);
+    }
+
+    #[test]
+    fn remove_tabs_by_id_declines_to_empty_the_window() {
+        // Emptying a window is a *window* close: a different op with its own
+        // entry, so this one refuses rather than escalating.
+        let mut tabs = vec![Tab::leaf(1, 0u32)];
+        assert!(remove_tabs_by_id(&mut tabs, &[1], 0).is_none());
+        assert_eq!(tabs.len(), 1);
+        // An id that is already gone is skipped, not an error…
+        let mut tabs = vec![Tab::leaf(1, 0u32), Tab::leaf(2, 0u32)];
+        let (closed, _) = remove_tabs_by_id(&mut tabs, &[2, 99], 0).expect("one known id");
+        assert_eq!(closed.len(), 1);
+        // …but if *every* id is gone there is nothing to do.
+        assert!(remove_tabs_by_id(&mut tabs, &[99], 0).is_none());
     }
 
     #[test]

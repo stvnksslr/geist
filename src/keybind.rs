@@ -631,7 +631,16 @@ fn default_binds() -> Vec<Bind> {
     // scrolling bindings above are registered *after* them and win. giest is
     // Windows, so those four stay scroll bindings — matching upstream, not
     // diverging from it.
+    //
+    // Undo/redo join them: upstream binds `undo`/`redo` performable too, so a
+    // chord with an empty stack behind it falls through to the shell instead of
+    // being swallowed. The triggers are Windows-conventional rather than
+    // upstream's `super+z` / `super+shift+z` — and deliberately *not* bare
+    // `ctrl+z`, which is the shell's own (SIGSTOP on a POSIX shell, and undo in
+    // every readline-alike).
     const PERFORMABLE: &[(&str, Action)] = &[
+        ("ctrl+shift+z", Action::Undo),
+        ("ctrl+shift+y", Action::Redo),
         ("shift+left", Action::AdjustSelection(SelectionAdjust::Left)),
         ("shift+right", Action::AdjustSelection(SelectionAdjust::Right)),
         ("shift+up", Action::AdjustSelection(SelectionAdjust::Up)),
@@ -1458,7 +1467,20 @@ mod tests {
         assert_eq!(km.lookup(&chord("alt+9")), Some(Action::LastTab));
         assert_eq!(km.lookup(&chord("ctrl+tab")), Some(Action::NextTab));
         // An unbound chord resolves to nothing.
-        assert_eq!(km.lookup(&chord("ctrl+shift+z")), None);
+        assert_eq!(km.lookup(&chord("ctrl+shift+j")), None);
+    }
+
+    #[test]
+    fn default_keymap_binds_undo_and_redo_performable() {
+        let km = Keymap::default();
+        assert_eq!(km.lookup(&chord("ctrl+shift+z")), Some(Action::Undo));
+        assert_eq!(km.lookup(&chord("ctrl+shift+y")), Some(Action::Redo));
+        // Performable, like upstream: with an empty stack the chord is the
+        // shell's rather than being swallowed.
+        assert!(km.is_performable(&[chord("ctrl+shift+z")]));
+        assert!(km.is_performable(&[chord("ctrl+shift+y")]));
+        // And bare ctrl+z stays the shell's under every circumstance.
+        assert_eq!(km.lookup(&chord("ctrl+z")), None);
     }
 
     #[test]

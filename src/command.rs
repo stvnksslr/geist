@@ -24,6 +24,20 @@ pub struct PerformCtx<'a> {
     pub keymap: Option<&'a crate::keybind::Keymap>,
     /// The active key-table stack, innermost last.
     pub tables: &'a [crate::keybind::TableEntry],
+    /// Whether the undo/redo stacks have anything on them.
+    pub undo: UndoState,
+}
+
+/// Whether `undo` / `redo` have anything to act on.
+///
+/// Mirrored from [`crate::undo::UndoStack`] onto each window every pass rather
+/// than read from the app: the `performable:` gate runs deep inside a session's
+/// key handling, which has no route back to `App`. One value rather than two
+/// loose booleans, so the mirror is threaded as a unit and can't half-arrive.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct UndoState {
+    pub can_undo: bool,
+    pub can_redo: bool,
 }
 
 /// Whether `action` can do anything right now.
@@ -48,6 +62,11 @@ pub fn can_perform(action: &Action, ctx: PerformCtx<'_>) -> bool {
             exists && innermost != Some(&**name)
         }
         Action::DeactivateKeyTable | Action::DeactivateAllKeyTables => !ctx.tables.is_empty(),
+        // Upstream binds both `performable:`, and `NSUndoManager` reports
+        // `canUndo`/`canRedo` — so with nothing to undo the chord is the
+        // shell's, exactly like shift+arrow with no selection.
+        Action::Undo => ctx.undo.can_undo,
+        Action::Redo => ctx.undo.can_redo,
         _ => true,
     }
 }
@@ -83,6 +102,8 @@ impl Action {
             | Action::ReloadConfig
             | Action::Quit
             | Action::ToggleQuickTerminal
+            | Action::Undo
+            | Action::Redo
             // App, but special-cased in a surface context upstream.
             | Action::NewWindow => App,
             // Everything else is surface-scoped, including the "less obvious"
@@ -303,6 +324,12 @@ pub enum Action {
     /// Scroll by this fraction of a page (Ghostty `scroll_page_fractional:N`,
     /// scaled by 100 so the action stays `Copy` without a float).
     ScrollPageFraction(i16),
+    /// Reverse the last undoable structural change — a closed split, tab or
+    /// window comes back with its shell still running; a newly created one
+    /// goes away again. Ghostty `undo`.
+    Undo,
+    /// Re-apply the change `Undo` took back. Ghostty `redo`.
+    Redo,
     /// Close every window, quitting giest. Ghostty `close_all_windows` / `quit`.
     Quit,
     /// Open the inline tab-rename box. Ghostty `prompt_tab_title`.
@@ -406,6 +433,8 @@ impl Action {
             Action::SetFontSize(_) => "Set Font Size",
             Action::ScrollLines(_) => "Scroll Lines",
             Action::ScrollPageFraction(_) => "Scroll Page",
+            Action::Undo => "Undo",
+            Action::Redo => "Redo",
             Action::Quit => "Quit",
             Action::PromptTabTitle => "Rename Tab",
             Action::ToggleMaximize => "Toggle Maximize",
@@ -468,6 +497,8 @@ impl Action {
             | Action::SetSurfaceTitle(_) => return None,
             Action::NewTab => "Ctrl+Shift+T",
             Action::NewWindow => "Ctrl+Shift+N",
+            Action::Undo => "Ctrl+Shift+Z",
+            Action::Redo => "Ctrl+Shift+Y",
             Action::NextTab => "Ctrl+Tab",
             Action::PrevTab => "Ctrl+Shift+Tab",
             Action::LastTab => "Alt+9",
@@ -597,6 +628,8 @@ impl Action {
             Action::ScrollPageFraction(n) => {
                 format!("scroll_page_fractional:{}", f32::from(*n) / 100.0)
             }
+            Action::Undo => "undo".into(),
+            Action::Redo => "redo".into(),
             Action::Quit => "quit".into(),
             Action::PromptTabTitle => "prompt_tab_title".into(),
             Action::ToggleMaximize => "toggle_maximize".into(),
@@ -716,6 +749,8 @@ impl Action {
             "clear_screen" => Action::ClearScreen,
             "copy_title_to_clipboard" => Action::CopyTitle,
             "toggle_readonly" => Action::ToggleReadonly,
+            "undo" => Action::Undo,
+            "redo" => Action::Redo,
             "quit" | "close_all_windows" => Action::Quit,
             "prompt_tab_title" => Action::PromptTabTitle,
             // giest splits are always 50/50, so there is nothing to equalize.
@@ -761,6 +796,8 @@ impl Action {
 /// catches a forgotten title/binding at compile time.
 const BASE_ACTIONS: &[Action] = &[
     Action::NewTab,
+    Action::Undo,
+    Action::Redo,
     Action::NewWindow,
     Action::CloseWindow,
     Action::CloseTab,

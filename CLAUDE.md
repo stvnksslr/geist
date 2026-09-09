@@ -294,7 +294,17 @@ fallback engine without app changes:
   `reap_dead` (shell exited) deliberately bypasses all of this: there's nothing left to confirm.
 - **Indices held across frames go stale.** `App::renaming`, `tab_drag` and `PendingClose::Tab` all
   store a tab *index*; a reorder or a `reap_dead` invalidates them, and acting on a stale one edits
-  the wrong tab. Clear them at both mutation points.
+  the wrong tab. Clear them at both mutation points. Anything that outlives more than a frame must
+  use `Tab::id` instead — that is why undo entries address tabs by id and not by slot.
+- **An undo entry owns *live* sessions, and they are not pumped while it holds them.** Undoing a
+  close is lossless because `Node::detach_leaf` (and the tab/window equivalents) **move** the pane
+  out rather than dropping it, so the shell keeps running — which also means an entry that never
+  expires is a process that never exits. `App::ui` prunes the stack every pass for that reason, not
+  only when undo is used. Their PTY output buffers in the reader channel meanwhile and is drained
+  on restore, so nothing is lost. And a restored `Window` must have its `closing`/`confirm` latches
+  cleared: `closing` is what stops a confirmed close's own `ViewportCommand::Close` re-opening the
+  dialog forever, and left set on a restored window it swallows every later close request too,
+  leaving a window the × cannot shut.
 - **After `cargo test`, the *binary* is still stale.** `cargo test --lib` builds only the test
   harness, so launching `target\debug\giest.exe` to check a change runs the previous build — which
   looks exactly like the feature not working. Run `cargo build` before any manual/screenshot check.

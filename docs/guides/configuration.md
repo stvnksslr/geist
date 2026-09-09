@@ -359,6 +359,43 @@ starts in the default one, and a shell that fails to spawn drops out of its spli
 taking the tab with it. The file is plain text, one record per line, and anything unparseable is
 skipped — a bad state file can never stop giest starting.
 
+### Undo and redo
+
+`Ctrl+Shift+Z` takes back the last structural change; `Ctrl+Shift+Y` re-applies it. (Upstream binds
+`super+z` / `super+shift+z`; bare `Ctrl+Z` is deliberately left alone — it belongs to the shell.)
+What is undoable:
+
+| Change | Undo does |
+| --- | --- |
+| Close split / tab / window | Puts it back, **with its shell still running** |
+| Close other tabs, close tabs to the right | Puts them all back at their old positions |
+| New split / tab / window | Closes it again |
+
+A restore is lossless because the close never destroyed anything: the pane, tab or window is
+*moved* into the undo entry and moved back out, so its scrollback, its running command and its
+working directory are exactly where you left them. Redo works the same way in the other direction,
+and the two stacks behave like any undo manager — making a new change after an undo drops the redo
+stack.
+
+That is also why entries **expire**. An undo entry is holding real processes open, so
+`undo-timeout` (default `5s`, Ghostty's duration grammar: `45s`, `1h30m`, `500ms`) bounds how long
+they live. Each operation ages on its own clock — a new one doesn't refresh an older one — and when
+an entry expires its shells finally exit. `undo-timeout = 0` turns the feature off entirely, which
+is upstream's documented meaning rather than an edge case; a very large value keeps operations
+around indefinitely, at the cost of an unbounded stack of live shells.
+
+Both bindings are `performable:`, so with nothing to undo the key is the shell's rather than being
+swallowed. Undo never quits giest: undoing the creation of the *only* remaining window would have
+to close it, so it declines instead.
+
+Two divergences from upstream worth knowing:
+
+- **A restored window comes back as an ordinary window**, put back at the position and size it had,
+  rather than reclaiming the OS-level root window slot. Reclaiming it would move a *different*
+  window on screen — the one that took the slot when the first closed.
+- **There is no "Undo Close Tab" wording anywhere**, because there is no Edit menu to put it in;
+  the command palette lists a plain `Undo` / `Redo`.
+
 ### More bindable actions
 
 Beyond the defaults, these Ghostty actions are available to `keybind`:
@@ -374,6 +411,7 @@ Beyond the defaults, these Ghostty actions are available to `keybind`:
 | `scroll_page_fractional:N` | Scroll N pages — `0.5` for half a screen. |
 | `prompt_tab_title` | Opens the inline tab-rename box. |
 | `quit` / `close_all_windows` | Close everything. |
+| `undo` / `redo` | Take back (or re-apply) the last structural change — see [Undo and redo](#undo-and-redo). Bound to `ctrl+shift+z` / `ctrl+shift+y`, both `performable:`. |
 | `equalize_splits` | Accepted as a no-op: giest's splits are always 50/50, so there is nothing to equalize. It binds without error so a Ghostty config transfers cleanly. |
 | `adjust_selection:<dir>` | Move the selection's free end. All ten upstream directions: `left`, `right`, `up`, `down`, `page_up`, `page_down`, `home`, `end`, `beginning_of_line`, `end_of_line`. Bound to shift+arrows by default (as `performable:`). |
 

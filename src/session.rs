@@ -1384,6 +1384,9 @@ impl Session {
         // Active key tables, innermost last — the same stack `App::handle_shortcuts`
         // resolves against, so both gates agree about which binding a key hits.
         tables: &[crate::keybind::TableEntry],
+        // Whether `undo`/`redo` have anything to act on, so their `performable:`
+        // bindings fall through to the shell when they don't.
+        undo: crate::command::UndoState,
     ) {
         let (events, ppp) = ctx.input(|i| (i.events.clone(), i.pixels_per_point().max(1.0)));
         let cell_h_pts = (cell_h / ppp).max(1.0);
@@ -1479,6 +1482,7 @@ impl Session {
                         has_selection: self.engine.selection_active(),
                         keymap: Some(keymap),
                         tables,
+                        undo,
                     },
                     tables,
                 ) {

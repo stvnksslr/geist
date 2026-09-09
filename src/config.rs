@@ -1106,6 +1106,11 @@ pub struct Config {
     /// How long a command must have run to be worth reporting. Ghostty
     /// `notify-on-command-finish-after`, default 5 s.
     pub notify_on_command_finish_after_ms: u64,
+    /// How long an undoable operation stays undoable, in milliseconds. Ghostty
+    /// `undo-timeout`, default 5 s. **Zero disables undo**, which is upstream's
+    /// documented meaning rather than a giest shortcut — and it matters here
+    /// because an undo entry holds a live shell open until it expires.
+    pub undo_timeout_ms: u64,
     /// Which bell effects fire on BEL. Ghostty `bell-features`.
     pub bell: BellFeatures,
     /// Sound file played when `bell-features` includes `audio`. Ghostty
@@ -1234,6 +1239,7 @@ impl Default for Config {
             notify_on_command_finish: NotifyOnCommandFinish::Never,
             notify_on_command_finish_action: NotifyOnCommandFinishAction::default(),
             notify_on_command_finish_after_ms: 5_000,
+            undo_timeout_ms: 5_000,
             bell: BellFeatures::default(),
             bell_audio_path: None,
             bell_audio_volume: 0.5,
@@ -2029,6 +2035,16 @@ const SETTERS: &[(&str, Setter)] = &[
             // about hour-long jobs), but floored at zero-is-zero: Ghostty
             // accepts `0` and means "every command".
             parse_duration_ms(v).unwrap_or(c.notify_on_command_finish_after_ms)
+        }
+    }),
+    ("undo-timeout", |c, v, d| {
+        c.undo_timeout_ms = if v.is_empty() {
+            d.undo_timeout_ms
+        } else {
+            // Unclamped, deliberately: upstream documents both ends — `0` turns
+            // undo off, and "a very large timeout" is the sanctioned way to keep
+            // operations around indefinitely (with its own warning attached).
+            parse_duration_ms(v).unwrap_or(c.undo_timeout_ms)
         }
     }),
     ("bell-features", |c, v, d| {
@@ -3275,6 +3291,21 @@ mod tests {
                 .resize_overlay_duration_ms,
             2_000
         );
+    }
+
+    #[test]
+    fn undo_timeout_parses_the_duration_grammar_and_defaults_to_five_seconds() {
+        let ms = |s: &str| parsed(&format!("undo-timeout = {s}")).undo_timeout_ms;
+        assert_eq!(Config::default().undo_timeout_ms, 5_000);
+        assert_eq!(ms("45s"), 45_000);
+        assert_eq!(ms("1h30m"), 5_400_000);
+        // **Unclamped, both ends, deliberately**: upstream documents `0` as
+        // "undo is off" and a very large value as the sanctioned way to keep
+        // operations around, so a clamp here would break both.
+        assert_eq!(ms("0"), 0);
+        assert_eq!(ms("1y"), 31_536_000_000);
+        // Garbage keeps the current value rather than resetting to the default.
+        assert_eq!(parsed("undo-timeout = 2s\nundo-timeout = later").undo_timeout_ms, 2_000);
     }
 
     #[test]
