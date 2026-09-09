@@ -131,7 +131,7 @@ backdrop or the taskbar attention flash, which need a window handle only the fir
 answers with the close confirmation. Bind it explicitly with `keybind = alt+f4=close_window` if you
 want the action as well.
 
-### Box drawing, blocks and braille
+### Box drawing, blocks, braille and mosaics
 
 giest **draws** these characters itself rather than taking them from the font, like Ghostty:
 
@@ -141,6 +141,10 @@ giest **draws** these characters itself rather than taking them from the font, l
 - U+2800–28FF braille
 - U+E0B0–E0BF powerline separators (the solid and thin chevrons, the half-circles and the corner
   triangles) plus E0D2 / E0D4
+- **U+1FB00–1FB3B sextants** and **U+1CD00–1CDE5 octants** — the 2×3 and 2×4 mosaics that terminal
+  image renderers (`chafa`, `timg`, `viu`) draw pictures with
+- **U+1FB70–1FB97** — the eighth and quarter blocks, their L-shaped corners and the medium-shaded
+  halves
 
 They are *defined* relative to the character cell, while a font draws its versions relative to its
 em box — so with any line spacing at all, a font's `│` stops short of the cell edges and a column of
@@ -148,10 +152,20 @@ them shows a dashed seam. Drawing from the cell metrics makes a box continuous b
 every font, including fonts that don't have these characters at all. The drawn versions **win over
 the font**, which is also what upstream does.
 
+This matters most for the mosaics. A picture drawn out of sextants or octants is thousands of cells
+that have to meet exactly; a font's versions are drawn to its em box, so at any line spacing the
+image comes out with a grid of hairlines through it. Drawn from the cell metrics, adjacent cells
+meet with no seam and no doubled column at **any** cell size — which is a property the tests assert
+at sizes that divide evenly by nothing, rather than something to check by eye.
+
 Powerline separators are drawn even if your font has no Nerd Font patch, so a prompt that uses them
-works with any font. Not drawn, so still taken from the font: the *stylized* powerline symbols
-(U+E0C0 and up — flames, hexagons, ice), which upstream doesn't draw either, and the
-legacy-computing symbols.
+works with any font.
+
+Not drawn, so still taken from the font: the *stylized* powerline symbols (U+E0C0 and up — flames,
+hexagons, ice), which upstream doesn't draw either; and the **diagonal** half of the legacy-computing
+block — U+1FB3C–1FB6F smooth mosaics, U+1FB98–1FB9F fills and triangles, U+1FBA0–1FBAF diagonal box
+drawing, the separated blocks and the segmented digits. Those need polygon work rather than
+rectangles; everything drawn above shares a single primitive, which is where the line is drawn.
 
 ### Selection
 
@@ -257,11 +271,17 @@ Every `adjust-*` key is a **delta, not a setting**: `1` means one pixel *more* t
 | `adjust-cursor-thickness` | Bar-cursor width, underline-cursor and hollow-cursor line width. |
 | `adjust-cursor-height` | Cursor height; a shorter cursor sits on the bottom of the cell. |
 | `adjust-box-thickness` | Thickness of the drawn box-drawing lines. |
+| `adjust-icon-height` | The ceiling a Nerd Font icon is scaled down to fit. Only the height: the aspect ratio carries the width, so a taller icon is also a wider one. Nothing else moves with it — the grid, the text and the decorations are unchanged, so bigger icons do not reflow the row. |
 
 Thicknesses are clamped to at least 1px — a zero-thickness line is invisible, which reads as a
-missing glyph rather than as too aggressive a setting. Positions are **not** clamped: zero and
-negative are meaningful placements there. Not implemented: `adjust-icon-height` and
-`adjust-cursor-*`'s interaction with `font-variation`.
+missing glyph rather than as too aggressive a setting. `adjust-icon-height` clamps the same way, for
+the same reason: a ceiling of zero would make every icon vanish. Positions are **not** clamped: zero
+and negative are meaningful placements there.
+
+Box-drawing, block and Powerline glyphs are drawn procedurally from the cell metrics rather than
+rasterized from the font, so `adjust-icon-height` does not touch them — which is also upstream's
+rule ("certain icons designed for box drawing and terminal graphics, such as Powerline symbols, are
+not affected"), reached here by construction rather than by an exception.
 
 ### Quick terminal (dropdown) and global keybinds
 

@@ -410,6 +410,9 @@ pub struct CellMetrics {
     pub cursor_height: f32,
     /// Thickness of the drawn box-drawing lines.
     pub box_thick: f32,
+    /// Ceiling a Nerd Font icon is scaled down to fit (`adjust-icon-height`).
+    /// The cell height by default; only `Constraint::Fit` glyphs consult it.
+    pub icon_height: f32,
 }
 
 /// Derive the cell and decoration metrics for a face at `px`, then apply the
@@ -464,6 +467,10 @@ pub fn derive_metrics(raw: RawFontMetrics, adjust: &crate::config::MetricAdjust)
         cursor_thick: adjust.cursor_thickness.apply_thickness(underline_thick),
         cursor_height: adjust.cursor_height.apply_thickness(cell_h),
         box_thick: adjust.box_thickness.apply_thickness(underline_thick),
+        // `apply_thickness`, not `apply`: a zero or negative ceiling would make
+        // every icon vanish, which reads as a missing glyph rather than as a
+        // mis-set option — the same reason every other *thickness* clamps.
+        icon_height: adjust.icon_height.apply_thickness(cell_h),
     }
 }
 
@@ -837,6 +844,13 @@ pub fn classify(ch: char) -> Constraint {
         0x2500..=0x259F => Constraint::Fill,
         // Braille patterns are designed to tile the cell.
         0x2800..=0x28FF => Constraint::Fill,
+        // The Symbols for Legacy Computing mosaics giest draws (sextants,
+        // octants, the eighth/quarter blocks). Listed for the same reason the
+        // box-drawing arm is: the sprite path takes these *before* `classify` is
+        // consulted, but the two tables should agree about what tiles the cell —
+        // narrowing `sprite::covers` later would otherwise silently start
+        // centring them instead.
+        0x1FB00..=0x1FB3B | 0x1FB70..=0x1FB97 | 0x1CD00..=0x1CDE5 => Constraint::Fill,
         // Powerline separators/arrows must touch cell edges — matched before the
         // broad PUA Fit arm below so they stay Fill.
         0xE0B0..=0xE0D4 => Constraint::Fill,
@@ -1444,7 +1458,12 @@ impl Atlas {
         // height; only ever shrink. This keeps wide icons (e.g. a folder) from
         // collapsing to a sliver while still capping overflow.
         let max_w = self.cell_w * span.max(2) as f32;
-        let scale = fit_scale(gw, gh, max_w, self.cell_h);
+        // The *height* ceiling is `adjust-icon-height`, which defaults to the
+        // cell height. Only the height: upstream adjusts the icon's maximum
+        // height and lets the aspect ratio carry the width, so a taller icon is
+        // also wider — which is what makes the option read as "bigger icons"
+        // rather than "stretched" ones.
+        let scale = fit_scale(gw, gh, max_w, self.metrics.icon_height);
         if scale <= 0.0 {
             return info;
         }
@@ -1707,6 +1726,29 @@ mod tests {
         // A position, by contrast, may go negative — that is a real placement.
         a.overline_position = crate::config::MetricModifier::Pixels(-3);
         assert_eq!(derive_metrics(raw(), &a).overline_pos, -3.0);
+    }
+
+    #[test]
+    fn adjust_icon_height_moves_only_the_icon_ceiling() {
+        let mut a = MetricAdjust::default();
+        // Unset, the ceiling *is* the cell height — an icon is scaled to fit the
+        // cell, which is what every other metric here assumes.
+        let base = derive_metrics(raw(), &a);
+        assert_eq!(base.icon_height, base.cell_h);
+        a.icon_height = crate::config::MetricModifier::Percent(0.25);
+        let m = derive_metrics(raw(), &a);
+        assert_eq!(m.icon_height, base.cell_h * 1.25);
+        // …and nothing else moves with it: the grid, the text and the
+        // decorations are unchanged, so a bigger icon does not reflow the row.
+        assert_eq!(m.cell_h, base.cell_h);
+        assert_eq!(m.cell_w, base.cell_w);
+        assert_eq!(m.ascent, base.ascent);
+        assert_eq!(m.underline_pos, base.underline_pos);
+        // Clamped like a thickness, not free like a position: a ceiling of zero
+        // would make every icon vanish, which reads as a missing glyph rather
+        // than as a mis-set option.
+        a.icon_height = crate::config::MetricModifier::Percent(-1.0);
+        assert_eq!(derive_metrics(raw(), &a).icon_height, 1.0);
     }
 
     #[test]
@@ -2195,6 +2237,9 @@ mod tests {
         assert_eq!(classify('█'), Constraint::Fill, "full block");
         assert_eq!(classify('\u{2580}'), Constraint::Fill, "upper half block");
         assert_eq!(classify('\u{2800}'), Constraint::Fill, "braille blank");
+        assert_eq!(classify('\u{1FB00}'), Constraint::Fill, "sextant");
+        assert_eq!(classify('\u{1CD00}'), Constraint::Fill, "octant");
+        assert_eq!(classify('\u{1FB82}'), Constraint::Fill, "upper quarter block");
         assert_eq!(
             classify('\u{E0B0}'),
             Constraint::Fill,

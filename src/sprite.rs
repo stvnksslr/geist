@@ -27,10 +27,25 @@
 //!
 //! Two rasterizing primitives serve all of it: axis-aligned rectangles for the
 //! straight work, and — for the curves and slopes — an anti-aliased pair of a
-//! distance-field stroke and a supersampled polygon fill. Deliberately *not*
-//! ported, so they still come from the font: the stylized powerline symbols
-//! (E0C0+, E0D0/E0D1/E0D3 — flames, hexagons, ice), which upstream doesn't draw
-//! either, and the legacy-computing symbols.
+//! distance-field stroke and a supersampled polygon fill.
+//!
+//! Also ported, from **Symbols for Legacy Computing**: the *mosaic* families —
+//! **U+1FB00–1FB3B** sextants, **U+1CD00–1CDE5** octants (the supplement block),
+//! and **U+1FB70–1FB97**, the eighth/quarter blocks and their shades. These are
+//! what terminal image renderers (`chafa`, `timg`, `viu`) draw with, and they
+//! are exactly the case for drawing rather than rasterizing: a mosaic is
+//! *defined* as a subdivision of the cell, so neighbouring cells must tile with
+//! no seam and no overlap at any cell size, which only cell-derived geometry
+//! gives you.
+//!
+//! Deliberately *not* ported, so they still come from the font: the stylized
+//! powerline symbols (E0C0+, E0D0/E0D1/E0D3 — flames, hexagons, ice), which
+//! upstream doesn't draw either; and the **diagonal** half of legacy computing
+//! (U+1FB3C–1FB6F smooth mosaics, U+1FB98–1FB9F fills and triangles,
+//! U+1FBA0–1FBAF diagonal box drawing, the separated blocks and the segmented
+//! digits). Those need polygon work rather than rectangles, and the boundary is
+//! drawn where it is because everything on this side of it shares one
+//! primitive.
 
 /// Cell metrics a sprite is drawn against, in **physical pixels**.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -347,6 +362,12 @@ pub fn covers(ch: char) -> bool {
         | 0xE0B0..=0xE0BF
         | 0xE0D2
         | 0xE0D4
+        // Symbols for Legacy Computing: the families that are pure rectangle
+        // fills. The diagonal ones (smooth mosaics, the triangles, the diagonal
+        // box-drawing) stay on the font for now — see this module's header.
+        | 0x1FB00..=0x1FB3B    // sextants
+        | 0x1FB70..=0x1FB97    // eighth/quarter blocks and their shades
+        | 0x1CD00..=0x1CDE5    // octants (the supplement block)
     )
 }
 
@@ -363,6 +384,9 @@ pub fn draw(ch: char, m: Metrics) -> Option<Vec<u8>> {
         0x2580..=0x259F => draw_block(&mut c, m, cp),
         0x2800..=0x28FF => draw_braille(&mut c, m, cp),
         0xE0B0..=0xE0BF | 0xE0D2 | 0xE0D4 => draw_powerline(&mut c, m, cp),
+        0x1FB00..=0x1FB3B => draw_sextant(&mut c, m, cp),
+        0x1CD00..=0x1CDE5 => draw_octant(&mut c, m, cp),
+        0x1FB70..=0x1FB97 => draw_legacy_block(&mut c, m, cp),
         _ => return None,
     }
     Some(c.data)
@@ -871,6 +895,225 @@ fn frac_max(f: f64, size: u32) -> i32 {
     ((f * size as f64).round()) as i32
 }
 
+/// Fill one cell of a `cols × rows` subdivision of the cell.
+///
+/// The min/max fraction rule (see [`frac_min`] / [`frac_max`]) is what makes a
+/// mosaic tile: cell *n*'s right edge and cell *n+1*'s left edge resolve to the
+/// same pixel, so a row of them has neither a seam nor a doubled column, at any
+/// cell size. Filling with independently rounded rectangles is the obvious
+/// implementation and is visibly wrong at small sizes.
+fn grid_fill(c: &mut Canvas, m: Metrics, col: u32, cols: u32, row: u32, rows: u32) {
+    let (x0, x1) = (
+        frac_min(f64::from(col) / f64::from(cols), m.w),
+        frac_max(f64::from(col + 1) / f64::from(cols), m.w),
+    );
+    let (y0, y1) = (
+        frac_min(f64::from(row) / f64::from(rows), m.h),
+        frac_max(f64::from(row + 1) / f64::from(rows), m.h),
+    );
+    c.rect(x0, y0, x1, y1, 0xFF);
+}
+
+/// Sextants — U+1FB00–1FB3B, a 2×3 mosaic.
+///
+/// The block holds the 62 non-trivial patterns: all 64 minus the empty one
+/// (which is a space) and the full one (`█`). Two more are missing from the
+/// *middle* of the range rather than the ends — the left and right halves,
+/// which are `▌` and `▐` — and upstream's `idx + idx / 0x14 + 1` is how the
+/// codepoint index steps over them. Ported as-is rather than re-derived: it is
+/// a numbering quirk of the block, and a rederivation that disagreed would
+/// silently shift 40 characters.
+fn draw_sextant(c: &mut Canvas, m: Metrics, cp: u32) {
+    let idx = cp - 0x1FB00;
+    let bits = idx + idx / 0x14 + 1;
+    for (i, (col, row)) in [(0, 0), (1, 0), (0, 1), (1, 1), (0, 2), (1, 2)]
+        .into_iter()
+        .enumerate()
+    {
+        if bits & (1 << i) != 0 {
+            grid_fill(c, m, col, 2, row, 3);
+        }
+    }
+}
+
+/// The octant patterns, indexed by `codepoint - 0x1CD00`, as bitmasks with
+/// octant *n* in bit *n-1*.
+///
+/// A **vendored table**, from Ghostty's own `octants.txt`, whose header says it
+/// plainly: "we weren't able to discern a mathematical pattern for them". The
+/// block holds 230 of the 256 possible patterns, and the 26 it omits are the
+/// ones already drawable some other way (the quadrants, the halves, the full
+/// block, the space) — but their *order* in the block is not derivable, and a
+/// rederivation that got it wrong would silently mis-draw every octant after
+/// the first mistake. The same reasoning that vendors `rgb.txt`.
+static OCTANTS: std::sync::LazyLock<Vec<u8>> = std::sync::LazyLock::new(|| {
+    include_str!("res/octants.txt")
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(|line| {
+            // "BLOCK OCTANT-1235" — the digits after the dash are the filled
+            // octants, numbered 1..8 top-to-bottom, left then right.
+            line.rsplit_once('-')
+                .map(|(_, digits)| {
+                    digits
+                        .bytes()
+                        .filter(|b| b.is_ascii_digit())
+                        .fold(0u8, |acc, b| acc | 1 << (b - b'1'))
+                })
+                .unwrap_or(0)
+        })
+        .collect()
+});
+
+/// Octants — U+1CD00–1CDE5, a 2×4 mosaic.
+fn draw_octant(c: &mut Canvas, m: Metrics, cp: u32) {
+    let Some(&bits) = OCTANTS.get((cp - 0x1CD00) as usize) else {
+        return;
+    };
+    for (i, (col, row)) in [
+        (0, 0),
+        (1, 0),
+        (0, 1),
+        (1, 1),
+        (0, 2),
+        (1, 2),
+        (0, 3),
+        (1, 3),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if bits & (1 << i) != 0 {
+            grid_fill(c, m, col, 2, row, 4);
+        }
+    }
+}
+
+/// U+1FB70–1FB97: the eighth and quarter blocks, their L-shaped corners, and
+/// the medium-shaded halves.
+fn draw_legacy_block(c: &mut Canvas, m: Metrics, cp: u32) {
+    const MEDIUM: u8 = 0x80;
+    let (w, h) = (m.w as i32, m.h as i32);
+    // An eighth-wide vertical strip at position `n` (0-based from the left).
+    let veighth = |c: &mut Canvas, n: u32| grid_fill(c, m, n, 8, 0, 1);
+    // An eighth-tall horizontal strip at row `n` (0-based from the top).
+    let heighth = |c: &mut Canvas, n: u32| grid_fill(c, m, 0, 1, n, 8);
+    let upper = |c: &mut Canvas, f: f64| c.rect(0, 0, w, frac_max(f, m.h), 0xFF);
+    let lower = |c: &mut Canvas, f: f64| c.rect(0, frac_min(1.0 - f, m.h), w, h, 0xFF);
+    let left = |c: &mut Canvas, f: f64| c.rect(0, 0, frac_max(f, m.w), h, 0xFF);
+    let right = |c: &mut Canvas, f: f64| c.rect(frac_min(1.0 - f, m.w), 0, w, h, 0xFF);
+    let shade_upper = |c: &mut Canvas| c.rect(0, 0, w, frac_max(0.5, m.h), MEDIUM);
+    let shade_lower = |c: &mut Canvas| c.rect(0, frac_min(0.5, m.h), w, h, MEDIUM);
+    let shade_left = |c: &mut Canvas| c.rect(0, 0, frac_max(0.5, m.w), h, MEDIUM);
+    let shade_right = |c: &mut Canvas| c.rect(frac_min(0.5, m.w), 0, w, h, MEDIUM);
+    let shade_full = |c: &mut Canvas| c.rect(0, 0, w, h, MEDIUM);
+
+    match cp {
+        // Vertical one-eighth blocks, positions 2–7 (position 1 is `▏` and
+        // position 8 is `▕`, both already in the block-elements range).
+        0x1FB70..=0x1FB75 => veighth(c, cp - 0x1FB70 + 1),
+        // Horizontal one-eighth blocks, rows 2–7 (`▔` and `▁` cover 1 and 8).
+        0x1FB76..=0x1FB7B => heighth(c, cp - 0x1FB76 + 1),
+        // The L-shaped corners: one edge plus one adjacent edge, both an eighth.
+        0x1FB7C => {
+            left(c, 0.125);
+            lower(c, 0.125);
+        }
+        0x1FB7D => {
+            left(c, 0.125);
+            upper(c, 0.125);
+        }
+        0x1FB7E => {
+            right(c, 0.125);
+            upper(c, 0.125);
+        }
+        0x1FB7F => {
+            right(c, 0.125);
+            lower(c, 0.125);
+        }
+        0x1FB80 => {
+            upper(c, 0.125);
+            lower(c, 0.125);
+        }
+        // "Horizontal one eighth block 1358": rows 1, 3, 5 and 8.
+        0x1FB81 => {
+            for n in [0, 2, 4, 7] {
+                heighth(c, n);
+            }
+        }
+        0x1FB82 => upper(c, 0.25),
+        0x1FB83 => upper(c, 0.375),
+        0x1FB84 => upper(c, 0.625),
+        0x1FB85 => upper(c, 0.75),
+        0x1FB86 => upper(c, 0.875),
+        0x1FB87 => right(c, 0.25),
+        0x1FB88 => right(c, 0.375),
+        0x1FB89 => right(c, 0.625),
+        0x1FB8A => right(c, 0.75),
+        0x1FB8B => right(c, 0.875),
+        // Medium-shaded halves. Like `░▒▓`, the shade is a partial *coverage*
+        // over the whole area rather than a dither pattern — that is what keeps
+        // it even at any cell size, and it is upstream's choice too.
+        0x1FB8C => shade_left(c),
+        0x1FB8D => shade_right(c),
+        0x1FB8E => shade_upper(c),
+        0x1FB8F => shade_lower(c),
+        0x1FB90 => shade_full(c),
+        0x1FB91 => {
+            shade_full(c);
+            upper(c, 0.5);
+        }
+        0x1FB92 => {
+            shade_full(c);
+            lower(c, 0.5);
+        }
+        // U+1FB93 is an unassigned hole in the block. Drawn as nothing, which
+        // is what upstream does — the alternative is a tofu box for a codepoint
+        // that has no character.
+        0x1FB93 => {}
+        0x1FB94 => {
+            shade_full(c);
+            right(c, 0.5);
+        }
+        // Checkerboards: the two phases of a 2×2 fill.
+        0x1FB95 => checkerboard(c, m, 0),
+        0x1FB96 => checkerboard(c, m, 1),
+        // "Heavy horizontal fill": two quarter-height bands, the second and the
+        // fourth. Integer quarters rather than the fraction rule, matching
+        // upstream — the bands are separated by gaps, so nothing has to tile.
+        0x1FB97 => {
+            c.rect(0, h / 4, w, 2 * h / 4, 0xFF);
+            c.rect(0, 3 * h / 4, w, h, 0xFF);
+        }
+        _ => {}
+    }
+}
+
+/// A checkerboard over the cell, in phase `phase` (0 or 1).
+///
+/// Four columns, and however many rows keep the squares **square** — upstream's
+/// `round(4 * h / w)` — rather than a 4×4 grid stretched to the cell's aspect,
+/// which at a typical 1:2 cell would give visibly oblong "squares".
+///
+/// Truncating integer division rather than the min/max fraction rule: each
+/// square's far edge *is* the next one's near edge by construction here, so the
+/// tiling is already exact, and this is the arithmetic upstream uses.
+fn checkerboard(c: &mut Canvas, m: Metrics, phase: u32) {
+    let cols = 4u32;
+    let rows = ((4.0 * f64::from(m.h) / f64::from(m.w)).round() as u32).max(1);
+    for row in 0..rows {
+        for col in 0..cols {
+            if (row + col) % 2 != phase {
+                continue;
+            }
+            let (x0, x1) = ((m.w * col) / cols, (m.w * (col + 1)) / cols);
+            let (y0, y1) = ((m.h * row) / rows, (m.h * (row + 1)) / rows);
+            c.rect(x0 as i32, y0 as i32, x1 as i32, y1 as i32, 0xFF);
+        }
+    }
+}
+
 fn draw_block(c: &mut Canvas, m: Metrics, cp: u32) {
     const EIGHTH: f64 = 0.125;
     const QUARTER: f64 = 0.25;
@@ -1056,6 +1299,159 @@ mod tests {
 
     fn at(b: &[u8], m: Metrics, x: u32, y: u32) -> u8 {
         b[(y * m.w + x) as usize]
+    }
+
+    // --- Symbols for Legacy Computing ------------------------------------
+
+    #[test]
+    fn the_sextant_index_skips_exactly_the_two_halves() {
+        // U+1FB00..1FB3B holds the 60 mosaic patterns that aren't already a
+        // character: everything except empty (space), full (`█`), the left half
+        // (`▌`, 0b010101) and the right half (`▐`, 0b101010). Upstream's
+        // `idx + idx / 0x14 + 1` is how the codepoint index steps over the two
+        // in the *middle*; a rederivation that got it wrong would silently shift
+        // 40 characters, so the whole sequence is checked rather than a sample.
+        let patterns: Vec<u32> = (0..=0x3B).map(|k| k + k / 0x14 + 1).collect();
+        assert_eq!(patterns.len(), 60);
+        assert_eq!(patterns[0], 1, "U+1FB00 is sextant 1 (top-left)");
+        assert_eq!(*patterns.last().expect("last"), 62, "one short of the full block");
+        // Strictly ascending, no repeats, and missing exactly 21 and 42.
+        assert!(patterns.windows(2).all(|w| w[1] == w[0] + 1 || w[1] == w[0] + 2));
+        let missing: Vec<u32> = (1..=62).filter(|p| !patterns.contains(p)).collect();
+        assert_eq!(missing, vec![0b010101, 0b101010]);
+    }
+
+    #[test]
+    fn a_sextant_fills_exactly_its_share_of_the_cell() {
+        // U+1FB00 is the top-left sextant: the left half of the top third, and
+        // nothing else. Computed, not eyeballed — 10×21 so the thirds are exact.
+        let m = Metrics { w: 10, h: 21, thickness: 2 };
+        let b = buf('\u{1FB00}', m);
+        for y in 0..m.h {
+            for x in 0..m.w {
+                let want = if x < 5 && y < 7 { 0xFF } else { 0x00 };
+                assert_eq!(at(&b, m, x, y), want, "pixel ({x},{y})");
+            }
+        }
+        // …and U+1FB02 (sextants 1+2) is the whole top third.
+        let b = buf('\u{1FB02}', m);
+        for y in 0..m.h {
+            for x in 0..m.w {
+                let want = if y < 7 { 0xFF } else { 0x00 };
+                assert_eq!(at(&b, m, x, y), want, "pixel ({x},{y})");
+            }
+        }
+    }
+
+    #[test]
+    fn the_octant_table_covers_the_whole_block() {
+        // 230 codepoints, U+1CD00..U+1CDE5, one entry each. A vendored table
+        // rather than a formula (see `OCTANTS`), so its *shape* is what needs
+        // asserting — an off-by-one in the parse would mis-draw every octant
+        // after the mistake.
+        assert_eq!(OCTANTS.len(), 0x1CDE5 - 0x1CD00 + 1);
+        // The first line is "BLOCK OCTANT-3": octant 3 only, which is bit 2.
+        assert_eq!(OCTANTS[0], 1 << 2);
+        // "BLOCK OCTANT-23" — bits 1 and 2.
+        assert_eq!(OCTANTS[1], (1 << 1) | (1 << 2));
+        // No entry is empty or full: those are the space and `█`, which is why
+        // the block has 230 entries and not 256.
+        assert!(OCTANTS.iter().all(|&m| m != 0x00 && m != 0xFF));
+        // Every pattern appears at most once.
+        let mut seen = OCTANTS.clone();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), OCTANTS.len(), "the table has duplicates");
+    }
+
+    #[test]
+    fn an_octant_fills_exactly_its_share_of_the_cell() {
+        // U+1CD00 is octant 3 — the left half of the second quarter.
+        let m = Metrics { w: 10, h: 20, thickness: 2 };
+        let b = buf('\u{1CD00}', m);
+        for y in 0..m.h {
+            for x in 0..m.w {
+                let want = if x < 5 && (5..10).contains(&y) { 0xFF } else { 0x00 };
+                assert_eq!(at(&b, m, x, y), want, "pixel ({x},{y})");
+            }
+        }
+    }
+
+    #[test]
+    fn a_mosaic_never_leaves_a_seam_or_a_soft_edge() {
+        // The property that makes drawing these worth doing at all: at *any*
+        // cell size every pixel is fully on or fully off, so two adjacent cells
+        // of a mosaic image meet with no hairline and no doubled column. Sizes
+        // that don't divide evenly by 2, 3 or 4 are the ones that catch a naive
+        // `round(f * size)` on both edges.
+        for (w, h) in [(6, 13), (7, 17), (9, 20), (10, 21), (11, 23), (13, 31)] {
+            let m = Metrics { w, h, thickness: 1 };
+            for cp in (0x1FB00..=0x1FB3Bu32).chain(0x1CD00..=0x1CDE5) {
+                let ch = char::from_u32(cp).expect("valid codepoint");
+                let b = buf(ch, m);
+                assert!(
+                    b.iter().all(|&v| v == 0x00 || v == 0xFF),
+                    "U+{cp:04X} at {w}x{h} has a partially covered pixel"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn complementary_mosaics_leave_no_gap_between_them() {
+        // The seam-free guarantee, stated as a property: two mosaics whose bit
+        // patterns are complements must together cover **every** pixel. Checked
+        // at cell sizes that divide by neither 2 nor 4, which is where a naive
+        // `round(f * size)` on both edges leaves a hairline row.
+        //
+        // Union, not sum: the fraction rule deliberately lets adjacent blocks
+        // *overlap* by a pixel rather than risk a gap (upstream's `Fraction.min`
+        // spells out the trade — at size 7 both halves are 4px, from 0..4 and
+        // 3..7). Asserting a partition would be asserting the bug this rule
+        // exists to avoid.
+        for (w, h) in [(9, 22), (7, 15), (11, 26)] {
+            let m = Metrics { w, h, thickness: 2 };
+            let mask = OCTANTS[0];
+            let Some(i) = OCTANTS.iter().position(|&o| o == !mask) else {
+                panic!("the complement of octant 3 should be in the block");
+            };
+            let a = buf('\u{1CD00}', m);
+            let b = buf(char::from_u32(0x1CD00 + i as u32).expect("valid"), m);
+            for (n, (pa, pb)) in a.iter().zip(b.iter()).enumerate() {
+                assert_eq!(
+                    pa | pb,
+                    0xFF,
+                    "gap at pixel {n} of {w}x{h}: complementary octants must cover it"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_eighth_blocks_land_on_their_own_eighth() {
+        // U+1FB70 is "vertical one eighth block 2" — the *second* of eight
+        // columns, `▏` being the first and already a block-elements character.
+        let m = Metrics { w: 16, h: 8, thickness: 1 };
+        let b = buf('\u{1FB70}', m);
+        assert_eq!(row_span(&b, m, 0), vec![2, 3]);
+        // The last of the six, position 7.
+        let b = buf('\u{1FB75}', m);
+        assert_eq!(row_span(&b, m, 0), vec![12, 13]);
+        // U+1FB93 is an unassigned hole in the block: claimed, and drawn empty,
+        // rather than left to the font to render as tofu.
+        assert!(covers('\u{1FB93}'));
+        assert!(buf('\u{1FB93}', m).iter().all(|&v| v == 0));
+    }
+
+    #[test]
+    fn a_shaded_half_is_partial_coverage_not_a_dither() {
+        // Like `░▒▓`, and for the same reason: a dither pattern breaks up at
+        // small cell sizes, a coverage value doesn't.
+        let m = Metrics { w: 10, h: 20, thickness: 2 };
+        let b = buf('\u{1FB8C}', m); // left half medium shade
+        assert_eq!(at(&b, m, 0, 0), 0x80);
+        assert_eq!(at(&b, m, 4, 19), 0x80);
+        assert_eq!(at(&b, m, 5, 0), 0x00);
     }
 
     /// The columns covered on row `y`.

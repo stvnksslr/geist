@@ -655,6 +655,9 @@ pub struct MetricAdjust {
     pub cursor_height: MetricModifier,
     /// Thickness of the drawn box-drawing lines (see [`crate::sprite`]).
     pub box_thickness: MetricModifier,
+    /// Maximum height a Nerd Font icon is scaled to fit. Ghostty
+    /// `adjust-icon-height`.
+    pub icon_height: MetricModifier,
 }
 
 /// Whether the window/tab/split layout survives a quit. Ghostty
@@ -1832,6 +1835,9 @@ const SETTERS: &[(&str, Setter)] = &[
     }),
     ("adjust-box-thickness", |c, v, d| {
         c.adjust.box_thickness = adjust_value(v, c.adjust.box_thickness, d.adjust.box_thickness)
+    }),
+    ("adjust-icon-height", |c, v, d| {
+        c.adjust.icon_height = adjust_value(v, c.adjust.icon_height, d.adjust.icon_height)
     }),
     ("quick-terminal-position", |c, v, d| {
         c.quick_terminal_position = match v {

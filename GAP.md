@@ -8,7 +8,7 @@ the terminal data already exists and just needs wiring).
 
 **Headline finding.** giest has a strong, correct *spine* — real VT engine, splits, tabs, ligatures,
 emoji, smooth scroll, command palette — but it covered a fraction of Ghostty's config surface and
-~90 keybind actions, with little of the macOS app's UX breadth. *(Measured since: **100 of Ghostty's
+~90 keybind actions, with little of the macOS app's UX breadth. *(Measured since: **101 of Ghostty's
 187 config keys** are now supported — see the config-surface ledger for the re-runnable audit.)* The encouraging part: **much of the gap
 is plumbing, not greenfield.** libghostty-vt already surfaces underline styles, faint/overline, OSC 8
 hyperlinks, OSC 133 semantic-prompt marks, kitty graphics, the bell, and a rich selection model — data
@@ -154,13 +154,15 @@ and a configured `font-family` / `font-feature = -calt`; curly-underline thickne
 OSC 4/5/13-19 color *queries*. *(OSC 8 hyperlinks, OSC 133 prompts, styled underlines, OSC 10/11/12
 dynamic colors incl. query replies — now done.)*
 
-**Rendering / fonts** — `adjust-icon-height`; legacy-computing sprites; COLRv1 emoji.
+**Rendering / fonts** — COLRv1 emoji; the *diagonal* half of legacy computing (smooth mosaics,
+triangles, diagonal box drawing).
 *(`font-family` (+ fallback chains, per-style overrides, **synthetic bold/italic**),
 `font-feature`/ligature toggle, **`font-variation`** and its three per-style siblings, `minimum-contrast`,
 `bold-is-bright`/`bold-color`, `cursor-style`/`-blink`, **transparency + background-opacity**,
 blur (Windows acrylic), `faint-opacity`, `cursor-opacity`, unfocused-split dimming, **custom
-shaders**, **box-drawing/block/braille/powerline sprites**, the **`adjust-*` metric family** and
-`isCovering` — now done.)*
+shaders**, **box-drawing/block/braille/powerline sprites**, the **legacy-computing mosaics**
+(sextants, octants, eighth blocks), the **`adjust-*` metric family** *in full* (including
+`adjust-icon-height`) and `isCovering` — now done.)*
 
 **Window / UI** — titlebar/decoration styles; settings UI; about dialog; custom app icons.
 *(the **inspector** is now done — see its ledger.)*
@@ -196,7 +198,7 @@ paste-protection confirmation, `clipboard-trim-trailing-spaces` and **readonly m
 indicator** — now done; **secure input is N/A on Windows**, see its ledger.)*
 
 **Config / theming** — `palette-generate`/`harmonious`, conditional configuration,
-and the **87 upstream keys still unsupported** (mostly `gtk-*`, `macos-*`, `linux-*` — see the
+and the **86 upstream keys still unsupported** (mostly `gtk-*`, `macos-*`, `linux-*` — see the
 config-surface ledger). *(theme/theme-file now done.)*
 
 **Notifications / bell** — desktop notifications (OSC 9/777/99); Win taskbar progress (OSC 9;4);
@@ -297,7 +299,7 @@ Effort: **S** <1d · **M** 1–3d · **L** ~1wk · **XL** multi-wk. Status: ✅ 
 ### Tier 3 — long tail / platform-specific
 auto-update · about dialog /
 custom icon · AppleScript / App-Intents / Services → Windows IPC ·
-legacy-computing sprites · COLRv1 emoji · grapheme-width ·
+COLRv1 emoji · grapheme-width ·
 window decorations / titlebar / colorspace · settings UI. *(all ⬜; the **inspector** is
 done — see its ledger.)*
 
@@ -403,8 +405,67 @@ With Phase 0 done, the remaining Tier-1 items are mostly small, registry-backed 
     keyboard and PTY logs the Windows-specific debugging actually needs. See the ledger below.
 34. ✅ **`font-variation`** and its three per-style siblings — variable-font axes on both the
     rasterizer and the shaper. See the ledger below.
-35. Next: Tier 3 — COLRv1 emoji, legacy-computing sprites, `adjust-icon-height`, window
+35. ✅ **`adjust-icon-height`** — the last of the `adjust-*` family. See the ledger below.
+36. ✅ **Legacy-computing mosaics** — sextants, octants and the eighth/quarter blocks. See the
+    ledger below.
+37. Next: Tier 3 — COLRv1 emoji, the diagonal half of legacy computing, window
     decorations/titlebar, a settings UI.
+
+### Legacy-computing mosaics + `adjust-icon-height` — ✅ divergences
+
+Two Tier-3 items that finish what was already built. `adjust-icon-height` completes the `adjust-*`
+family; the mosaics extend `sprite.rs` with the families that share its existing primitive.
+
+**Drawn now:** U+1FB00–1FB3B **sextants** (2×3), U+1CD00–1CDE5 **octants** (2×4, the supplement
+block), and U+1FB70–1FB97 — the eighth and quarter blocks, their L-shaped corners, the medium-shaded
+halves, the checkerboards and the heavy horizontal fill. ~330 characters.
+
+- **This is the case sprite drawing exists for, at its most extreme.** A picture rendered by `chafa`
+  or `timg` is thousands of mosaic cells that have to meet exactly; a font's versions are drawn to
+  its em box, so at any line spacing the image comes out with a grid of hairlines through it. The
+  no-seam property is asserted as a *property* rather than eyeballed: at six cell sizes that divide
+  evenly by neither 2, 3 nor 4, every pixel of every sextant and octant is fully on or fully off,
+  and two complementary octants cover every pixel between them.
+- **The fraction rule deliberately overlaps rather than risking a gap**, and a test tried to assert
+  the opposite before the arithmetic corrected it. `frac_min`/`frac_max` resolve the same fraction
+  to *different* pixels (upstream spells out why: at size 7 both halves come out 4px, `0..4` and
+  `3..7`), so adjacent blocks share a pixel. Asserting a partition would have been asserting the bug
+  the rule exists to avoid; the test asserts the union instead.
+- **The sextant numbering is ported, not re-derived.** The block holds the 60 patterns that aren't
+  already characters — everything but empty, full, `▌` and `▐` — and the two missing ones are in the
+  *middle* of the range. Upstream's `idx + idx / 0x14 + 1` steps over them; a rederivation that
+  disagreed would silently shift 40 characters, so the whole 60-long sequence is checked against the
+  two exclusions.
+- **The octant table is vendored, for the reason upstream states outright.** Its `octants.txt` says
+  "we weren't able to discern a mathematical pattern for them" — the block omits 26 of the 256
+  patterns and their *order* is not derivable. `src/res/octants.txt` is that file, parsed at first
+  use, the same call giest already makes for `rgb.txt`. The test asserts the table's shape (230
+  entries, no duplicates, none empty or full) rather than its contents.
+- **`adjust-icon-height` adjusts only the ceiling.** Nothing else moves with it — the grid, the text
+  and the decorations are unchanged — so bigger icons don't reflow the row; and only the *height*,
+  letting the aspect ratio carry the width, which is what makes it read as "bigger icons" rather
+  than stretched ones. Clamped like a thickness rather than free like a position: a ceiling of zero
+  would make every icon vanish, which reads as a missing glyph.
+- **Upstream's "Powerline symbols are not affected by `adjust-icon-height`" falls out by
+  construction.** Box-drawing, block and Powerline glyphs are drawn procedurally from the cell
+  metrics rather than rasterized, so they never consult the icon ceiling — no exception needed.
+
+**Divergences:**
+
+- **The diagonal half of legacy computing is not drawn** and still comes from the font:
+  U+1FB3C–1FB6F smooth mosaics, U+1FB98–1FB9F fills and triangles, U+1FBA0–1FBAF diagonal box
+  drawing, the separated blocks and the segmented digits. Those need polygon work; everything ported
+  here shares one rectangle primitive, and the boundary is drawn where that stops.
+- **U+1FB93 is claimed and drawn empty.** It is an unassigned hole in the block; upstream draws
+  nothing there too, and the alternative is a tofu box for a codepoint that has no character.
+- **The checkerboards use upstream's aspect-corrected grid** (four columns, `round(4·h/w)` rows) so
+  the squares are square, rather than a 4×4 grid stretched to a 1:2 cell.
+
+**Verified**: `cargo test` — the sextant sequence in full, the octant table's shape and two spot
+entries, exact pixel coverage for a sextant and an octant, the no-seam property at six awkward cell
+sizes, the eighth-block positions, the shade being coverage rather than a dither, and
+`adjust-icon-height` moving the ceiling and nothing else. **Wants a human look**: an actual image
+piped through `chafa` — the geometry is proven, how it reads is not.
 
 ### `font-variation` (variable fonts) — ✅ divergences
 
@@ -1166,8 +1227,8 @@ grep -oE '^@"[a-z0-9-]+"' ghostty-src/src/config/Config.zig | tr -d '@"' | sort 
 grep -oE '\("[a-z0-9-]+", \|' src/config.rs | grep -oE '"[a-z0-9-]+"' | tr -d '"' | sort -u
 ```
 
-**187 upstream keys; giest now sets 108, of which 100 are upstream's** (`config-file`, then
-`undo-timeout`, then the four `font-variation*` keys, since) (the rest are giest-specific,
+**187 upstream keys; giest now sets 109, of which 101 are upstream's** (`config-file`, then
+`undo-timeout`, then the four `font-variation*` keys, then `adjust-icon-height`, since) (the rest are giest-specific,
 e.g. `text-gamma`). That replaces the "~250 options / ~230 remaining" estimates this document opened
 with, which were never counted.
 
