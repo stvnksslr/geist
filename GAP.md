@@ -8,7 +8,7 @@ the terminal data already exists and just needs wiring).
 
 **Headline finding.** giest has a strong, correct *spine* — real VT engine, splits, tabs, ligatures,
 emoji, smooth scroll, command palette — but it covered a fraction of Ghostty's config surface and
-~90 keybind actions, with little of the macOS app's UX breadth. *(Measured since: **96 of Ghostty's
+~90 keybind actions, with little of the macOS app's UX breadth. *(Measured since: **100 of Ghostty's
 187 config keys** are now supported — see the config-surface ledger for the re-runnable audit.)* The encouraging part: **much of the gap
 is plumbing, not greenfield.** libghostty-vt already surfaces underline styles, faint/overline, OSC 8
 hyperlinks, OSC 133 semantic-prompt marks, kitty graphics, the bell, and a rich selection model — data
@@ -154,10 +154,9 @@ and a configured `font-family` / `font-feature = -calt`; curly-underline thickne
 OSC 4/5/13-19 color *queries*. *(OSC 8 hyperlinks, OSC 133 prompts, styled underlines, OSC 10/11/12
 dynamic colors incl. query replies — now done.)*
 
-**Rendering / fonts** — `font-variation`; `adjust-icon-height`; legacy-computing sprites;
-COLRv1 emoji.
+**Rendering / fonts** — `adjust-icon-height`; legacy-computing sprites; COLRv1 emoji.
 *(`font-family` (+ fallback chains, per-style overrides, **synthetic bold/italic**),
-`font-feature`/ligature toggle, `minimum-contrast`,
+`font-feature`/ligature toggle, **`font-variation`** and its three per-style siblings, `minimum-contrast`,
 `bold-is-bright`/`bold-color`, `cursor-style`/`-blink`, **transparency + background-opacity**,
 blur (Windows acrylic), `faint-opacity`, `cursor-opacity`, unfocused-split dimming, **custom
 shaders**, **box-drawing/block/braille/powerline sprites**, the **`adjust-*` metric family** and
@@ -197,7 +196,7 @@ paste-protection confirmation, `clipboard-trim-trailing-spaces` and **readonly m
 indicator** — now done; **secure input is N/A on Windows**, see its ledger.)*
 
 **Config / theming** — `palette-generate`/`harmonious`, conditional configuration,
-and the **91 upstream keys still unsupported** (mostly `gtk-*`, `macos-*`, `linux-*` — see the
+and the **87 upstream keys still unsupported** (mostly `gtk-*`, `macos-*`, `linux-*` — see the
 config-surface ledger). *(theme/theme-file now done.)*
 
 **Notifications / bell** — desktop notifications (OSC 9/777/99); Win taskbar progress (OSC 9;4);
@@ -402,8 +401,59 @@ With Phase 0 done, the remaining Tier-1 items are mostly small, registry-backed 
     keys through the keymap. See the ledger below.
 33. ✅ **The terminal inspector** — `inspector:toggle|show|hide` on `ctrl+shift+i`, with the
     keyboard and PTY logs the Windows-specific debugging actually needs. See the ledger below.
-34. Next: Tier 3 — `font-variation`, COLRv1 emoji, legacy-computing sprites, window
+34. ✅ **`font-variation`** and its three per-style siblings — variable-font axes on both the
+    rasterizer and the shaper. See the ledger below.
+35. Next: Tier 3 — COLRv1 emoji, legacy-computing sprites, `adjust-icon-height`, window
     decorations/titlebar, a settings UI.
+
+### `font-variation` (variable fonts) — ✅ divergences
+
+All four keys (`font-variation`, `-bold`, `-italic`, `-bold-italic`), parsed to Ghostty's grammar
+and applied to the parsed faces at atlas construction.
+
+- **Both faces, or neither.** giest keeps two views of each font: `ab_glyph::FontRef` rasterizes the
+  outline and `rustybuzz::Face` decides the advance. A variation set on one alone draws glyphs of
+  one weight on spacing computed for another, which reads as bad kerning rather than as a broken
+  feature — so `apply_variations` sets both, and the test **measures** it: Segoe UI Variable's `M`
+  advance moves 43.207 → 46.050 at `wght` 300 → 700, and the shaped advance has to move with it.
+- **Applied before the metrics are derived.** An axis like `wght` or `wdth` changes advance widths,
+  which is what the cell size is computed from. Ordering this the other way would give a grid sized
+  for the font's default instance and glyphs drawn for the configured one.
+- **The grammar is *not* `font-feature`'s, and the difference is load-bearing.** Upstream trims
+  whitespace around both halves of `id=value` (so `wght = 350` is valid, where the same spacing is
+  rejected for `font-feature` — there the value goes to rustybuzz's stricter parser), and it takes
+  **one axis per occurrence** with no comma splitting. Accepting `wght=350, wdth=90` here would bind
+  a config a real Ghostty rejects, so it is rejected, with a message.
+- **The style slots do not inherit, which is upstream's behaviour and surprising.**
+  `SharedGridSet.zig` hands each style descriptor only its own key's list, so `font-variation` alone
+  leaves the bold face at the font's default weight. Pinned by a test so it can't quietly drift into
+  inheritance, and called out in the guide, because it is the first thing someone will report as a
+  bug.
+- **The user's `font-family` chain gets the base variations; the system fallbacks do not.** Upstream
+  builds a descriptor from *every* entry in `font-family` and gives each `font-variation`, so the
+  chain matches. Nothing configured the system fallbacks, and an axis meant for a coding font has no
+  business reshaping the emoji face that happens to share a tag name.
+- **An unknown axis is reported once and skipped.** Upstream says "invalid ids and values are
+  usually ignored", and a config shared between machines will name axes some installed fonts lack —
+  but silence would make a typo in the tag indistinguishable from a font that doesn't have it, and
+  that is the most likely way to get this wrong.
+
+**Divergences:**
+
+- **An out-of-range value is silently ignored, not clamped** — upstream's documented behaviour
+  ("setting `wght=800` will do nothing") and, here, also a limit: neither backend reports whether a
+  value was in range, so giest cannot warn about it the way it warns about an unknown axis.
+- **The bundled font has no variation axes**, so the feature does nothing until `font-family` points
+  at a variable font. That is a property of the shipped asset rather than of the feature, and it is
+  asserted in a test: swapping the bundled JetBrains Mono for a VF fails there, and the
+  documentation gets revisited with it.
+- **Applied at startup**, like every other font key — a config reload re-applies colors and sizes,
+  not fonts.
+
+**Verified**: `cargo test` — the parser (trimming, repetition, the rejected comma list, the reset,
+and six malformed forms), the per-slot independence, and the end-to-end axis effect measured on
+Segoe UI Variable through `apply_variations`, asserting the rasterizer *and* the shaper moved. The
+appearance of a variable font at a non-default weight still wants a human look.
 
 ### The terminal inspector — ✅ divergences
 
@@ -1116,7 +1166,8 @@ grep -oE '^@"[a-z0-9-]+"' ghostty-src/src/config/Config.zig | tr -d '@"' | sort 
 grep -oE '\("[a-z0-9-]+", \|' src/config.rs | grep -oE '"[a-z0-9-]+"' | tr -d '"' | sort -u
 ```
 
-**187 upstream keys; giest now sets 104, of which 96 are upstream's** (`config-file`, then `undo-timeout`, since) (the rest are giest-specific,
+**187 upstream keys; giest now sets 108, of which 100 are upstream's** (`config-file`, then
+`undo-timeout`, then the four `font-variation*` keys, since) (the rest are giest-specific,
 e.g. `text-gamma`). That replaces the "~250 options / ~230 remaining" estimates this document opened
 with, which were never counted.
 

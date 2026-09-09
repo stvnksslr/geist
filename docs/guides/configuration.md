@@ -198,6 +198,8 @@ Ghostty would. Double-click-*drag* also doesn't snap to whole words yet.
 | `font-family` | repeatable string | A family name or a path to a font file. **Repeat it to build a fallback chain**: the first that resolves is the primary font (it sets the cell metrics), and the rest are searched, in order, for characters it lacks — ahead of the system fonts. An empty value clears the list. |
 | `font-family-bold` / `-italic` / `-bold-italic` | string | Per-style overrides; each falls back to the primary family. |
 | `font-feature` | repeatable | OpenType features, e.g. `-calt` to drop programming ligatures. |
+| `font-variation` | repeatable `id=value` | Variable-font axis settings — see below. |
+| `font-variation-bold` / `-italic` / `-bold-italic` | repeatable `id=value` | The same, for that style slot. |
 | `font-synthetic-style` | bool or list | Whether a missing style may be **synthesized** from the face you have: bold by thickening it, italic by slanting it 12°. `false` disables all three; a list starts from the defaults, so `no-bold` disables only bold — note that it does **not** disable `bold-italic`, which you must turn off by name. |
 
 Synthesis only happens when your family genuinely lacks the style: if the font has a real bold face,
@@ -206,6 +208,39 @@ thickens a real italic, else does both to the regular — upstream's preference 
 
 Font selection is applied **at startup**; changing any of these keys needs a restart (a config
 reload re-applies colors and sizes, not fonts).
+
+#### Variable fonts (`font-variation`)
+
+A *variable* font packs several designs into one file along named axes — `wght` (weight), `wdth`
+(width), `slnt` (slant), `opsz` (optical size) — and a variation picks a point on them. One axis per
+line, repeated:
+
+```ini
+font-family = Recursive Mono Casual Static
+font-variation = wght=350
+font-variation = slnt=0
+font-variation-bold = wght=700
+```
+
+The axis id is always exactly four characters. Whitespace around either side of the `=` is fine
+(`wght = 350`), unlike `font-feature`. Values are **not** comma-separated — that is the shape
+`font-feature` takes, and writing `font-variation = wght=350, wdth=90` is rejected here because a
+real Ghostty config rejects it too. An empty value clears that slot.
+
+Two things surprise people, and both are upstream's behaviour rather than giest's:
+
+- **The style slots do not inherit.** `font-variation` applies to the regular face only. If you want
+  a weight on bold too you must also write `font-variation-bold`; setting only `font-variation` will
+  leave the bold face at the font's default weight.
+- **An axis a font doesn't have is ignored, and so is an out-of-range value.** `wght=800` on a font
+  that stops at 700 does nothing — it is not clamped. giest logs a line when the *axis* is unknown,
+  since a typo in the tag is otherwise indistinguishable from a font that lacks it; an out-of-range
+  value cannot be detected and is silent.
+
+**The bundled font is not variable.** giest ships a static JetBrains Mono, so `font-variation` does
+nothing until you point `font-family` at a variable font of your own. Windows ships two you can try
+it against: `Bahnschrift` (`wght`, `wdth`) and `Segoe UI Variable` (`wght`, `opsz`) — neither is
+monospaced, so they are for confirming the feature works rather than for daily use.
 
 ### Font and cell metric adjustments (`adjust-*`)
 

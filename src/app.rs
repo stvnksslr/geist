@@ -6094,6 +6094,7 @@ fn font_spec(config: &Config) -> render::FontSpec {
         family_italic: config.font_family_italic.clone(),
         family_bold_italic: config.font_family_bold_italic.clone(),
         features: config.font_features.clone(),
+        variations: config.font_variations.clone(),
         adjust: config.adjust,
         synthetic: config.font_synthetic_style,
     }

@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use ab_glyph::{Font, FontRef, FontVec, GlyphId, PxScale, ScaleFont, point};
+use ab_glyph::{Font, FontRef, FontVec, GlyphId, PxScale, ScaleFont, VariableFont, point};
 use eframe::wgpu;
 use rustybuzz::ttf_parser;
 use rustybuzz::{Direction, Face as ShapeFace, Feature, UnicodeBuffer};
@@ -372,6 +372,10 @@ pub struct FontSpec {
     pub family_bold_italic: Option<String>,
     /// OpenType feature specs (e.g. `-calt`, `ss01`, `cv01=2`) applied at shaping.
     pub features: Vec<String>,
+    /// Variable-font axis settings per style slot (regular, bold, italic,
+    /// bold-italic). Applied to the parsed face, so they move the *outlines* and
+    /// therefore the cell metrics — unlike `features`, which act at shaping.
+    pub variations: [Vec<crate::config::FontVariation>; 4],
     /// The `adjust-*` metric modifiers.
     pub adjust: crate::config::MetricAdjust,
     /// Which missing styles may be synthesized (`font-synthetic-style`).
@@ -551,6 +555,41 @@ fn has_4char_tag(spec: &str) -> bool {
     let s = s.strip_prefix(['+', '-']).unwrap_or(s);
     let s = s.strip_prefix(['\'', '"']).unwrap_or(s);
     s.chars().take_while(char::is_ascii_alphanumeric).count() == 4
+}
+
+/// Apply `font-variation` axes to a style slot's rasterizer and shaper faces.
+///
+/// An axis the font doesn't have is **reported once and skipped**, not an error:
+/// upstream says "invalid ids and values are usually ignored", and a config
+/// shared between machines will name axes some installed fonts lack. But it is
+/// reported, because "nothing happened" is otherwise indistinguishable from a
+/// typo in the tag — the most likely way to get this wrong.
+///
+/// Out-of-range *values* are not detected here and cannot be: upstream notes
+/// they are ignored rather than clamped ("if a font only supports weights from
+/// 100 to 700, setting `wght=800` will do nothing"), and neither backend
+/// reports the difference.
+fn apply_variations(
+    font: &mut FontRef<'static>,
+    shaper: &mut ShapeFace<'static>,
+    variations: &[crate::config::FontVariation],
+) {
+    for v in variations {
+        // The shaper's setter reports nothing, so the rasterizer's return is the
+        // only signal either way — and they parse the same file, so it speaks
+        // for both.
+        let known = font.set_variation(&v.tag, v.value);
+        shaper.set_variations(&[rustybuzz::Variation {
+            tag: rustybuzz::ttf_parser::Tag::from_bytes(&v.tag),
+            value: v.value,
+        }]);
+        if !known {
+            eprintln!(
+                "giest: font-variation '{}' is not an axis of this font; ignoring it",
+                v.tag_str()
+            );
+        }
+    }
 }
 
 /// Leak font bytes to `'static`. The atlas (and its `FontRef`/`ShapeFace`, which
@@ -927,12 +966,17 @@ impl Atlas {
             // The built-in fonts always parse; a resolved user font that fails to
             // build (corrupt/unsupported) falls back to the built-in for that slot.
             let embedded = [FONT_REGULAR, FONT_BOLD, FONT_ITALIC, FONT_BOLD_ITALIC][i];
-            let font = FontRef::try_from_slice_and_index(bytes, idx)
+            let mut font = FontRef::try_from_slice_and_index(bytes, idx)
                 .or_else(|_| FontRef::try_from_slice(embedded))
                 .expect("font face");
-            let shaper = ShapeFace::from_slice(bytes, idx)
+            let mut shaper = ShapeFace::from_slice(bytes, idx)
                 .or_else(|| ShapeFace::from_slice(embedded, 0))
                 .expect("shaper face");
+            // `font-variation` must reach **both** faces, and the reason is not
+            // symmetry: the rasterizer draws the outline while the shaper decides
+            // the advance, so setting an axis on one alone gives glyphs of one
+            // weight positioned for another.
+            apply_variations(&mut font, &mut shaper, &spec.variations[i]);
             (font, shaper)
         };
         let (f0, s0) = face(0);
@@ -956,7 +1000,18 @@ impl Atlas {
             match find_regular_font(family)
                 .and_then(|(bytes, idx)| FontVec::try_from_vec_and_index(bytes.to_vec(), idx).ok())
             {
-                Some(font) => fallbacks.push(font),
+                Some(mut font) => {
+                    // The chain is part of `font-family`, and upstream applies
+                    // `font-variation` to *every* descriptor built from that
+                    // list — so these get it too. The system fallbacks below
+                    // deliberately do not: nothing configured them, and an axis
+                    // meant for your coding font has no business reshaping the
+                    // emoji face it happens to share a tag with.
+                    for v in &spec.variations[0] {
+                        font.set_variation(&v.tag, v.value);
+                    }
+                    fallbacks.push(font);
+                }
                 None => eprintln!("giest: font-family '{family}' not found; skipping it"),
             }
         }
@@ -1557,10 +1612,11 @@ mod tests {
         FONT_ITALIC, FONT_REGULAR, Feature, FontSpec, LayerCollector, ShapeFace, classify,
         composite_color_layers, face_matches, family_name_matches, find_font, find_regular_font,
         derive_metrics, fit_scale, has_4char_tag, parse_features, resolve_slots, RawFontMetrics,
-        Raster, Synth, embolden, embolden_strength, shear, ITALIC_SKEW,
+        Raster, Synth, apply_variations, embolden, embolden_strength, leak_font, shear,
+        ITALIC_SKEW,
     };
     use crate::config::MetricAdjust;
-    use ab_glyph::{Font, FontRef, FontVec};
+    use ab_glyph::{Font, FontRef, FontVec, ScaleFont, VariableFont};
     use rustybuzz::ttf_parser;
     use rustybuzz::{Direction, UnicodeBuffer};
     use std::str::FromStr;
@@ -1988,6 +2044,100 @@ mod tests {
         assert_eq!(synth[1], Synth::default(), "bold synthesis is off");
         assert!(synth[3].bold && synth[3].italic, "bold-italic is untouched");
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn the_bundled_font_has_no_variation_axes() {
+        // Not a limitation of the *feature* — a fact about the asset, and the
+        // one users will trip on: `font-variation` does nothing until you point
+        // `font-family` at a variable font, because the bundled JetBrains Mono
+        // is a static instance. Asserted so that swapping the asset for a VF
+        // fails here and the documentation gets revisited with it.
+        for bytes in [FONT_REGULAR, FONT_BOLD, FONT_ITALIC, FONT_BOLD_ITALIC] {
+            let font = FontRef::try_from_slice(bytes).expect("bundled font parses");
+            assert!(
+                font.variations().is_empty(),
+                "the bundled font gained variation axes; revisit the font-variation docs"
+            );
+        }
+    }
+
+    #[test]
+    fn a_variation_moves_the_outline_and_the_shaper_together() {
+        // The measurable half of `font-variation`, on a font Windows 10+ ships:
+        // Segoe UI Variable's `wght` axis runs 300–700 and changes the advance
+        // width of `M` (measured: 43.207 → 46.050 at 64px). That advance is what
+        // makes this worth asserting rather than eyeballing — a variation
+        // applied to the rasterizer but *not* the shaper would draw bold glyphs
+        // on regular-width spacing, which reads as bad kerning rather than as a
+        // missing feature.
+        const PATH: &str = r"C:\Windows\Fonts\SegUIVar.ttf";
+        let Ok(bytes) = std::fs::read(PATH) else {
+            // Not every Windows install has it; the parser tests carry the
+            // grammar and this one only adds the end-to-end effect.
+            eprintln!("skipping: {PATH} not present");
+            return;
+        };
+        let bytes = leak_font(bytes);
+        let mut font = FontRef::try_from_slice(bytes).expect("variable font parses");
+        let mut shaper = ShapeFace::from_slice(bytes, 0).expect("shaper face");
+        let axes = font.variations();
+        assert!(
+            axes.iter().any(|a| &a.tag == b"wght"),
+            "Segoe UI Variable should expose a wght axis"
+        );
+
+        let glyph = font.glyph_id('M');
+        let before = font.as_scaled(64.0).h_advance(glyph);
+        let before_shaped = shaped_advance(&shaper, "M");
+
+        apply_variations(
+            &mut font,
+            &mut shaper,
+            &[crate::config::FontVariation {
+                tag: *b"wght",
+                value: 700.0,
+            }],
+        );
+
+        let after = font.as_scaled(64.0).h_advance(glyph);
+        let after_shaped = shaped_advance(&shaper, "M");
+        assert!(
+            after > before,
+            "a heavier weight should widen M: {before} -> {after}"
+        );
+        assert!(
+            after_shaped > before_shaped,
+            "the shaper must move with the outline: {before_shaped} -> {after_shaped}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_axis_is_ignored_rather_than_fatal() {
+        // Upstream: "invalid ids and values are usually ignored". A config
+        // shared between machines will name axes some fonts lack.
+        let mut font = FontRef::try_from_slice(FONT_REGULAR).expect("bundled font");
+        let mut shaper = ShapeFace::from_slice(FONT_REGULAR, 0).expect("shaper");
+        let glyph = font.glyph_id('M');
+        let before = font.as_scaled(64.0).h_advance(glyph);
+        apply_variations(
+            &mut font,
+            &mut shaper,
+            &[crate::config::FontVariation {
+                tag: *b"nope",
+                value: 1.0,
+            }],
+        );
+        assert_eq!(font.as_scaled(64.0).h_advance(glyph), before);
+    }
+
+    /// The advance rustybuzz reports for `text`, in font units — the shaper's
+    /// half of the pair above.
+    fn shaped_advance(face: &ShapeFace<'static>, text: &str) -> i32 {
+        let mut buf = UnicodeBuffer::new();
+        buf.push_str(text);
+        let glyphs = rustybuzz::shape(face, &[], buf);
+        glyphs.glyph_positions().iter().map(|p| p.x_advance).sum()
     }
 
     #[test]

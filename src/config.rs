@@ -896,6 +896,14 @@ pub struct Config {
     /// ligatures/contextual alternates), `ss01`, `cv01=2`. Repeatable. Ghostty
     /// `font-feature`.
     pub font_features: Vec<String>,
+    /// Variable-font axis settings, per style slot, in the order
+    /// regular / bold / italic / bold-italic. Ghostty `font-variation` and its
+    /// three `-bold` / `-italic` / `-bold-italic` siblings.
+    ///
+    /// One list **per slot, not inherited**: upstream hands each style
+    /// descriptor only its own key's list, so `font-variation` alone leaves the
+    /// bold face at the font's default weight. Surprising, and parity.
+    pub font_variations: [Vec<FontVariation>; 4],
     /// Default foreground (text) color. Ghostty `foreground`.
     pub fg: Rgb,
     /// Default background color. Ghostty `background`.
@@ -1161,6 +1169,7 @@ impl Default for Config {
             font_family_italic: None,
             font_family_bold_italic: None,
             font_features: Vec::new(),
+            font_variations: Default::default(),
             fg: Rgb::new(0xc5, 0xc8, 0xc6),
             bg: Rgb::new(0x10, 0x12, 0x18),
             palette: xterm_palette(GIEST_ANSI16),
@@ -1519,6 +1528,10 @@ const SETTERS: &[(&str, Setter)] = &[
             }
         }
     }),
+    ("font-variation", |c, v, d| set_font_variation(c, d, v, 0)),
+    ("font-variation-bold", |c, v, d| set_font_variation(c, d, v, 1)),
+    ("font-variation-italic", |c, v, d| set_font_variation(c, d, v, 2)),
+    ("font-variation-bold-italic", |c, v, d| set_font_variation(c, d, v, 3)),
     ("foreground", |c, v, d| c.fg = color(v, d.fg, c.fg)),
     ("background", |c, v, d| c.bg = color(v, d.bg, c.bg)),
     ("cursor-color", |c, v, d| c.cursor = opt_color(v, d.cursor, c.cursor)),
@@ -2307,6 +2320,72 @@ fn ratio(value: &str, default: f32, current: f32, min: f32, max: f32) -> f32 {
     } else {
         value.parse::<f32>().map(|n| n.clamp(min, max)).unwrap_or(current)
     }
+}
+
+/// The body of all four `font-variation*` keys, so the slots cannot drift.
+///
+/// Repeatable like `font-feature` and `palette`: each line **appends** one axis,
+/// and an empty value resets that slot to the default (empty). A malformed line
+/// is dropped and reported — silence would be indistinguishable from a font
+/// that doesn't have the axis, which is the failure this feature is most likely
+/// to be blamed for.
+fn set_font_variation(c: &mut Config, d: &Config, v: &str, slot: usize) {
+    if v.is_empty() {
+        c.font_variations[slot] = d.font_variations[slot].clone();
+        return;
+    }
+    match parse_font_variation(v) {
+        Some(var) => c.font_variations[slot].push(var),
+        None => eprintln!(
+            "giest: font-variation: expected a 4-character axis and a number, e.g. `wght=200`; got {v:?}"
+        ),
+    }
+}
+
+/// One variable-font axis setting. Ghostty `font-variation` and its three
+/// per-style siblings.
+///
+/// A *variable* font packs several designs into one file along named axes —
+/// `wght` (weight), `wdth` (width), `slnt` (slant), `opsz` (optical size) — and
+/// a variation picks a point on them. The tag is always exactly four bytes;
+/// that is the OpenType format's rule, not a parser convenience.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FontVariation {
+    pub tag: [u8; 4],
+    pub value: f32,
+}
+
+impl FontVariation {
+    /// The tag as text, for messages and round-tripping.
+    pub fn tag_str(&self) -> String {
+        self.tag.iter().map(|b| *b as char).collect()
+    }
+}
+
+/// Parse one `id=value` variation, Ghostty's `RepeatableFontVariation.parseCLI`.
+///
+/// Whitespace around **both** halves is trimmed — upstream trims explicitly, so
+/// `wght = 200` is valid here even though the same spacing is rejected for
+/// `font-feature` (there the value is handed to rustybuzz, whose parser is
+/// stricter than Ghostty's). The tag must be exactly four characters and the
+/// value must parse as a float; anything else is rejected rather than guessed
+/// at, because a silently-dropped axis looks exactly like a font that doesn't
+/// support it.
+///
+/// Note the **absence** of comma splitting, which `font-feature` has: upstream
+/// takes one axis per occurrence and repeats the key, and splitting here would
+/// accept `wght=200, wdth=90` that a real Ghostty config rejects.
+fn parse_font_variation(s: &str) -> Option<FontVariation> {
+    let (id, value) = s.split_once('=')?;
+    let id = id.trim();
+    // Four *bytes*: an OpenType tag is four bytes, and a multi-byte character
+    // would make a 4-char string that is not a 4-byte tag.
+    let tag: [u8; 4] = id.as_bytes().try_into().ok()?;
+    if !id.is_ascii() {
+        return None;
+    }
+    let value: f32 = value.trim().parse().ok()?;
+    value.is_finite().then_some(FontVariation { tag, value })
 }
 
 /// Parse Ghostty's `Duration` grammar into milliseconds.
@@ -3291,6 +3370,59 @@ mod tests {
                 .resize_overlay_duration_ms,
             2_000
         );
+    }
+
+    #[test]
+    fn font_variation_parses_ghosttys_grammar() {
+        let one = |body: &str| parsed(body).font_variations[0].clone();
+        assert_eq!(
+            one("font-variation = wght=200"),
+            vec![FontVariation { tag: *b"wght", value: 200.0 }]
+        );
+        // Upstream trims around **both** halves — unlike `font-feature`, whose
+        // value is handed to rustybuzz's stricter parser.
+        assert_eq!(one("font-variation = wght = 200.5")[0].value, 200.5);
+        // Repeatable: one axis per line, appending.
+        assert_eq!(
+            one("font-variation = wght=200\nfont-variation = wdth=90")
+                .iter()
+                .map(|v| (v.tag_str(), v.value))
+                .collect::<Vec<_>>(),
+            vec![("wght".to_string(), 200.0), ("wdth".to_string(), 90.0)]
+        );
+        // …and **not** comma-split, which `font-feature` is: upstream takes one
+        // axis per occurrence, so accepting a list here would bind a config a
+        // real Ghostty rejects.
+        assert!(one("font-variation = wght=200, wdth=90").is_empty());
+        // An empty value resets the slot, like every other repeatable key.
+        assert!(one("font-variation = wght=200\nfont-variation =").is_empty());
+        // A tag must be exactly four ASCII characters, and the value a number.
+        for bad in ["wgh=200", "weight=200", "wght=heavy", "wght", "=200", "wgh†=200"] {
+            assert!(
+                one(&format!("font-variation = {bad}")).is_empty(),
+                "should reject {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn each_font_variation_slot_is_its_own_list() {
+        // Upstream hands each style descriptor **only** its own key's list, so
+        // `font-variation` alone leaves the bold face at the font's default.
+        // Surprising, and parity — pinned so it can't drift into inheritance.
+        let c = parsed(
+            "font-variation = wght=300\n\
+             font-variation-bold = wght=700\n\
+             font-variation-italic = slnt=-10\n\
+             font-variation-bold-italic = wght=700\n\
+             font-variation-bold-italic = slnt=-10",
+        );
+        assert_eq!(c.font_variations[0].len(), 1);
+        assert_eq!(c.font_variations[1][0].value, 700.0);
+        assert_eq!(c.font_variations[2][0].tag_str(), "slnt");
+        assert_eq!(c.font_variations[3].len(), 2);
+        // The regular slot is untouched by the others.
+        assert_eq!(c.font_variations[0][0].value, 300.0);
     }
 
     #[test]
