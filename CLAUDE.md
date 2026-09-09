@@ -145,8 +145,9 @@ fallback engine without app changes:
   doesn't understand. `ESC _ … ESC \` (APC, used by kitty graphics) never reaches
   `TerminalEngine::write` at all, while ordinary text and OSC pass fine — so the symptom is "the
   feature does nothing" with no error anywhere. Before debugging any new escape-sequence support,
-  **confirm the bytes actually arrive** (a temporary probe in `GhosttyVtEngine::write` looking for
-  the prefix takes a minute and saves an afternoon). The fix is
+  **confirm the bytes actually arrive**. That probe is now permanent: `Ctrl+Shift+I` opens the
+  inspector, whose Terminal IO log records every PTY read with each control byte rendered
+  distinctly, taken *before* `engine.write` sees it. The fix is
   `PSEUDOCONSOLE_PASSTHROUGH_MODE` (`0x8`), which portable-pty declares at
   `src/win/psuedocon.rs:31` under `#[allow(dead_code)]` and never passes (`:83-90` sends only
   `RESIZE_QUIRK | WIN32_INPUT_MODE`); using it means vendoring and patching portable-pty, and it
@@ -290,7 +291,10 @@ fallback engine without app changes:
   A modal also stops `handle_shortcuts` running at all, so **any keybind the modal itself wants has
   to be resolved by the modal**, against the keymap rather than a hardcoded key — otherwise the
   binding is dead exactly where it is meant to work, and `unbind` on it is a lie. The search bar's
-  `search_overlay_actions` is the worked example.
+  `search_overlay_actions` is the worked example. The **inspector is the deliberate exception**: it
+  is in neither gate, because a keyboard log you cannot type into is useless — but a non-modal
+  overlay still has to withhold the *pointer* where it sits, or a click on its own button also
+  starts a text selection in the pane below (`Window::inspector_rect`).
 - **`close_requested` must be answered in the same pass.** eframe reads it from that pass's raw input
   and exits afterwards unless `ViewportCommand::CancelClose` appears in the same pass's output. And
   once a confirmed close sends `ViewportCommand::Close`, the resulting pass sees `close_requested`

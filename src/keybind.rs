@@ -598,6 +598,9 @@ fn default_binds() -> Vec<Bind> {
         ("ctrl+shift+]", Action::FocusSplitNext),
         ("ctrl+shift+p", Action::TogglePalette),
         ("ctrl+shift+f", Action::ToggleSearch),
+        // Ghostty's own trigger, which its comment records as "matching
+        // Chromium" — the devtools chord every browser uses.
+        ("ctrl+shift+i", Action::Inspector(crate::inspector::InspectorMode::Toggle)),
         ("ctrl+alt+left", Action::FocusSplitLeft),
         ("ctrl+alt+right", Action::FocusSplitRight),
         ("ctrl+alt+up", Action::FocusSplitUp),
@@ -761,6 +764,117 @@ fn key_from_name(name: &str) -> Option<KeyCode> {
         "f12" => F12,
         _ => return None,
     })
+}
+
+/// The config spelling of a key code — the inverse of [`key_from_name`].
+///
+/// Written out rather than derived from `Debug`, because its consumer is the
+/// inspector's keyboard log, whose whole job is to answer "what do I type after
+/// `keybind =` to bind this key?". `ArrowLeft` is not that answer; `left` is.
+/// Where `key_from_name` accepts several spellings this returns the one
+/// upstream's own configs use.
+pub fn key_name(code: KeyCode) -> &'static str {
+    use KeyCode::*;
+    match code {
+        CatchAll => "catch_all",
+        A => "a",
+        B => "b",
+        C => "c",
+        D => "d",
+        E => "e",
+        F => "f",
+        G => "g",
+        H => "h",
+        I => "i",
+        J => "j",
+        K => "k",
+        L => "l",
+        M => "m",
+        N => "n",
+        O => "o",
+        P => "p",
+        Q => "q",
+        R => "r",
+        S => "s",
+        T => "t",
+        U => "u",
+        V => "v",
+        W => "w",
+        X => "x",
+        Y => "y",
+        Z => "z",
+        Digit0 => "0",
+        Digit1 => "1",
+        Digit2 => "2",
+        Digit3 => "3",
+        Digit4 => "4",
+        Digit5 => "5",
+        Digit6 => "6",
+        Digit7 => "7",
+        Digit8 => "8",
+        Digit9 => "9",
+        ArrowLeft => "left",
+        ArrowRight => "right",
+        ArrowUp => "up",
+        ArrowDown => "down",
+        Tab => "tab",
+        Enter => "enter",
+        Space => "space",
+        Escape => "escape",
+        Backspace => "backspace",
+        Delete => "delete",
+        Insert => "insert",
+        Home => "home",
+        End => "end",
+        PageUp => "pageup",
+        PageDown => "pagedown",
+        Minus => "minus",
+        Equal => "equal",
+        BracketLeft => "[",
+        BracketRight => "]",
+        Backslash => "\\",
+        Semicolon => ";",
+        Quote => "'",
+        Backquote => "`",
+        Comma => ",",
+        Period => ".",
+        Slash => "/",
+        F1 => "f1",
+        F2 => "f2",
+        F3 => "f3",
+        F4 => "f4",
+        F5 => "f5",
+        F6 => "f6",
+        F7 => "f7",
+        F8 => "f8",
+        F9 => "f9",
+        F10 => "f10",
+        F11 => "f11",
+        F12 => "f12",
+    }
+}
+
+impl Chord {
+    /// This chord in config spelling, e.g. `ctrl+shift+t`.
+    ///
+    /// Modifier order is upstream's (`super`, `ctrl`, `alt`, `shift`), so a
+    /// chord copied out of the inspector into a config parses back to itself.
+    pub fn name(&self) -> String {
+        let mut out = String::new();
+        for (on, name) in [
+            (self.mods.sup, "super"),
+            (self.mods.ctrl, "ctrl"),
+            (self.mods.alt, "alt"),
+            (self.mods.shift, "shift"),
+        ] {
+            if on {
+                out.push_str(name);
+                out.push('+');
+            }
+        }
+        out.push_str(key_name(self.code));
+        out
+    }
 }
 
 #[cfg(test)]
@@ -1475,6 +1589,40 @@ mod tests {
         assert_eq!(km.lookup(&chord("ctrl+tab")), Some(Action::NextTab));
         // An unbound chord resolves to nothing.
         assert_eq!(km.lookup(&chord("ctrl+shift+j")), None);
+    }
+
+    #[test]
+    fn every_chord_round_trips_through_its_config_spelling() {
+        // `Chord::name` feeds the inspector's keyboard log, which exists to tell
+        // you what to put in your config — so the string it prints has to parse
+        // back to the chord it printed. Exhaustive over the key table, because a
+        // single wrong row would be a name that silently doesn't bind.
+        for &code in crate::engine::KeyCode::ALL {
+            for mods in [
+                KeyMods::default(),
+                KeyMods { ctrl: true, ..Default::default() },
+                KeyMods { ctrl: true, shift: true, ..Default::default() },
+                KeyMods { sup: true, ctrl: true, alt: true, shift: true },
+            ] {
+                let chord = Chord { mods, code };
+                let name = chord.name();
+                assert_eq!(parse_chord(&name), Some(chord), "round-trip {name:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn ctrl_shift_i_toggles_the_inspector() {
+        // Upstream's trigger, whose own comment records it as "matching
+        // Chromium" — the devtools chord.
+        let km = Keymap::default();
+        assert_eq!(
+            km.lookup(&chord("ctrl+shift+i")),
+            Some(Action::Inspector(crate::inspector::InspectorMode::Toggle))
+        );
+        // Not performable: upstream binds it with a plain `put`, and the panel
+        // should open whatever the pane is doing.
+        assert!(!km.is_performable(&[chord("ctrl+shift+i")]));
     }
 
     #[test]

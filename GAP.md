@@ -163,7 +163,8 @@ blur (Windows acrylic), `faint-opacity`, `cursor-opacity`, unfocused-split dimmi
 shaders**, **box-drawing/block/braille/powerline sprites**, the **`adjust-*` metric family** and
 `isCovering` — now done.)*
 
-**Window / UI** — titlebar/decoration styles; settings UI; inspector; about dialog; custom app icons.
+**Window / UI** — titlebar/decoration styles; settings UI; about dialog; custom app icons.
+*(the **inspector** is now done — see its ledger.)*
 *(fullscreen toggle, split zoom, tab drag-reorder, resize overlay, confirm-close-surface,
 **multi-window**, **scrollbar**, **`window-theme` + the chrome design system** (`theme.rs`:
 tab strip, palette, overlays and dialogs all derive their colors from
@@ -175,8 +176,8 @@ light/dark preference), **window/tab/split state restore** (`window-save-state`)
 binding, leader sequences, key tables, `catch_all`, `chain=`, all four trigger flags — `global:`,
 `performable:`, `unconsumed:` and `all:` — the `write_*_file` / `set_*_title` / `toggle_*` /
 `text:` / `csi:` / `esc:` actions, and now **`undo`/`redo` + `undo-timeout`**. The only remaining
-gap against upstream's action union is the **inspector**, which needs a subsystem giest doesn't
-have.)*
+gap against upstream's action union is **`show_gtk_inspector`**, which is GTK's own widget
+inspector and has no Windows counterpart. giest's `inspector:` is now done.)*
 
 **Selection / scroll / search** — upstream's 60%-of-cell threshold for including the clicked/dragged
 cell; the double-click-*drag* word-snapping refinement; regex search. *(scrollback search plus
@@ -298,7 +299,8 @@ Effort: **S** <1d · **M** 1–3d · **L** ~1wk · **XL** multi-wk. Status: ✅ 
 auto-update · about dialog /
 custom icon · AppleScript / App-Intents / Services → Windows IPC ·
 legacy-computing sprites · COLRv1 emoji · grapheme-width ·
-window decorations / titlebar / colorspace · settings UI · inspector. *(all ⬜)*
+window decorations / titlebar / colorspace · settings UI. *(all ⬜; the **inspector** is
+done — see its ledger.)*
 
 **Done from this tier:** window geometry (`window-width`/`-height` in cells, `window-position-x`/`-y`)
 plus `toggle_maximize`, `toggle_window_float_on_top` and `toggle_background_opacity` — the last three
@@ -398,7 +400,74 @@ With Phase 0 done, the remaining Tier-1 items are mostly small, registry-backed 
 32. ✅ **The five search actions** — `start_search` / `end_search` / `navigate_search:` /
     `search_selection` / `search:`, plus `escape=end_search` and a search bar that resolves its
     keys through the keymap. See the ledger below.
-33. Next: the inspector.
+33. ✅ **The terminal inspector** — `inspector:toggle|show|hide` on `ctrl+shift+i`, with the
+    keyboard and PTY logs the Windows-specific debugging actually needs. See the ledger below.
+34. Next: Tier 3 — `font-variation`, COLRv1 emoji, legacy-computing sprites, window
+    decorations/titlebar, a settings UI.
+
+### The terminal inspector — ✅ divergences
+
+`inspector:toggle|show|hide` on `ctrl+shift+i` (upstream's own trigger, whose comment records it as
+"matching Chromium"), drawn as an egui window over the pane it belongs to. New `src/inspector.rs`
+holds the capture — bounded ring buffers and the byte rendering — and is pure and unit-tested;
+`app.rs` draws it.
+
+Four sections against upstream's five ImGui windows: **Surface** (grid, cell and pane geometry,
+font size, DPI), **Terminal** (cursor, scrollback, resolved colors, mouse tracking, selection,
+read-only, kitty placements, title, cwd), **Keyboard** and **Terminal IO**.
+
+- **The two logs are the point, and they are Windows-shaped.** Upstream's `termio` window shows
+  libghostty's *parsed* VT actions; giest's engine is behind a `write(&[u8])` trait, so what it can
+  show is the byte stream — which turns out to be the more useful half here. ConPTY does not pipe a
+  child's output through: it parses the VT and emits its *own* stream, silently dropping sequences
+  it doesn't understand (APC, and with it kitty graphics). CLAUDE.md's standing advice for any
+  escape-sequence work is to first confirm the bytes arrive, by adding a temporary probe to
+  `GhosttyVtEngine::write`. This is that probe, made permanent and readable.
+- **The keyboard log prints chords in *config spelling*.** Its question is "what do I put after
+  `keybind =` to bind this?", so a `Debug` rendering (`ArrowLeft`) would be the wrong answer where
+  `left` is the right one. That needed `keybind::key_name` as the inverse of `key_from_name` and a
+  `Chord::name`, pinned by an **exhaustive** round-trip test over `KeyCode::ALL` × four modifier
+  sets: one wrong row would be a chord the inspector prints and the config then refuses to bind.
+- **Capture is taken at the two chokepoints that know the whole answer.** Keys are logged in
+  `handle_input` right after `decide_key`, the only point that has the chord, the decision *and* the
+  bytes the encoder produced — earlier and it couldn't report the encoding, later and a *swallowed*
+  key wouldn't appear at all, which is exactly the press someone opens the panel to explain. Reads
+  are logged in `pump_pty` **before** `engine.write`, the last honest view of the stream.
+- **It costs nothing while closed.** The log is an `Option` on the `Session`, `None` until an
+  inspector is opened on that pane, so both record calls are a null check. That is also why it is
+  per-pane state rather than the window's — and it matches upstream, whose inspector is per-surface.
+- **It is deliberately not a modal.** Every other overlay in giest takes the keyboard (CLAUDE.md's
+  two-gate rule); this one is in *neither* gate, because a keyboard log you cannot type into and an
+  IO log over a program you cannot watch redraw would both be useless. The pointer is a different
+  matter: the pane underneath still hit-tests, so a click on `Pause` would also start a text
+  selection. `Window::inspector_rect` — last frame's rect, the `last_layout` idiom — withholds the
+  pointer (and the scrollbar's) where the panel is.
+- **Every control byte gets its own glyph** (`␛`, `␇`, `␍` from the Control Pictures block), unlike
+  `app::preview_text`, which collapses them onto one `␦`. That one is showing a human what they are
+  about to paste; here the whole question is *which* control arrived. Invalid UTF-8 shows as `\xNN`
+  rather than U+FFFD for the same reason — a replacement character would read as corruption in the
+  terminal rather than in the byte stream.
+
+**Divergences from upstream:**
+
+- **No parsed VT actions, no DEC mode table, no per-cell or pagelist browsing, no renderer
+  statistics.** All four read state the binding does not surface (`libghostty-vt` exposes no mode
+  enumeration and no parser event stream), so they would be invented rather than reported.
+- **Four collapsing sections, not five dockable windows.** giest has no docking, and five floating
+  ImGui-style windows over a single terminal pane would be unusable at a terminal's size.
+- **`show` on an already-open inspector keeps the capture**, rather than restarting it — the same
+  rule `start_search` follows, and the one branch in the feature, so it has its own test.
+- **Closing drops the capture.** Nothing quietly retains a buffer of the user's terminal output
+  after the panel is closed, which is also what makes the closed cost zero.
+- **`show_gtk_inspector` is not accepted**, even as a no-op: it is GTK's *widget* inspector, a
+  different thing from the terminal one, and there is no Windows counterpart to point it at.
+
+**Verified**: `cargo test` — the byte rendering (controls, DEL, UTF-8, invalid bytes, a real
+`ESC [ 2 J`, and the cap counting input bytes), the ring buffers dropping the oldest, pause and
+clear semantics, the mode decision, action round-trips and the default binding, plus the exhaustive
+chord round-trip. **The panel itself needs a human look** — an attempt to capture it failed for the
+reason CLAUDE.md records: synthetic keyboard input cannot take the foreground here, so the chord
+never reached the app. Open it with `Ctrl+Shift+I`, type into the pane and watch both logs fill.
 
 ### The search action family — ✅ divergences
 
@@ -1363,7 +1432,8 @@ guessed at, and the ones needing no new subsystem are now wired: `clear_screen`,
 - **The five search actions are now done** — `start_search`, `end_search`,
   `navigate_search:next|previous`, `search_selection` and `search:<text>`, alongside giest's own
   `toggle_search`. See their ledger below.
-- Still open: the **inspector**, the one remaining member of upstream's action union.
+- **`inspector:toggle|show|hide` is now done** — see its ledger below. Upstream's action union is
+  now fully covered apart from `show_gtk_inspector`, which is GTK's widget inspector.
 
 ### Keybind sequences — ◐ divergences
 

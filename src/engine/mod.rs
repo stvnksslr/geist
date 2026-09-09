@@ -331,6 +331,94 @@ pub enum KeyCode {
     Slash,
 }
 
+impl KeyCode {
+    /// Every key code, for tests that need to be exhaustive over the table —
+    /// notably the round-trip between [`crate::keybind::Chord::name`] and
+    /// `parse_chord`, where one wrong row is a chord the inspector prints and
+    /// the config then refuses to bind.
+    ///
+    /// Kept by hand, and deliberately not the compiler-enforced half of that
+    /// pair: `keybind::key_name`'s match has no `_` arm, so a new variant fails
+    /// the build there. A variant missing *here* only narrows a test.
+    pub const ALL: &'static [KeyCode] = &[
+        KeyCode::CatchAll,
+        KeyCode::A,
+        KeyCode::B,
+        KeyCode::C,
+        KeyCode::D,
+        KeyCode::E,
+        KeyCode::F,
+        KeyCode::G,
+        KeyCode::H,
+        KeyCode::I,
+        KeyCode::J,
+        KeyCode::K,
+        KeyCode::L,
+        KeyCode::M,
+        KeyCode::N,
+        KeyCode::O,
+        KeyCode::P,
+        KeyCode::Q,
+        KeyCode::R,
+        KeyCode::S,
+        KeyCode::T,
+        KeyCode::U,
+        KeyCode::V,
+        KeyCode::W,
+        KeyCode::X,
+        KeyCode::Y,
+        KeyCode::Z,
+        KeyCode::Digit0,
+        KeyCode::Digit1,
+        KeyCode::Digit2,
+        KeyCode::Digit3,
+        KeyCode::Digit4,
+        KeyCode::Digit5,
+        KeyCode::Digit6,
+        KeyCode::Digit7,
+        KeyCode::Digit8,
+        KeyCode::Digit9,
+        KeyCode::Enter,
+        KeyCode::Tab,
+        KeyCode::Backspace,
+        KeyCode::Escape,
+        KeyCode::Space,
+        KeyCode::Delete,
+        KeyCode::Insert,
+        KeyCode::Home,
+        KeyCode::End,
+        KeyCode::PageUp,
+        KeyCode::PageDown,
+        KeyCode::ArrowUp,
+        KeyCode::ArrowDown,
+        KeyCode::ArrowLeft,
+        KeyCode::ArrowRight,
+        KeyCode::F1,
+        KeyCode::F2,
+        KeyCode::F3,
+        KeyCode::F4,
+        KeyCode::F5,
+        KeyCode::F6,
+        KeyCode::F7,
+        KeyCode::F8,
+        KeyCode::F9,
+        KeyCode::F10,
+        KeyCode::F11,
+        KeyCode::F12,
+        KeyCode::Minus,
+        KeyCode::Equal,
+        KeyCode::BracketLeft,
+        KeyCode::BracketRight,
+        KeyCode::Backslash,
+        KeyCode::Semicolon,
+        KeyCode::Quote,
+        KeyCode::Backquote,
+        KeyCode::Comma,
+        KeyCode::Period,
+        KeyCode::Slash,
+    ];
+}
+
 /// A keyboard event to be encoded into a terminal byte sequence.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeyInput {

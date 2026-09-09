@@ -190,6 +190,10 @@ pub struct Session {
     /// from one place instead of every caller remembering to.
     scrollbar_last_px: f32,
     /// Scrollback-search overlay state (query + matches + current) while open.
+    /// This pane's inspector capture (Ghostty `inspector:`), `None` while no
+    /// inspector is open on it — which is what keeps the record calls on the
+    /// input and PTY paths free.
+    inspect: Option<crate::inspector::Log>,
     search: Option<SearchState>,
     /// Screen text captured when the search opened. Re-searched on each keystroke
     /// so matching doesn't re-walk the whole grid every frame. Empty when closed.
@@ -285,6 +289,7 @@ impl Session {
             scrollbar_grab: None,
             scrollbar_last_px: 0.0,
             search: None,
+            inspect: None,
             search_text: Vec::new(),
         })
     }
@@ -306,6 +311,18 @@ impl Session {
                     // scrollback of a command that is still producing output.
                     if self.scroll_to_bottom.output {
                         self.scroll_target_px = 0.0;
+                    }
+                    // The inspector's IO log, in the one place every byte from
+                    // the shell passes through. `None` unless an inspector is
+                    // open on this pane, so this is a null check otherwise.
+                    //
+                    // Recorded *before* the engine sees it, deliberately: the
+                    // question this log answers is "did the sequence arrive?",
+                    // and ConPTY re-renders a child's output rather than piping
+                    // it (see CLAUDE.md), so what lands here is the last honest
+                    // view of the stream.
+                    if let Some(log) = self.inspect.as_mut() {
+                        log.read(&chunk);
                     }
                     self.engine.write(&chunk);
                     self.osc52.feed(&chunk, &mut clipboard_requests);
@@ -1145,6 +1162,59 @@ impl Session {
         self.rows.saturating_sub(1).max(1) as isize
     }
 
+    // --- Inspector ----------------------------------------------------------
+
+    /// Record one key press for the inspector's keyboard log.
+    ///
+    /// A key with no [`crate::engine::KeyCode`] (a modifier press, a media key)
+    /// is skipped rather than logged under a placeholder: the log's column is a
+    /// *config spelling*, and a row that can't be bound would read as one that
+    /// can.
+    fn log_key(
+        &mut self,
+        key: egui::Key,
+        mods: &egui::Modifiers,
+        outcome: crate::inspector::KeyOutcome,
+        bytes: &[u8],
+    ) {
+        let Some(code) = map_egui_key(key) else {
+            return;
+        };
+        let chord = crate::keybind::Chord {
+            mods: key_mods(mods),
+            code,
+        };
+        if let Some(log) = self.inspect.as_mut() {
+            log.key(chord.name(), outcome, bytes);
+        }
+    }
+
+    /// This pane's inspector capture, or `None` when no inspector is open on it.
+    pub fn inspector(&self) -> Option<&crate::inspector::Log> {
+        self.inspect.as_ref()
+    }
+
+    pub fn inspector_mut(&mut self) -> Option<&mut crate::inspector::Log> {
+        self.inspect.as_mut()
+    }
+
+    /// Apply Ghostty's `inspector:<mode>` to this pane.
+    ///
+    /// The log is created on show and **dropped on hide**, which is what makes
+    /// the capture free while it is closed: the record calls on the input and
+    /// PTY paths become a null check. Dropping it also discards the capture,
+    /// matching the rest of giest's overlays — nothing here quietly retains a
+    /// buffer of the user's terminal output after they close the panel.
+    pub fn set_inspector(&mut self, mode: crate::inspector::InspectorMode) {
+        let want = mode.wants(self.inspect.is_some());
+        // `show` on an already-open inspector keeps the capture rather than
+        // restarting it — the same rule as `start_search`.
+        if want == self.inspect.is_some() {
+            return;
+        }
+        self.inspect = want.then(crate::inspector::Log::new);
+    }
+
     // --- Scrollback search --------------------------------------------------
 
     /// Open the search overlay: capture the current screen (scrollback + viewport)
@@ -1474,41 +1544,56 @@ impl Session {
                     pressed: true,
                     modifiers,
                     ..
-                } => match decide_key(
-                    *key,
-                    modifiers,
-                    keymap,
-                    crate::command::PerformCtx {
-                        has_selection: self.engine.selection_active(),
-                        keymap: Some(keymap),
+                } => {
+                    let decision = decide_key(
+                        *key,
+                        modifiers,
+                        keymap,
+                        crate::command::PerformCtx {
+                            has_selection: self.engine.selection_active(),
+                            keymap: Some(keymap),
+                            tables,
+                            undo,
+                            search_active: self.search.is_some(),
+                        },
                         tables,
-                        undo,
-                        search_active: self.search.is_some(),
-                    },
-                    tables,
-                ) {
-                    KeyAction::Encode(input) => {
-                        bytes.extend_from_slice(&self.engine.encode_key(&input));
-                        typed = true;
-                    }
-                    // Reserved app combos (Ctrl+Shift/Ctrl+Tab/Ctrl-zoom, and
-                    // anything bound in the keymap — including the scrollback
-                    // keys, which `App::handle_shortcuts` runs as actions) and
-                    // text-producing keys (handled by the `Text` event) emit no
-                    // bytes here.
-                    KeyAction::Swallow => {
-                        // …but a swallowed key that is *about* to produce a
-                        // `Text` event has to suppress that too, or the
-                        // character is typed anyway. Only a press that can
-                        // produce text counts: ctrl/alt/super combos emit no
-                        // `Text`, so counting them would eat a later, unrelated
-                        // character.
-                        if produces_text(*key, modifiers) {
-                            suppress_text += 1;
+                    );
+                    // Where the inspector's keyboard log is taken from: the one
+                    // point that knows the chord, the decision *and* the bytes
+                    // it produced. Anywhere earlier and it couldn't report the
+                    // encoding; anywhere later and a swallowed key wouldn't
+                    // appear at all — which is exactly the press someone opens
+                    // this panel to explain.
+                    // Read off *before* the match consumes the decision.
+                    let outcome = key_outcome(&decision);
+                    let before = bytes.len();
+                    match decision {
+                        KeyAction::Encode(input) => {
+                            bytes.extend_from_slice(&self.engine.encode_key(&input));
+                            typed = true;
                         }
+                        // Reserved app combos (Ctrl+Shift/Ctrl+Tab/Ctrl-zoom, and
+                        // anything bound in the keymap — including the scrollback
+                        // keys, which `App::handle_shortcuts` runs as actions) and
+                        // text-producing keys (handled by the `Text` event) emit no
+                        // bytes here.
+                        KeyAction::Swallow => {
+                            // …but a swallowed key that is *about* to produce a
+                            // `Text` event has to suppress that too, or the
+                            // character is typed anyway. Only a press that can
+                            // produce text counts: ctrl/alt/super combos emit no
+                            // `Text`, so counting them would eat a later, unrelated
+                            // character.
+                            if produces_text(*key, modifiers) {
+                                suppress_text += 1;
+                            }
+                        }
+                        KeyAction::Suppress => {}
                     }
-                    KeyAction::Suppress => {}
-                },
+                    if self.inspect.is_some() {
+                        self.log_key(*key, modifiers, outcome, &bytes[before..]);
+                    }
+                }
                 _ => {}
             }
         }
@@ -2211,6 +2296,21 @@ fn autoscroll_rows(accum: &mut f32, dir: isize, dt: f32) -> isize {
     let rows = (*accum / TICK).floor();
     *accum -= rows * TICK;
     dir * rows as isize
+}
+
+/// How a [`KeyAction`] reads in the inspector's keyboard log.
+///
+/// A swallow is the app taking the key — a binding, or a reserved namespace —
+/// and either way the shell saw nothing. A suppress is the encoder standing
+/// aside for the matching `Event::Text`, which is the case that most often
+/// looks like a bug from outside: the key *did* produce bytes, just not here.
+fn key_outcome(action: &KeyAction) -> crate::inspector::KeyOutcome {
+    use crate::inspector::KeyOutcome;
+    match action {
+        KeyAction::Encode(_) => KeyOutcome::Encoded,
+        KeyAction::Swallow => KeyOutcome::Swallowed,
+        KeyAction::Suppress => KeyOutcome::Text,
+    }
 }
 
 /// Whether this key press will also arrive as an `Event::Text`.

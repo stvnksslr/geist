@@ -337,6 +337,9 @@ pub enum Action {
     /// Scroll by this fraction of a page (Ghostty `scroll_page_fractional:N`,
     /// scaled by 100 so the action stays `Copy` without a float).
     ScrollPageFraction(i16),
+    /// Show, hide or toggle the terminal inspector on the focused pane
+    /// (Ghostty `inspector:toggle|show|hide`).
+    Inspector(crate::inspector::InspectorMode),
     /// Open the search overlay if it isn't open already (Ghostty
     /// `start_search`). Unlike [`Action::ToggleSearch`] a second press is a
     /// no-op, which is what makes it safe to bind alongside `end_search`.
@@ -464,6 +467,7 @@ impl Action {
             Action::SetFontSize(_) => "Set Font Size",
             Action::ScrollLines(_) => "Scroll Lines",
             Action::ScrollPageFraction(_) => "Scroll Page",
+            Action::Inspector(_) => "Terminal Inspector",
             Action::StartSearch => "Search",
             Action::EndSearch => "End Search",
             Action::NavigateSearch(true) => "Find Next",
@@ -534,6 +538,7 @@ impl Action {
             | Action::SetSurfaceTitle(_) => return None,
             Action::NewTab => "Ctrl+Shift+T",
             Action::NewWindow => "Ctrl+Shift+N",
+            Action::Inspector(_) => "Ctrl+Shift+I",
             Action::EndSearch => "Esc",
             Action::StartSearch
             | Action::NavigateSearch(_)
@@ -670,6 +675,7 @@ impl Action {
             Action::ScrollPageFraction(n) => {
                 format!("scroll_page_fractional:{}", f32::from(*n) / 100.0)
             }
+            Action::Inspector(m) => format!("inspector:{}", m.name()),
             Action::StartSearch => "start_search".into(),
             Action::EndSearch => "end_search".into(),
             Action::NavigateSearch(next) => {
@@ -743,6 +749,9 @@ impl Action {
                 .ok()
                 .filter(|n| n.is_finite())
                 .map(|n| Action::ScrollPageFraction((n * 100.0).round() as i16));
+        }
+        if let Some(rest) = s.strip_prefix("inspector:") {
+            return crate::inspector::InspectorMode::from_name(rest).map(Action::Inspector);
         }
         if let Some(rest) = s.strip_prefix("navigate_search:") {
             return match rest.trim() {
@@ -866,6 +875,7 @@ const BASE_ACTIONS: &[Action] = &[
     Action::Undo,
     Action::Redo,
     Action::SearchSelection,
+    Action::Inspector(crate::inspector::InspectorMode::Toggle),
     Action::NewWindow,
     Action::CloseWindow,
     Action::CloseTab,
@@ -1107,6 +1117,23 @@ mod tests {
             Action::from_name("set_surface_title:"),
             Some(Action::SetSurfaceTitle(Arc::from("")))
         );
+    }
+
+    #[test]
+    fn the_inspector_action_parses_and_round_trips() {
+        use crate::inspector::InspectorMode;
+        for raw in ["inspector:toggle", "inspector:show", "inspector:hide"] {
+            let a = Action::from_name(raw).unwrap_or_else(|| panic!("parsing {raw:?}"));
+            assert_eq!(a.name(), raw, "round-trip {raw:?}");
+        }
+        assert_eq!(
+            Action::from_name("inspector:toggle"),
+            Some(Action::Inspector(InspectorMode::Toggle))
+        );
+        // The parameter is required and there is no default: a typo should fail
+        // to bind rather than silently pick a mode.
+        assert_eq!(Action::from_name("inspector"), None);
+        assert_eq!(Action::from_name("inspector:open"), None);
     }
 
     #[test]

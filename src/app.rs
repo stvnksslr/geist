@@ -593,6 +593,33 @@ type Detached<T> = Option<(PaneSlot, Node<T>)>;
 /// The shape an undo entry re-inserts from.
 type ClosedTabs<T> = Vec<(usize, Tab<T>)>;
 
+/// Everything the inspector shows, read off the session in one go.
+///
+/// A snapshot rather than a live borrow, because the panel is drawn inside an
+/// egui closure that already borrows `self` — the same deferred shape the
+/// palette and the search overlay use.
+#[derive(Default)]
+struct InspectorFacts {
+    surface: Vec<(String, String)>,
+    terminal: Vec<(String, String)>,
+    keys: Vec<crate::inspector::KeyRecord>,
+    io: Vec<crate::inspector::IoRecord>,
+    paused: bool,
+}
+
+/// One `label: value` line in the inspector, values in the mono face so
+/// coordinates and hex colors line up down the column.
+fn fact_row(ui: &mut egui::Ui, key: &str, value: &str, mono: &egui::FontId) {
+    ui.horizontal(|ui| {
+        ui.add_sized([130.0, 0.0], egui::Label::new(egui::RichText::new(key).weak()));
+        ui.label(egui::RichText::new(value).font(mono.clone()));
+    });
+}
+
+fn yes_no(v: bool) -> &'static str {
+    if v { "yes" } else { "no" }
+}
+
 /// One laid-out pane: a focusable leaf with its payload and screen rect.
 struct Leaf<'a, T> {
     id: u64,
@@ -752,6 +779,13 @@ pub struct Window {
     /// `ctrl+shift+z` is the app's key or the shell's runs inside
     /// `session::decide_key`, which has no route back to [`App`].
     undo_state: crate::command::UndoState,
+    /// Last frame's inspector-window rect, when one was drawn.
+    ///
+    /// The inspector is **not** modal, so the pane underneath still takes the
+    /// pointer — a click on its Pause button would otherwise also start a text
+    /// selection. `render_active` runs before the window exists, so this is the
+    /// previous frame's rect, the same idiom as `last_layout`.
+    inspector_rect: Option<egui::Rect>,
     /// Geometry to command this window onto on its next pass, then forget.
     ///
     /// Set when `undo` re-opens a closed window: a restored window has to come
@@ -1269,6 +1303,7 @@ impl Window {
             shader_last_time: 0.0,
             shader_frame: 0,
             undo_state: crate::command::UndoState::default(),
+            inspector_rect: None,
             place_geom: None,
         };
         app.apply_backdrop();
@@ -1566,6 +1601,7 @@ impl Window {
             shader_last_time: 0.0,
             shader_frame: 0,
             undo_state: crate::command::UndoState::default(),
+            inspector_rect: None,
             place_geom: None,
         })
     }
@@ -2677,6 +2713,16 @@ impl Window {
                     );
                 }
             }
+            // Per *pane*, like upstream's per-surface inspector: the log it
+            // shows is that pane's own, and focusing another shows theirs (or
+            // nothing). Deliberately **not** added to `modal_open` or the
+            // `palette_open` gate — a keyboard log you cannot type into, over a
+            // program you cannot watch redraw, would be useless.
+            Action::Inspector(mode) => {
+                if let Some(s) = self.focused_session_mut() {
+                    s.set_inspector(mode);
+                }
+            }
             Action::ToggleSearch => {
                 if let Some(s) = self.focused_session_mut() {
                     if s.search_active() {
@@ -3170,6 +3216,241 @@ impl Window {
             }
         });
         out
+    }
+
+    /// Draw the terminal inspector over the focused pane (Ghostty
+    /// `inspector:`), if that pane has one open.
+    ///
+    /// **Not a modal**, and that is the whole design: the keyboard log is
+    /// worthless if opening it stops you typing, and watching a program redraw
+    /// is why the IO log exists. So this appears in neither `modal_open` nor
+    /// `render_active`'s `palette_open` gate — the one overlay in giest that
+    /// doesn't take the keyboard.
+    ///
+    /// Per *pane*, like upstream's per-surface inspector: the state and the logs
+    /// belong to the `Session`, so focusing another pane shows that pane's
+    /// inspector or none at all.
+    fn render_inspector(&mut self, ctx: &egui::Context) {
+        self.inspector_rect = None;
+        let focus = self.tabs.get(self.active_tab).map(|t| t.focus);
+        let Some(pane) = focus.and_then(|f| self.last_layout.iter().find(|(id, _)| *id == f)) else {
+            return;
+        };
+        let pane = pane.1;
+        if !self
+            .focused_session()
+            .is_some_and(|s| s.inspector().is_some())
+        {
+            return;
+        }
+
+        // Collected inside the closure and applied after, so no session borrow
+        // is held across the egui frame (the same shape `render_search` uses).
+        let mut close = false;
+        let mut clear = false;
+        let mut toggle_pause = false;
+
+        let facts = self.inspector_facts();
+        let mono = egui::FontId::monospace(12.0);
+        let response = egui::Window::new("Terminal Inspector")
+            .id(self.id("inspector"))
+            .constrain_to(pane)
+            .default_pos(pane.left_top() + egui::vec2(16.0, 16.0))
+            .default_size([460.0, 420.0])
+            .collapsible(true)
+            .resizable(true)
+            .show(ctx, |ui| {
+                let paused = facts.paused;
+                ui.horizontal(|ui| {
+                    if ui
+                        .selectable_label(paused, if paused { "Resume" } else { "Pause" })
+                        .on_hover_text("Stop recording (the terminal keeps running)")
+                        .clicked()
+                    {
+                        toggle_pause = true;
+                    }
+                    if ui.button("Clear").clicked() {
+                        clear = true;
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("\u{00d7}").on_hover_text("Close (Ctrl+Shift+I)").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+                ui.separator();
+
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    // Upstream's five windows, as collapsing sections: giest has
+                    // no docking, and five floating windows over one pane would
+                    // be unusable at a terminal's size.
+                    egui::CollapsingHeader::new("Surface")
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            for (k, v) in &facts.surface {
+                                fact_row(ui, k, v, &mono);
+                            }
+                        });
+                    egui::CollapsingHeader::new("Terminal")
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            for (k, v) in &facts.terminal {
+                                fact_row(ui, k, v, &mono);
+                            }
+                        });
+                    egui::CollapsingHeader::new(format!("Keyboard ({})", facts.keys.len()))
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            if facts.keys.is_empty() {
+                                ui.weak("Press a key in this pane.");
+                            }
+                            // Newest first: the press you are explaining is the
+                            // one you just made, and a log that grows downward
+                            // puts it off the bottom of a short panel.
+                            for k in facts.keys.iter().rev() {
+                                ui.horizontal(|ui| {
+                                    ui.weak(format!("{:>4}", k.seq));
+                                    ui.label(
+                                        egui::RichText::new(&k.chord).font(mono.clone()).strong(),
+                                    );
+                                    ui.weak(k.outcome.label());
+                                    if !k.bytes.is_empty() {
+                                        ui.label(
+                                            egui::RichText::new(&k.bytes).font(mono.clone()),
+                                        );
+                                    }
+                                });
+                            }
+                        });
+                    egui::CollapsingHeader::new(format!("Terminal IO ({})", facts.io.len()))
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            if facts.io.is_empty() {
+                                ui.weak("Nothing read from the shell yet.");
+                            }
+                            for r in facts.io.iter().rev() {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 4.0;
+                                    ui.weak(format!("{:>4}", r.seq));
+                                    ui.weak(format!("{}B", r.len));
+                                    ui.label(egui::RichText::new(&r.text).font(mono.clone()));
+                                    if r.truncated {
+                                        ui.weak("…");
+                                    }
+                                });
+                            }
+                        });
+                });
+            });
+
+        // Remembered for the *next* frame's pane hit-testing, the same
+        // previous-frame idiom as `last_layout`: the pane's `interact` runs in
+        // `render_active`, which is over by the time this window exists, so a
+        // click on "Pause" would otherwise also start a selection underneath.
+        self.inspector_rect = response.map(|r| r.response.rect);
+
+        if let Some(s) = self.focused_session_mut() {
+            if close {
+                s.set_inspector(crate::inspector::InspectorMode::Hide);
+            } else if let Some(log) = s.inspector_mut() {
+                if toggle_pause {
+                    log.paused = !log.paused;
+                }
+                if clear {
+                    log.clear();
+                }
+            }
+        }
+    }
+
+    /// Snapshot everything the inspector displays, so the egui closure holds no
+    /// borrow on the session it is describing.
+    fn inspector_facts(&self) -> InspectorFacts {
+        let mut facts = InspectorFacts::default();
+        let Some(s) = self.focused_session() else {
+            return facts;
+        };
+        let Some(log) = s.inspector() else {
+            return facts;
+        };
+        facts.paused = log.paused;
+        facts.keys = log.keys().cloned().collect();
+        facts.io = log.io().cloned().collect();
+
+        let ppp = self.egui_ctx.pixels_per_point();
+        let (cols, rows) = s.grid_size();
+        let snap = &s.snapshot;
+        let mut surface = vec![
+            ("Grid size".into(), format!("{cols} × {rows} cells")),
+            (
+                "Cell size".into(),
+                format!("{:.1} × {:.1} px", self.cell_w, self.cell_h),
+            ),
+            ("Font size".into(), format!("{:.1} pt", self.font_points)),
+            ("Scale".into(), format!("{ppp:.2} ×")),
+            (
+                "Padding".into(),
+                format!(
+                    "{:.0} × {:.0} pt",
+                    self.config.padding_x, self.config.padding_y
+                ),
+            ),
+        ];
+        if let Some((_, rect)) = self
+            .tabs
+            .get(self.active_tab)
+            .map(|t| t.focus)
+            .and_then(|f| self.last_layout.iter().find(|(id, _)| *id == f))
+        {
+            surface.push((
+                "Pane".into(),
+                format!("{:.0} × {:.0} pt", rect.width(), rect.height()),
+            ));
+        }
+        facts.surface = surface;
+
+        let rgb = |c: crate::engine::Rgb| format!("#{:02x}{:02x}{:02x}", c.r, c.g, c.b);
+        facts.terminal = vec![
+            (
+                "Cursor".into(),
+                format!(
+                    "({}, {}) {:?}{}{}",
+                    snap.cursor_x,
+                    snap.cursor_y,
+                    snap.cursor_shape,
+                    if snap.cursor_visible { "" } else { " hidden" },
+                    if snap.cursor_blinking { " blinking" } else { "" },
+                ),
+            ),
+            ("Scrollback".into(), format!("{} rows", s.scrollback_rows())),
+            (
+                "Colors".into(),
+                format!(
+                    "fg {} · bg {} · cursor {}",
+                    rgb(snap.default_fg),
+                    rgb(snap.default_bg),
+                    rgb(snap.cursor_color)
+                ),
+            ),
+            (
+                "Mouse tracking".into(),
+                yes_no(s.is_mouse_tracking()).into(),
+            ),
+            ("Selection".into(), yes_no(s.has_selection()).into()),
+            ("Read-only".into(), yes_no(s.readonly()).into()),
+            ("Images".into(), format!("{} placements", snap.images.len())),
+            (
+                "Title".into(),
+                s.title().unwrap_or_else(|| "(none)".into()),
+            ),
+            (
+                "Working directory".into(),
+                s.pwd()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "(not reported)".into()),
+            ),
+        ];
+        facts
     }
 
     fn render_search(&mut self, ctx: &egui::Context) {
@@ -3862,6 +4143,16 @@ impl Window {
         let palette_open =
             self.palette.is_some() || self.confirm.is_some() || self.clipboard_prompt().is_some();
 
+        // The inspector is deliberately **not** in that list — it must never
+        // take the keyboard, or its own keyboard log would have nothing to
+        // show. But it does sit over the pane, so the *pointer* has to be
+        // withheld where it is, or a click on its Pause button also starts a
+        // text selection underneath. Last frame's rect, since the window is
+        // drawn after this (the `last_layout` idiom).
+        let over_inspector = self.inspector_rect.is_some_and(|r| {
+            ctx.pointer_latest_pos().is_some_and(|p| r.contains(p))
+        });
+
         // Fill the whole area (including the per-pane padding band and the split
         // gutters) with the focused pane's background. This single rect is what
         // carries `background-opacity`: cells left on the default background emit
@@ -4068,7 +4359,7 @@ impl Window {
 
             // Mouse / selection interaction only for the focused pane, and not
             // while a modal overlay (palette or search) owns input/focus.
-            if is_focus && !palette_open && !search_open {
+            if is_focus && !palette_open && !search_open && !over_inspector {
                 // Hold keyboard focus on the terminal and lock the navigation keys
                 // to it. Otherwise egui's built-in focus traversal swallows Tab
                 // (which the shell wants for completion) to cycle focus through the
@@ -4344,7 +4635,7 @@ impl Window {
             // the search overlay is a plain `Area` and does not — so without
             // this, a click meant for the search box could reach a bar behind it.
             // Still painted, so a search jump visibly moves the thumb.
-            if palette_open || search_open {
+            if palette_open || search_open || over_inspector {
                 if let Some(a) = alpha {
                     scrollbars.push((track, thumb, a, false));
                 }
@@ -4948,6 +5239,8 @@ impl Window {
         // The scrollback-search overlay (self-gating: a no-op unless the focused
         // pane's search is open).
         self.render_search(&ctx);
+        // The inspector: not modal, so it goes *under* every dialog that is.
+        self.render_inspector(&ctx);
         // The close confirmation draws over everything else.
         self.render_confirm_close(&ctx);
         // …and the clipboard permission prompt over that: it's the one dialog

@@ -359,6 +359,42 @@ starts in the default one, and a shell that fails to spawn drops out of its spli
 taking the tab with it. The file is plain text, one record per line, and anything unparseable is
 skipped — a bad state file can never stop giest starting.
 
+### The terminal inspector
+
+`Ctrl+Shift+I` opens a debug panel over the focused pane (Ghostty's
+`inspector:toggle|show|hide`, on upstream's own trigger — its comment records it as "matching
+Chromium"). Four sections:
+
+| Section | Shows |
+| --- | --- |
+| **Surface** | Grid size in cells, cell size in pixels, font size, DPI scale, padding, the pane's size in points |
+| **Terminal** | Cursor position / shape / visibility / blink, scrollback depth, resolved default and cursor colors, mouse tracking, selection, read-only, kitty image placements, title, working directory |
+| **Keyboard** | Every key press: the chord **in config spelling**, whether it was encoded / swallowed / left to the text event, and the exact bytes that reached the shell |
+| **Terminal IO** | Every read from the shell, with byte count and the bytes rendered so each control is distinct (`␛`, `␇`, `␍`) |
+
+Two of those earn their place on Windows specifically:
+
+- The **keyboard** log answers "why didn't my key do anything?" in one place — you see the chord as
+  you would have to type it after `keybind =`, and whether the app took it or the shell did.
+- The **IO** log answers "did that escape sequence actually arrive?". ConPTY does not pipe a child's
+  output through; it parses the VT and emits its own stream, silently dropping sequences it doesn't
+  understand (APC, and with it the kitty graphics protocol). That makes "the feature does nothing"
+  the symptom of a problem with no error anywhere, and this panel is where you look first.
+
+`Pause` stops recording — the terminal keeps running, so you can freeze a stream and read what
+scrolled past. `Clear` empties both logs; the sequence numbers keep counting, so two captures are
+never confused for each other.
+
+The inspector is **per pane**, like upstream's per-surface one: each pane has its own logs, and
+focusing another shows that pane's inspector or none. It is also the one overlay in giest that does
+**not** take the keyboard — a keyboard log you cannot type into would be useless — so the terminal
+underneath keeps working while it is open. Recording costs nothing while it is closed: the buffers
+only exist once you open one.
+
+What it does not have, against upstream: **parsed** VT actions (giest sees the byte stream, not
+libghostty's parse of it), the DEC mode table, per-cell and pagelist browsing, renderer statistics,
+and detachable/dockable sub-windows.
+
 ### Search
 
 `Ctrl+Shift+F` opens the search bar over the focused pane; `Esc` closes it, `Enter` /
@@ -444,6 +480,7 @@ Beyond the defaults, these Ghostty actions are available to `keybind`:
 | `quit` / `close_all_windows` | Close everything. |
 | `undo` / `redo` | Take back (or re-apply) the last structural change — see [Undo and redo](#undo-and-redo). Bound to `ctrl+shift+z` / `ctrl+shift+y`, both `performable:`. |
 | `start_search` / `end_search` / `navigate_search:<dir>` / `search_selection` / `search:<text>` | See [Search](#search). |
+| `inspector:toggle` / `:show` / `:hide` | The debug panel — see [The terminal inspector](#the-terminal-inspector). The parameter is required; there is no default, so a typo fails to bind rather than picking a mode. |
 | `equalize_splits` | Accepted as a no-op: giest's splits are always 50/50, so there is nothing to equalize. It binds without error so a Ghostty config transfers cleanly. |
 | `adjust_selection:<dir>` | Move the selection's free end. All ten upstream directions: `left`, `right`, `up`, `down`, `page_up`, `page_down`, `home`, `end`, `beginning_of_line`, `end_of_line`. Bound to shift+arrows by default (as `performable:`). |
 
