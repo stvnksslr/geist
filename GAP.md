@@ -175,11 +175,13 @@ light/dark preference), **window/tab/split state restore** (`window-save-state`)
 binding, leader sequences, key tables, `catch_all`, `chain=`, all four trigger flags — `global:`,
 `performable:`, `unconsumed:` and `all:` — the `write_*_file` / `set_*_title` / `toggle_*` /
 `text:` / `csi:` / `esc:` actions, and now **`undo`/`redo` + `undo-timeout`**. The only remaining
-gaps against upstream's action union are the ones that need a subsystem giest doesn't have: the
-inspector, and the finer-grained search actions.)*
+gap against upstream's action union is the **inspector**, which needs a subsystem giest doesn't
+have.)*
 
 **Selection / scroll / search** — upstream's 60%-of-cell threshold for including the clicked/dragged
 cell; the double-click-*drag* word-snapping refinement; regex search. *(scrollback search plus
+**upstream's five search actions** (`start_search` / `end_search` / `navigate_search:` /
+`search_selection` / `search:`),
 **cross-wrap matches and drift-free tracking**, **semantic selection**, the **full binding-backed
 selection** — reflow-correct and scrollback-spanning — and **`adjust_selection` / rectangle
 selection / drag-past-edge autoscroll** — now all done.)*
@@ -393,7 +395,67 @@ With Phase 0 done, the remaining Tier-1 items are mostly small, registry-backed 
 30. ✅ **`all:` / broadcast input** — one feature under two names. See the ledger.
 31. ✅ **`undo`/`redo` + `undo-timeout`** — close and creation both reversible, with the shells
     still running. See the ledger below.
-32. Next: the inspector, and the finer-grained search actions.
+32. ✅ **The five search actions** — `start_search` / `end_search` / `navigate_search:` /
+    `search_selection` / `search:`, plus `escape=end_search` and a search bar that resolves its
+    keys through the keymap. See the ledger below.
+33. Next: the inspector.
+
+### The search action family — ✅ divergences
+
+Upstream's five (`start_search`, `end_search`, `navigate_search:next|previous`, `search_selection`,
+`search:<text>`) now sit alongside giest's own `toggle_search`, all bindable, all with upstream's
+`performable:` semantics ported from `Surface.zig`'s return values rather than guessed at.
+
+- **`escape` is bound to `end_search`, and `performable:` is what makes that safe.** This is
+  upstream's non-Darwin default and the sharpest example of the flag in the whole table: with a
+  search open the key closes the bar, with none open the action reports "not performed" and the key
+  belongs entirely to the program. Without it the bind would swallow Escape in vim, every pager and
+  every TUI — so it is asserted against the *real* default keymap in `session.rs`, both directions,
+  rather than a constructed one.
+- **The search bar now resolves its keys through the keymap.** It is modal — `run_pass` skips
+  `handle_shortcuts` while it is up — so `navigate_search` bound to a key would have been dead
+  exactly when it is wanted, and Escape closed the bar only because the close was *also* hardcoded,
+  which made `keybind = escape=unbind` a lie. `Window::search_overlay_actions` is the restricted
+  pass: it resolves each chord and runs only the search family, leaving every other bound chord
+  swallowed. That is the same principle already recorded for the scrollback keys — a key handled
+  only by a hardcoded branch can be rebound but never turned off.
+- **A modifier-less printable key is left to the text field.** Upstream's search entry holds the
+  keyboard the same way, so this is parity rather than a shortcut: a binding on a bare letter
+  belongs to whoever is typing a query. `session::produces_text` (already written for the
+  swallowed-key suppression) is the predicate, reused rather than re-derived.
+- **`search:` had to go in the *payload* table, and the bare `search` alias had to go.** giest
+  accepted `search` as a synonym for `toggle_search`; upstream's `search` takes a needle
+  (`search:foo`). Keeping both would mean a transferred Ghostty config binding `search` silently did
+  something else. The prefixes don't overlap with `search_selection`, so the two coexist.
+- **An empty `search:` payload stops the search without hiding the bar**, which is upstream's split
+  and the reason it isn't folded into `end_search`. Its `performable:` gate follows: an empty needle
+  with nothing running has nothing to stop.
+- **`start_search` on an already-open search is a no-op, not a recapture.** Upstream: "Start a
+  search if it isn't started already." Re-opening would throw away a query the user is mid-way
+  through typing — and `start_search` is precisely what someone binds when they also bind
+  `end_search`.
+
+**Divergences:**
+
+- **`toggle_search` stays the `Ctrl+Shift+F` default**, rather than upstream's `start_search`.
+  giest's toggle predates the pair and is a superset; a single key that both opens and closes is
+  what Windows users reach for, and `start_search` is bindable for anyone who wants the split.
+- **`search_selection` uses only the first line of a multi-line selection.** giest's search matches
+  within a single (soft-wrapped) row, so a multi-line needle could never match — taking the first
+  line finds something rather than nothing.
+- **No default `navigate_search` binding.** Upstream binds `super+g`/`super+shift+g` on macOS only;
+  its non-Darwin defaults have none either, and Enter / Shift+Enter in the bar already step. The
+  action is bindable.
+- **The needle from `search_selection` goes through `selection_text`**, so
+  `clipboard-trim-trailing-spaces` applies to it. A needle with an invisible trailing space would
+  match nothing and read as a broken feature.
+- Unchanged from the search ledger below: ASCII case-folding, and **no regex**. `search:` sets a
+  substring needle like anything typed into the bar.
+
+**Verified**: `cargo test` — round-trip parsing for all five (including the empty-needle form and
+the rejected bare `search`), the `can_perform` gate for each, and the Escape-reaches-the-program
+assertion on the default keymap. The overlay's own key handling is interactive and wants a human
+look: Escape and Ctrl+Shift+F should still close the bar, and Enter / Shift+Enter should still step.
 
 ### `undo` / `redo` — ✅ divergences
 
@@ -1298,8 +1360,10 @@ guessed at, and the ones needing no new subsystem are now wired: `clear_screen`,
   `Action` to own strings, which it does — `Arc<str>` payloads, `Clone` instead of `Copy`. See their
   own ledger; the refactor cost 16 mechanical errors, measured rather than estimated.
 - **`undo`/`redo` are now done** — see their own ledger below.
-- Still open: the inspector, and the finer-grained search actions (`start_search` /
-  `navigate_search` / `search_selection`) against giest's single `toggle_search`.
+- **The five search actions are now done** — `start_search`, `end_search`,
+  `navigate_search:next|previous`, `search_selection` and `search:<text>`, alongside giest's own
+  `toggle_search`. See their ledger below.
+- Still open: the **inspector**, the one remaining member of upstream's action union.
 
 ### Keybind sequences — ◐ divergences
 

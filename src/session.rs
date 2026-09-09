@@ -1483,6 +1483,7 @@ impl Session {
                         keymap: Some(keymap),
                         tables,
                         undo,
+                        search_active: self.search.is_some(),
                     },
                     tables,
                 ) {
@@ -2218,7 +2219,7 @@ fn autoscroll_rows(accum: &mut f32, dir: isize, dt: f32) -> isize {
 /// on every platform egui runs on. Shift does not — `shift+a` types `A` — so it
 /// is deliberately not in the list. Used to keep a *swallowed* printable key
 /// from being typed anyway (see the suppression counter in `handle_input`).
-fn produces_text(key: egui::Key, m: &egui::Modifiers) -> bool {
+pub fn produces_text(key: egui::Key, m: &egui::Modifiers) -> bool {
     if m.ctrl || m.alt || m.command || m.mac_cmd {
         return false;
     }
@@ -2602,6 +2603,29 @@ mod tests {
         // A non-performable bind on the same modifier is unaffected.
         assert_eq!(
             super::decide_key(egui::Key::PageUp, &shift, &km, without, &[]),
+            KeyAction::Swallow
+        );
+    }
+
+    #[test]
+    fn escape_reaches_the_program_unless_a_search_is_open() {
+        // `escape` is bound to `end_search` by default, and *only* the
+        // `performable:` flag keeps it usable. If this ever regressed, Escape
+        // would be swallowed in vim, every pager and every TUI — so it is
+        // asserted on the real default keymap rather than a constructed one.
+        let km = Keymap::default();
+        let none = egui::Modifiers::default();
+        let searching = crate::command::PerformCtx {
+            search_active: true,
+            ..Default::default()
+        };
+        assert!(matches!(
+            super::decide_key(egui::Key::Escape, &none, &km, Default::default(), &[]),
+            KeyAction::Encode(_)
+        ));
+        // …and with a search open it belongs to the overlay instead.
+        assert_eq!(
+            super::decide_key(egui::Key::Escape, &none, &km, searching, &[]),
             KeyAction::Swallow
         );
     }

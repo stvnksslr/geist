@@ -359,6 +359,37 @@ starts in the default one, and a shell that fails to spawn drops out of its spli
 taking the tab with it. The file is plain text, one record per line, and anything unparseable is
 skipped — a bad state file can never stop giest starting.
 
+### Search
+
+`Ctrl+Shift+F` opens the search bar over the focused pane; `Esc` closes it, `Enter` /
+`Shift+Enter` step through matches, and `Aa` toggles case-sensitivity. Upstream's five search
+actions are all bindable:
+
+| Action | Notes |
+| --- | --- |
+| `start_search` | Opens the bar. A second press is a **no-op** — unlike `toggle_search` it never closes, which is what makes it safe to bind alongside `end_search`. |
+| `end_search` | Closes it. `performable:` — see below. |
+| `navigate_search:next` / `:previous` | Step through matches. `performable:`: nothing to navigate when no search is open. |
+| `search_selection` | Opens the bar with the current selection as the needle. `performable:` on there being a selection. |
+| `search:<text>` | Set the needle directly. An **empty** payload stops the search *without* hiding the bar — that is upstream's split, and `end_search` is the one that hides it. |
+| `toggle_search` | giest's own: one key that both opens and closes. It predates the pair above and stays the `Ctrl+Shift+F` default, because a single key is what Windows users reach for. There is no bare `search` alias — upstream's `search` takes a payload, so accepting the bare word for a toggle would make a transferred config quietly do the wrong thing. |
+
+**`Esc` is bound to `end_search`, and it is `performable:`** — which is the only reason that binding
+is safe. With a search open the key closes the bar; with none open the action reports that it did
+nothing and the key goes to the program, so Escape still works in vim, a pager or any full-screen
+TUI. Upstream ships exactly this bind for the same reason.
+
+While the bar has the keyboard it resolves keys **through the keymap**, not from a hardcoded list,
+so `keybind = escape=unbind` really does stop Escape closing it and `keybind =
+ctrl+g=navigate_search:next` really does work while you are typing a query. Only the search family
+acts there; every other bound chord stays swallowed, and a **modifier-less printable key is left to
+the text field** — upstream's search entry holds the keyboard the same way, so a binding on a bare
+letter belongs to whoever is typing.
+
+Two limits worth knowing: the search is a case-foldable substring match with no regex, and
+`search_selection` uses only the **first line** of a multi-line selection, since a match is looked
+for within a single (soft-wrapped) row.
+
 ### Undo and redo
 
 `Ctrl+Shift+Z` takes back the last structural change; `Ctrl+Shift+Y` re-applies it. (Upstream binds
@@ -412,6 +443,7 @@ Beyond the defaults, these Ghostty actions are available to `keybind`:
 | `prompt_tab_title` | Opens the inline tab-rename box. |
 | `quit` / `close_all_windows` | Close everything. |
 | `undo` / `redo` | Take back (or re-apply) the last structural change — see [Undo and redo](#undo-and-redo). Bound to `ctrl+shift+z` / `ctrl+shift+y`, both `performable:`. |
+| `start_search` / `end_search` / `navigate_search:<dir>` / `search_selection` / `search:<text>` | See [Search](#search). |
 | `equalize_splits` | Accepted as a no-op: giest's splits are always 50/50, so there is nothing to equalize. It binds without error so a Ghostty config transfers cleanly. |
 | `adjust_selection:<dir>` | Move the selection's free end. All ten upstream directions: `left`, `right`, `up`, `down`, `page_up`, `page_down`, `home`, `end`, `beginning_of_line`, `end_of_line`. Bound to shift+arrows by default (as `performable:`). |
 

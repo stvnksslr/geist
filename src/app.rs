@@ -2349,6 +2349,7 @@ impl Window {
             keymap: Some(&self.keymap),
             tables: &self.key_tables,
             undo: self.undo_state,
+            search_active: self.focused_search_open(),
         }
     }
 
@@ -2682,6 +2683,66 @@ impl Window {
                         s.close_search();
                     } else {
                         s.open_search();
+                    }
+                }
+            }
+            // Upstream's split of the toggle. `start_search` on an already-open
+            // search is deliberately a no-op rather than a recapture: it is what
+            // a user binds when they also bind `end_search`, and re-opening
+            // would throw away the query they are in the middle of typing.
+            Action::StartSearch => {
+                if let Some(s) = self.focused_session_mut()
+                    && !s.search_active()
+                {
+                    s.open_search();
+                }
+            }
+            Action::EndSearch => {
+                if let Some(s) = self.focused_session_mut() {
+                    s.close_search();
+                }
+            }
+            Action::NavigateSearch(next) => {
+                let cell_h = self.cell_h;
+                if let Some(s) = self.focused_session_mut() {
+                    s.step_search(next, cell_h);
+                }
+            }
+            // Ghostty opens the search with the selection as its needle. The
+            // selection is read through the same `selection_text` the clipboard
+            // uses, so `clipboard-trim-trailing-spaces` applies here too — a
+            // needle with a trailing space the user cannot see would match
+            // nothing and look like a broken feature.
+            Action::SearchSelection => {
+                let cell_h = self.cell_h;
+                if let Some(s) = self.focused_session_mut() {
+                    let Some(needle) = s.selection_text().filter(|t| !t.is_empty()) else {
+                        return;
+                    };
+                    // One line only: the overlay is a substring search over
+                    // single rows, so a multi-line selection could never match.
+                    let needle = needle.lines().next().unwrap_or_default().to_string();
+                    if !s.search_active() {
+                        s.open_search();
+                    }
+                    s.set_search_query(needle, cell_h);
+                }
+            }
+            // An empty needle *stops* the search without hiding the overlay —
+            // upstream's rule, and the reason this isn't folded into
+            // `end_search`.
+            Action::Search(text) => {
+                let cell_h = self.cell_h;
+                if let Some(s) = self.focused_session_mut() {
+                    if text.is_empty() {
+                        if s.search_active() {
+                            s.set_search_query(String::new(), cell_h);
+                        }
+                    } else {
+                        if !s.search_active() {
+                            s.open_search();
+                        }
+                        s.set_search_query(text.to_string(), cell_h);
                     }
                 }
             }
@@ -3035,6 +3096,82 @@ impl Window {
     /// Modal for the keyboard like the palette: it owns Enter / Shift+Enter (next
     /// / previous match), Esc and Ctrl+Shift+F (close), and the query box. Edits
     /// are deferred to after the egui closure so no session borrow spans it.
+    /// Whether `action` is one the search overlay handles while it owns the
+    /// keyboard. Upstream's five, plus giest's own toggle.
+    fn is_search_action(action: &Action) -> bool {
+        matches!(
+            action,
+            Action::ToggleSearch
+                | Action::StartSearch
+                | Action::EndSearch
+                | Action::NavigateSearch(_)
+                | Action::SearchSelection
+                | Action::Search(_)
+        )
+    }
+
+    /// Resolve key presses through the keymap while the search overlay is open,
+    /// returning the search actions to run and consuming the keys that matched.
+    ///
+    /// The overlay is **modal** — `run_pass` skips `handle_shortcuts` while it
+    /// is up — so without this a `keybind = ctrl+g=navigate_search:next` would
+    /// be dead exactly when it is wanted, and Escape would close the bar only
+    /// because the close was also hardcoded (making `escape=unbind` a lie). It
+    /// is the same principle already recorded for the scrollback keys: a key
+    /// handled only by a hardcoded branch can be rebound but never turned off.
+    ///
+    /// Only the search family acts; every other bound chord stays swallowed,
+    /// which is what modal means. **Modifier-less printable keys are skipped**
+    /// and left to the text field — upstream's search entry holds the keyboard
+    /// for the same reason, so a binding on a bare letter belongs to whoever is
+    /// typing, not to the binding.
+    fn search_overlay_actions(&self, ctx: &egui::Context) -> Vec<Action> {
+        let events = ctx.input(|i| i.events.clone());
+        let mut out = Vec::new();
+        let mut consume = Vec::new();
+        for event in &events {
+            let egui::Event::Key {
+                key,
+                pressed: true,
+                modifiers,
+                ..
+            } = event
+            else {
+                continue;
+            };
+            if crate::session::produces_text(*key, modifiers) {
+                continue;
+            }
+            let Some(code) = session::map_egui_key(*key) else {
+                continue;
+            };
+            let chord = Chord {
+                mods: session::key_mods(modifiers),
+                code,
+            };
+            // A plain lookup, not the sequence machine: a leader would have to
+            // be held across frames while the overlay also owns the keyboard,
+            // and a half-entered sequence inside a search box is a worse
+            // failure than not supporting one there.
+            let Some(action) = self.keymap.lookup_in(&self.key_tables, &chord) else {
+                continue;
+            };
+            if !Self::is_search_action(&action) {
+                continue;
+            }
+            consume.push((*modifiers, *key));
+            out.push(action);
+        }
+        // Consumed so the text field doesn't also act on them — Escape in
+        // particular, which a `TextEdit` treats as "defocus".
+        ctx.input_mut(|i| {
+            for (m, k) in consume {
+                i.consume_key(m, k);
+            }
+        });
+        out
+    }
+
     fn render_search(&mut self, ctx: &egui::Context) {
         let cell_h = self.cell_h;
         // Snapshot the overlay state (and clear the one-shot focus flag).
@@ -3156,27 +3293,9 @@ impl Window {
                     });
             });
 
-        // Overlay-level modal keys: Esc and the Ctrl+Shift+F toggle close it
-        // (skip the toggle on the opening frame, whose keypress is still queued).
-        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            close = true;
-        }
-        let toggled = ctx.input_mut(|i| {
-            i.consume_key(
-                egui::Modifiers {
-                    ctrl: true,
-                    shift: true,
-                    ..Default::default()
-                },
-                egui::Key::F,
-            )
-        });
-        if toggled && !just_opened {
-            close = true;
-        }
-
-        // Apply, deferred so no session borrow is held across the egui closure.
-        // Fetch the session once, then act on the collected flags.
+        // Apply the overlay's own widgets first, deferred so no session borrow
+        // is held across the egui closure. Fetch the session once, then act on
+        // the collected flags.
         if let Some(s) = self.focused_session_mut() {
             if close {
                 s.close_search();
@@ -3193,6 +3312,16 @@ impl Window {
                 if prev {
                     s.step_search(false, cell_h);
                 }
+            }
+        }
+
+        // Then the bound keys — Escape, the Ctrl+Shift+F toggle and anything
+        // else the user bound to the search family. Skipped on the frame the
+        // overlay opened, whose own opening keypress is still in the queue and
+        // would toggle it straight back shut.
+        if !close && !just_opened {
+            for action in self.search_overlay_actions(ctx) {
+                self.execute_action(ctx, None, action);
             }
         }
         ctx.request_repaint();

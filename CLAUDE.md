@@ -287,6 +287,10 @@ fallback engine without app changes:
   and tab-traversal focus, but `Memory::request_focus` is unconditional and the pane calls
   `resp.request_focus()` every frame — so any new modal must also be added to the *manual* gate in
   `render_active` (the `palette_open` local) or typing goes straight to the shell behind the dialog.
+  A modal also stops `handle_shortcuts` running at all, so **any keybind the modal itself wants has
+  to be resolved by the modal**, against the keymap rather than a hardcoded key — otherwise the
+  binding is dead exactly where it is meant to work, and `unbind` on it is a lie. The search bar's
+  `search_overlay_actions` is the worked example.
 - **`close_requested` must be answered in the same pass.** eframe reads it from that pass's raw input
   and exits afterwards unless `ViewportCommand::CancelClose` appears in the same pass's output. And
   once a confirmed close sends `ViewportCommand::Close`, the resulting pass sees `close_requested`

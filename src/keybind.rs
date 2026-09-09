@@ -638,9 +638,16 @@ fn default_binds() -> Vec<Bind> {
     // upstream's `super+z` / `super+shift+z` — and deliberately *not* bare
     // `ctrl+z`, which is the shell's own (SIGSTOP on a POSIX shell, and undo in
     // every readline-alike).
+    //
+    // `escape` joins them for the same reason, and it is the sharpest example
+    // in the table: upstream binds it to `end_search` **performable**, so the
+    // key closes the search bar when one is open and belongs entirely to the
+    // program (vim, a pager, a TUI) when one isn't. Without the flag this bind
+    // would make Escape unusable in every full-screen application.
     const PERFORMABLE: &[(&str, Action)] = &[
         ("ctrl+shift+z", Action::Undo),
         ("ctrl+shift+y", Action::Redo),
+        ("escape", Action::EndSearch),
         ("shift+left", Action::AdjustSelection(SelectionAdjust::Left)),
         ("shift+right", Action::AdjustSelection(SelectionAdjust::Right)),
         ("shift+up", Action::AdjustSelection(SelectionAdjust::Up)),
@@ -1468,6 +1475,16 @@ mod tests {
         assert_eq!(km.lookup(&chord("ctrl+tab")), Some(Action::NextTab));
         // An unbound chord resolves to nothing.
         assert_eq!(km.lookup(&chord("ctrl+shift+j")), None);
+    }
+
+    #[test]
+    fn escape_is_a_performable_end_search_bind() {
+        // Upstream's non-Darwin default. The `performable:` flag is the whole
+        // point: without it this bind would swallow Escape in every full-screen
+        // program, which is about the worst regression a terminal can ship.
+        let km = Keymap::default();
+        assert_eq!(km.lookup(&chord("escape")), Some(Action::EndSearch));
+        assert!(km.is_performable(&[chord("escape")]));
     }
 
     #[test]

@@ -26,6 +26,8 @@ pub struct PerformCtx<'a> {
     pub tables: &'a [crate::keybind::TableEntry],
     /// Whether the undo/redo stacks have anything on them.
     pub undo: UndoState,
+    /// Whether the focused pane has a search open.
+    pub search_active: bool,
 }
 
 /// Whether `undo` / `redo` have anything to act on.
@@ -67,6 +69,14 @@ pub fn can_perform(action: &Action, ctx: PerformCtx<'_>) -> bool {
         // shell's, exactly like shift+arrow with no selection.
         Action::Undo => ctx.undo.can_undo,
         Action::Redo => ctx.undo.can_redo,
+        // Upstream returns "not performed" when there is no search to end or
+        // navigate. `escape` is bound to `end_search` by default, so this is
+        // the whole reason a full-screen program still receives Escape.
+        Action::EndSearch | Action::NavigateSearch(_) => ctx.search_active,
+        // Upstream: no selection, nothing to search for.
+        Action::SearchSelection => ctx.has_selection,
+        // Upstream: an empty needle with no search running has nothing to stop.
+        Action::Search(text) => !text.is_empty() || ctx.search_active,
         _ => true,
     }
 }
@@ -160,6 +170,9 @@ const PAYLOAD_ACTIONS: &[(&str, PayloadCtor)] = &[
     ("esc:", Action::SendEsc),
     ("set_tab_title:", Action::SetTabTitle),
     ("set_surface_title:", Action::SetSurfaceTitle),
+    // Checked before the plain-name table below, which is why `search:foo`
+    // can coexist with `search_selection` — the prefixes don't overlap.
+    ("search:", Action::Search),
 ];
 
 /// Decode a `text:` payload's escape sequences.
@@ -324,6 +337,24 @@ pub enum Action {
     /// Scroll by this fraction of a page (Ghostty `scroll_page_fractional:N`,
     /// scaled by 100 so the action stays `Copy` without a float).
     ScrollPageFraction(i16),
+    /// Open the search overlay if it isn't open already (Ghostty
+    /// `start_search`). Unlike [`Action::ToggleSearch`] a second press is a
+    /// no-op, which is what makes it safe to bind alongside `end_search`.
+    StartSearch,
+    /// Close the search overlay (Ghostty `end_search`). **Performable only
+    /// while a search is open** — that is what lets `escape` be bound to it and
+    /// still reach a full-screen program when nothing is being searched.
+    EndSearch,
+    /// Step to the next (`true`) or previous match (Ghostty
+    /// `navigate_search:next|previous`). Performable only while searching.
+    NavigateSearch(bool),
+    /// Search for the current selection (Ghostty `search_selection`), opening
+    /// the overlay if needed. Performable only with a selection.
+    SearchSelection,
+    /// Set the needle directly (Ghostty `search:<text>`). An **empty** payload
+    /// stops the search without closing the overlay, which is upstream's
+    /// documented behaviour — `end_search` is the one that hides the UI.
+    Search(Arc<str>),
     /// Reverse the last undoable structural change — a closed split, tab or
     /// window comes back with its shell still running; a newly created one
     /// goes away again. Ghostty `undo`.
@@ -433,6 +464,12 @@ impl Action {
             Action::SetFontSize(_) => "Set Font Size",
             Action::ScrollLines(_) => "Scroll Lines",
             Action::ScrollPageFraction(_) => "Scroll Page",
+            Action::StartSearch => "Search",
+            Action::EndSearch => "End Search",
+            Action::NavigateSearch(true) => "Find Next",
+            Action::NavigateSearch(false) => "Find Previous",
+            Action::SearchSelection => "Search Selection",
+            Action::Search(_) => "Search For",
             Action::Undo => "Undo",
             Action::Redo => "Redo",
             Action::Quit => "Quit",
@@ -497,6 +534,11 @@ impl Action {
             | Action::SetSurfaceTitle(_) => return None,
             Action::NewTab => "Ctrl+Shift+T",
             Action::NewWindow => "Ctrl+Shift+N",
+            Action::EndSearch => "Esc",
+            Action::StartSearch
+            | Action::NavigateSearch(_)
+            | Action::SearchSelection
+            | Action::Search(_) => return None,
             Action::Undo => "Ctrl+Shift+Z",
             Action::Redo => "Ctrl+Shift+Y",
             Action::NextTab => "Ctrl+Tab",
@@ -628,6 +670,14 @@ impl Action {
             Action::ScrollPageFraction(n) => {
                 format!("scroll_page_fractional:{}", f32::from(*n) / 100.0)
             }
+            Action::StartSearch => "start_search".into(),
+            Action::EndSearch => "end_search".into(),
+            Action::NavigateSearch(next) => {
+                let dir = if *next { "next" } else { "previous" };
+                format!("navigate_search:{dir}")
+            }
+            Action::SearchSelection => "search_selection".into(),
+            Action::Search(t) => format!("search:{t}"),
             Action::Undo => "undo".into(),
             Action::Redo => "redo".into(),
             Action::Quit => "quit".into(),
@@ -693,6 +743,13 @@ impl Action {
                 .ok()
                 .filter(|n| n.is_finite())
                 .map(|n| Action::ScrollPageFraction((n * 100.0).round() as i16));
+        }
+        if let Some(rest) = s.strip_prefix("navigate_search:") {
+            return match rest.trim() {
+                "next" => Some(Action::NavigateSearch(true)),
+                "previous" | "prev" => Some(Action::NavigateSearch(false)),
+                _ => None,
+            };
         }
         if let Some(rest) = s.strip_prefix("jump_to_prompt:") {
             let n: i8 = rest.trim().parse().ok()?;
@@ -784,7 +841,17 @@ impl Action {
                 };
                 Action::WriteFile(scope, crate::writefile::WriteAction::from_name(param)?)
             }
-            "toggle_search" | "search" => Action::ToggleSearch,
+            // `toggle_search` is giest's own: one key that opens *and* closes.
+            // Upstream splits that into `start_search` / `end_search`, and both
+            // are bindable here too — the toggle predates them and stays the
+            // default because a single Ctrl+Shift+F is what Windows users reach
+            // for. There is no bare `search` alias: `search` takes a payload
+            // upstream (`search:foo`), so accepting the bare word for something
+            // else would make a transferred config do the wrong thing silently.
+            "toggle_search" => Action::ToggleSearch,
+            "start_search" => Action::StartSearch,
+            "end_search" => Action::EndSearch,
+            "search_selection" => Action::SearchSelection,
             _ => return None,
         })
     }
@@ -798,6 +865,7 @@ const BASE_ACTIONS: &[Action] = &[
     Action::NewTab,
     Action::Undo,
     Action::Redo,
+    Action::SearchSelection,
     Action::NewWindow,
     Action::CloseWindow,
     Action::CloseTab,
@@ -1039,6 +1107,64 @@ mod tests {
             Action::from_name("set_surface_title:"),
             Some(Action::SetSurfaceTitle(Arc::from("")))
         );
+    }
+
+    #[test]
+    fn the_search_action_family_parses_and_round_trips() {
+        for raw in [
+            "start_search",
+            "end_search",
+            "search_selection",
+            "navigate_search:next",
+            "navigate_search:previous",
+            "search:needle",
+            // An empty needle is meaningful: it *stops* the search without
+            // hiding the bar, which is what separates it from `end_search`.
+            "search:",
+        ] {
+            let a = Action::from_name(raw).unwrap_or_else(|| panic!("parsing {raw:?}"));
+            assert_eq!(a.name(), raw, "round-trip {raw:?}");
+        }
+        // `prev` is accepted as an alias, like `goto_split:prev`, but normalizes
+        // to upstream's spelling.
+        assert_eq!(
+            Action::from_name("navigate_search:prev"),
+            Some(Action::NavigateSearch(false))
+        );
+        assert_eq!(Action::from_name("navigate_search:sideways"), None);
+        // `search` takes a payload upstream, so the bare word is *not* an alias
+        // for giest's toggle — accepting it would make a transferred config do
+        // something other than what it says.
+        assert_eq!(Action::from_name("search"), None);
+        assert_eq!(Action::from_name("toggle_search"), Some(Action::ToggleSearch));
+    }
+
+    #[test]
+    fn the_search_actions_report_when_they_can_act() {
+        // These gates are what make `escape=end_search` safe to ship as a
+        // default: with no search open the key is the program's.
+        let idle = PerformCtx::default();
+        let searching = PerformCtx {
+            search_active: true,
+            ..Default::default()
+        };
+        let selected = PerformCtx {
+            has_selection: true,
+            ..Default::default()
+        };
+        assert!(!can_perform(&Action::EndSearch, idle));
+        assert!(can_perform(&Action::EndSearch, searching));
+        assert!(!can_perform(&Action::NavigateSearch(true), idle));
+        assert!(can_perform(&Action::NavigateSearch(true), searching));
+        assert!(!can_perform(&Action::SearchSelection, idle));
+        assert!(can_perform(&Action::SearchSelection, selected));
+        // `start_search` always acts — it opens the bar.
+        assert!(can_perform(&Action::StartSearch, idle));
+        // A needle always acts; an *empty* one only has something to stop when
+        // a search is already running.
+        assert!(can_perform(&Action::Search(Arc::from("x")), idle));
+        assert!(!can_perform(&Action::Search(Arc::from("")), idle));
+        assert!(can_perform(&Action::Search(Arc::from("")), searching));
     }
 
     #[test]
