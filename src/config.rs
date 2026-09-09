@@ -899,6 +899,10 @@ pub struct Config {
     /// ligatures/contextual alternates), `ss01`, `cv01=2`. Repeatable. Ghostty
     /// `font-feature`.
     pub font_features: Vec<String>,
+    /// Named style / disabled per style slot, in the order
+    /// regular / bold / italic / bold-italic. Ghostty `font-style` and its three
+    /// siblings.
+    pub font_styles: [FontStyle; 4],
     /// Variable-font axis settings, per style slot, in the order
     /// regular / bold / italic / bold-italic. Ghostty `font-variation` and its
     /// three `-bold` / `-italic` / `-bold-italic` siblings.
@@ -1172,6 +1176,7 @@ impl Default for Config {
             font_family_italic: None,
             font_family_bold_italic: None,
             font_features: Vec::new(),
+            font_styles: Default::default(),
             font_variations: Default::default(),
             fg: Rgb::new(0xc5, 0xc8, 0xc6),
             bg: Rgb::new(0x10, 0x12, 0x18),
@@ -1531,6 +1536,10 @@ const SETTERS: &[(&str, Setter)] = &[
             }
         }
     }),
+    ("font-style", |c, v, d| set_font_style(c, d, v, 0)),
+    ("font-style-bold", |c, v, d| set_font_style(c, d, v, 1)),
+    ("font-style-italic", |c, v, d| set_font_style(c, d, v, 2)),
+    ("font-style-bold-italic", |c, v, d| set_font_style(c, d, v, 3)),
     ("font-variation", |c, v, d| set_font_variation(c, d, v, 0)),
     ("font-variation-bold", |c, v, d| set_font_variation(c, d, v, 1)),
     ("font-variation-italic", |c, v, d| set_font_variation(c, d, v, 2)),
@@ -2328,6 +2337,15 @@ fn ratio(value: &str, default: f32, current: f32, min: f32, max: f32) -> f32 {
     }
 }
 
+/// The body of all four `font-style*` keys, so the slots cannot drift.
+fn set_font_style(c: &mut Config, d: &Config, v: &str, slot: usize) {
+    c.font_styles[slot] = if v.is_empty() {
+        d.font_styles[slot].clone()
+    } else {
+        FontStyle::parse(v)
+    };
+}
+
 /// The body of all four `font-variation*` keys, so the slots cannot drift.
 ///
 /// Repeatable like `font-feature` and `palette`: each line **appends** one axis,
@@ -2345,6 +2363,40 @@ fn set_font_variation(c: &mut Config, d: &Config, v: &str, slot: usize) {
         None => eprintln!(
             "giest: font-variation: expected a 4-character axis and a number, e.g. `wght=200`; got {v:?}"
         ),
+    }
+}
+
+/// Ghostty `font-style` and its three per-style siblings.
+///
+/// Not a bool and not a string: the three cases behave differently enough that
+/// collapsing any two of them loses a real option. `Disabled` in particular is
+/// the only one that does something *without* a `font-family` — upstream:
+/// "these are only valid if its corresponding font-family is also specified …
+/// unless you're disabling the font style".
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub enum FontStyle {
+    /// Pick the style the usual way: by the face's bold/italic flags.
+    #[default]
+    Default,
+    /// Turn this style off. A program asking for it gets the **regular** face,
+    /// and nothing is synthesized — that is the difference from
+    /// `font-synthetic-style`, which controls how a *missing* style is faked.
+    Disabled,
+    /// Match the font's own advertised style name, e.g. `Heavy` for
+    /// "Iosevka Heavy". This is how you reach a weight that isn't "bold".
+    Named(String),
+}
+
+impl FontStyle {
+    fn parse(v: &str) -> Self {
+        match v.trim() {
+            "default" => Self::Default,
+            "false" => Self::Disabled,
+            // Everything else is a style name — including "true", which is not a
+            // value upstream gives meaning to, and a name a font could plausibly
+            // advertise.
+            name => Self::Named(name.to_string()),
+        }
     }
 }
 
@@ -3376,6 +3428,39 @@ mod tests {
                 .resize_overlay_duration_ms,
             2_000
         );
+    }
+
+    #[test]
+    fn font_style_has_three_meanings_not_two() {
+        let one = |body: &str| parsed(body).font_styles[0].clone();
+        assert_eq!(one("font-style = default"), FontStyle::Default);
+        assert_eq!(one("font-style = false"), FontStyle::Disabled);
+        assert_eq!(one("font-style = Heavy"), FontStyle::Named("Heavy".into()));
+        // A style name can contain spaces ("Light Italic" is a real subfamily),
+        // so only the surrounding whitespace goes.
+        assert_eq!(
+            one("font-style =  Light Italic "),
+            FontStyle::Named("Light Italic".into())
+        );
+        // `true` is not a value upstream gives meaning to, and *is* a name a
+        // font could advertise — so it is a name, not the opposite of `false`.
+        assert_eq!(one("font-style = true"), FontStyle::Named("true".into()));
+        // An empty value resets, like every other key.
+        assert_eq!(one("font-style = Heavy\nfont-style ="), FontStyle::Default);
+    }
+
+    #[test]
+    fn each_font_style_slot_is_independent() {
+        let c = parsed(
+            "font-style = Light\n\
+             font-style-bold = Semibold\n\
+             font-style-italic = false\n\
+             font-style-bold-italic = default",
+        );
+        assert_eq!(c.font_styles[0], FontStyle::Named("Light".into()));
+        assert_eq!(c.font_styles[1], FontStyle::Named("Semibold".into()));
+        assert_eq!(c.font_styles[2], FontStyle::Disabled);
+        assert_eq!(c.font_styles[3], FontStyle::Default);
     }
 
     #[test]

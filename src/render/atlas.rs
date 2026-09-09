@@ -372,6 +372,8 @@ pub struct FontSpec {
     pub family_bold_italic: Option<String>,
     /// OpenType feature specs (e.g. `-calt`, `ss01`, `cv01=2`) applied at shaping.
     pub features: Vec<String>,
+    /// Named style / disabled per style slot (`font-style` and its siblings).
+    pub styles: [crate::config::FontStyle; 4],
     /// Variable-font axis settings per style slot (regular, bold, italic,
     /// bold-italic). Applied to the parsed face, so they move the *outlines* and
     /// therefore the cell metrics — unlike `features`, which act at shaping.
@@ -625,6 +627,47 @@ fn face_matches(face: &ttf_parser::Face, family: &str, bold: bool, italic: bool)
     family_name_matches(face, family) && face.is_bold() == bold && face.is_italic() == italic
 }
 
+/// Whether the face advertises this style (subfamily) name — `Heavy`,
+/// `SemiBold`, `Medium`…
+///
+/// Both the standard subfamily (name ID 2) and the *typographic* one (ID 17)
+/// are checked, and they genuinely differ on the fonts this feature exists for:
+/// a family shipping eight weights has to squeeze them into the four
+/// Regular/Bold/Italic/Bold-Italic buckets of ID 2, and puts the real name
+/// ("Heavy") in ID 17. Checking only ID 2 would make `font-style = Heavy` fail
+/// on exactly the fonts someone would write it for.
+fn style_name_matches(face: &ttf_parser::Face, style: &str) -> bool {
+    let want = style.trim();
+    face.names().into_iter().any(|n| {
+        matches!(
+            n.name_id,
+            ttf_parser::name_id::SUBFAMILY | ttf_parser::name_id::TYPOGRAPHIC_SUBFAMILY
+        ) && n.to_string().is_some_and(|s| s.trim().eq_ignore_ascii_case(want))
+    })
+}
+
+/// Find a face for one style slot, honouring `font-style`.
+///
+/// A [`FontStyle::Named`] style replaces the bold/italic test rather than adding
+/// to it — upstream is explicit about why: "if a user says `font-style = italic`
+/// for the bold face, no results would be found if we restrict to ALSO
+/// searching for italic".
+fn find_font_styled(
+    family: &str,
+    bold: bool,
+    italic: bool,
+    style: &crate::config::FontStyle,
+) -> Option<(&'static [u8], u32)> {
+    match style {
+        crate::config::FontStyle::Named(name) => {
+            scan_fonts(family, |face| {
+                family_name_matches(face, family) && style_name_matches(face, name)
+            })
+        }
+        _ => find_font(family, bold, italic),
+    }
+}
+
 /// Whether `face`'s family matches `family` by its family / typographic-family
 /// name records, case-insensitively (the name half of [`face_matches`]).
 fn family_name_matches(face: &ttf_parser::Face, family: &str) -> bool {
@@ -753,25 +796,37 @@ fn resolve_slots(spec: &FontSpec) -> ([(&'static [u8], u32); 4], [Synth; 4]) {
         if let Some(f) = primary {
             eprintln!("giest: font-family '{f}' not found; using the built-in font");
         }
-        return (embedded, [Synth::default(); 4]);
+        return (disable_styles(embedded, spec), [Synth::default(); 4]);
     }
 
     let mut out = embedded;
     let mut synth = [Synth::default(); 4];
     // Which styled slots found a *real* face for their style. Computed first
     // because the bold-italic rule depends on the other two.
+    // `font-style-<slot> = false`: the style is turned **off**. The slot keeps
+    // the regular face and nothing is synthesized for it — a program asking for
+    // bold gets regular, which is upstream's stated behaviour and the whole
+    // difference from `font-synthetic-style` (that one decides how a *missing*
+    // style is faked; this one says there is no such style).
+    let off = |i: usize| spec.styles[i] == crate::config::FontStyle::Disabled;
     let real: [bool; 4] = std::array::from_fn(|i| {
         let (family, bold, italic) = slots[i];
-        i == 0 || family.is_some_and(|f| find_font(f, bold, italic).is_some())
+        i == 0
+            || (!off(i)
+                && family.is_some_and(|f| find_font_styled(f, bold, italic, &spec.styles[i]).is_some()))
     });
 
     for (i, (family, bold, italic)) in slots.into_iter().enumerate() {
-        // Regular slot: the tolerant lookup. Styled slots: exact style → the
-        // family's regular → built-in for this slot.
-        let found = if i == 0 {
+        // Styled slots: exact style → the family's regular → built-in for this
+        // slot. The regular slot uses the tolerant lookup, and a *disabled*
+        // style lands on the same face for a different reason — there is no
+        // such style, so the regular one answers for it.
+        let found = if i == 0 || off(i) {
             regular
         } else {
-            family.and_then(|f| find_font(f, bold, italic)).or(regular)
+            family
+                .and_then(|f| find_font_styled(f, bold, italic, &spec.styles[i]))
+                .or(regular)
         };
         if let Some(found) = found {
             out[i] = found;
@@ -780,15 +835,15 @@ fn resolve_slots(spec: &FontSpec) -> ([(&'static [u8], u32); 4], [Synth; 4]) {
     // Nothing to synthesize when no family resolved: the built-in font has all
     // four real styles.
     if regular.is_none() {
-        return (out, synth);
+        return (disable_styles(out, spec), synth);
     }
-    if !real[1] && spec.synthetic.bold {
+    if !real[1] && !off(1) && spec.synthetic.bold {
         synth[1].bold = true;
     }
-    if !real[2] && spec.synthetic.italic {
+    if !real[2] && !off(2) && spec.synthetic.italic {
         synth[2].italic = true;
     }
-    if !real[3] && spec.synthetic.bold_italic {
+    if !real[3] && !off(3) && spec.synthetic.bold_italic {
         // Upstream's preference order: shear the real bold if there is one, else
         // embolden the real italic, else do both to the regular. Slot 3 already
         // holds the family's regular here, so point it at whichever real styled
@@ -807,6 +862,24 @@ fn resolve_slots(spec: &FontSpec) -> ([(&'static [u8], u32); 4], [Synth; 4]) {
         }
     }
     (out, synth)
+}
+
+/// Point every `font-style-<slot> = false` slot at the regular face.
+///
+/// Needed on the paths that return early with the **built-in** font, because
+/// `font-style = false` is the one setting that works without a `font-family` —
+/// upstream says so outright, and it is the setting someone reaches for to stop
+/// a program italicising their terminal at all.
+fn disable_styles(
+    mut slots: [(&'static [u8], u32); 4],
+    spec: &FontSpec,
+) -> [(&'static [u8], u32); 4] {
+    for i in 1..4 {
+        if spec.styles[i] == crate::config::FontStyle::Disabled {
+            slots[i] = slots[0];
+        }
+    }
+    slots
 }
 
 /// How a glyph should be fitted to the terminal cell. Most characters are
@@ -1634,7 +1707,7 @@ mod tests {
         composite_color_layers, face_matches, family_name_matches, find_font, find_regular_font,
         derive_metrics, fit_scale, has_4char_tag, parse_features, resolve_slots, RawFontMetrics,
         Raster, Synth, apply_variations, embolden, embolden_strength, leak_font, shear,
-        ITALIC_SKEW,
+        style_name_matches, ITALIC_SKEW,
     };
     use crate::config::MetricAdjust;
     use ab_glyph::{Font, FontRef, FontVec, ScaleFont, VariableFont};
@@ -2182,6 +2255,73 @@ mod tests {
         buf.push_str(text);
         let glyphs = rustybuzz::shape(face, &[], buf);
         glyphs.glyph_positions().iter().map(|p| p.x_advance).sum()
+    }
+
+    #[test]
+    fn a_named_font_style_is_matched_on_the_typographic_subfamily() {
+        // Measured on Windows' own Segoe UI Semibold, which is exactly the shape
+        // of font this feature exists for: name ID 1 is "Segoe UI Semibold",
+        // ID 2 is **"Regular"**, and only ID 16/17 carry the real family and
+        // style ("Segoe UI" / "Semibold"). A matcher that looked at ID 2 alone
+        // would fail here — on precisely the font someone writes
+        // `font-style-bold = Semibold` for.
+        const PATH: &str = r"C:\Windows\Fonts\seguisb.ttf";
+        let Ok(bytes) = std::fs::read(PATH) else {
+            eprintln!("skipping: {PATH} not present");
+            return;
+        };
+        let face = ttf_parser::Face::parse(&bytes, 0).expect("parses");
+        assert!(style_name_matches(&face, "Semibold"));
+        assert!(style_name_matches(&face, "  semibold "), "trimmed, case-folded");
+        assert!(!style_name_matches(&face, "Bold"));
+        // And the family still resolves, through the typographic family name.
+        assert!(family_name_matches(&face, "Segoe UI"));
+    }
+
+    #[test]
+    fn a_disabled_style_uses_the_regular_face_and_synthesizes_nothing() {
+        // `font-style-italic = false` means "this family has no italic", so a
+        // program asking for italic gets regular — *not* a slanted regular.
+        // That is the whole difference from `font-synthetic-style`, and it has
+        // to hold even with no `font-family` set (upstream is explicit that
+        // disabling works without one).
+        let spec = FontSpec {
+            styles: [
+                crate::config::FontStyle::Default,
+                crate::config::FontStyle::Disabled,
+                crate::config::FontStyle::Disabled,
+                crate::config::FontStyle::Default,
+            ],
+            ..Default::default()
+        };
+        let (slots, synth) = resolve_slots(&spec);
+        assert_eq!(slots[1].0, FONT_REGULAR, "bold falls back to regular");
+        assert_eq!(slots[2].0, FONT_REGULAR, "italic falls back to regular");
+        assert!(!synth[1].bold, "a disabled style is never synthesized");
+        assert!(!synth[2].italic);
+        // The styles left alone keep their real faces.
+        assert_eq!(slots[3].0, FONT_BOLD_ITALIC);
+        assert_eq!(slots[0].0, FONT_REGULAR);
+    }
+
+    #[test]
+    fn disabling_a_style_also_holds_for_an_unresolvable_family() {
+        // The early-return path: the family didn't resolve, so everything is the
+        // built-in font — but a disabled style still has to be disabled, or the
+        // setting would silently depend on whether the font was found.
+        let spec = FontSpec {
+            families: vec!["This Font Surely Does Not Exist 9000".into()],
+            styles: [
+                crate::config::FontStyle::Default,
+                crate::config::FontStyle::Default,
+                crate::config::FontStyle::Disabled,
+                crate::config::FontStyle::Default,
+            ],
+            ..Default::default()
+        };
+        let (slots, _) = resolve_slots(&spec);
+        assert_eq!(slots[2].0, FONT_REGULAR, "italic is off");
+        assert_eq!(slots[1].0, FONT_BOLD, "bold is untouched");
     }
 
     #[test]

@@ -8,7 +8,7 @@ the terminal data already exists and just needs wiring).
 
 **Headline finding.** giest has a strong, correct *spine* — real VT engine, splits, tabs, ligatures,
 emoji, smooth scroll, command palette — but it covered a fraction of Ghostty's config surface and
-~90 keybind actions, with little of the macOS app's UX breadth. *(Measured since: **101 of Ghostty's
+~90 keybind actions, with little of the macOS app's UX breadth. *(Measured since: **105 of Ghostty's
 187 config keys** are now supported — see the config-surface ledger for the re-runnable audit.)* The encouraging part: **much of the gap
 is plumbing, not greenfield.** libghostty-vt already surfaces underline styles, faint/overline, OSC 8
 hyperlinks, OSC 133 semantic-prompt marks, kitty graphics, the bell, and a rich selection model — data
@@ -157,7 +157,8 @@ dynamic colors incl. query replies — now done.)*
 **Rendering / fonts** — COLRv1 emoji; from legacy computing, the diagonal *fills*, the separated
 blocks and the segmented digits.
 *(`font-family` (+ fallback chains, per-style overrides, **synthetic bold/italic**),
-`font-feature`/ligature toggle, **`font-variation`** and its three per-style siblings, `minimum-contrast`,
+`font-feature`/ligature toggle, **`font-variation`** and **`font-style`**, each with their three
+per-style siblings, `minimum-contrast`,
 `bold-is-bright`/`bold-color`, `cursor-style`/`-blink`, **transparency + background-opacity**,
 blur (Windows acrylic), `faint-opacity`, `cursor-opacity`, unfocused-split dimming, **custom
 shaders**, **box-drawing/block/braille/powerline sprites**, the **legacy-computing mosaics**
@@ -199,7 +200,7 @@ paste-protection confirmation, `clipboard-trim-trailing-spaces` and **readonly m
 indicator** — now done; **secure input is N/A on Windows**, see its ledger.)*
 
 **Config / theming** — `palette-generate`/`harmonious`, conditional configuration,
-and the **86 upstream keys still unsupported** (mostly `gtk-*`, `macos-*`, `linux-*` — see the
+and the **82 upstream keys still unsupported** (mostly `gtk-*`, `macos-*`, `linux-*` — see the
 config-surface ledger). *(theme/theme-file now done.)*
 
 **Notifications / bell** — desktop notifications (OSC 9/777/99); Win taskbar progress (OSC 9;4);
@@ -411,7 +412,51 @@ With Phase 0 done, the remaining Tier-1 items are mostly small, registry-backed 
     ledger below.
 37. ✅ **The diagonal legacy-computing families** — smooth mosaics, edge triangles, shaded corner
     triangles and the corner diagonal lines. See the ledger below.
-38. Next: Tier 3 — COLRv1 emoji, window decorations/titlebar, a settings UI, the about dialog.
+38. ✅ **The `font-style` family** — named styles and style disabling. See the ledger below.
+39. Next: Tier 3 — `shell-integration` / `-features` (giest's prompt hooks have no off switch
+    today), COLRv1 emoji, window decorations/titlebar, a settings UI.
+
+### `font-style` and its three siblings — ✅ divergences
+
+The last unfinished part of font *selection*. Each slot takes `default`, a style **name**, or
+`false`.
+
+- **A named style replaces the bold/italic test rather than adding to it**, and upstream says
+  exactly why: "if a user says `font-style = italic` for the bold face, no results would be found if
+  we restrict to ALSO searching for italic". So `font-style-bold = Heavy` finds the Heavy face
+  whatever its style bits claim.
+- **The match reads the *typographic* subfamily as well as the standard one, and that is what makes
+  the feature work at all.** Measured on Windows' own Segoe UI Semibold: name ID 1 is "Segoe UI
+  Semibold", ID 2 is **"Regular"**, and only IDs 16/17 carry "Segoe UI" / "Semibold". A family
+  shipping more than four weights has to squash them into ID 2's Regular/Bold/Italic/Bold-Italic
+  buckets and puts the real name in ID 17 — so checking ID 2 alone would fail on precisely the fonts
+  someone writes this key for. The test asserts it against that font.
+- **`false` disables the style; it does not synthesize one.** A program asking for a disabled style
+  gets the regular face. That is the whole difference from `font-synthetic-style` — that key decides
+  how a *missing* style is faked, this one says the family has no such style — and getting them
+  confused would produce a slanted regular where the user asked for no italics at all. Upstream
+  implements it the same way (`styles.set(.italic, config.@"font-style-italic" != .false)`).
+- **Disabling works with no `font-family` set**, which needed care: two paths in `resolve_slots`
+  return the built-in font early, and both now run the slots through `disable_styles` first.
+  Upstream is explicit that this is the one case where `font-style` applies without a family, and it
+  is the case someone reaches for — "never italicise my terminal" shouldn't depend on whether a
+  custom font was found.
+- **A style name may contain spaces** (`Light Italic` is a real subfamily), so only the surrounding
+  whitespace is trimmed — and `true` is a *name*, not the opposite of `false`: upstream gives it no
+  meaning and a font could advertise it.
+
+**Divergences:**
+
+- **A localized style name matches too.** The name table carries one entry per language, and the
+  lookup scans all of them — so on a German system `font-style-bold = Fett` finds the bold face.
+  Upstream matches the platform's own style string, which is likewise localized; this is the same
+  behaviour reached by a different route, and it can only ever match *more*.
+- **Applied at startup**, like every other font key.
+
+**Verified**: `cargo test` — the three-way parse (including the space-carrying name, `true` as a
+name, and the reset), per-slot independence, the typographic-subfamily match against a real Segoe UI
+Semibold, and that a disabled style lands on the regular face with no synthesis both when a family
+resolves and when it doesn't. The *appearance* of a named weight wants a human look.
 
 ### Legacy computing (mosaics *and* diagonals) + `adjust-icon-height` — ✅ divergences
 
@@ -1257,8 +1302,9 @@ grep -oE '^@"[a-z0-9-]+"' ghostty-src/src/config/Config.zig | tr -d '@"' | sort 
 grep -oE '\("[a-z0-9-]+", \|' src/config.rs | grep -oE '"[a-z0-9-]+"' | tr -d '"' | sort -u
 ```
 
-**187 upstream keys; giest now sets 109, of which 101 are upstream's** (`config-file`, then
-`undo-timeout`, then the four `font-variation*` keys, then `adjust-icon-height`, since) (the rest are giest-specific,
+**187 upstream keys; giest now sets 113, of which 105 are upstream's** (`config-file`, then
+`undo-timeout`, the four `font-variation*` keys, `adjust-icon-height`, and the four `font-style*`
+keys, since) (the rest are giest-specific,
 e.g. `text-gamma`). That replaces the "~250 options / ~230 remaining" estimates this document opened
 with, which were never counted.
 

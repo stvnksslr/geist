@@ -213,6 +213,8 @@ Ghostty would. Double-click-*drag* also doesn't snap to whole words yet.
 | `font-family` | repeatable string | A family name or a path to a font file. **Repeat it to build a fallback chain**: the first that resolves is the primary font (it sets the cell metrics), and the rest are searched, in order, for characters it lacks — ahead of the system fonts. An empty value clears the list. |
 | `font-family-bold` / `-italic` / `-bold-italic` | string | Per-style overrides; each falls back to the primary family. |
 | `font-feature` | repeatable | OpenType features, e.g. `-calt` to drop programming ligatures. |
+| `font-style` | `default` \| `false` \| name | Which face to take for the regular slot — see below. |
+| `font-style-bold` / `-italic` / `-bold-italic` | same | The same, per style slot. |
 | `font-variation` | repeatable `id=value` | Variable-font axis settings — see below. |
 | `font-variation-bold` / `-italic` / `-bold-italic` | repeatable `id=value` | The same, for that style slot. |
 | `font-synthetic-style` | bool or list | Whether a missing style may be **synthesized** from the face you have: bold by thickening it, italic by slanting it 12°. `false` disables all three; a list starts from the defaults, so `no-bold` disables only bold — note that it does **not** disable `bold-italic`, which you must turn off by name. |
@@ -223,6 +225,30 @@ thickens a real italic, else does both to the regular — upstream's preference 
 
 Font selection is applied **at startup**; changing any of these keys needs a restart (a config
 reload re-applies colors and sizes, not fonts).
+
+#### Picking a named style (`font-style`)
+
+Each style slot takes one of three things:
+
+- **`default`** — the usual lookup, by the face's bold/italic flags.
+- **a style name** — match what the font *calls* that face. This is how you reach a weight that
+  isn't "bold": `font-family = Iosevka` with `font-style-bold = Heavy`, or `font-family = Segoe UI`
+  with `font-style-bold = Semibold`. The name replaces the bold/italic test rather than adding to
+  it, so asking for a style the flags disagree with still finds it.
+- **`false`** — turn the style off. A program asking for it gets the **regular** face, and nothing
+  is synthesized. That is the difference from `font-synthetic-style`: that key decides how a
+  *missing* style is faked; this one says the family has no such style, so stop asking. It is also
+  the one value that works without a `font-family`, which is what you want for "never italicise my
+  terminal".
+
+A style name may contain spaces (`Light Italic` is a real subfamily), so only the surrounding
+whitespace is trimmed. `true` is a *name*, not the opposite of `false` — upstream gives it no
+meaning, and a font could plausibly advertise it.
+
+The match looks at both the standard subfamily name and the **typographic** one, which matters more
+than it sounds: Windows' own Segoe UI Semibold records its standard subfamily as `Regular` and only
+names itself `Semibold` in the typographic field. Checking one alone would fail on exactly the fonts
+this key exists for.
 
 #### Variable fonts (`font-variation`)
 
