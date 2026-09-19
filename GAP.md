@@ -131,7 +131,7 @@ dilation in the rasterizer, S), `drag-handle` (comes with pane drag, §C), `auto
 | OSC 52 / pwd **effects in lib-vt** | ◐ | could retire the `osc52.rs` / `osc7.rs` side-scanners (pwd callback 002fd41) — M |
 | `ghostty_terminal_paste` | ⬜ | route the paste encoder through it, gate unchanged — S |
 | Native search API (`ghostty_search_*`) | ⬜ | back the search bar; unlocks regex search — M |
-| Dirty-row iteration | ⬜ | skip unchanged rows in the snapshot copy — M |
+| Dirty-row iteration | ✅ | `f00c510`: only dirty rows are re-copied; the render state is now acknowledged each frame (it reported `Full` forever before). Needs an eyeball pass for stale cells while typing, scrolling and changing themes. |
 | Selection gesture engine | ⬜ | optional replacement for giest's click-count logic — M |
 | Default cursor style/blink engine options | ✅ N/A | probed: equivalent to `decscusr.rs` for initial, `CSI 0 q`, RIS and mode 12 — except upstream ignores mode 12 when `cursor-style-blink` is set, which only the scanner does. The scanner stays. |
 | OSC 72 kitty drag-and-drop | ⬜ | after file drop — M |
