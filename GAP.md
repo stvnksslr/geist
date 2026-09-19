@@ -54,7 +54,7 @@ Effort: **S** <1d · **M** 1–3d · **L** ~1wk · **XL** multi-week.
 | ~~`command-palette-entry`~~ | ✅ Upstream grammar incl. Zig-literal quoting; `clear` drops the built-ins, empty restores them; unparseable actions are dropped. | — |
 | ~~`window-subtitle`, `window-title-font-family`~~ | ✅ ◐ Subtitle (`working-directory`) is appended to the window caption as `title — cwd` (a Windows caption has one line). The title font applies to the **tab strip** only — the caption is drawn by DWM with the system font; resolved through the renderer's font scan, startup-only. | — |
 | ~~`app-notifications`~~ | ✅ In-app toasts ("Copied to clipboard", "Reloaded the configuration"); `Window::render_toast`, per-window egui temp data. | S |
-| `language` | Only meaningful once the UI is localized — deferred. | — |
+| `language` | **Decided against for now.** Upstream uses it to pick a gettext catalog for its GUI strings; giest ships no translations, so accepting the key would be a no-op that looks supported. Revisit if giest's UI is ever localized. | — |
 
 **A2. Windows analogues of platform keys.** Done (`winchrome.rs`): ✅ `window-decoration`
 (`none`/`false` → `ViewportCommand::Decorations(false)`; `auto`/`client`/`server` all mean "native
