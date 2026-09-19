@@ -27,6 +27,8 @@ use super::{
 type ResponseSink = Rc<RefCell<Vec<u8>>>;
 
 pub struct GhosttyVtEngine {
+    /// `vt-kam-allowed`; when false a program setting KAM is undone after each write.
+    kam_allowed: bool,
     /// Scrollback-compression idle tracking: the last activity token seen and
     /// when it last changed (upstream `renderer/Thread.zig` `Compression`).
     compress_activity: Option<libghostty_vt::terminal::CompressionActivity>,
@@ -199,6 +201,7 @@ impl GhosttyVtEngine {
             compress_activity: None,
             compress_since: std::time::Instant::now(),
             compress_done: false,
+            kam_allowed: false,
             placements: PlacementIterator::new()?,
             image_cache: HashMap::new(),
             image_ids_seen: Vec::new(),
@@ -1043,6 +1046,23 @@ mod tests {
     }
 
     #[test]
+    fn vt_policy_title_report_and_kam() {
+        let mut eng = GhosttyVtEngine::new(20, 5, 100_000).unwrap();
+        eng.write(b"\x1b]2;secret\x07\x1b[21t");
+        assert!(eng.take_responses().is_empty(), "title reports must be off by default");
+        eng.set_vt_policy(true, false, true).unwrap();
+        eng.write(b"\x1b[21t");
+        let r = String::from_utf8_lossy(&eng.take_responses()).into_owned();
+        assert!(r.contains("secret"), "title report enabled but got {r:?}");
+
+        eng.write(b"\x1b[2h"); // KAM: lock the keyboard
+        assert!(!eng.term.mode(libghostty_vt::terminal::Mode::KAM).unwrap(), "KAM must be refused by default");
+        eng.set_vt_policy(false, true, true).unwrap();
+        eng.write(b"\x1b[2h");
+        assert!(eng.term.mode(libghostty_vt::terminal::Mode::KAM).unwrap());
+    }
+
+    #[test]
     fn compression_waits_for_idle_and_keeps_contents() {
         use std::time::{Duration, Instant};
         let mut eng = GhosttyVtEngine::new(40, 5, 10_000_000).unwrap();
@@ -1860,6 +1880,11 @@ fn copy_cell(
 impl TerminalEngine for GhosttyVtEngine {
     fn write(&mut self, bytes: &[u8]) {
         self.term.vt_write(bytes);
+        // Upstream ignores KAM in termio unless `vt-kam-allowed`; lib-vt has no
+        // such switch, so undo it: a locked keyboard is a denial of service.
+        if !self.kam_allowed && self.term.mode(Mode::KAM).unwrap_or(false) {
+            let _ = self.term.set_mode(Mode::KAM, false);
+        }
     }
 
     fn resize(&mut self, cols: u16, rows: u16, cell_px: (u32, u32)) -> Result<()> {
@@ -2034,6 +2059,14 @@ impl TerminalEngine for GhosttyVtEngine {
 
     fn set_min_contrast(&mut self, ratio: f32) -> Result<()> {
         self.min_contrast = ratio;
+        Ok(())
+    }
+
+    fn set_vt_policy(&mut self, title_report: bool, kam_allowed: bool, grapheme_unicode: bool) -> Result<()> {
+        self.term.set_title_report_enabled(title_report)?;
+        self.kam_allowed = kam_allowed;
+        self.term.set_default_mode(Mode::GRAPHEME_CLUSTER, grapheme_unicode)?;
+        self.term.set_mode(Mode::GRAPHEME_CLUSTER, grapheme_unicode)?;
         Ok(())
     }
 

@@ -1022,6 +1022,13 @@ pub struct Config {
     pub scrollback_limit_lines: Option<usize>,
     /// Ghostty `scrollback-compression` (default on).
     pub scrollback_compression: bool,
+    /// Ghostty `title-report`: answer `CSI 21 t`. Off by default (it can inject
+    /// a program-chosen title back into the shell's input).
+    pub title_report: bool,
+    /// Ghostty `vt-kam-allowed`: honor ANSI mode 2 (keyboard lock).
+    pub vt_kam_allowed: bool,
+    /// Ghostty `grapheme-width-method`: `unicode` (true, default) or `legacy`.
+    pub grapheme_unicode: bool,
     /// Total bytes of image data (kitty graphics) retained per terminal screen.
     /// Ghostty `image-storage-limit`.
     ///
@@ -1221,6 +1228,9 @@ impl Default for Config {
             scrollback_limit: 10_000,
             scrollback_limit_lines: None,
             scrollback_compression: true,
+            title_report: false,
+            vt_kam_allowed: false,
+            grapheme_unicode: true,
             // Ghostty's default: 320 MB (decimal), per screen.
             image_storage_limit: 320 * 1000 * 1000,
             selection_bg: Rgb::new(0x38, 0x5a, 0x9c),
@@ -2149,6 +2159,15 @@ const SETTERS: &[(&str, Setter)] = &[
     }),
     ("window-inherit-working-directory", |c, v, d| {
         c.window_inherit_working_directory = parse_bool(v, d.window_inherit_working_directory);
+    }),
+    ("title-report", |c, v, d| c.title_report = parse_bool(v, d.title_report)),
+    ("vt-kam-allowed", |c, v, d| c.vt_kam_allowed = parse_bool(v, d.vt_kam_allowed)),
+    ("grapheme-width-method", |c, v, d| {
+        c.grapheme_unicode = match v {
+            "unicode" => true,
+            "legacy" => false,
+            _ => d.grapheme_unicode,
+        };
     }),
 ];
 
