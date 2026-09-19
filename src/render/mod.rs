@@ -180,6 +180,8 @@ pub struct TermFrame {
     pub search_fg: crate::config::TerminalColor,
     pub search_selected_bg: crate::config::TerminalColor,
     pub search_selected_fg: crate::config::TerminalColor,
+    /// `cursor-text`: glyph color under a block cursor; `None` = the cell's bg.
+    pub cursor_text: Option<crate::config::TerminalColor>,
     /// `background-opacity`. Cells on the *default* background emit no quad, so
     /// the translucent window fill painted behind the grid is what actually
     /// carries this; the renderer needs the value only for
@@ -1281,7 +1283,8 @@ impl GpuResources {
                         (false, false)
                     };
                     let (fg, mut bg) = if is_cursor_cell {
-                        (cell.bg, snap.cursor_color)
+                        let fg = frame.cursor_text.map_or(cell.bg, |t| t.resolve(cell.fg, cell.bg));
+                        (fg, snap.cursor_color)
                     } else {
                         (cell.fg, cell.bg)
                     };

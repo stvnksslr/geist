@@ -882,6 +882,8 @@ pub struct Config {
     pub search_fg: TerminalColor,
     pub search_selected_bg: TerminalColor,
     pub search_selected_fg: TerminalColor,
+    /// Ghostty `cursor-text`; `None` (unset) keeps the cell's background.
+    pub cursor_text: Option<TerminalColor>,
     /// Color of the gutter between splits; `None` derives one from the chrome.
     /// Ghostty `split-divider-color`.
     pub split_divider_color: Option<Rgb>,
@@ -1192,6 +1194,7 @@ impl Default for Config {
             search_fg: TerminalColor::Color(Rgb::new(0, 0, 0)),
             search_selected_bg: TerminalColor::Color(Rgb::new(0xF2, 0xA5, 0x7E)),
             search_selected_fg: TerminalColor::Color(Rgb::new(0, 0, 0)),
+            cursor_text: None,
             split_divider_color: None,
             new_tab_position: NewTabPosition::default(),
             window_padding_balance: PaddingBalance::default(),
@@ -1516,6 +1519,9 @@ const SETTERS: &[(&str, Setter)] = &[
     }),
     ("search-selected-background", |c, v, d| {
         c.search_selected_bg = terminal_color(v, c.search_selected_bg, d.search_selected_bg)
+    }),
+    ("cursor-text", |c, v, d| {
+        c.cursor_text = if v.is_empty() { d.cursor_text } else { TerminalColor::parse(v).or(c.cursor_text) };
     }),
     ("search-selected-foreground", |c, v, d| {
         c.search_selected_fg = terminal_color(v, c.search_selected_fg, d.search_selected_fg)
@@ -2764,6 +2770,9 @@ mod tests {
         assert_eq!(parsed("foreground = red").fg, Rgb::new(255, 0, 0));
         assert_eq!(parsed("background = black").bg, Rgb::new(0, 0, 0));
         assert_eq!(parsed("cursor-color = blue").cursor, Some(Rgb::new(0, 0, 255)));
+        assert_eq!(parsed("cursor-text = cell-foreground").cursor_text, Some(TerminalColor::CellForeground));
+        assert_eq!(parsed("cursor-text = #00ff00").cursor_text, Some(TerminalColor::Color(Rgb::new(0, 255, 0))));
+        assert_eq!(parsed("").cursor_text, None);
         assert_eq!(
             parsed("bold-color = black").bold_color,
             BoldColor::Color(Rgb::new(0, 0, 0))

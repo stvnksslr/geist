@@ -4812,7 +4812,10 @@ impl Window {
             g.selection_background_color = rgb(sel_bg);
             g.selection_foreground_color = rgb(sel_fg.unwrap_or(self.config.fg));
             g.cursor_color = rgb(self.config.cursor.unwrap_or(self.config.fg));
-            g.cursor_text = rgb(bg);
+            g.cursor_text = rgb(match self.config.cursor_text {
+                Some(crate::config::TerminalColor::Color(c)) => c,
+                _ => bg,
+            });
             self.shader_last_time = now;
             self.shader_frame = self.shader_frame.wrapping_add(1);
             // An animated shader has to be driven: nothing else repaints an idle
@@ -4834,6 +4837,7 @@ impl Window {
                 search_fg: self.config.search_fg,
                 search_selected_bg: self.config.search_selected_bg,
                 search_selected_fg: self.config.search_selected_fg,
+                cursor_text: self.config.cursor_text,
                 background_opacity,
                 background_opacity_cells,
                 faint_opacity,
