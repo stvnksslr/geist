@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  App Installer file for the MSIX (template; scripts/package.ps1 fills @TOKENS@).
+
+  Host this file and the .msix at stable URLs (e.g. a GitHub Pages site or the
+  "latest" release download path) and install with
+  `ms-appinstaller:?source=<Uri of this file>`. Windows then re-reads this
+  file on launch / every 24 h and updates the package in the background — the
+  MSIX analogue of the self-updater in src/update.rs, which stays idle in a
+  packaged install.
+
+  The Uri attributes must be the file's own final hosting location; the
+  Version here and in the package Identity must match. Not hosted yet.
+-->
+<AppInstaller
+  xmlns="http://schemas.microsoft.com/appx/appinstaller/2021"
+  Version="@VERSION4@"
+  Uri="@BASE_URI@/giest.appinstaller">
+
+  <MainPackage
+    Name="giest.giest"
+    Publisher="@PUBLISHER@"
+    Version="@VERSION4@"
+    ProcessorArchitecture="@ARCH@"
+    Uri="@BASE_URI@/@MSIX_NAME@" />
+
+  <UpdateSettings>
+    <OnLaunch HoursBetweenUpdateChecks="24" ShowPrompt="true" UpdateBlocksActivation="false" />
+    <AutomaticBackgroundTask />
+    <ForceUpdateFromAnyVersion>false</ForceUpdateFromAnyVersion>
+  </UpdateSettings>
+</AppInstaller>

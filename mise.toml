@@ -8,3 +8,7 @@ run = "cargo run"
 [tasks.release]
 description = "Optimized release build"
 run = "cargo build --release"
+
+[tasks.package]
+description = "Release zip + MSIX + App Installer file + giest-manifest.json into dist/<version>/"
+run = "pwsh -NoProfile -File scripts/package.ps1"
