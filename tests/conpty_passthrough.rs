@@ -358,6 +358,32 @@ fn kitty_clipboard_protocol_survives_conpty() {
 
 #[test]
 #[ignore = "spawns a real shell; run with --ignored --nocapture"]
+fn kitty_dnd_protocol_survives_conpty() {
+    // OSC 72 (kitty drag-and-drop): a support query and a drop-target
+    // registration with a MIME list. Probed before deciding what giest can do
+    // with it (see GAP.md: the C API can't deliver a drop, so replies are
+    // withheld) — this pins that the bytes would at least arrive.
+    let out = run(&emit(&cat(&[
+        ESC.into(),
+        lit("]72;t=q:i=7"),
+        st(),
+        ESC.into(),
+        lit("]72;t=a:i=7;text/uri-list text/plain"),
+        st(),
+    ])));
+    let text = String::from_utf8_lossy(&out);
+    eprintln!("ConPTY emitted {} bytes: {:?}", out.len(), text);
+    for needle in [&b"]72;t=q:i=7"[..], b"]72;t=a:i=7;text/uri-list text/plain"] {
+        assert!(
+            contains(&out, needle),
+            "ConPTY dropped {:?}. Got: {text:?}",
+            String::from_utf8_lossy(needle)
+        );
+    }
+}
+
+#[test]
+#[ignore = "spawns a real shell; run with --ignored --nocapture"]
 fn the_cmd_prompt_sets_the_bar_cursor_and_title() {
     let profile = Profile {
         name: "Command Prompt".into(),

@@ -68,7 +68,10 @@ fallback engine without app changes:
   `DWMWA_SYSTEMBACKDROP_TYPE`, falling back to the undocumented `SetWindowCompositionAttribute` accent
   policy (resolved via `GetProcAddress`, never linked) on Win10, then to nothing.
 - **`osc_notify.rs`** — side-scanner for OSC 9 / OSC 777 desktop-notification requests (the engine
-  drops them on the read-only path; lib-vt now has an `on_desktop_notification` callback, unexplored). **`notify.rs`** — shows them as Windows toasts via the notification-area
+  drops them on the read-only path). lib-vt's `on_desktop_notification`/`on_progress_report` were
+  evaluated and **not adopted**: they match the scanner on OSC 9/777/9;4 but never see kitty OSC 99
+  (title+body only, no chunking/occasion). `engine_callbacks_match_the_scanner_except_kitty_osc99`
+  is the tripwire. **`notify.rs`** — shows them as Windows toasts via the notification-area
   balloon API; WinRT toasts would need a registered AppUserModelID (i.e. a Start Menu shortcut).
   **`shader.rs`** — `custom-shader`: Shadertoy GLSL → naga IR → WGSL. **The prefix's oddities are
   all forced by naga, not style**: no combined `sampler2D` (Vulkan-style `texture2D`+`sampler`
@@ -205,7 +208,10 @@ fallback engine without app changes:
 - **Anything newly forwarded by the sideloaded ConPTY is newly *live* in the engine.** libghostty
   enables some APC features by default — the glyph protocol (`25a1`) would answer support queries
   giest can't render — so `GhosttyVtEngine::new` switches it off. Check engine defaults for any
-  sequence family that starts arriving.
+  sequence family that starts arriving. Likewise **OSC 72** (kitty drag-and-drop): the engine answers
+  `t=q`, but the C API cannot deliver a drop, so `write` strips every OSC 72 reply (`strip_osc72`)
+  rather than advertise it. ENQ is answered via `on_enquiry` (`enquiry-response`) — which is why
+  that key only works under the sideloaded ConPTY.
 - **Kitty image textures are keyed by `Arc<ImageData>` address, not image id** (ids are per
   terminal), and the engine's pixel copy is keyed by the image's **generation** stamp (changes on
   re-transmit and on every animation frame change). Autoplaying animations don't advance: upstream

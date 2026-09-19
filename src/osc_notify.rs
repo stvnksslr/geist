@@ -614,4 +614,78 @@ mod tests {
         // ESC followed by something that isn't `\` is not an ST.
         assert!(scan(&[b"\x1b]9;body\x1bZ\x07"]).is_empty());
     }
+
+    /// Normalize a scanner event for comparison with the engine's callbacks.
+    fn describe(e: &Osc9) -> String {
+        match e {
+            Osc9::Notify(n) => format!("N|{}|{}", n.title, n.body),
+            Osc9::Progress(p) => format!("P|{:?}|{:?}", p.state, p.value),
+        }
+    }
+
+    /// What libghostty's own `on_desktop_notification` / `on_progress_report`
+    /// callbacks report for `bytes`, in the same normalized form.
+    fn engine_events(bytes: &[u8]) -> Vec<String> {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let mut term = libghostty_vt::Terminal::new(80, 24).unwrap();
+        let s1 = seen.clone();
+        term.on_desktop_notification(move |_t, n| {
+            s1.borrow_mut().push(format!("N|{}|{}", n.title(), n.body()));
+        })
+        .unwrap();
+        let s2 = seen.clone();
+        term.on_progress_report(move |_t, p| {
+            use libghostty_vt::terminal::ProgressState as E;
+            let state = match p.state() {
+                Ok(E::Remove) => "Remove",
+                Ok(E::Set) => "Set",
+                Ok(E::Error) => "Error",
+                Ok(E::Indeterminate) => "Indeterminate",
+                Ok(E::Pause) => "Pause",
+                _ => "?",
+            };
+            s2.borrow_mut().push(format!("P|{state}|{:?}", p.progress()));
+        })
+        .unwrap();
+        term.vt_write(bytes);
+        drop(term);
+        Rc::try_unwrap(seen).unwrap().into_inner()
+    }
+
+    /// The case for retiring this scanner onto the engine's callbacks, and why
+    /// it has not happened. For OSC 9 / 777 / 9;4 the engine agrees with the
+    /// scanner — including the ConEmu fall-through (`9;4` alone is a
+    /// notification whose body is `4`). But the callback carries only
+    /// title + body, and **kitty OSC 99 never reaches it** (upstream logs it as
+    /// an unimplemented OSC), so OSC 99, its `d=0` chunking and its `o=`
+    /// occasion would be lost. Tripwire: if the engine starts delivering OSC 99,
+    /// the last assertion fails and retirement should be re-evaluated.
+    #[test]
+    fn engine_callbacks_match_the_scanner_except_kitty_osc99() {
+        let shared: &[&[u8]] = &[
+            b"\x1b]9;hello\x07",
+            b"\x1b]9;4\x07",
+            b"\x1b]9;4;1;50\x07",
+            b"\x1b]9;4;3\x07",
+            b"\x1b]9;4;0\x07",
+            b"\x1b]9;4;2;10\x1b\\",
+            b"\x1b]9;4;4;20\x07",
+            b"\x1b]9;1;500\x07",
+            b"\x1b]777;notify;Title;Body\x07",
+            b"\x1b]9;42 is the answer\x07",
+        ];
+        for case in shared {
+            let ours: Vec<String> = scan_all(&[case]).iter().map(describe).collect();
+            assert_eq!(engine_events(case), ours, "case {:?}", String::from_utf8_lossy(case));
+        }
+
+        let kitty: &[u8] = b"\x1b]99;;Hello from kitty\x1b\\";
+        assert_eq!(scan(&[kitty]).len(), 1, "the scanner handles OSC 99");
+        assert!(
+            engine_events(kitty).is_empty(),
+            "the engine now delivers kitty OSC 99 — re-evaluate retiring osc_notify.rs"
+        );
+    }
 }

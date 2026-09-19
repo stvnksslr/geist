@@ -71,7 +71,10 @@ rest before the slide starts). Still open: `window-colorspace` (display-p3 → H
 ~~`font-thicken` + `-strength`~~ ✅ (1px coverage dilation weighted by strength; upstream is
 macOS-only — needs eyeballing), ~~`drag-handle`~~ ✅ (see §C pane drag), `auto-update` / `auto-update-channel` (§C).
 
-**A3. Blocked.** `enquiry-response` — ConPTY strips ENQ (probed; see the config-surface ledger).
+**A3. ✅ `enquiry-response`** — answered through the engine's `on_enquiry` callback (upstream
+semantics: sent verbatim, empty = no reply, 256+ bytes silently not sent). **Only works with
+`conpty-passthrough` active** (sideloaded `conpty.dll`): the inbox conhost strips ENQ, so without
+the sideload the byte never reaches the engine. See the ledger "Protocol leftovers".
 
 **A4. N/A on Windows.** Every `gtk-*`, `linux-*`, `x11-*`, `class`, `async-backend`, most `macos-*`
 (`macos-icon*` map to the runtime-icon row in §C), `quick-terminal-keyboard-interactivity` /
@@ -134,7 +137,7 @@ macOS-only — needs eyeballing), ~~`drag-handle`~~ ✅ (see §C pane drag), `au
 |---|---|---|
 | No scrollback pull on resize under ConPTY (c55f213) | ✅ | done (`0458c1c`) |
 | `scrollback-limit-bytes` / `-lines` | ✅ | done |
-| OSC 99 (kitty notifications) | ⬜ | engine parses; route to `notify.rs` alongside 9/777 — S |
+| OSC 99 (kitty notifications) | ✅ | side-scanned by `osc_notify.rs` (chunking + `o=`); the engine's notification callback never sees OSC 99, which is why the scanner is not retired — see "Protocol leftovers" |
 | OSC 5522 kitty clipboard + paste-events mode 5522 | ✅ | `clipboard.rs` + engine callbacks, existing permission prompts; see the ledger "Kitty clipboard (OSC 5522) + engine-side OSC 52 / pwd" |
 | OSC 52 / pwd **effects in lib-vt** | ✅ | `osc52.rs` and `osc7.rs` retired; same ledger |
 | `ghostty_terminal_paste` | ◐ | wrapped (`Terminal::paste`, giest-local) and used for mode-5522 paste events; ordinary text pastes still go through `encode_paste` behind the same gate — S |
@@ -142,8 +145,8 @@ macOS-only — needs eyeballing), ~~`drag-handle`~~ ✅ (see §C pane drag), `au
 | Dirty-row iteration | ✅ | `f00c510`: only dirty rows are re-copied; the render state is now acknowledged each frame (it reported `Full` forever before). Needs an eyeball pass for stale cells while typing, scrolling and changing themes. |
 | Selection gesture engine | ⬜ | optional replacement for giest's click-count logic — M |
 | Default cursor style/blink engine options | ✅ N/A | probed: equivalent to `decscusr.rs` for initial, `CSI 0 q`, RIS and mode 12 — except upstream ignores mode 12 when `cursor-style-blink` is set, which only the scanner does. The scanner stays. |
-| OSC 72 kitty drag-and-drop | ⬜ | after file drop — M |
-| Kitty animation / relative placements / glyph protocol | ◐ | unblocked by a **sideloaded ConPTY** (`conpty-passthrough`, `scripts/fetch-conpty.ps1`). Relative placements ✅, client-driven frames (`a=a,c=N`) ✅, transient ✅ (engine-side eviction); autoplay (`s=2/3`) ⬜ — `animationTick` isn't in the C API; glyph protocol ⬜ — no outline read-back in the C API, so it is **disabled** rather than advertised. See the kitty section |
+| OSC 72 kitty drag-and-drop | ⬜ blocked | bytes survive both ConPTYs (probed), and the engine parses OSC 72, answers `t=q` and tracks registrations — but the C API has **no way to deliver a drop** (upstream calls `kitty.dnd.State.dragDrop` from Zig; no C export, no `drag_and_drop` effect in the C wrapper). giest therefore **withholds the engine's OSC 72 replies** so no program is told drops will come; file drops keep pasting paths. See the ledger "Protocol leftovers" |
+| Kitty animation / relative placements / glyph protocol | ◐ | unblocked by a **sideloaded ConPTY** (`conpty-passthrough`, `scripts/fetch-conpty.ps1`). Relative placements ✅, client-driven frames (`a=a,c=N`) ✅, transient ✅ (engine-side eviction); autoplay (`s=2/3`) ⬜ — `animationTick` isn't in the C API, and the C API exposes no frame count or per-frame gap either, so giest can't drive frames itself (re-checked at b32f20f); glyph protocol ⬜ — no outline read-back in the C API, so it is **disabled** rather than advertised. See the kitty section |
 | New `middle-click-action` / `copy-on-select` values, `~` in theme paths | ✅ | `clipboard-paste`; `none/primary/clipboard/both` (`true` = clipboard, as off-Linux upstream); `primary-paste` reads the PRIMARY emulation, falling back to the clipboard while it is empty; `~`/`~\` → `%USERPROFILE%` for every theme name incl. light/dark pairs |
 | Free with the bump | ✅ | XTGETTCAP, ANSI DECRQM, DECECM report, mode 2048 size-on-enable, C0/C1 fixes, CSI 2K wrap reset, color-reset fix, RIS clears progress, MOK2 + F13–F25 key encoding, kitty graphics spec fixes |
 
@@ -2254,3 +2257,37 @@ shared decision table — `split-inherit-working-directory` was previously hardc
 **Verification note (per CLAUDE.md):** `cargo test` covers parser/registry/engine logic; any `render/*`,
 transparency, font, or opacity change needs **human visual confirmation** in the running app
 (`mise dev`) — screenshots have repeatedly produced false "it works" conclusions on these.
+
+### Protocol leftovers (enquiry-response, OSC 72, notification callback, kitty autoplay)
+Re-checked against the pinned engine (ghostty b32f20f) and its C API.
+- **`enquiry-response` ✅.** `GhosttyVtEngine` installs `on_enquiry` and answers with the configured
+  string (interned once per distinct value: the binding's callback must return a `&str` that outlives
+  the closure's borrow). Upstream semantics — verbatim, empty sends nothing, 256+ bytes are dropped
+  by libghostty. Reloads apply. **Needs `conpty-passthrough`**: ENQ arrives only through the
+  sideloaded ConPTY (`enq_is_still_stripped_by_conpty`, both modes). Tests:
+  `enquiry_response_answers_enq`, `enquiry_response_parses`.
+- **OSC 72 kitty drag-and-drop: blocked on the C API.** Probed first
+  (`kitty_dnd_protocol_survives_conpty`, both modes): `t=q` and a `t=a` registration arrive verbatim.
+  The engine handles the client half (query reply, registration, MIME accept, data requests), but
+  the *terminal* half — "a drop happened, here are its MIMEs/data" — is `kitty.dnd.State.dragDrop` /
+  `dragMove` / `dragLeave`, which are Zig-only; the C wrapper sets the `drag_and_drop` effect to null
+  and exports no drop entry point, and the registration state isn't readable either. A giest side
+  implementation would fight the engine's own replies (it answers data requests from its empty drop
+  state). So giest **withholds every OSC 72 reply** after `vt_write` (`strip_osc72`): a program that
+  queries sees no support and falls back, instead of registering for drops that never come. File
+  drops keep pasting shell-quoted paths via `Session::paste_str`. Tripwire
+  `kitty_dnd_is_not_advertised` pins that the raw engine *does* answer (so a C API change is visible)
+  while giest does not. Unblocking needs a C export for drop/move/leave (+ serving data).
+- **Desktop-notification callback: evaluated, not adopted.** `on_desktop_notification` +
+  `on_progress_report` agree with `osc_notify.rs` on every OSC 9 / 777 / 9;4 case tried, *including*
+  the ConEmu fall-through (`9;4` alone is a notification with body `4`) — pinned by
+  `engine_callbacks_match_the_scanner_except_kitty_osc99`. But the callback carries only
+  title + body, and **kitty OSC 99 never reaches it** (upstream `stream.zig` logs
+  `kitty_desktop_notification` as an unimplemented OSC), so moving onto it would lose OSC 99, its
+  `d=0` chunking and `o=` occasion. The scanner stays whole (splitting 9/777 onto the engine and 99
+  onto a scanner buys nothing). The same test is the tripwire: it fails once the engine starts
+  delivering OSC 99.
+- **Kitty autoplay (`a=a,s=2|3`): still not possible.** `ImageStorage.animationTick` is called only
+  from `renderer/generic.zig`; `kitty_graphics.h` exports no tick, no frame count and no per-frame
+  gap, so giest can't even drive frames itself with synthetic `a=a,c=N` writes. Client-driven frames
+  keep working.
