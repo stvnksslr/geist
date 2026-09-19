@@ -904,6 +904,8 @@ pub struct Window {
     /// no sequence is in progress. Held across frames because that is exactly
     /// what a sequence is: state between two key events.
     pending_keys: Vec<Chord>,
+    /// The leaders of the binding being executed, for `end_key_sequence`.
+    seq_prefix: Vec<Chord>,
     /// Active key tables, innermost **last**. Runtime state, not config: the
     /// stack is per window and is cleared on a config reload, since a reload can
     /// delete a table whose name is still on it — and a stale name silently
@@ -1168,6 +1170,8 @@ enum AppRequest {
     /// Ghostty `undo` / `redo`.
     Undo,
     Redo,
+    /// Ghostty `goto_window:next|previous`: focus the window `delta` slots away.
+    FocusWindow(isize),
 }
 
 /// The whole application: every open window, plus the little state that has to
@@ -1535,6 +1539,7 @@ impl Window {
             palette: None,
             keymap,
             pending_keys: Vec::new(),
+            seq_prefix: Vec::new(),
             key_tables: Vec::new(),
             pointer_hidden: false,
             write_file_seq: 0,
@@ -1918,6 +1923,7 @@ impl Window {
             palette: None,
             keymap: self.keymap.clone(),
             pending_keys: Vec::new(),
+            seq_prefix: Vec::new(),
             key_tables: Vec::new(),
             pointer_hidden: false,
             write_file_seq: 0,
@@ -2630,6 +2636,9 @@ impl Window {
                     // isn't tied to one surface — so it skips the performable
                     // check entirely, matching `decide_key`'s short-circuit.
                     let all = self.keymap.is_all(&stack, &self.pending_keys);
+                    // For `end_key_sequence`: the leaders, without the key that
+                    // completed the binding.
+                    self.seq_prefix = self.pending_keys[..self.pending_keys.len() - 1].to_vec();
                     self.pending_keys.clear();
                     let ctx_perform = self.perform_ctx();
                     let can = actions
@@ -2931,6 +2940,38 @@ impl Window {
         match action {
             // Bound, and deliberately does nothing (see `Action::Noop`).
             Action::Noop(_) => {}
+            Action::GotoWindowNext => self.requests.push(AppRequest::FocusWindow(1)),
+            Action::GotoWindowPrev => self.requests.push(AppRequest::FocusWindow(-1)),
+            // Geometry is applied once, on the first frame with cell metrics;
+            // re-arming it re-applies `window-width`/`-height`. Upstream: no
+            // effect while fullscreen.
+            Action::ResetWindowSize => {
+                if !self.fullscreen {
+                    self.geometry_applied = false;
+                }
+            }
+            Action::CopyUrlToClipboard => {
+                if let Some(url) = self
+                    .focused_session()
+                    .and_then(|s| s.hover_cell.and_then(|c| s.url_at(c, true, true)))
+                {
+                    ctx.copy_text(url);
+                }
+            }
+            Action::ScrollToSelection => {
+                let cell_h = self.cell_h;
+                if let Some(s) = self.focused_session_mut() {
+                    s.scroll_to_selection(cell_h);
+                }
+            }
+            Action::EndKeySequence => {
+                let prefix = std::mem::take(&mut self.seq_prefix);
+                if !prefix.is_empty()
+                    && let Some(s) = self.focused_session_mut()
+                {
+                    s.send_chords(&prefix);
+                }
+            }
             // Key tables. `can_perform` has already rejected the no-op cases
             // (an unknown table, or one that is already innermost), so these
             // only run when they will actually change the stack.
@@ -4932,6 +4973,8 @@ impl Window {
                     )
                 });
 
+                session.hover_cell = resp.hover_pos().map(|p| session.pos_to_cell(p, prect, ppp, cw, ch));
+
                 // `handle_mouse` reads raw `ctx.input` events rather than the
                 // `Response` above, so egui's widget arbitration does *not*
                 // keep a scrollbar drag out of it — the grab check is what
@@ -6179,6 +6222,13 @@ impl App {
                 AppRequest::Record(op) => self.undo.record(now, op),
                 AppRequest::Undo => self.undo_or_redo(ctx, now, false),
                 AppRequest::Redo => self.undo_or_redo(ctx, now, true),
+                AppRequest::FocusWindow(delta) => {
+                    let n = self.windows.len() as isize;
+                    if let Some(i) = self.windows.iter().position(|w| w.window_id == id) {
+                        let j = (i as isize + delta).rem_euclid(n) as usize;
+                        ctx.send_viewport_cmd_to(self.windows[j].viewport_id(), egui::ViewportCommand::Focus);
+                    }
+                }
             }
         }
     }

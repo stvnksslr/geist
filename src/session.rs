@@ -130,6 +130,9 @@ pub struct Session {
     preedit: crate::ime::Preedit,
     /// `scroll-to-bottom`, read on keystroke and on new output.
     scroll_to_bottom: crate::config::ScrollToBottom,
+    /// The cell under the mouse pointer this frame, if it is over this pane.
+    /// Read by `copy_url_to_clipboard` and the link-hover preview.
+    pub hover_cell: Option<(u16, u16)>,
     /// Ghostty `scrollback-compression`; drives [`Session::idle_work`].
     scrollback_compression: bool,
     /// Precision of OSC color-query replies. Read at pump time rather than per
@@ -318,6 +321,7 @@ impl Session {
             preedit: crate::ime::Preedit::default(),
             scroll_to_bottom: config.scroll_to_bottom,
             scrollback_compression: config.scrollback_compression,
+            hover_cell: None,
             osc_color_report_format: config.osc_color_report_format,
             cursor_style: config.cursor_style,
             cursor_style_blink: config.cursor_style_blink,
@@ -868,6 +872,19 @@ impl Session {
         let Some(end_row) = self.engine.selection_adjust(how) else {
             return;
         };
+        self.reveal_row(end_row, cell_h);
+    }
+
+    /// Ghostty `scroll_to_selection`: bring the selection's end into view.
+    pub fn scroll_to_selection(&mut self, cell_h: f32) {
+        if let Some(row) = self.engine.selection_end_row() {
+            self.reveal_row(row, cell_h);
+        }
+    }
+
+    /// Scroll so absolute screen `end_row` is visible, snapping to the nearest
+    /// edge rather than centring.
+    fn reveal_row(&mut self, end_row: u32, cell_h: f32) {
         let (top, bottom) = (self.viewport_top_row(), self.viewport_bottom_row());
         if end_row >= top && end_row <= bottom {
             return;

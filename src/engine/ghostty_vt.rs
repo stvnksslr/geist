@@ -2342,6 +2342,15 @@ impl TerminalEngine for GhosttyVtEngine {
         self.selection_installed
     }
 
+    fn selection_end_row(&self) -> Option<u32> {
+        if !self.selection_installed {
+            return None;
+        }
+        let h = self.sel_head.as_ref()?;
+        let end = h.snapshot(&self.term).ok()??;
+        self.term.point_from_grid_ref(&end, PointSpace::Screen).ok().flatten().map(|p| p.y)
+    }
+
     fn selected_text(&self, trim: bool) -> Option<String> {
         use libghostty_vt::selection::FormatOptions;
 

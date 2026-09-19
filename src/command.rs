@@ -446,6 +446,18 @@ pub enum Action {
     FocusSplitDown,
     FocusSplitNext,
     FocusSplitPrev,
+    /// Focus the next / previous window (Ghostty `goto_window:next|previous`).
+    GotoWindowNext,
+    GotoWindowPrev,
+    /// Resize the window back to `window-width`/`-height` (Ghostty `reset_window_size`).
+    ResetWindowSize,
+    /// Copy the URL under the mouse pointer (Ghostty `copy_url_to_clipboard`).
+    CopyUrlToClipboard,
+    /// Scroll the viewport to the selection (Ghostty `scroll_to_selection`).
+    ScrollToSelection,
+    /// Send the pending leader keys to the shell and end the sequence
+    /// (Ghostty `end_key_sequence`).
+    EndKeySequence,
     IncreaseFontSize,
     DecreaseFontSize,
     ResetFontSize,
@@ -549,6 +561,12 @@ impl Action {
             Action::FocusSplitRight => "Focus Split: Right",
             Action::FocusSplitUp => "Focus Split: Up",
             Action::FocusSplitDown => "Focus Split: Down",
+            Action::GotoWindowNext => "Focus Next Window",
+            Action::GotoWindowPrev => "Focus Previous Window",
+            Action::ResetWindowSize => "Reset Window Size",
+            Action::CopyUrlToClipboard => "Copy URL",
+            Action::ScrollToSelection => "Scroll to Selection",
+            Action::EndKeySequence => "End Key Sequence",
             Action::FocusSplitNext => "Focus Split: Next",
             Action::FocusSplitPrev => "Focus Split: Previous",
             Action::IncreaseFontSize => "Increase Font Size",
@@ -585,7 +603,13 @@ impl Action {
             | Action::DeactivateAllKeyTables
             | Action::SetTabTitle(_)
             | Action::SetSurfaceTitle(_)
-            | Action::SetWindowTitle(_) => return None,
+            | Action::SetWindowTitle(_)
+            | Action::GotoWindowNext
+            | Action::GotoWindowPrev
+            | Action::ResetWindowSize
+            | Action::CopyUrlToClipboard
+            | Action::ScrollToSelection
+            | Action::EndKeySequence => return None,
             Action::NewTab => "Ctrl+Shift+T",
             Action::NewWindow => "Ctrl+Shift+N",
             Action::Inspector(_) => "Ctrl+Shift+I",
@@ -697,6 +721,12 @@ impl Action {
             Action::EqualizeSplits => "equalize_splits".into(),
             Action::ClosePane => "close_surface".into(),
             Action::ToggleFullscreen => "toggle_fullscreen".into(),
+            Action::GotoWindowNext => "goto_window:next".into(),
+            Action::GotoWindowPrev => "goto_window:previous".into(),
+            Action::ResetWindowSize => "reset_window_size".into(),
+            Action::CopyUrlToClipboard => "copy_url_to_clipboard".into(),
+            Action::ScrollToSelection => "scroll_to_selection".into(),
+            Action::EndKeySequence => "end_key_sequence".into(),
             Action::ToggleQuickTerminal => "toggle_quick_terminal".into(),
             Action::FocusSplitLeft => "goto_split:left".into(),
             Action::FocusSplitRight => "goto_split:right".into(),
@@ -836,6 +866,13 @@ impl Action {
             let dir = SplitDir::from_name(dir.trim())?;
             return amount.trim().parse::<u16>().ok().map(|n| Action::ResizeSplit(dir, n));
         }
+        if let Some(rest) = s.strip_prefix("goto_window:") {
+            return match rest.trim() {
+                "next" => Some(Action::GotoWindowNext),
+                "previous" | "prev" => Some(Action::GotoWindowPrev),
+                _ => None,
+            };
+        }
         if let Some(rest) = s.strip_prefix("goto_split:") {
             return match rest.trim() {
                 "left" => Some(Action::FocusSplitLeft),
@@ -860,6 +897,10 @@ impl Action {
             "close_surface" | "close_pane" => Action::ClosePane,
             "toggle_split_zoom" => Action::ToggleSplitZoom,
             "toggle_fullscreen" => Action::ToggleFullscreen,
+            "reset_window_size" => Action::ResetWindowSize,
+            "copy_url_to_clipboard" => Action::CopyUrlToClipboard,
+            "scroll_to_selection" => Action::ScrollToSelection,
+            "end_key_sequence" => Action::EndKeySequence,
             "toggle_quick_terminal" => Action::ToggleQuickTerminal,
             "increase_font_size" => Action::IncreaseFontSize,
             "decrease_font_size" => Action::DecreaseFontSize,
@@ -1171,6 +1212,12 @@ mod tests {
             "set_tab_title:build",
             "set_surface_title:",
             "set_window_title:main",
+            "goto_window:next",
+            "goto_window:previous",
+            "reset_window_size",
+            "copy_url_to_clipboard",
+            "scroll_to_selection",
+            "end_key_sequence",
         ] {
             let a = Action::from_name(raw).unwrap_or_else(|| panic!("parsing {raw:?}"));
             assert_eq!(a.name(), raw, "round-trip {raw:?}");

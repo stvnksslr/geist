@@ -696,6 +696,11 @@ pub trait TerminalEngine {
         false
     }
 
+    /// Absolute screen row of the selection's moving end, if any.
+    fn selection_end_row(&self) -> Option<u32> {
+        None
+    }
+
     /// The selected text, or `None` when nothing is selected.
     ///
     /// Read from the VT engine, so it spans scrollback and **unwraps** soft
