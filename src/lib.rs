@@ -32,6 +32,7 @@ pub mod menu;
 pub mod notify;
 pub mod osc133;
 pub mod padding;
+pub mod panedrag;
 pub mod osc52;
 pub mod osc7;
 pub mod osc_color;

@@ -338,6 +338,69 @@ impl<T> Node<T> {
         };
     }
 
+    /// Split leaf `target` and put `node` on `zone`'s side of it at an even
+    /// ratio — the insert half of a pane drop (upstream `SplitTree.inserting`).
+    /// Hands `node` back if `target` isn't here, so a failed drop never drops a
+    /// running shell.
+    fn insert_beside(
+        &mut self,
+        target: u64,
+        zone: crate::panedrag::Zone,
+        node: Node<T>,
+    ) -> Result<(), Node<T>> {
+        match self {
+            Node::Leaf { id, .. } if *id == target => {
+                let old = std::mem::replace(self, Node::Empty);
+                let (first, second) = if zone.before() { (node, old) } else { (old, node) };
+                *self = Node::Split {
+                    vertical: zone.vertical(),
+                    ratio: 0.5,
+                    first: Box::new(first),
+                    second: Box::new(second),
+                };
+                Ok(())
+            }
+            Node::Split { first, second, .. } => {
+                if first.contains(target) {
+                    first.insert_beside(target, zone, node)
+                } else {
+                    second.insert_beside(target, zone, node)
+                }
+            }
+            _ => Err(node),
+        }
+    }
+
+    /// Give every leaf a fresh id from `next`, returning `(old, new)` pairs.
+    /// Leaf ids are per window, so a subtree moving to another window has to
+    /// be renumbered from *that* window's counter or it could collide.
+    fn reid(&mut self, next: &mut impl FnMut() -> u64, map: &mut Vec<(u64, u64)>) {
+        match self {
+            Node::Leaf { id, .. } => {
+                let new = next();
+                map.push((*id, new));
+                *id = new;
+            }
+            Node::Split { first, second, .. } => {
+                first.reid(next, map);
+                second.reid(next, map);
+            }
+            Node::Empty => {}
+        }
+    }
+
+    /// The subtree at a root-downwards `path` (`true` = first child).
+    fn node_at(&self, path: &[bool]) -> Option<&Node<T>> {
+        let mut cur = self;
+        for step in path {
+            let Node::Split { first, second, .. } = cur else {
+                return None;
+            };
+            cur = if *step { first } else { second };
+        }
+        Some(cur)
+    }
+
     /// Drop leaves for which `dead` returns true, collapsing splits. `None` if
     /// the whole subtree is gone. The predicate decouples the tree from the
     /// liveness source (a live shell in the app; a flag in tests).
@@ -806,6 +869,229 @@ struct PaneSlot {
     first: bool,
 }
 
+/// What a pane/tab drag (or the undo of one) picks up. Addressed by ids, never
+/// indices: a move is recorded for undo, and undo entries outlive any index.
+#[derive(Clone, Debug, PartialEq)]
+enum Grab {
+    /// One pane. If it is its tab's only pane, the whole tab goes with it.
+    Pane { window: u64, tab: u64, leaf: u64 },
+    /// A whole tab, splits and all.
+    Tab { window: u64, tab: u64 },
+}
+
+impl Grab {
+    fn window(&self) -> u64 {
+        match self {
+            Grab::Pane { window, .. } | Grab::Tab { window, .. } => *window,
+        }
+    }
+}
+
+/// Where a grabbed pane or tab is put down.
+#[derive(Clone, Debug, PartialEq)]
+enum Dest {
+    /// Back into the slot a pane was detached from (the undo of a move).
+    Slot { window: u64, tab: u64, slot: PaneSlot },
+    /// Beside a pane, on one side of it (a drop on a pane's drop zone).
+    Beside {
+        window: u64,
+        tab: u64,
+        leaf: u64,
+        zone: crate::panedrag::Zone,
+    },
+    /// As a new tab at `index` (a drop on a tab strip).
+    NewTab { window: u64, index: usize },
+    /// In a new window, placed at `geom` (outer position, inner size) if known.
+    NewWindow { geom: Option<(egui::Pos2, egui::Vec2)> },
+}
+
+impl Dest {
+    fn window(&self) -> Option<u64> {
+        match self {
+            Dest::Slot { window, .. } | Dest::Beside { window, .. } | Dest::NewTab { window, .. } => {
+                Some(*window)
+            }
+            Dest::NewWindow { .. } => None,
+        }
+    }
+}
+
+/// A grabbed pane or tab in flight between [`take_grab`] and [`put_grab`] —
+/// owning live sessions, like an undo entry.
+enum Moved<T> {
+    Node(Node<T>),
+    Tab(Tab<T>),
+}
+
+impl<T> Moved<T> {
+    /// As a whole tab: a bare subtree gets a fresh tab id from `next`.
+    fn into_tab(self, next: &mut impl FnMut() -> u64) -> Tab<T> {
+        match self {
+            Moved::Tab(t) => t,
+            Moved::Node(root) => {
+                let focus = root.first_leaf_id();
+                Tab {
+                    id: next(),
+                    root,
+                    focus,
+                    name: None,
+                    color: None,
+                    zoomed: None,
+                    bell: false,
+                }
+            }
+        }
+    }
+
+    /// As a subtree, for inserting into a split. A tab keeps its focused pane
+    /// focused, which is why the focus is returned alongside.
+    fn into_node(self) -> (Node<T>, u64) {
+        match self {
+            Moved::Node(n) => {
+                let f = n.first_leaf_id();
+                (n, f)
+            }
+            Moved::Tab(t) => (t.root, t.focus),
+        }
+    }
+}
+
+/// Detach what `grab` names from one window's tabs, returning it and the
+/// [`Dest`] that would put it back exactly where it was.
+///
+/// A pane in a split is detached from its tree (the sibling collapses into its
+/// place, focus moves into that sibling if it was on the pane). A tab — or a
+/// pane that is its tab's only one — is removed from the list whole. The
+/// returned `Dest` for that is a `NewTab` at the old index; the caller
+/// replaces it with a `NewWindow` when the window is left empty.
+fn take_grab<T>(
+    tabs: &mut Vec<Tab<T>>,
+    active: &mut usize,
+    grab: &Grab,
+) -> Option<(Moved<T>, Dest)> {
+    let window = grab.window();
+    let (tab_id, leaf) = match *grab {
+        Grab::Pane { tab, leaf, .. } => (tab, Some(leaf)),
+        Grab::Tab { tab, .. } => (tab, None),
+    };
+    let i = tabs.iter().position(|t| t.id == tab_id)?;
+    if let Some(leaf) = leaf {
+        if !tabs[i].root.contains(leaf) {
+            return None;
+        }
+        if tabs[i].leaf_count() > 1 {
+            let t = &mut tabs[i];
+            let root = std::mem::replace(&mut t.root, Node::Empty);
+            let (rest, taken) = root.detach_leaf(leaf);
+            t.root = rest.unwrap_or(Node::Empty);
+            let (slot, node) = taken?;
+            if !t.root.contains(t.focus) {
+                t.focus = t
+                    .root
+                    .node_at(&slot.path)
+                    .map(|n| n.first_leaf_id())
+                    .unwrap_or_else(|| t.root.first_leaf_id());
+            }
+            t.zoomed = None;
+            return Some((
+                Moved::Node(node),
+                Dest::Slot {
+                    window,
+                    tab: tab_id,
+                    slot,
+                },
+            ));
+        }
+    }
+    let tab = tabs.remove(i);
+    if *active > i || (*active == i && *active >= tabs.len()) {
+        *active = active.saturating_sub(1);
+    }
+    Some((Moved::Tab(tab), Dest::NewTab { window, index: i }))
+}
+
+/// Put `moved` down at `dest` in one window's tabs (not `NewWindow`, which
+/// makes a window and so belongs to [`App`]). Returns the [`Grab`] that picks
+/// it up again from where it landed — together with the `Dest` from
+/// [`take_grab`], exactly the undo of the move.
+///
+/// `reid` renumbers every id from `next_id` first, for a move from another
+/// window (ids are per window). On failure — the target tab or pane is gone —
+/// the moved thing is handed back so the caller can return it; a drop must
+/// never be what closes a shell.
+fn put_grab<T>(
+    tabs: &mut Vec<Tab<T>>,
+    active: &mut usize,
+    next_id: &mut u64,
+    reid: bool,
+    moved: Moved<T>,
+    dest: &Dest,
+) -> Result<Grab, Moved<T>> {
+    let mut next = || {
+        let id = *next_id;
+        *next_id += 1;
+        id
+    };
+    match dest {
+        Dest::Slot { window, tab, .. } | Dest::Beside { window, tab, .. } => {
+            let Some(i) = tabs.iter().position(|t| t.id == *tab) else {
+                return Err(moved);
+            };
+            if let Dest::Beside { leaf, .. } = dest
+                && !tabs[i].root.contains(*leaf)
+            {
+                return Err(moved);
+            }
+            let (mut node, mut focus) = moved.into_node();
+            if reid {
+                let mut map = Vec::new();
+                node.reid(&mut next, &mut map);
+                focus = map
+                    .iter()
+                    .find(|(old, _)| *old == focus)
+                    .map_or_else(|| node.first_leaf_id(), |(_, new)| *new);
+            }
+            let t = &mut tabs[i];
+            match dest {
+                Dest::Slot { slot, .. } => t.root.attach_at(slot, node),
+                Dest::Beside { leaf, zone, .. } => {
+                    if let Err(node) = t.root.insert_beside(*leaf, *zone, node) {
+                        return Err(Moved::Node(node));
+                    }
+                }
+                _ => unreachable!(),
+            }
+            t.focus = focus;
+            t.zoomed = None;
+            *active = i;
+            Ok(Grab::Pane {
+                window: *window,
+                tab: *tab,
+                leaf: focus,
+            })
+        }
+        Dest::NewTab { window, index } => {
+            let mut tab = moved.into_tab(&mut next);
+            if reid {
+                let mut map = Vec::new();
+                tab.root.reid(&mut next, &mut map);
+                tab.focus = map
+                    .iter()
+                    .find(|(old, _)| *old == tab.focus)
+                    .map_or_else(|| tab.root.first_leaf_id(), |(_, new)| *new);
+                tab.zoomed = None;
+                tab.id = next();
+            }
+            let idx = (*index).min(tabs.len());
+            let id = tab.id;
+            tabs.insert(idx, tab);
+            *active = idx;
+            Ok(Grab::Tab { window: *window, tab: id })
+        }
+        Dest::NewWindow { .. } => Err(moved),
+    }
+}
+
 /// One split's divider as laid out this frame (see [`Node::dividers`]).
 ///
 /// Addressed by **path**, not by a pane id: a divider belongs to a split, and a
@@ -826,6 +1112,11 @@ struct Divider {
 /// pixel; nobody can hit that, so the band extends into both panes (Ghostty's
 /// `splitterInvisibleSize` does the same).
 const DIVIDER_GRAB_PT: f32 = 3.0;
+
+/// How far off the tab strip (in points, any direction) a dragged tab has to
+/// go before it tears out of the strip into a cross-window drag. Generous, so
+/// an ordinary reorder that wobbles off the strip stays a reorder.
+const TAB_TEAR_PT: f32 = 24.0;
 
 /// A divider drag in progress: which tab, and which split in it.
 #[derive(Clone, Debug, PartialEq)]
@@ -1100,6 +1391,50 @@ pub struct Window {
     quick_anim: Option<QuickAnim>,
     /// The `window-step-resize` geometry last handed to the `WM_SIZING` hook.
     step_geom: Option<crate::winchrome::StepGeometry>,
+    /// A pane being dragged by its grab handle (`drag-handle`).
+    pane_drag: Option<PaneDrag>,
+    /// The last window-local pointer position seen during a pane or tab drag.
+    /// Kept because the pointer can leave the window mid-drag, and egui may
+    /// stop reporting a position once it does.
+    drag_ptr: Option<egui::Pos2>,
+    /// Where a drag in progress (in *any* window) would drop in this one.
+    /// Resolved by [`App`] from the previous pass's geometry.
+    drop_hint: Option<DropHint>,
+    /// This window's client-area origin in screen points, this pass — what
+    /// turns a window-local pointer into a position other windows understand.
+    screen_origin: Option<egui::Pos2>,
+    /// The tab strip and its tabs as drawn last pass (window-local), as drop
+    /// targets. `None` / empty when the strip is hidden.
+    last_strip: Option<egui::Rect>,
+    last_tab_rects: Vec<egui::Rect>,
+    /// `toggle_tab_overview`: the open overview. Modal: in both input gates.
+    overview: Option<Overview>,
+}
+
+/// A pane drag by its grab handle. Held by tab id + leaf id, never indices.
+#[derive(Clone, Debug)]
+struct PaneDrag {
+    tab: u64,
+    leaf: u64,
+    /// Where the press landed, window-local: the drag starts once the pointer
+    /// is [`crate::panedrag::DRAG_THRESHOLD`] away from it.
+    origin: egui::Pos2,
+    active: bool,
+}
+
+/// What this window should highlight under a drag.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum DropHint {
+    Pane { leaf: u64, zone: crate::panedrag::Zone },
+    Strip { index: usize },
+}
+
+/// The tab overview's state: the highlighted tab (by id, so a reap under the
+/// open overview can't point it at the wrong tab) and a text thumbnail of each
+/// tab's focused pane, captured when it opened.
+struct Overview {
+    selected: u64,
+    thumbs: Vec<(u64, String)>,
 }
 
 /// Which title a `prompt_*_title` dialog edits.
@@ -1239,6 +1574,10 @@ enum UndoOp {
     RestoreWindow { window: Box<Window> },
     /// Close it again (also: undo a `new_window`).
     RemoveWindow { window: u64 },
+    /// Pick up `grab` and put it down at `dest` — a pane or tab drag, and
+    /// its own inverse (upstream groups these as "Move Split"). Holds no
+    /// sessions: the pane stays where it was dropped until this is applied.
+    Move { grab: Grab, dest: Box<Dest> },
 }
 
 /// Start a session, or -- when the shell cannot be spawned -- a pane that says
@@ -1273,6 +1612,7 @@ impl UndoOp {
             UndoOp::RemoveTabs { window, ids } => (UndoKind::CloseTabs(ids.len()), *window),
             UndoOp::RestoreWindow { window } => (UndoKind::ReopenWindow, window.window_id),
             UndoOp::RemoveWindow { window } => (UndoKind::CloseWindow, *window),
+            UndoOp::Move { grab, .. } => (UndoKind::MoveSplit, grab.window()),
         }
     }
 }
@@ -1303,6 +1643,11 @@ enum AppRequest {
     AdoptTab(Box<Tab<Session>>),
     /// `toggle_visibility`: hide or show every window.
     ToggleVisibility,
+    /// A pane or tab drag is in progress over `screen` (screen points), so
+    /// every window can draw the drop target under it next pass.
+    DragHover(Grab, egui::Pos2),
+    /// …and was released there.
+    Drop(Grab, egui::Pos2),
 }
 
 /// The whole application: every open window, plus the little state that has to
@@ -1347,6 +1692,10 @@ pub struct App {
     /// The window count and titlebar colors last pushed to DWM, so the
     /// `EnumThreadWindows` sweep runs only when one of them changes.
     titlebar_applied: Option<(usize, Option<crate::engine::Rgb>, Option<crate::engine::Rgb>)>,
+    /// A pane or tab drag in progress and where it is (screen points), from
+    /// the last pass's `DragHover`. Turned into every window's `drop_hint` at
+    /// the top of the next pass, then cleared: a drag that stops reporting is over.
+    drag: Option<(Grab, egui::Pos2)>,
 }
 
 /// The kind of surface being created, for the working-directory inheritance
@@ -1677,6 +2026,13 @@ impl Window {
             startup_state_applied: false,
             quick_anim: None,
             step_geom: None,
+            pane_drag: None,
+            drag_ptr: None,
+            drop_hint: None,
+            screen_origin: None,
+            last_strip: None,
+            last_tab_rects: Vec::new(),
+            overview: None,
             config,
             profiles,
             default_profile,
@@ -1996,6 +2352,189 @@ impl Window {
         }
     }
 
+    /// Open `toggle_tab_overview`, capturing a text thumbnail of every tab's
+    /// focused pane now. Captured once rather than per frame: a capture walks
+    /// the screen through the FFI, and the overview is a moment's glance.
+    fn open_overview(&mut self) {
+        let thumbs = self
+            .tabs
+            .iter_mut()
+            .map(|t| {
+                let focus = t.focus;
+                let text = t
+                    .root
+                    .payload_mut(focus)
+                    .and_then(|s| s.capture_text(crate::writefile::WriteScope::Screen))
+                    .unwrap_or_default();
+                (t.id, overview_thumb(&text, OVERVIEW_ROWS, OVERVIEW_COLS))
+            })
+            .collect();
+        let selected = self.tabs.get(self.active_tab).map_or(0, |t| t.id);
+        self.overview = Some(Overview { selected, thumbs });
+    }
+
+    /// The tab overview (Ghostty `toggle_tab_overview`): a grid of this
+    /// window's tabs, each a title plus a text thumbnail of its focused pane.
+    /// Arrows move, Enter or a click switches, Esc (or the toggle's own
+    /// binding, resolved here because a modal stops `handle_shortcuts`)
+    /// closes. Modal, and in both input gates.
+    fn render_overview(&mut self, ctx: &egui::Context) {
+        let Some(ov) = &self.overview else {
+            return;
+        };
+        let n = self.tabs.len();
+        if n == 0 {
+            self.overview = None;
+            return;
+        }
+        let mut sel = self
+            .tabs
+            .iter()
+            .position(|t| t.id == ov.selected)
+            .unwrap_or(self.active_tab.min(n - 1));
+        let cols = overview_columns(n);
+        let mut choose: Option<usize> = None;
+        let mut close = false;
+
+        // Keys: the navigation set, plus whatever the keymap binds to the
+        // toggle itself.
+        let events = ctx.input(|i| i.events.clone());
+        let mut consume = Vec::new();
+        for event in &events {
+            let egui::Event::Key {
+                key,
+                pressed: true,
+                modifiers,
+                ..
+            } = event
+            else {
+                continue;
+            };
+            let nav = match key {
+                egui::Key::ArrowLeft => Some(OverviewKey::Left),
+                egui::Key::ArrowRight => Some(OverviewKey::Right),
+                egui::Key::ArrowUp => Some(OverviewKey::Up),
+                egui::Key::ArrowDown => Some(OverviewKey::Down),
+                egui::Key::Home => Some(OverviewKey::First),
+                egui::Key::End => Some(OverviewKey::Last),
+                _ => None,
+            };
+            if let Some(k) = nav
+                && modifiers.is_none()
+            {
+                sel = overview_step(sel, n, cols, k);
+                consume.push((*modifiers, *key));
+                continue;
+            }
+            match key {
+                egui::Key::Enter => {
+                    choose = Some(sel);
+                    consume.push((*modifiers, *key));
+                    continue;
+                }
+                egui::Key::Escape => {
+                    close = true;
+                    consume.push((*modifiers, *key));
+                    continue;
+                }
+                _ => {}
+            }
+            if let Some(code) = session::map_egui_key(*key) {
+                let chord = Chord {
+                    mods: session::key_mods(modifiers),
+                    code,
+                };
+                if self.keymap.lookup_in(&self.key_tables, &chord) == Some(Action::ToggleTabOverview) {
+                    close = true;
+                    consume.push((*modifiers, *key));
+                }
+            }
+        }
+        ctx.input_mut(|i| {
+            for (m, k) in consume {
+                i.consume_key(m, k);
+            }
+        });
+
+        let chrome = self.chrome;
+        let thumbs = &ov.thumbs;
+        let mono = egui::FontId::monospace(9.0);
+        let modal = egui::Modal::new(self.id("tab-overview")).show(ctx, |ui| {
+            ui.label(egui::RichText::new("Tabs").strong());
+            ui.add_space(6.0);
+            egui::Grid::new(self.id("tab-overview-grid"))
+                .spacing(egui::vec2(10.0, 10.0))
+                .show(ui, |ui| {
+                    for (i, t) in self.tabs.iter().enumerate() {
+                        let title = t
+                            .name
+                            .clone()
+                            .or_else(|| t.focused_payload().title())
+                            .unwrap_or_else(|| format!("Tab {}", i + 1));
+                        let thumb = thumbs
+                            .iter()
+                            .find(|(id, _)| *id == t.id)
+                            .map_or("", |(_, s)| s.as_str());
+                        let selected = i == sel;
+                        let stroke = if selected {
+                            egui::Stroke::new(2.0_f32, chrome.accent)
+                        } else {
+                            egui::Stroke::new(1.0_f32, chrome.divider)
+                        };
+                        let frame = egui::Frame::new()
+                            .fill(chrome.extreme_bg)
+                            .stroke(stroke)
+                            .corner_radius(4)
+                            .inner_margin(egui::Margin::same(6));
+                        let resp = frame
+                            .show(ui, |ui| {
+                                ui.set_width(OVERVIEW_CARD_W);
+                                ui.label(
+                                    egui::RichText::new(format!("{}  {}", i + 1, title))
+                                        .strong()
+                                        .color(t.color.unwrap_or(chrome.text)),
+                                );
+                                ui.add_space(2.0);
+                                ui.label(
+                                    egui::RichText::new(thumb)
+                                        .font(mono.clone())
+                                        .color(chrome.weak_text),
+                                );
+                            })
+                            .response;
+                        let resp = ui.interact(
+                            resp.rect,
+                            self.id(("tab-overview-card", t.id)),
+                            egui::Sense::click(),
+                        );
+                        if resp.hovered() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                        }
+                        if resp.clicked() {
+                            choose = Some(i);
+                        }
+                        if (i + 1) % cols == 0 {
+                            ui.end_row();
+                        }
+                    }
+                });
+        });
+        if modal.should_close() {
+            close = true;
+        }
+        if let Some(i) = choose {
+            self.active_tab = i;
+            close = true;
+        }
+        if close {
+            self.overview = None;
+        } else if let Some(ov) = self.overview.as_mut()
+            && let Some(t) = self.tabs.get(sel)
+        {
+            ov.selected = t.id;
+        }
+    }
+
     /// Draw the current toast, if any, bottom-centre of the window, fading out
     /// over its last few hundred milliseconds.
     fn render_toast(&mut self, ctx: &egui::Context) {
@@ -2191,6 +2730,13 @@ impl Window {
             startup_state_applied: false,
             quick_anim: None,
             step_geom: None,
+            pane_drag: None,
+            drag_ptr: None,
+            drop_hint: None,
+            screen_origin: None,
+            last_strip: None,
+            last_tab_rects: Vec::new(),
+            overview: None,
             config: self.config.clone(),
             profiles: self.profiles.clone(),
             default_profile: self.default_profile,
@@ -2489,6 +3035,16 @@ impl Window {
         id
     }
 
+    /// Forget every gesture and index held across frames: a pane or tab just
+    /// moved in or out, so a tab index or split path may name something else.
+    fn clear_drag_state(&mut self) {
+        self.renaming = None;
+        self.tab_drag = None;
+        self.divider_drag = None;
+        self.pane_drag = None;
+        self.drag_ptr = None;
+    }
+
     /// Spawn a session for profile `idx` (clamped to the default if invalid),
     /// starting in `cwd` when given (else the process default directory).
     fn spawn_session(&self, idx: usize, cwd: Option<&std::path::Path>) -> Option<Session> {
@@ -2645,6 +3201,8 @@ impl Window {
             || self.config_errors_open()
             || self.about_open
             || self.title_prompt.is_some()
+            // The tab overview: also in `render_active`'s `palette_open` gate.
+            || self.overview.is_some()
     }
 
     /// Whether the config-errors dialog is up: the loaded config had problems
@@ -3309,6 +3867,13 @@ impl Window {
             }
             // Upstream is a no-op for a window's only tab: there is nothing to
             // leave behind, and the new window would be the same window.
+            Action::ToggleTabOverview => {
+                if self.overview.is_some() {
+                    self.overview = None;
+                } else {
+                    self.open_overview();
+                }
+            }
             Action::MoveTabToNewWindow => {
                 if let Some((tab, active)) = take_active_tab(&mut self.tabs, self.active_tab) {
                     self.active_tab = active;
@@ -4938,8 +5503,43 @@ impl Window {
             chrome.divider,
         );
 
+        // This frame's strip and tabs, as drop targets for drags from any
+        // window (resolved by `App` next pass).
+        let strip_rect = egui::Rect::from_min_max(
+            egui::pos2(clip.left(), strip_top),
+            egui::pos2(clip.right(), strip_bottom),
+        );
+        self.last_strip = Some(strip_rect);
+        self.last_tab_rects = tab_rects.clone();
+        // Caret centred in the *gap* a tab would land in. Drawn at a tab's edge
+        // it sat inside the neighbouring tab instead of between the two, which
+        // reads as "replace this one" rather than "insert here".
+        let caret = |ui: &egui::Ui, to: usize| {
+            if tab_rects.is_empty() {
+                return;
+            }
+            let last = tab_rects.len() - 1;
+            let cx = if to == 0 {
+                tab_rects[0].left() - theme::TAB_GAP * 0.5
+            } else if to > last {
+                tab_rects[last].right() + theme::TAB_GAP * 0.5
+            } else {
+                (tab_rects[to - 1].right() + tab_rects[to].left()) * 0.5
+            };
+            ui.painter().rect_filled(
+                egui::Rect::from_min_max(
+                    egui::pos2(cx - 1.0, strip_top),
+                    egui::pos2(cx + 1.0, strip_bottom),
+                ),
+                egui::CornerRadius::same(1),
+                chrome.accent,
+            );
+        };
+
         // Resolve an in-progress tab drag. The tabs stay put while dragging; an
-        // insertion caret shows where the drop would land.
+        // insertion caret shows where the drop would land. Dragged far enough
+        // off the strip, the tab *tears out*: it becomes a cross-window drag
+        // that lands in another window's strip, or in a new window of its own.
         //
         // Suppressed entirely while a rename is open: the rename box is not in
         // `tab_rects` (it is far wider than a tab), so the midpoints a drop would
@@ -4947,44 +5547,59 @@ impl Window {
         if let Some(from) = drag_from {
             self.tab_drag = Some(from);
         }
+        let mut tearing = false;
         if renaming.is_some() {
             self.tab_drag = None;
         } else if let Some(from) = self.tab_drag {
             let pointer = ui.ctx().input(|i| i.pointer.clone());
             let held = pointer.any_down();
-            if let Some(x) = pointer.latest_pos().map(|p| p.x) {
-                let to = drop_index(&tab_rects, x);
-                if held && !tab_rects.is_empty() {
-                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
-                    // Caret centred in the *gap* the tab would land in. Drawn at
-                    // a tab's edge it sat inside the neighbouring tab instead of
-                    // between the two, which reads as "replace this one" rather
-                    // than "insert here".
-                    let last = tab_rects.len() - 1;
-                    let cx = if to == 0 {
-                        tab_rects[0].left() - theme::TAB_GAP * 0.5
-                    } else if to > last {
-                        tab_rects[last].right() + theme::TAB_GAP * 0.5
-                    } else {
-                        (tab_rects[to - 1].right() + tab_rects[to].left()) * 0.5
-                    };
-                    ui.painter().rect_filled(
-                        egui::Rect::from_min_max(
-                            egui::pos2(cx - 1.0, strip_top),
-                            egui::pos2(cx + 1.0, strip_bottom),
-                        ),
-                        egui::CornerRadius::same(1),
-                        chrome.accent,
-                    );
-                } else if !held {
-                    want_move = Some((from, to));
+            if let Some(p) = pointer.latest_pos() {
+                self.drag_ptr = Some(p);
+            }
+            let ptr = self.drag_ptr;
+            tearing = ptr.is_some_and(|p| {
+                !strip_rect
+                    .expand2(egui::vec2(TAB_TEAR_PT, TAB_TEAR_PT))
+                    .contains(p)
+            });
+            let screen = ptr
+                .zip(self.screen_origin)
+                .map(|(p, o)| o + p.to_vec2());
+            let grab = self.tabs.get(from).map(|t| Grab::Tab {
+                window: self.window_id,
+                tab: t.id,
+            });
+            if held {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                if tearing {
+                    if let (Some(g), Some(s)) = (grab, screen) {
+                        self.requests.push(AppRequest::DragHover(g, s));
+                    }
+                    ui.ctx().request_repaint_of(egui::ViewportId::ROOT);
+                } else if let Some(p) = ptr {
+                    caret(ui, drop_index(&tab_rects, p.x));
                 }
-            }
-            // Clear the latch once no button is held — covers a drop outside the
-            // strip and an Escape-aborted drag as well as a normal release.
-            if !held {
+            } else {
+                if tearing {
+                    if let (Some(g), Some(s)) = (grab, screen) {
+                        self.requests.push(AppRequest::Drop(g, s));
+                    }
+                } else if let Some(p) = ptr {
+                    want_move = Some((from, drop_index(&tab_rects, p.x)));
+                }
+                // Clear the latch once no button is held — covers a drop outside
+                // the strip and an Escape-aborted drag as well as a release.
                 self.tab_drag = None;
+                self.drag_ptr = None;
             }
+        }
+        // A drag from elsewhere (another window's tab, or a pane) over this
+        // strip: show where it would land.
+        if !tearing
+            && self.tab_drag.is_none()
+            && let Some(DropHint::Strip { index }) = self.drop_hint
+        {
+            caret(ui, index);
         }
 
         // Apply collected intents. Index-stable edits first; tab-removing actions
@@ -5097,7 +5712,8 @@ impl Window {
                 // The About box and the terminal-title dialog: also listed in
                 // `modal_open` — a modal needs *both* gates.
                 || self.about_open
-                || self.title_prompt.is_some();
+                || self.title_prompt.is_some()
+                || self.overview.is_some();
 
         // The inspector is deliberately **not** in that list — it must never
         // take the keyboard, or its own keyboard log would have nothing to
@@ -5252,8 +5868,139 @@ impl Window {
         // The pointer belongs to the divider while one is dragged, and while it
         // hovers one *unless* a button is already held — a text selection
         // dragged across a divider must keep going.
+        // `drag-handle`: every visible pane's grab handle (Ghostty's
+        // `SurfaceGrabHandle`), arbitrated against the panes exactly like the
+        // divider: raw pointer state, and the pointer withheld from the pane
+        // while it is on a handle or a pane drag is live.
+        let mut pane_rects: Vec<(u64, egui::Rect)> = Vec::new();
+        match zoomed {
+            Some(id) => pane_rects.push((id, full_area)),
+            None => tab.root.leaf_rects(full_area, ppp, &mut pane_rects),
+        }
+        let handles_enabled = match self.config.drag_handle {
+            crate::config::DragHandle::Never => false,
+            crate::config::DragHandle::Always => true,
+            // macOS: hidden only for a lone pane in a fullscreen window.
+            crate::config::DragHandle::Auto => !(self.fullscreen && pane_rects.len() < 2),
+        };
+        let hovered_handle = if !handles_enabled
+            || palette_open
+            || over_inspector
+            || self.divider_drag.is_some()
+        {
+            None
+        } else {
+            ptr_pos.and_then(|p| {
+                pane_rects
+                    .iter()
+                    .find(|(_, r)| crate::panedrag::handle_rect(*r).contains(p))
+                    .map(|(id, _)| *id)
+            })
+        };
+        if self.pane_drag.is_some() || self.tab_drag.is_some() {
+            if let Some(p) = ptr_pos {
+                self.drag_ptr = Some(p);
+            }
+        }
+        // A drag whose pane left this tab (reaped, or the tab switched) is over.
+        if self
+            .pane_drag
+            .as_ref()
+            .is_some_and(|d| d.tab != tab.id || !tab.root.contains(d.leaf))
+        {
+            self.pane_drag = None;
+        }
+        if ptr_pressed
+            && self.pane_drag.is_none()
+            && let (Some(leaf), Some(p)) = (hovered_handle, ptr_pos)
+        {
+            self.pane_drag = Some(PaneDrag {
+                tab: tab.id,
+                leaf,
+                origin: p,
+                active: false,
+            });
+            self.drag_ptr = Some(p);
+        }
+        if let Some(mut drag) = self.pane_drag.take() {
+            let p = self.drag_ptr.unwrap_or(drag.origin);
+            if !drag.active && p.distance(drag.origin) >= crate::panedrag::DRAG_THRESHOLD {
+                drag.active = true;
+            }
+            let grab = Grab::Pane {
+                window: win_id,
+                tab: drag.tab,
+                leaf: drag.leaf,
+            };
+            let screen = self.screen_origin.map(|o| o + p.to_vec2());
+            let escape = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+            if escape {
+                // Cancelled: nothing moves.
+            } else if !ptr_down {
+                if drag.active
+                    && let Some(s) = screen
+                {
+                    self.requests.push(AppRequest::Drop(grab, s));
+                }
+            } else {
+                if drag.active {
+                    if let Some(s) = screen {
+                        self.requests.push(AppRequest::DragHover(grab, s));
+                    }
+                    ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+                    // Other windows draw the drop zone, and only a root pass
+                    // re-runs them all.
+                    ctx.request_repaint_of(egui::ViewportId::ROOT);
+                }
+                self.pane_drag = Some(drag);
+            }
+        }
+        if self.pane_drag.is_none() && hovered_handle.is_some() {
+            ctx.set_cursor_icon(egui::CursorIcon::Grab);
+        }
+        {
+            // The handles and the drop-zone highlight, over the panes. A layer
+            // of its own: the panes are one GPU callback drawn in the panel's
+            // layer, and this has to land on top of it.
+            let overlay = ctx.layer_painter(egui::LayerId::new(
+                egui::Order::Middle,
+                egui::Id::new(("pane-drag-overlay", win_id)),
+            ));
+            let chrome = self.chrome;
+            if let Some(DropHint::Pane { leaf, zone }) = self.drop_hint
+                && let Some((_, r)) = pane_rects.iter().find(|(id, _)| *id == leaf)
+            {
+                overlay.rect_filled(
+                    crate::panedrag::zone_rect(*r, zone),
+                    egui::CornerRadius::ZERO,
+                    chrome.accent.gamma_multiply(0.3),
+                );
+            }
+            let always = self.config.drag_handle == crate::config::DragHandle::Always;
+            if handles_enabled && !palette_open {
+                for (id, r) in &pane_rects {
+                    let dragging = self.pane_drag.as_ref().is_some_and(|d| d.leaf == *id);
+                    let hovered = hovered_handle == Some(*id);
+                    let in_band =
+                        ptr_pos.is_some_and(|p| crate::panedrag::hover_band(*r).contains(p));
+                    if !(always || dragging || hovered || in_band) {
+                        continue;
+                    }
+                    // Upstream draws an SF Symbols "ellipsis": three dots.
+                    let h = crate::panedrag::handle_rect(*r);
+                    let alpha = if hovered || dragging { 0.8 } else { 0.3 };
+                    let color = chrome.text.gamma_multiply(alpha);
+                    let c = h.center();
+                    for dx in [-5.0, 0.0, 5.0] {
+                        overlay.circle_filled(egui::pos2(c.x + dx, c.y), 1.5, color);
+                    }
+                }
+            }
+        }
         let over_divider = self.divider_drag.is_some()
-            || (hovered_divider.is_some() && (!ptr_down || ptr_pressed));
+            || self.pane_drag.is_some()
+            || (hovered_divider.is_some() && (!ptr_down || ptr_pressed))
+            || (hovered_handle.is_some() && (!ptr_down || ptr_pressed));
 
         // Lay the split tree out across the full area; each leaf gets its rect
         // (padding is applied per-leaf below). When a split is zoomed, that one
@@ -6577,6 +7324,8 @@ impl Window {
             let vp = i.viewport();
             Some((vp.outer_rect?.min, vp.inner_rect?.size()))
         });
+        // …and where its client area is, for drags that cross windows.
+        self.screen_origin = ctx.input(|i| i.viewport().inner_rect.map(|r| r.min));
 
         // Close panes/tabs whose shell exited; bail if that closed the window.
         // NOTE: this path is deliberately never confirmed — the process is
@@ -6705,6 +7454,10 @@ impl Window {
         // forces the strip on while it's open.
         let show_strip =
             self.config.window_show_tab_bar.visible(self.tabs.len()) || self.renaming.is_some();
+        if !show_strip {
+            self.last_strip = None;
+            self.last_tab_rects.clear();
+        }
         if show_strip {
         egui::Panel::top(self.id("tabs"))
             .frame(
@@ -6743,6 +7496,7 @@ impl Window {
         // dialogs that are waiting on a decision.
         self.render_config_errors(&ctx, render_state);
         self.render_about(&ctx);
+        self.render_overview(&ctx);
         // The close confirmation draws over everything else.
         self.render_confirm_close(&ctx);
         self.render_title_prompt(&ctx);
@@ -6773,6 +7527,7 @@ impl App {
             quit_at: None,
             hidden: false,
             titlebar_applied: None,
+            drag: None,
         };
         // `initial-window = false`: start resident with no window. The first
         // window's shell is already running (building a `Window` spawns one),
@@ -7109,6 +7864,11 @@ impl App {
                 }
                 AppRequest::AdoptTab(tab) => self.adopt_tab(ctx, id, *tab),
                 AppRequest::ToggleVisibility => self.toggle_visibility(ctx),
+                AppRequest::DragHover(grab, screen) => self.drag = Some((grab, screen)),
+                AppRequest::Drop(grab, screen) => {
+                    self.drag = None;
+                    self.drop_grab(ctx, now, grab, screen);
+                }
             }
         }
     }
@@ -7260,6 +8020,273 @@ impl App {
                     window: Box::new(w),
                 })
             }
+            UndoOp::Move { grab, dest } => self.move_grab(ctx, &grab, *dest),
+        }
+    }
+
+    /// Pick up `grab` and put it down at `dest`, returning the move that puts
+    /// it back — the one primitive behind every pane/tab drop and its undo.
+    ///
+    /// Sessions are *moved*, never respawned, so shells, scrollback and splits
+    /// survive a move between windows (one process, no IPC). A window the move
+    /// empties is retired, and the inverse then re-creates a window where it
+    /// stood. If the destination turns out to be gone, the moved thing goes
+    /// straight back where it came from and nothing is recorded.
+    fn move_grab(&mut self, ctx: &egui::Context, grab: &Grab, dest: Dest) -> Option<UndoOp> {
+        let src = grab.window();
+        if let Some(dw) = dest.window()
+            && !self.windows.iter().any(|w| w.window_id == dw)
+        {
+            return None;
+        }
+        let si = self.windows.iter().position(|w| w.window_id == src)?;
+        let (moved, mut back) = {
+            let w = &mut self.windows[si];
+            let r = take_grab(&mut w.tabs, &mut w.active_tab, grab)?;
+            // Index-holding state is stale after any reshape.
+            w.clear_drag_state();
+            r
+        };
+        let emptied = self.windows[si].tabs.is_empty();
+        if emptied {
+            back = Dest::NewWindow {
+                geom: self.windows[si].geom,
+            };
+        }
+        match self.put_moved(ctx, src, moved, &dest) {
+            Ok(new_grab) => {
+                if emptied {
+                    // Nothing left in it; the inverse re-creates it.
+                    drop(self.take_window(ctx, src));
+                }
+                ctx.request_repaint();
+                Some(UndoOp::Move {
+                    grab: new_grab,
+                    dest: Box::new(back),
+                })
+            }
+            Err(moved) => {
+                let home = if emptied {
+                    Dest::NewTab {
+                        window: src,
+                        index: 0,
+                    }
+                } else {
+                    back
+                };
+                if let Err(lost) = self.put_moved(ctx, src, moved, &home) {
+                    // Unreachable in practice (the source window is still
+                    // there); never drop live shells silently, though.
+                    let w = &mut self.windows[si];
+                    let tab = lost.into_tab(&mut || w.alloc_id());
+                    w.tabs.push(tab);
+                }
+                None
+            }
+        }
+    }
+
+    /// Put `moved` (taken from window `from`) down at `dest`.
+    fn put_moved(
+        &mut self,
+        ctx: &egui::Context,
+        from: u64,
+        moved: Moved<Session>,
+        dest: &Dest,
+    ) -> Result<Grab, Moved<Session>> {
+        if let Dest::NewWindow { geom } = dest {
+            let Some(src) = self
+                .windows
+                .iter()
+                .find(|w| w.window_id == from)
+                .or_else(|| self.windows.first())
+            else {
+                return Err(moved);
+            };
+            // A fresh window numbers its panes from 1.
+            let mut next_id = 1;
+            let mut next = || {
+                let id = next_id;
+                next_id += 1;
+                id
+            };
+            let mut tab = moved.into_tab(&mut next);
+            let mut map = Vec::new();
+            tab.root.reid(&mut next, &mut map);
+            tab.focus = map
+                .iter()
+                .find(|(old, _)| *old == tab.focus)
+                .map_or_else(|| tab.root.first_leaf_id(), |(_, new)| *new);
+            tab.id = next();
+            tab.zoomed = None;
+            let tab_id = tab.id;
+            let id = self.next_window_id;
+            self.next_window_id += 1;
+            let mut w = src.sibling_with(id, vec![tab], next_id);
+            w.place_geom = *geom;
+            self.windows.push(w);
+            self.focused = self.windows.len() - 1;
+            return Ok(Grab::Tab {
+                window: id,
+                tab: tab_id,
+            });
+        }
+        let Some(dw) = dest.window() else {
+            return Err(moved);
+        };
+        let Some(w) = self.windows.iter_mut().find(|w| w.window_id == dw) else {
+            return Err(moved);
+        };
+        let r = put_grab(
+            &mut w.tabs,
+            &mut w.active_tab,
+            &mut w.next_id,
+            dw != from,
+            moved,
+            dest,
+        );
+        w.clear_drag_state();
+        if r.is_ok() {
+            // Focus the window the pane landed in, like upstream.
+            let vp = w.viewport_id();
+            ctx.send_viewport_cmd_to(vp, egui::ViewportCommand::Focus);
+        }
+        r
+    }
+
+    /// A pane or tab drag was released at `screen`: work out what it landed
+    /// on, apply the move and record it for undo.
+    fn drop_grab(&mut self, ctx: &egui::Context, now: f64, grab: Grab, screen: egui::Pos2) {
+        use crate::panedrag::DropTarget;
+        let src = grab.window();
+        let Some(sw) = self.windows.iter().find(|w| w.window_id == src) else {
+            return;
+        };
+        let target = crate::panedrag::resolve(&self.drop_geoms(), screen, src);
+        // The grabbed tab and whether it is split / the window has others.
+        let (grab_tab, grab_leaf) = match grab {
+            Grab::Pane { tab, leaf, .. } => (tab, Some(leaf)),
+            Grab::Tab { tab, .. } => (tab, None),
+        };
+        let Some(tab_idx) = sw.tabs.iter().position(|t| t.id == grab_tab) else {
+            return;
+        };
+        let lone = grab_leaf.is_none() || sw.tabs[tab_idx].leaf_count() < 2;
+        let dest = match target {
+            DropTarget::Pane {
+                window,
+                tab,
+                leaf,
+                zone,
+            } => {
+                if grab_leaf.is_none() {
+                    // A torn-out tab over another window's panes joins that
+                    // window's strip; over its own window it is a no-op.
+                    if window == src {
+                        return;
+                    }
+                    let len = self
+                        .windows
+                        .iter()
+                        .find(|w| w.window_id == window)
+                        .map_or(0, |w| w.tabs.len());
+                    Dest::NewTab { window, index: len }
+                } else if grab_leaf == Some(leaf) {
+                    return;
+                } else {
+                    Dest::Beside {
+                        window,
+                        tab,
+                        leaf,
+                        zone,
+                    }
+                }
+            }
+            DropTarget::Strip { window, index } => {
+                // Within its own strip a whole tab — or a lone pane's tab — is
+                // a reorder, which the strip does itself. (So `index`, counted
+                // against the strip before any removal, never needs shifting.)
+                if window == src && lone {
+                    return;
+                }
+                Dest::NewTab { window, index }
+            }
+            DropTarget::Window { window } => {
+                if window == src || grab_leaf.is_some() {
+                    return;
+                }
+                let len = self
+                    .windows
+                    .iter()
+                    .find(|w| w.window_id == window)
+                    .map_or(0, |w| w.tabs.len());
+                Dest::NewTab { window, index: len }
+            }
+            DropTarget::Outside => {
+                // Upstream never makes a window out of a window's only
+                // surface: it would be the same window.
+                if lone && sw.tabs.len() < 2 {
+                    return;
+                }
+                let size = sw.geom.map(|g| g.1);
+                // Put the new window's top-left a little up-left of the
+                // pointer, so it lands roughly where the pane was carried.
+                let pos = screen - egui::vec2(40.0, 20.0);
+                Dest::NewWindow {
+                    geom: size.map(|s| (pos, s)),
+                }
+            }
+        };
+        if let Some(op) = self.move_grab(ctx, &grab, dest) {
+            self.undo.record(now, op);
+        }
+    }
+
+    /// Every visible window's drop targets, from its last pass.
+    fn drop_geoms(&self) -> Vec<crate::panedrag::WindowGeom> {
+        self.windows
+            .iter()
+            .filter(|w| !w.quick || w.quick_visible)
+            .filter_map(|w| {
+                let origin = w.screen_origin?;
+                let size = w.geom.map(|g| g.1)?;
+                Some(crate::panedrag::WindowGeom {
+                    window: w.window_id,
+                    screen: egui::Rect::from_min_size(origin, size),
+                    tab: w.tabs.get(w.active_tab)?.id,
+                    panes: w.last_layout.clone(),
+                    strip: w.last_strip,
+                    tab_rects: w.last_tab_rects.clone(),
+                })
+            })
+            .collect()
+    }
+
+    /// Turn the drag reported last pass into each window's `drop_hint`.
+    fn publish_drop_hints(&mut self) {
+        use crate::panedrag::DropTarget;
+        let hint = self.drag.take().map(|(grab, screen)| {
+            let target = crate::panedrag::resolve(&self.drop_geoms(), screen, grab.window());
+            (grab, target)
+        });
+        for w in &mut self.windows {
+            w.drop_hint = match &hint {
+                Some((grab, DropTarget::Pane { window, leaf, zone, .. }))
+                    if *window == w.window_id && matches!(grab, Grab::Pane { .. }) =>
+                {
+                    match grab {
+                        Grab::Pane { leaf: l, .. } if l == leaf => None,
+                        _ => Some(DropHint::Pane {
+                            leaf: *leaf,
+                            zone: *zone,
+                        }),
+                    }
+                }
+                Some((_, DropTarget::Strip { window, index })) if *window == w.window_id => {
+                    Some(DropHint::Strip { index: *index })
+                }
+                _ => None,
+            };
         }
     }
 
@@ -7577,6 +8604,9 @@ impl eframe::App for App {
             crate::notify::error_box(hwnd, "giest: renderer error", &msg);
         }
 
+        // Where last pass's pane/tab drag would drop, for each window to draw.
+        self.publish_drop_hints();
+
         let mut requests: Vec<(u64, AppRequest)> = Vec::new();
         // The root window draws into the `Ui` eframe handed us.
         if let Some(w) = self.windows.first_mut() {
@@ -7728,8 +8758,66 @@ fn new_tab_index(pos: crate::config::NewTabPosition, active: usize, len: usize) 
 /// Centre-crossing (rather than edge-crossing) is what makes the swap happen at
 /// the halfway point, which is what a drag reorder is expected to feel like.
 /// Returns an insertion index in `0..=rects.len()`.
-fn drop_index(rects: &[egui::Rect], x: f32) -> usize {
+pub(crate) fn drop_index(rects: &[egui::Rect], x: f32) -> usize {
     rects.iter().filter(|r| r.center().x < x).count()
+}
+
+/// Rows and columns of a tab-overview thumbnail, and a card's width in points.
+const OVERVIEW_ROWS: usize = 12;
+const OVERVIEW_COLS: usize = 48;
+const OVERVIEW_CARD_W: f32 = 260.0;
+
+/// A text thumbnail of a pane: the bottom `rows` lines of `text` that carry
+/// anything (a shell's screen is mostly blank below the prompt), each cut to
+/// `cols` characters.
+fn overview_thumb(text: &str, rows: usize, cols: usize) -> String {
+    let lines: Vec<&str> = text.lines().map(|l| l.trim_end()).collect();
+    let end = lines.iter().rposition(|l| !l.is_empty()).map_or(0, |i| i + 1);
+    let start = end.saturating_sub(rows);
+    lines[start..end]
+        .iter()
+        .map(|l| l.chars().take(cols).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Overview grid width: roughly square, never more than four across.
+fn overview_columns(n: usize) -> usize {
+    ((n as f32).sqrt().ceil() as usize).clamp(1, 4)
+}
+
+#[derive(Clone, Copy, Debug)]
+enum OverviewKey {
+    Left,
+    Right,
+    Up,
+    Down,
+    First,
+    Last,
+}
+
+/// Move the overview selection `sel` over `n` cards laid out `cols` across.
+/// Left/right walk the whole list (wrapping), up/down stay in the column
+/// and stop at the edges.
+fn overview_step(sel: usize, n: usize, cols: usize, key: OverviewKey) -> usize {
+    if n == 0 {
+        return 0;
+    }
+    let cols = cols.max(1);
+    match key {
+        OverviewKey::Left => (sel + n - 1) % n,
+        OverviewKey::Right => (sel + 1) % n,
+        OverviewKey::Up => sel.checked_sub(cols).unwrap_or(sel),
+        OverviewKey::Down => {
+            if sel + cols < n {
+                sel + cols
+            } else {
+                sel
+            }
+        }
+        OverviewKey::First => 0,
+        OverviewKey::Last => n - 1,
+    }
 }
 
 /// Move `tabs[from]` to insertion index `to`, returning the reordered list and
@@ -9237,5 +10325,256 @@ mod tests {
         let os = crate::app::click_repeat_secs(0);
         assert!(os > 0.0 && os <= 5.0, "{os}");
         assert_eq!(os, f64::from(crate::app::os_double_click_ms()) / 1000.0);
+    }
+
+    // --- Pane / tab drag-and-drop ---------------------------------------
+
+    use super::{
+        Dest, Grab, Moved, OverviewKey, overview_columns, overview_step, overview_thumb,
+        put_grab, take_grab,
+    };
+    use crate::panedrag::Zone;
+
+    /// A tab over `root` with `focus`, id `id`.
+    fn tab_of(id: u64, root: Node<u32>, focus: u64) -> Tab<u32> {
+        Tab {
+            id,
+            root,
+            focus,
+            name: None,
+            color: None,
+            zoomed: None,
+            bell: false,
+        }
+    }
+
+    /// Every leaf's `(id, payload)`, in layout order — the "sessions" a move
+    /// must carry along untouched.
+    fn payloads(n: &Node<u32>) -> Vec<(u64, u32)> {
+        let mut out = Vec::new();
+        fn walk(n: &Node<u32>, out: &mut Vec<(u64, u32)>) {
+            match n {
+                Node::Leaf { id, payload } => out.push((*id, *payload)),
+                Node::Split { first, second, .. } => {
+                    walk(first, out);
+                    walk(second, out);
+                }
+                Node::Empty => {}
+            }
+        }
+        walk(n, &mut out);
+        out
+    }
+
+    #[test]
+    fn insert_beside_puts_the_pane_on_the_zone_side() {
+        for (zone, want) in [
+            (Zone::Left, "(9|1)"),
+            (Zone::Right, "(1|9)"),
+            (Zone::Top, "(9/1)"),
+            (Zone::Bottom, "(1/9)"),
+        ] {
+            let mut n = leaf(1, 1);
+            assert!(n.insert_beside(1, zone, leaf(9, 9)).is_ok());
+            assert_eq!(shape(&n), want, "{zone:?}");
+        }
+        // Nested: only the target is split, at an even ratio; the rest keeps
+        // its shape and ratio.
+        let mut n = split(true, leaf(1, 1), leaf(2, 2));
+        *n.split_at_mut(&[]).unwrap().0 = 0.3;
+        n.insert_beside(2, Zone::Top, leaf(9, 9)).ok().unwrap();
+        assert_eq!(shape(&n), "(1|(9/2))");
+        assert_eq!(ratio_at(&mut n, &[]), 0.3);
+        assert_eq!(ratio_at(&mut n, &[false]), 0.5);
+        // A missing target hands the pane back rather than dropping it.
+        let back = n.insert_beside(42, Zone::Left, leaf(7, 7)).unwrap_err();
+        assert_eq!(payloads(&back), vec![(7, 7)]);
+    }
+
+    #[test]
+    fn moving_a_pane_within_a_tab_is_detach_then_insert() {
+        // [1 | (2 / 3)], focus on 2. Drag 2 to the left of 1.
+        let mut tabs = vec![tab_of(
+            10,
+            split(true, leaf(1, 1), split(false, leaf(2, 2), leaf(3, 3))),
+            2,
+        )];
+        *tabs[0].root.split_at_mut(&[]).unwrap().0 = 0.7;
+        let (mut active, mut next) = (0, 100);
+        let grab = Grab::Pane { window: 1, tab: 10, leaf: 2 };
+        let (moved, back) = take_grab(&mut tabs, &mut active, &grab).unwrap();
+        // The sibling collapsed into the parent's place; focus moved into it.
+        assert_eq!(shape(&tabs[0].root), "(1|3)");
+        assert_eq!(tabs[0].focus, 3);
+        assert_eq!(ratio_at(&mut tabs[0].root, &[]), 0.7, "the surviving split keeps its ratio");
+        let dest = Dest::Beside { window: 1, tab: 10, leaf: 1, zone: Zone::Left };
+        let landed = put_grab(&mut tabs, &mut active, &mut next, false, moved, &dest).ok().unwrap();
+        assert_eq!(shape(&tabs[0].root), "((2|1)|3)");
+        assert_eq!(tabs[0].focus, 2, "focus follows the moved pane");
+        assert_eq!(landed, Grab::Pane { window: 1, tab: 10, leaf: 2 });
+        assert_eq!(next, 100, "no ids spent within a window");
+
+        // The inverse — pick it up where it landed, put it back in its old
+        // slot — restores the original tree, ratio included.
+        let (moved, _) = take_grab(&mut tabs, &mut active, &landed).unwrap();
+        put_grab(&mut tabs, &mut active, &mut next, false, moved, &back).ok().unwrap();
+        assert_eq!(shape(&tabs[0].root), "(1|(2/3))");
+        assert_eq!(ratio_at(&mut tabs[0].root, &[]), 0.7);
+        assert_eq!(tabs[0].focus, 2);
+    }
+
+    #[test]
+    fn taking_a_lone_pane_takes_its_tab_and_remembers_the_index() {
+        let mut tabs: Vec<Tab<u32>> =
+            (1..=3).map(|i| tab_of(i, leaf(i * 10, i as u32), i * 10)).collect();
+        let mut active = 2;
+        let (moved, back) =
+            take_grab(&mut tabs, &mut active, &Grab::Pane { window: 1, tab: 2, leaf: 20 }).unwrap();
+        assert!(matches!(moved, Moved::Tab(ref t) if t.id == 2));
+        assert_eq!(back, Dest::NewTab { window: 1, index: 1 });
+        assert_eq!(tabs.iter().map(|t| t.id).collect::<Vec<_>>(), vec![1, 3]);
+        assert_eq!(active, 1, "the same tab (3) stays selected");
+        // Putting it back at that index restores the order and selects it.
+        let mut next = 50;
+        put_grab(&mut tabs, &mut active, &mut next, false, moved, &back).ok().unwrap();
+        assert_eq!(tabs.iter().map(|t| t.id).collect::<Vec<_>>(), vec![1, 2, 3]);
+        assert_eq!(active, 1);
+        // Removing the active last tab selects the new last one.
+        let mut active = 2;
+        take_grab(&mut tabs, &mut active, &Grab::Tab { window: 1, tab: 3 }).unwrap();
+        assert_eq!(active, 1);
+    }
+
+    #[test]
+    fn a_split_pane_dropped_on_a_strip_becomes_its_own_tab() {
+        let mut tabs = vec![tab_of(1, split(true, leaf(2, 2), leaf(3, 3)), 3)];
+        let (mut active, mut next) = (0, 4);
+        let (moved, _) =
+            take_grab(&mut tabs, &mut active, &Grab::Pane { window: 1, tab: 1, leaf: 3 }).unwrap();
+        let landed = put_grab(
+            &mut tabs,
+            &mut active,
+            &mut next,
+            false,
+            moved,
+            &Dest::NewTab { window: 1, index: 1 },
+        )
+        .ok()
+        .unwrap();
+        assert_eq!(landed, Grab::Tab { window: 1, tab: 4 });
+        assert_eq!(tabs.len(), 2);
+        assert_eq!((tabs[1].id, tabs[1].focus), (4, 3));
+        assert_eq!(active, 1);
+        assert_eq!(tabs[0].focus, 2, "focus fell back into the survivor");
+    }
+
+    #[test]
+    fn a_cross_window_move_renumbers_ids_and_keeps_every_session() {
+        // Source window: tab 1 = [1 | 2]. Destination window: tab 1 = leaf 1 —
+        // the *same* ids, which is exactly why a cross-window move renumbers.
+        let mut src = vec![tab_of(1, split(true, leaf(1, 111), leaf(2, 222)), 2)];
+        let mut dst = vec![tab_of(1, leaf(1, 999), 1)];
+        let (mut sa, mut da, mut dnext) = (0, 0, 2);
+        let (moved, back) =
+            take_grab(&mut src, &mut sa, &Grab::Pane { window: 1, tab: 1, leaf: 2 }).unwrap();
+        let dest = Dest::Beside { window: 2, tab: 1, leaf: 1, zone: Zone::Right };
+        let landed = put_grab(&mut dst, &mut da, &mut dnext, true, moved, &dest).ok().unwrap();
+        // The moved pane got a fresh id from the destination's counter...
+        assert_eq!(landed, Grab::Pane { window: 2, tab: 1, leaf: 2 });
+        assert_eq!(payloads(&dst[0].root), vec![(1, 999), (2, 222)]);
+        assert_eq!(dnext, 3);
+        assert_eq!(dst[0].focus, 2);
+        // ...and every session is somewhere: nothing dropped, nothing duplicated.
+        assert_eq!(payloads(&src[0].root), vec![(1, 111)]);
+
+        // Undo moves it back, renumbered again from the source's counter.
+        let mut snext = 3;
+        let (moved, _) = take_grab(&mut dst, &mut da, &landed).unwrap();
+        let home = put_grab(&mut src, &mut sa, &mut snext, true, moved, &back).ok().unwrap();
+        assert_eq!(home, Grab::Pane { window: 1, tab: 1, leaf: 3 });
+        assert_eq!(payloads(&src[0].root), vec![(1, 111), (3, 222)]);
+        assert_eq!(shape(&src[0].root), "(1|3)");
+        assert_eq!(payloads(&dst[0].root), vec![(1, 999)]);
+    }
+
+    #[test]
+    fn a_cross_window_tab_move_renumbers_the_tab_and_its_focus() {
+        let mut src = vec![
+            tab_of(1, leaf(1, 1), 1),
+            tab_of(2, split(false, leaf(3, 3), leaf(4, 4)), 4),
+        ];
+        let mut dst = vec![tab_of(1, leaf(1, 9), 1)];
+        let (mut sa, mut da, mut dnext) = (1, 0, 2);
+        let (moved, back) = take_grab(&mut src, &mut sa, &Grab::Tab { window: 1, tab: 2 }).unwrap();
+        assert_eq!(back, Dest::NewTab { window: 1, index: 1 });
+        assert_eq!(sa, 0);
+        let landed = put_grab(
+            &mut dst,
+            &mut da,
+            &mut dnext,
+            true,
+            moved,
+            &Dest::NewTab { window: 2, index: 9 },
+        )
+        .ok()
+        .unwrap();
+        // Leaves 3,4 -> 2,3; the tab id comes after them; focus followed 4 -> 3.
+        assert_eq!(landed, Grab::Tab { window: 2, tab: 4 });
+        assert_eq!(payloads(&dst[1].root), vec![(2, 3), (3, 4)]);
+        assert_eq!(dst[1].focus, 3);
+        assert_eq!(da, 1, "clamped to the end and selected");
+    }
+
+    #[test]
+    fn a_failed_put_hands_the_pane_back() {
+        let mut tabs = vec![tab_of(1, leaf(1, 1), 1)];
+        let (mut active, mut next) = (0, 2);
+        let moved = Moved::Node(leaf(5, 55));
+        let gone = Dest::Beside { window: 1, tab: 1, leaf: 42, zone: Zone::Left };
+        let back = put_grab(&mut tabs, &mut active, &mut next, false, moved, &gone);
+        let Err(Moved::Node(n)) = back else {
+            panic!("the pane must come back");
+        };
+        assert_eq!(payloads(&n), vec![(5, 55)]);
+        let missing_tab = Dest::Slot {
+            window: 1,
+            tab: 99,
+            slot: super::PaneSlot { path: vec![], vertical: true, ratio: 0.5, first: true },
+        };
+        assert!(put_grab(&mut tabs, &mut active, &mut next, false, Moved::Node(n), &missing_tab).is_err());
+        assert_eq!(shape(&tabs[0].root), "1", "the target is untouched");
+    }
+
+    #[test]
+    fn take_grab_declines_unknown_targets() {
+        let mut tabs = vec![tab_of(1, split(true, leaf(1, 1), leaf(2, 2)), 1)];
+        let mut active = 0;
+        assert!(take_grab(&mut tabs, &mut active, &Grab::Pane { window: 1, tab: 1, leaf: 9 }).is_none());
+        assert!(take_grab(&mut tabs, &mut active, &Grab::Tab { window: 1, tab: 9 }).is_none());
+        assert_eq!(shape(&tabs[0].root), "(1|2)");
+    }
+
+    #[test]
+    fn overview_navigation_walks_the_grid() {
+        // 5 cards, 3 across:  0 1 2 / 3 4
+        assert_eq!(overview_columns(5), 3);
+        assert_eq!(overview_columns(1), 1);
+        assert_eq!(overview_columns(30), 4);
+        assert_eq!(overview_step(0, 5, 3, OverviewKey::Left), 4);
+        assert_eq!(overview_step(4, 5, 3, OverviewKey::Right), 0);
+        assert_eq!(overview_step(1, 5, 3, OverviewKey::Down), 4);
+        assert_eq!(overview_step(2, 5, 3, OverviewKey::Down), 2, "no card below");
+        assert_eq!(overview_step(4, 5, 3, OverviewKey::Up), 1);
+        assert_eq!(overview_step(1, 5, 3, OverviewKey::Up), 1);
+        assert_eq!(overview_step(3, 5, 3, OverviewKey::First), 0);
+        assert_eq!(overview_step(0, 5, 3, OverviewKey::Last), 4);
+    }
+
+    #[test]
+    fn overview_thumb_keeps_the_bottom_of_the_content() {
+        let text = "a\nbb\nccc\n\n\n";
+        assert_eq!(overview_thumb(text, 2, 10), "bb\nccc");
+        assert_eq!(overview_thumb("abcdef", 3, 3), "abc");
+        assert_eq!(overview_thumb("", 3, 3), "");
     }
 }

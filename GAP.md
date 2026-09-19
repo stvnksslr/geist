@@ -69,8 +69,7 @@ pane area, not each pane), ✅ `quick-terminal-animation-duration` (slide in/out
 edge, ease-out cubic; `center` doesn't slide; a newly *created* quick terminal may show one frame at
 rest before the slide starts). Still open: `window-colorspace` (display-p3 → HDR swapchain, L),
 ~~`font-thicken` + `-strength`~~ ✅ (1px coverage dilation weighted by strength; upstream is
-macOS-only — needs eyeballing), `drag-handle` (comes with pane
-drag, §C), `auto-update` / `auto-update-channel` (§C).
+macOS-only — needs eyeballing), ~~`drag-handle`~~ ✅ (see §C pane drag), `auto-update` / `auto-update-channel` (§C).
 
 **A3. Blocked.** `enquiry-response` — ConPTY strips ENQ (probed; see the config-surface ledger).
 
@@ -93,7 +92,7 @@ drag, §C), `auto-update` / `auto-update-channel` (§C).
 | `end_key_sequence` | Flush a pending leader as literal keys. | S |
 | ~~`toggle_window_decorations`~~ ✅ | Per window, via `ViewportCommand::Decorations`. | S |
 | `check_for_updates` | With auto-update. | — |
-| `toggle_tab_overview` | Thumbnail-grid overlay. | M–L |
+| ~~`toggle_tab_overview`~~ ✅ | Modal grid of the window's tabs: title + a *text* thumbnail (bottom 12 non-blank rows of the focused pane's screen, captured when it opens — not a live render). Arrows/Home/End move, Enter or click switches, Esc, a backdrop click or the toggle's own binding (resolved by the modal) closes. In both input gates. Divergence: no rendered previews. Needs a human look. | M–L |
 | ~~`show_on_screen_keyboard`~~ ✅ | `ITipInvocation::Toggle` on the touch-keyboard broker (hand-declared vtable); starts `TabTip.exe` if the broker isn't running; silent without one. It *toggles* — Windows exposes no reliable "is it visible" query on Win11 — so a second press hides it. Needs a human check on a touch-keyboard machine. | S |
 | `crash`, `cursor_key`, `show_gtk_inspector` | Debug-only / internal / GTK — N/A. | — |
 
@@ -103,7 +102,7 @@ drag, §C), `auto-update` / `auto-update-channel` (§C).
 |---|---|---|---|
 | **IME / preedit** (CJK, dead keys, Win+. emoji panel) | ◐ | Done: `PlatformOutput::ime` at the cursor cell (candidate window placement), `Event::Ime` preedit/commit (`ime.rs`, commit/Text dedupe, keys held back while composing), preedit drawn underlined at the cursor. Missing: preedit caret/segment styling (egui drops winit's cursor range), overlong preedit doesn't wrap; needs a human check with a real CJK IME | M |
 | **Split divider drag** | ✅ | Grab band ±3pt around the gutter, resize cursor, clamped to 2 cells a side; double-click equalizes (upstream). Needs human visual confirmation. | M |
-| **Pane drag-to-rearrange, drag out to tab/window** | ⬜ | drop-zone overlay, detach-then-insert (one process, no IPC) | L |
+| **Pane drag-to-rearrange, drag out to tab/window** | ✅ | `drag-handle` (`auto`/`always`/`never`): an 80×12pt grab handle on each pane's top edge, dots shown in the top 20% band (upstream `SurfaceGrabHandle`). Drop zones are upstream's nearest-edge triangles with the half-pane highlight (`panedrag.rs`); a drop is detach-then-insert on the split tree (`take_grab`/`put_grab`), within a tab, across tabs and across windows (sessions *move*, ids renumbered from the target window's counter). On a tab strip → new tab; outside every window → new window at the pointer (only if the pane was split or the window has other tabs, as upstream). **Tab tear-out**: a tab dragged >24pt off its strip lands in another window's strip (or its panes → appended) or becomes a new window. Every move is one undo entry ("moved split"); a window a move empties is retired and its undo re-creates it. Divergences/limits: overlapping windows resolve source-window-first, not by z-order; windows on monitors with different DPI don't share a point space, so cross-monitor drops can land off by the scale ratio; the drop relies on winit's mouse capture delivering the release outside the window. Needs human drag tests. | L |
 | **File drag-and-drop** → shell-quoted path | ✅ | `dropfiles.rs`: PowerShell single quotes, cmd double quotes, WSL `/mnt/c/…` (and `\\wsl$\distro\…` back to its Linux path) with POSIX quoting; through `Session::paste_str`. Lands in the pane under the pointer, else the focused one (Windows may report no pointer motion during an OLE drag); accent outline while hovering. Needs a human drag test. | S |
 | **Accessibility** (Narrator/NVDA) | ⬜ | AccessKit via egui; grid as a text node | L |
 | **Child-exited bar** (exit code, abnormal exit, press-any-key) | ✅ | Painter-only strip at the pane bottom (red on failure); any key dismisses and `reap_dead` closes the pane. A held pane is not alive, so it never counts as busy for quit confirmation. **Needs human visual confirmation.** Divergence: upstream prints its non-GUI fallback into the terminal and also shows it on a normal close for undo; giest shows the bar only while held. | S–M |
@@ -127,7 +126,7 @@ drag, §C), `auto-update` / `auto-update-channel` (§C).
 | Runtime custom app icon | ⬜ | tinted icon via `icongen` + `ViewportCommand::Icon` | M |
 | Auto-update | ⬜ | winget manifest (S) → MSIX App Installer (M) → self-updater with a pill (L) | S–L |
 | Default-terminal handoff | ⬜ | `IConsoleHandoff` COM server, as Windows Terminal does | XL |
-| Tab overview | ⬜ | see §B | M–L |
+| Tab overview | ✅ | see §B (text thumbnails, not rendered previews) | M–L |
 
 ### D. Protocols and engine features new on `main`
 
@@ -152,15 +151,15 @@ drag, §C), `auto-update` / `auto-update-channel` (§C).
 
 1. **Windows correctness:** IME (M) · child-exited bar + config-errors dialog (S) ·
    `scrollback-compression` idle timer (S) · OSC 99 (S).
-2. **Split model:** ✅ ratios + divider drag + `resize_split` / `equalize_splits`; then pane
-   drag-rearrange + `drag-handle` + `move_tab_to_new_window` (L).
+2. **Split model:** ✅ ratios + divider drag + `resize_split` / `equalize_splits`; ✅ pane
+   drag-rearrange + `drag-handle` + `move_tab_to_new_window` + tab tear-out (L).
 3. **The S-sized sweep:** A1's window/mouse/cursor options, §B's small actions, §C's right-click
    menu, indicators, link preview, file drop, About box.
 4. **Shell integration:** ✅ `shell-integration(-features)`, ✅ WSL scripts; `cursor-click-to-move` (M).
 5. **Automation:** CLI args → named-pipe IPC → Explorer entry → Jump List (L).
 6. **Protocols:** OSC 5522; move side-scanners onto lib-vt effects; native search + regex (M each).
 7. **Chrome:** custom caption + `window-decoration` + titlebar colors; runtime icon (L).
-8. **Long tail:** accessibility (L), auto-update, tab overview, default-terminal handoff (XL), and
+8. **Long tail:** accessibility (L), auto-update, ~~tab overview~~ ✅, default-terminal handoff (XL), and
    the ConPTY passthrough patch that unblocks every kitty APC feature (L–XL).
 
 ---

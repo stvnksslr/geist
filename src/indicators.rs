@@ -116,6 +116,8 @@ pub enum UndoKind {
     CloseTabs(usize),
     ReopenWindow,
     CloseWindow,
+    /// A pane or tab dragged somewhere else (upstream's "Move Split").
+    MoveSplit,
 }
 
 /// The toast text for applying `kind` as an undo (`redo == false`) or a redo.
@@ -129,6 +131,7 @@ pub fn undo_toast(kind: UndoKind, redo: bool) -> String {
         UndoKind::CloseTabs(n) => format!("closed {}", tabs(n)),
         UndoKind::ReopenWindow => "reopened window".to_string(),
         UndoKind::CloseWindow => "closed window".to_string(),
+        UndoKind::MoveSplit => "moved split".to_string(),
     };
     format!("{verb}: {what}")
 }
