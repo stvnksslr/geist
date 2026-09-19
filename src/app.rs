@@ -4296,6 +4296,12 @@ impl Window {
             // that `scroll_to_match` targeted.
             leaves[focus_idx].payload.tick_scroll(ctx, ch);
         }
+        // A modal took the keyboard mid-composition: its IME events now go to
+        // the modal's text box, so this preedit could never be finished or
+        // cleared and would sit over the grid forever.
+        if palette_open || search_open {
+            leaves[focus_idx].payload.clear_preedit();
+        }
 
         let mut frames: Vec<PaneFrame> = Vec::with_capacity(leaves.len());
         // (pane rect, flash intensity) for any pane ringing its visual bell.
@@ -4311,6 +4317,10 @@ impl Window {
         // Panes in read-only mode, which get a persistent badge — without one,
         // `toggle_readonly` looks exactly like a hung shell.
         let mut readonly_panes: Vec<egui::Rect> = Vec::new();
+        // (cursor cell, preedit text, default fg, default bg) for the focused
+        // pane's in-progress IME composition, painted over the grid below.
+        let mut ime_preedit: Option<(egui::Rect, String, crate::engine::Rgb, crate::engine::Rgb)> =
+            None;
         for leaf in leaves.iter_mut() {
             // The pane occupies `leaf.rect`; the grid is inset by the padding so
             // text clears the pane's edges (window border or split divider alike).
@@ -4363,6 +4373,31 @@ impl Window {
             }
             if !session.update_snapshot() {
                 continue;
+            }
+
+            // IME: allow it for the focused pane and park the candidate window
+            // on the terminal cursor. egui-winit turns `PlatformOutput::ime`
+            // into `set_ime_allowed` + `set_ime_cursor_area`, placing the
+            // candidates under `rect` — so `rect` is the cursor cell, not the
+            // pane. Not while a modal owns the keyboard (its own text box sets
+            // this instead), mirroring the `handle_input` gate above.
+            if is_focus && !palette_open && !search_open {
+                let snap = &session.snapshot;
+                let (cwp, chp) = (cw / ppp, ch / ppp);
+                let cell = egui::Rect::from_min_size(
+                    prect.min
+                        + egui::vec2(snap.cursor_x as f32 * cwp, snap.cursor_y as f32 * chp),
+                    egui::vec2(cwp, chp),
+                );
+                ctx.output_mut(|o| {
+                    o.ime = Some(egui::output::IMEOutput {
+                        rect: cell,
+                        cursor_rect: cell,
+                    })
+                });
+                if let Some(text) = session.preedit() {
+                    ime_preedit = Some((cell, text.to_owned(), snap.default_fg, snap.default_bg));
+                }
             }
 
             // Mouse / selection interaction only for the focused pane, and not
@@ -4970,6 +5005,29 @@ impl Window {
             ui.painter().rect_filled(pill, r, self.chrome.accent_warn);
             ui.painter()
                 .galley(text_rect.min, galley, self.chrome.on_accent);
+        }
+
+        // IME preedit: the uncommitted composition, drawn at the cursor in the
+        // terminal's own colours and underlined (the platform convention for
+        // "not yet typed"). Painter-only and opaque, so it covers the cells it
+        // overlaps; it is egui text rather than atlas glyphs because it never
+        // enters the grid — the shell only sees the commit.
+        if let Some((cell, text, fg, bg)) = &ime_preedit {
+            let fg = egui::Color32::from_rgb(fg.r, fg.g, fg.b);
+            let bg = egui::Color32::from_rgb(bg.r, bg.g, bg.b);
+            let font = egui::FontId::monospace((cell.height() * 0.8).max(6.0));
+            let galley = ui.painter().layout_no_wrap(text.clone(), font, fg);
+            let size = egui::vec2(galley.size().x.max(cell.width()), cell.height());
+            let rect = egui::Rect::from_min_size(cell.min, size);
+            ui.painter().rect_filled(rect, 0.0, bg);
+            let y = rect.center().y - galley.size().y * 0.5;
+            ui.painter().galley(egui::pos2(rect.left(), y), galley, fg);
+            let underline_y = rect.bottom() - stroke_w(1.0);
+            ui.painter().hline(
+                rect.x_range(),
+                underline_y,
+                egui::Stroke::new(stroke_w(1.0), fg),
+            );
         }
 
         // Scrollbars, painted last so a bar over an unfocused split stays

@@ -112,6 +112,10 @@ pub struct Session {
     /// `toggle_readonly`: refuse to send keyboard input to the shell. Per-pane
     /// and runtime-only — there is no config key for it upstream either.
     readonly: bool,
+    /// IME composition in progress, drawn at the cursor by `render_active`.
+    /// Per-pane so a split switch mid-composition can't move it onto another
+    /// pane's cursor.
+    preedit: crate::ime::Preedit,
     /// `scroll-to-bottom`, read on keystroke and on new output.
     scroll_to_bottom: crate::config::ScrollToBottom,
     /// Ghostty `scrollback-compression`; drives [`Session::idle_work`].
@@ -268,6 +272,7 @@ impl Session {
             mouse_reporting: config.mouse_reporting,
             mouse_scroll_multiplier: config.mouse_scroll_multiplier,
             readonly: false,
+            preedit: crate::ime::Preedit::default(),
             scroll_to_bottom: config.scroll_to_bottom,
             scrollback_compression: config.scrollback_compression,
             osc_color_report_format: config.osc_color_report_format,
@@ -1066,6 +1071,17 @@ impl Session {
         self.readonly
     }
 
+    /// The IME composition to draw at the cursor, if one is in progress.
+    pub fn preedit(&self) -> Option<&str> {
+        self.preedit.active().then(|| self.preedit.text())
+    }
+
+    /// Drop a composition this pane can no longer finish — a modal took the
+    /// keyboard, so `handle_input` stops seeing the IME's events.
+    pub fn clear_preedit(&mut self) {
+        self.preedit.clear();
+    }
+
     /// Capture this pane's text for `write_*_file`.
     ///
     /// Returns `None` when there is nothing to write — notably for
@@ -1497,6 +1513,9 @@ impl Session {
         // one: egui emits the pair back to back, and anything left over is
         // discarded when the loop ends.
         let mut suppress_text = 0usize;
+        // Drops the second half of a `Commit`/`Text` pair for the same text —
+        // see `ime.rs`.
+        let mut dedupe = crate::ime::FrameDedupe::default();
         for event in &events {
             match event {
                 // Raw wheel deltas set the scroll *target* immediately (no egui
@@ -1524,9 +1543,28 @@ impl Session {
                         suppress_text -= 1;
                         continue;
                     }
+                    // Mid-composition the IME owns the keyboard, and the echo
+                    // of a commit already typed must not type twice.
+                    if self.preedit.active() || !dedupe.text(text) {
+                        continue;
+                    }
                     bytes.extend_from_slice(text.as_bytes());
                     typed = true;
                 }
+                // Committed IME text is typed exactly like `Text`: raw bytes, no
+                // keymap (a composed string is not a key), and still behind the
+                // read-only gate below.
+                egui::Event::Ime(ime) => {
+                    if let Some(text) = self.preedit.apply(ime) {
+                        if dedupe.commit(&text) {
+                            bytes.extend_from_slice(text.as_bytes());
+                            typed = true;
+                        }
+                    }
+                }
+                // While composing, Enter/Backspace/arrows edit the preedit —
+                // none of them may reach the shell or trigger a binding.
+                egui::Event::Key { .. } if self.preedit.active() => {}
                 // Routed through `paste_str` like every other paste path, so
                 // protection can't be bypassed by using the keyboard. It writes
                 // to the PTY itself (or raises a confirmation and writes
