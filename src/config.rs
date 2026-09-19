@@ -102,13 +102,197 @@ pub enum RightClickAction {
 }
 
 /// What a middle-click inside a terminal pane does. Ghostty `middle-click-action`.
-/// Windows has no PRIMARY selection, so `primary-paste` reads the system clipboard.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MiddleClickAction {
-    /// Paste the (system) clipboard. The default.
+    /// Paste giest's emulated PRIMARY selection (`crate::primary`), falling back
+    /// to the system clipboard while it is empty. The default.
     PrimaryPaste,
+    /// Paste the system clipboard.
+    ClipboardPaste,
     /// Do nothing.
     Ignore,
+}
+
+/// Ghostty `copy-on-select`. Windows has no PRIMARY selection, so giest keeps an
+/// in-process one (`crate::primary`) for `primary`/`both` to write to, which
+/// middle-click and `paste_from_selection` read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CopyOnSelect {
+    /// Don't copy automatically. The default off Linux, as upstream.
+    None,
+    /// The emulated PRIMARY buffer only.
+    Primary,
+    /// The system clipboard only.
+    Clipboard,
+    /// Both.
+    Both,
+}
+
+impl CopyOnSelect {
+    pub fn primary(self) -> bool {
+        matches!(self, Self::Primary | Self::Both)
+    }
+    pub fn clipboard(self) -> bool {
+        matches!(self, Self::Clipboard | Self::Both)
+    }
+}
+
+/// Ghostty `mouse-shift-capture`: whether Shift+click goes to a mouse-tracking
+/// program (`true`/`always`) or extends the selection (`false`/`never`). The
+/// `true`/`false` forms can be overridden by the program with `XTSHIFTESCAPE`
+/// (`CSI > Ps s`), which giest side-scans (`crate::xtshiftescape`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MouseShiftCapture {
+    False,
+    True,
+    Always,
+    Never,
+}
+
+impl MouseShiftCapture {
+    /// Whether shift is captured (sent to the program) given the program's
+    /// latest `XTSHIFTESCAPE` request, if any. Mirrors `Surface.zig`'s
+    /// `mouseShiftCapture`.
+    pub fn captured(self, program: Option<bool>) -> bool {
+        match self {
+            Self::Always => true,
+            Self::Never => false,
+            Self::False => program.unwrap_or(false),
+            Self::True => program.unwrap_or(true),
+        }
+    }
+}
+
+/// One `command-palette-entry` row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PaletteEntry {
+    pub title: String,
+    pub description: Option<String>,
+    /// The action, in keybind-action syntax (parsed when the palette opens).
+    pub action: String,
+}
+
+/// Parse `title:…,description:…,action:…`. A value may be a double-quoted
+/// Zig-style string literal (for commas, edge whitespace, or `\xNN` escapes).
+/// `title` and `action` are required; an unknown field rejects the line.
+pub fn parse_command_palette_entry(v: &str) -> Option<PaletteEntry> {
+    let (mut title, mut description, mut action) = (None, None, None);
+    let mut rest = v.trim();
+    while !rest.is_empty() {
+        let (key, after) = rest.split_once(':')?;
+        let key = key.trim();
+        let after = after.trim_start();
+        let (value, tail) = if let Some(q) = after.strip_prefix('"') {
+            // The closing quote, skipping backslash escapes.
+            let bytes = q.as_bytes();
+            let mut i = 0;
+            let mut end = None;
+            while i < bytes.len() {
+                match bytes[i] {
+                    b'\\' => i += 2,
+                    b'"' => {
+                        end = Some(i);
+                        break;
+                    }
+                    _ => i += 1,
+                }
+            }
+            let end = end?;
+            let lit = crate::command::decode_escapes(&q[..end])?;
+            (lit, q[end + 1..].trim_start())
+        } else {
+            match after.find(',') {
+                Some(i) => (after[..i].trim().to_string(), &after[i..]),
+                None => (after.trim().to_string(), ""),
+            }
+        };
+        match key {
+            "title" => title = Some(value),
+            "description" => description = Some(value),
+            "action" => action = Some(value),
+            _ => return None,
+        }
+        rest = match tail.strip_prefix(',') {
+            Some(t) => t.trim_start(),
+            None if tail.is_empty() => "",
+            None => return None,
+        };
+    }
+    Some(PaletteEntry {
+        title: title.filter(|t| !t.is_empty())?,
+        description: description.filter(|d| !d.is_empty()),
+        action: action.filter(|a| !a.is_empty())?,
+    })
+}
+
+/// Parse a comma-separated list of `U+XXXX` / `U+XXXX-U+YYYY` ranges.
+pub fn parse_codepoint_ranges(v: &str) -> Option<Vec<(u32, u32)>> {
+    let one = |s: &str| -> Option<u32> {
+        let s = s.trim();
+        let h = s.strip_prefix("U+").or_else(|| s.strip_prefix("u+"))?;
+        let n = u32::from_str_radix(h, 16).ok()?;
+        char::from_u32(n).map(|_| n)
+    };
+    v.split(',')
+        .map(|r| {
+            let r = r.trim();
+            match r.split_once('-') {
+                Some((a, b)) => {
+                    let (a, b) = (one(a)?, one(b)?);
+                    (a <= b).then_some((a, b))
+                }
+                None => one(r).map(|a| (a, a)),
+            }
+        })
+        .collect()
+}
+
+/// One `clipboard-codepoint-map` line: ranges and their replacement text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClipboardMap {
+    pub ranges: Vec<(u32, u32)>,
+    pub replacement: String,
+}
+
+/// Parse `U+2500=U+002D` / `U+03A3=SUM`. A replacement that is itself a single
+/// `U+XXXX` is that character; anything else is literal text.
+pub fn parse_clipboard_map(v: &str) -> Option<ClipboardMap> {
+    let (lhs, rhs) = v.split_once('=')?;
+    let ranges = parse_codepoint_ranges(lhs)?;
+    let rhs = rhs.trim();
+    let replacement = match parse_codepoint_ranges(rhs).as_deref() {
+        Some([(a, b)]) if a == b => char::from_u32(*a)?.to_string(),
+        _ => rhs.to_string(),
+    };
+    Some(ClipboardMap { ranges, replacement })
+}
+
+/// Apply `clipboard-codepoint-map` to copied text. Later entries win over
+/// earlier ones for overlapping ranges, as upstream documents.
+pub fn map_clipboard_text(maps: &[ClipboardMap], text: &str) -> String {
+    if maps.is_empty() {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        let cp = ch as u32;
+        match maps
+            .iter()
+            .rev()
+            .find(|m| m.ranges.iter().any(|&(a, b)| a <= cp && cp <= b))
+        {
+            Some(m) => out.push_str(&m.replacement),
+            None => out.push(ch),
+        }
+    }
+    out
+}
+
+/// One `font-codepoint-map` line: ranges forced to a named family.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FontCodepointMap {
+    pub ranges: Vec<(u32, u32)>,
+    pub family: String,
 }
 
 /// Window backdrop blur behind a translucent background. Ghostty
@@ -1121,10 +1305,32 @@ pub struct Config {
     /// Text color over a selection; `None` keeps each cell's own foreground.
     /// Ghostty `selection-foreground`.
     pub selection_fg: Option<Rgb>,
-    /// Copy a selection to the clipboard as soon as it is made. Ghostty
-    /// `copy-on-select` (an enum there; Windows has no primary selection, so
-    /// `clipboard`/`primary`/`true` all map to true).
-    pub copy_on_select: bool,
+    /// Where a finished selection is copied automatically. Ghostty
+    /// `copy-on-select`; see [`CopyOnSelect`].
+    pub copy_on_select: CopyOnSelect,
+    /// `key-remap` lines, in order (later wins for the same source).
+    pub key_remap: Vec<crate::keyremap::Remap>,
+    /// Ghostty `mouse-shift-capture`.
+    pub mouse_shift_capture: MouseShiftCapture,
+    /// Ghostty `click-repeat-interval`, in ms. `0` = the OS double-click time.
+    pub click_repeat_interval: u32,
+    /// Ghostty `command-palette-entry`: whether the built-in rows are shown
+    /// (`clear` turns them off, an empty value restores them).
+    pub palette_defaults: bool,
+    /// Ghostty `command-palette-entry`: custom rows, after the defaults.
+    pub palette_entries: Vec<PaletteEntry>,
+    /// Ghostty `clipboard-codepoint-map`.
+    pub clipboard_codepoint_map: Vec<ClipboardMap>,
+    /// Ghostty `font-codepoint-map`.
+    pub font_codepoint_map: Vec<FontCodepointMap>,
+    /// Ghostty `font-shaping-break = cursor`: shape the cursor cell on its own.
+    pub font_shaping_break_cursor: bool,
+    /// Ghostty `font-thicken`.
+    pub font_thicken: bool,
+    /// Ghostty `font-thicken-strength` (0..=255).
+    pub font_thicken_strength: u8,
+    /// Ghostty `cursor-click-to-move`.
+    pub cursor_click_to_move: bool,
     /// What a right-click in a terminal pane does. Ghostty `right-click-action`.
     pub right_click_action: RightClickAction,
     /// What a middle-click in a terminal pane does. Ghostty `middle-click-action`.
@@ -1339,7 +1545,18 @@ impl Default for Config {
             image_storage_limit: 320 * 1000 * 1000,
             selection_bg: Rgb::new(0x38, 0x5a, 0x9c),
             selection_fg: None,
-            copy_on_select: false,
+            copy_on_select: CopyOnSelect::None,
+            key_remap: Vec::new(),
+            mouse_shift_capture: MouseShiftCapture::False,
+            click_repeat_interval: 0,
+            palette_defaults: true,
+            palette_entries: Vec::new(),
+            clipboard_codepoint_map: Vec::new(),
+            font_codepoint_map: Vec::new(),
+            font_shaping_break_cursor: true,
+            font_thicken: false,
+            font_thicken_strength: 255,
+            cursor_click_to_move: true,
             right_click_action: RightClickAction::ContextMenu,
             middle_click_action: MiddleClickAction::PrimaryPaste,
             shell: None,
@@ -1928,10 +2145,95 @@ const SETTERS: &[(&str, Setter)] = &[
     ("copy-on-select", |c, v, d| {
         c.copy_on_select = match v.to_ascii_lowercase().as_str() {
             "" => d.copy_on_select,
-            "false" | "0" | "off" | "no" => false,
-            "true" | "1" | "on" | "yes" | "clipboard" | "primary" => true,
+            "false" | "0" | "off" | "no" | "none" => CopyOnSelect::None,
+            // Upstream's `true` is `clipboard` everywhere but Linux; Windows
+            // follows macOS (it has no system PRIMARY to prefer).
+            "true" | "1" | "on" | "yes" | "clipboard" => CopyOnSelect::Clipboard,
+            "primary" => CopyOnSelect::Primary,
+            "both" => CopyOnSelect::Both,
             _ => c.copy_on_select,
         }
+    }),
+    ("key-remap", |c, v, _d| {
+        if v.is_empty() {
+            c.key_remap.clear();
+        } else if let Some(r) = crate::keyremap::parse(v) {
+            c.key_remap.push(r);
+        }
+    }),
+    ("mouse-shift-capture", |c, v, d| {
+        c.mouse_shift_capture = match v.to_ascii_lowercase().as_str() {
+            "" => d.mouse_shift_capture,
+            "false" => MouseShiftCapture::False,
+            "true" => MouseShiftCapture::True,
+            "always" => MouseShiftCapture::Always,
+            "never" => MouseShiftCapture::Never,
+            _ => c.mouse_shift_capture,
+        }
+    }),
+    ("click-repeat-interval", |c, v, d| {
+        c.click_repeat_interval = if v.is_empty() {
+            d.click_repeat_interval
+        } else {
+            v.parse().unwrap_or(c.click_repeat_interval)
+        }
+    }),
+    ("command-palette-entry", |c, v, _d| {
+        if v.is_empty() {
+            c.palette_defaults = true;
+            c.palette_entries.clear();
+        } else if v == "clear" {
+            c.palette_defaults = false;
+            c.palette_entries.clear();
+        } else if let Some(e) = parse_command_palette_entry(v) {
+            c.palette_entries.push(e);
+        }
+    }),
+    ("clipboard-codepoint-map", |c, v, _d| {
+        if v.is_empty() {
+            c.clipboard_codepoint_map.clear();
+        } else if let Some(m) = parse_clipboard_map(v) {
+            c.clipboard_codepoint_map.push(m);
+        }
+    }),
+    ("font-codepoint-map", |c, v, _d| {
+        if v.is_empty() {
+            c.font_codepoint_map.clear();
+        } else if let Some((lhs, family)) = v.split_once('=')
+            && let Some(ranges) = parse_codepoint_ranges(lhs)
+            && !family.trim().is_empty()
+        {
+            c.font_codepoint_map.push(FontCodepointMap {
+                ranges,
+                family: family.trim().to_string(),
+            });
+        }
+    }),
+    ("font-shaping-break", |c, v, d| {
+        if v.is_empty() {
+            c.font_shaping_break_cursor = d.font_shaping_break_cursor;
+            return;
+        }
+        // Upstream's packed-struct grammar: `opt`, `no-opt`, or a bare boolean
+        // for every option. `cursor` is the only option.
+        for part in v.split(',') {
+            match part.trim().to_ascii_lowercase().as_str() {
+                "cursor" | "true" => c.font_shaping_break_cursor = true,
+                "no-cursor" | "false" => c.font_shaping_break_cursor = false,
+                _ => {}
+            }
+        }
+    }),
+    ("font-thicken", |c, v, d| c.font_thicken = parse_bool(v, d.font_thicken)),
+    ("font-thicken-strength", |c, v, d| {
+        c.font_thicken_strength = if v.is_empty() {
+            d.font_thicken_strength
+        } else {
+            v.parse().unwrap_or(c.font_thicken_strength)
+        }
+    }),
+    ("cursor-click-to-move", |c, v, d| {
+        c.cursor_click_to_move = parse_bool(v, d.cursor_click_to_move)
     }),
     ("right-click-action", |c, v, d| {
         c.right_click_action = match v.to_ascii_lowercase().as_str() {
@@ -1948,6 +2250,7 @@ const SETTERS: &[(&str, Setter)] = &[
         c.middle_click_action = match v.to_ascii_lowercase().as_str() {
             "" => d.middle_click_action,
             "primary-paste" => MiddleClickAction::PrimaryPaste,
+            "clipboard-paste" => MiddleClickAction::ClipboardPaste,
             "ignore" => MiddleClickAction::Ignore,
             _ => c.middle_click_action,
         }
@@ -2519,11 +2822,27 @@ fn select_theme_variant(spec: &str) -> String {
     spec.to_string()
 }
 
-/// Resolve a theme name to a file: an explicit existing path wins, otherwise
+/// Expand a leading `~/` or `~\` (or a bare `~`) to `%USERPROFILE%`, as
+/// upstream expands `~` in theme paths. Anything else is returned verbatim.
+fn expand_home(p: &str) -> PathBuf {
+    if p == "~" {
+        if let Some(h) = home_dir() {
+            return h;
+        }
+    }
+    if let Some(rest) = p.strip_prefix("~/").or_else(|| p.strip_prefix(r"~\"))
+        && let Some(h) = home_dir()
+    {
+        return h.join(rest);
+    }
+    PathBuf::from(p)
+}
+
+/// Resolve a theme name to a file (after `~` expansion):an explicit existing path wins, otherwise
 /// `<config-dir>/themes/<name>` (Ghostty's `themes/` convention). `None` if no
 /// such file exists.
 fn resolve_theme_path(name: &str) -> Option<PathBuf> {
-    let direct = PathBuf::from(name);
+    let direct = expand_home(name);
     if direct.is_file() {
         return Some(direct);
     }
@@ -3177,7 +3496,7 @@ mod tests {
         );
         assert_eq!(c.selection_bg, Rgb::new(0x38, 0x5a, 0x9c));
         assert_eq!(c.selection_fg, Some(Rgb::new(0xff, 0xff, 0xff)));
-        assert!(c.copy_on_select);
+        assert_eq!(c.copy_on_select, CopyOnSelect::Clipboard);
     }
 
     #[test]
@@ -3311,9 +3630,109 @@ mod tests {
 
     #[test]
     fn copy_on_select_accepts_ghostty_enum() {
-        assert!(parsed("copy-on-select = clipboard").copy_on_select);
-        assert!(parsed("copy-on-select = primary").copy_on_select);
-        assert!(!parsed("copy-on-select = false").copy_on_select);
+        let cos = |v: &str| parsed(&format!("copy-on-select = {v}")).copy_on_select;
+        assert_eq!(Config::default().copy_on_select, CopyOnSelect::None);
+        assert_eq!(cos("clipboard"), CopyOnSelect::Clipboard);
+        assert_eq!(cos("true"), CopyOnSelect::Clipboard);
+        assert_eq!(cos("primary"), CopyOnSelect::Primary);
+        assert_eq!(cos("both"), CopyOnSelect::Both);
+        assert_eq!(cos("none"), CopyOnSelect::None);
+        assert_eq!(cos("false"), CopyOnSelect::None);
+        assert!(CopyOnSelect::Both.primary() && CopyOnSelect::Both.clipboard());
+        assert!(!CopyOnSelect::Primary.clipboard());
+    }
+
+    #[test]
+    fn key_remap_is_repeatable_and_resettable() {
+        let c = parsed("key-remap = ctrl=alt\nkey-remap = bogus\nkey-remap = left_shift=super");
+        assert_eq!(c.key_remap.len(), 2);
+        assert!(parsed("key-remap = ctrl=alt\nkey-remap =").key_remap.is_empty());
+    }
+
+    #[test]
+    fn mouse_shift_capture_and_click_interval() {
+        use MouseShiftCapture as M;
+        assert_eq!(Config::default().mouse_shift_capture, M::False);
+        assert_eq!(parsed("mouse-shift-capture = always").mouse_shift_capture, M::Always);
+        assert_eq!(parsed("mouse-shift-capture = never").mouse_shift_capture, M::Never);
+        assert_eq!(parsed("mouse-shift-capture = true").mouse_shift_capture, M::True);
+        // Only true/false defer to the program's XTSHIFTESCAPE.
+        assert!(M::False.captured(Some(true)) && !M::False.captured(None));
+        assert!(!M::True.captured(Some(false)) && M::True.captured(None));
+        assert!(M::Always.captured(Some(false)) && !M::Never.captured(Some(true)));
+        assert_eq!(Config::default().click_repeat_interval, 0);
+        assert_eq!(parsed("click-repeat-interval = 250").click_repeat_interval, 250);
+        assert_eq!(parsed("click-repeat-interval = x").click_repeat_interval, 0);
+    }
+
+    #[test]
+    fn command_palette_entry_grammar() {
+        let e = parse_command_palette_entry("title:Reset Font Style, action:csi:0m").unwrap();
+        assert_eq!(e.title, "Reset Font Style");
+        assert_eq!(e.action, "csi:0m");
+        assert_eq!(e.description, None);
+        let e = parse_command_palette_entry(
+            r#"title:Focus Split: Right,description:"Focus the split to the right, if it exists.",action:goto_split:right"#,
+        )
+        .unwrap();
+        assert_eq!(e.title, "Focus Split: Right");
+        assert_eq!(e.description.as_deref(), Some("Focus the split to the right, if it exists."));
+        assert_eq!(e.action, "goto_split:right");
+        let e = parse_command_palette_entry(r#"title:"Ghostty",action:"text:\xf0""#).unwrap();
+        assert_eq!(e.title, "Ghostty");
+        assert_eq!(e.action, "text:\u{f0}");
+        // Required fields and unknown fields.
+        assert!(parse_command_palette_entry("title:x").is_none());
+        assert!(parse_command_palette_entry("action:new_tab").is_none());
+        assert!(parse_command_palette_entry("title:x,action:new_tab,bogus:1").is_none());
+
+        let c = parsed("command-palette-entry = title:A,action:new_tab");
+        assert!(c.palette_defaults);
+        assert_eq!(c.palette_entries.len(), 1);
+        let c = parsed("command-palette-entry = title:A,action:new_tab\ncommand-palette-entry = clear\ncommand-palette-entry = title:B,action:new_tab");
+        assert!(!c.palette_defaults);
+        assert_eq!(c.palette_entries[0].title, "B");
+        let c = parsed("command-palette-entry = clear\ncommand-palette-entry =");
+        assert!(c.palette_defaults && c.palette_entries.is_empty());
+    }
+
+    #[test]
+    fn clipboard_codepoint_map_replaces_on_copy() {
+        let c = parsed(
+            "clipboard-codepoint-map = U+2500=U+002D\nclipboard-codepoint-map = U+03A3=SUM\nclipboard-codepoint-map = U+2500-U+2502=|",
+        );
+        assert_eq!(c.clipboard_codepoint_map.len(), 3);
+        // The later range wins for U+2500.
+        assert_eq!(map_clipboard_text(&c.clipboard_codepoint_map, "a\u{2500}\u{3a3}\u{2501}b"), "a|SUM|b");
+        assert_eq!(map_clipboard_text(&[], "x\u{2500}"), "x\u{2500}");
+        assert!(parse_clipboard_map("2500=x").is_none());
+        assert!(parse_clipboard_map("U+2502-U+2500=x").is_none());
+    }
+
+    #[test]
+    fn font_codepoint_map_and_shaping_and_thicken() {
+        let c = parsed("font-codepoint-map = U+E000-U+E0FF,U+F000=Symbols Nerd Font");
+        assert_eq!(c.font_codepoint_map[0].ranges, vec![(0xE000, 0xE0FF), (0xF000, 0xF000)]);
+        assert_eq!(c.font_codepoint_map[0].family, "Symbols Nerd Font");
+        assert!(parsed("font-codepoint-map = U+E000=").font_codepoint_map.is_empty());
+        assert!(Config::default().font_shaping_break_cursor);
+        assert!(!parsed("font-shaping-break = no-cursor").font_shaping_break_cursor);
+        assert!(parsed("font-shaping-break = no-cursor,cursor").font_shaping_break_cursor);
+        let c = parsed("font-thicken = true\nfont-thicken-strength = 40");
+        assert!(c.font_thicken);
+        assert_eq!(c.font_thicken_strength, 40);
+        assert_eq!(parsed("font-thicken-strength = 300").font_thicken_strength, 255);
+        assert!(!parsed("cursor-click-to-move = false").cursor_click_to_move);
+    }
+
+    #[test]
+    fn theme_paths_expand_tilde() {
+        let Some(home) = home_dir() else { return };
+        assert_eq!(expand_home("~/themes/x"), home.join("themes/x"));
+        assert_eq!(expand_home(r"~\themes\x"), home.join(r"themes\x"));
+        assert_eq!(expand_home("~"), home);
+        assert_eq!(expand_home("dracula"), PathBuf::from("dracula"));
+        assert_eq!(expand_home("~user/x"), PathBuf::from("~user/x"));
     }
 
     #[test]

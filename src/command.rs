@@ -173,6 +173,7 @@ impl Action {
                 | Action::SendCsi(_)
                 | Action::SendEsc(_)
                 | Action::Paste
+                | Action::PasteFromSelection
                 | Action::ClearScreen
                 | Action::ResetTerminal
                 | Action::SelectAll
@@ -463,6 +464,9 @@ pub enum Action {
     ResetFontSize,
     Copy,
     Paste,
+    /// Paste the emulated PRIMARY selection (`crate::primary`). Ghostty
+    /// `paste_from_selection`.
+    PasteFromSelection,
     SelectAll,
     ClearSelection,
     ResetTerminal,
@@ -574,6 +578,7 @@ impl Action {
             Action::ResetFontSize => "Reset Font Size",
             Action::Copy => "Copy",
             Action::Paste => "Paste",
+            Action::PasteFromSelection => "Paste from Selection",
             Action::SelectAll => "Select All",
             Action::ClearSelection => "Clear Selection",
             Action::ResetTerminal => "Reset Terminal",
@@ -608,6 +613,7 @@ impl Action {
             | Action::GotoWindowPrev
             | Action::ResetWindowSize
             | Action::CopyUrlToClipboard
+            | Action::PasteFromSelection
             | Action::ScrollToSelection
             | Action::EndKeySequence => return None,
             Action::NewTab => "Ctrl+Shift+T",
@@ -739,6 +745,7 @@ impl Action {
             Action::ResetFontSize => "reset_font_size".into(),
             Action::Copy => "copy_to_clipboard".into(),
             Action::Paste => "paste_from_clipboard".into(),
+            Action::PasteFromSelection => "paste_from_selection".into(),
             Action::SelectAll => "select_all".into(),
             Action::ClearSelection => "clear_selection".into(),
             Action::ResetTerminal => "reset".into(),
@@ -907,6 +914,7 @@ impl Action {
             "reset_font_size" => Action::ResetFontSize,
             "copy_to_clipboard" | "copy" => Action::Copy,
             "paste_from_clipboard" | "paste" => Action::Paste,
+            "paste_from_selection" => Action::PasteFromSelection,
             "select_all" => Action::SelectAll,
             "clear_selection" => Action::ClearSelection,
             "reset" | "reset_terminal" => Action::ResetTerminal,
@@ -1007,6 +1015,7 @@ const BASE_ACTIONS: &[Action] = &[
     Action::ResetFontSize,
     Action::Copy,
     Action::Paste,
+    Action::PasteFromSelection,
     Action::SelectAll,
     Action::ClearSelection,
     Action::ResetTerminal,

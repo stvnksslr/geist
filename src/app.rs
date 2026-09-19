@@ -9,7 +9,7 @@ use eframe::egui;
 use eframe::egui_wgpu;
 
 use crate::command::{self, Action, PaletteState};
-use crate::config::{Config, MiddleClickAction, ResizeOverlayPosition, RightClickAction};
+use crate::config::{Config, CopyOnSelect, MiddleClickAction, ResizeOverlayPosition, RightClickAction};
 use crate::profiles::{self, Profile};
 use crate::keybind::{Chord, Keymap};
 use crate::render::{self, BgImageFrame, PaneFrame, TermFrame};
@@ -3262,7 +3262,7 @@ impl Window {
                 let toast = self.config.app_notifications.clipboard_copy;
                 let win_id = self.window_id;
                 if let Some(s) = self.focused_session_mut() {
-                    if let Some(text) = s.selection_text() {
+                    if let Some(text) = s.copy_text() {
                         ctx.copy_text(text);
                         s.clear_selection();
                         if toast {
@@ -3273,6 +3273,16 @@ impl Window {
             }
             Action::Paste => {
                 if let Some(text) = session::read_clipboard() {
+                    if let Some(s) = self.focused_session_mut() {
+                        s.paste_str(&text);
+                    }
+                }
+            }
+            // Strictly the emulated PRIMARY: unlike middle-click's default it
+            // does not fall back to the clipboard, since `paste_from_clipboard`
+            // already exists for that.
+            Action::PasteFromSelection => {
+                if let Some(text) = crate::primary::get() {
                     if let Some(s) = self.focused_session_mut() {
                         s.paste_str(&text);
                     }
@@ -5071,11 +5081,18 @@ impl Window {
                         }
                     }
                     // Copy as soon as a selection is completed, if enabled.
-                    if copy_on_select
+                    // `primary`/`both` feed the emulated PRIMARY buffer that
+                    // middle-click and `paste_from_selection` read.
+                    if copy_on_select != CopyOnSelect::None
                         && (resp.double_clicked() || resp.triple_clicked() || resp.drag_stopped())
                     {
-                        if let Some(text) = session.selection_text() {
-                            ctx.copy_text(text);
+                        if let Some(text) = session.copy_text() {
+                            if copy_on_select.primary() {
+                                crate::primary::set(&text);
+                            }
+                            if copy_on_select.clipboard() {
+                                ctx.copy_text(text);
+                            }
                         }
                     }
 
@@ -5083,7 +5100,7 @@ impl Window {
                     // Only reached when the app isn't capturing the mouse (the
                     // `tracking` branch above), matching Ghostty's suppression.
                     let copy_sel = |s: &Session| {
-                        if let Some(text) = s.selection_text() {
+                        if let Some(text) = s.copy_text() {
                             ctx.copy_text(text);
                             if copy_toast {
                                 push_toast(ctx, win_id, "Copied to clipboard");
@@ -5142,11 +5159,22 @@ impl Window {
                         _ => {}
                     }
 
-                    // Middle-click pastes the clipboard (no PRIMARY on Windows).
-                    if middle_click_action == MiddleClickAction::PrimaryPaste
-                        && resp.clicked_by(egui::PointerButton::Middle)
-                    {
-                        paste(session);
+                    // Middle-click. `primary-paste` reads giest's emulated
+                    // PRIMARY (`crate::primary`) and, while nothing has been
+                    // selected into it, the clipboard — so the default keeps
+                    // doing something useful on a platform with no PRIMARY.
+                    if resp.clicked_by(egui::PointerButton::Middle) {
+                        match middle_click_action {
+                            MiddleClickAction::PrimaryPaste => {
+                                if let Some(text) =
+                                    crate::primary::get().or_else(session::read_clipboard)
+                                {
+                                    session.paste_str(&text);
+                                }
+                            }
+                            MiddleClickAction::ClipboardPaste => paste(session),
+                            MiddleClickAction::Ignore => {}
+                        }
                     }
                 }
             }
@@ -5767,6 +5795,14 @@ impl Window {
         render_state: Option<&egui_wgpu::RenderState>,
     ) -> Vec<AppRequest> {
         let ctx = ui.ctx().clone();
+
+        // `key-remap`: rewrite this pass's modifiers before *anything* reads
+        // them, so keybind lookup, `decide_key`, the encoder and mouse reports
+        // all agree (upstream remaps ahead of both matching and encoding).
+        if !self.config.key_remap.is_empty() {
+            let set = self.config.key_remap.clone();
+            ctx.input_mut(|i| crate::keyremap::apply(&set, i));
+        }
 
         // A window `undo` just re-opened: put it back where it was. Sent as
         // viewport commands rather than built into `child_builder`, which is

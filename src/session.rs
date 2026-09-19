@@ -138,6 +138,8 @@ pub struct Session {
     /// Precision of OSC color-query replies. Read at pump time rather than per
     /// frame, so a config reload must push it (see `apply_config`).
     osc_color_report_format: OscColorReportFormat,
+    /// `clipboard-codepoint-map`, applied by [`Session::copy_text`].
+    clipboard_map: Vec<config::ClipboardMap>,
     /// Configured default cursor shape (`cursor-style`), applied via `decscusr`.
     cursor_style: CursorShape,
     /// Configured default cursor blink (`cursor-style-blink`); `None` follows the
@@ -323,6 +325,7 @@ impl Session {
             scrollback_compression: config.scrollback_compression,
             hover_cell: None,
             osc_color_report_format: config.osc_color_report_format,
+            clipboard_map: config.clipboard_codepoint_map.clone(),
             cursor_style: config.cursor_style,
             cursor_style_blink: config.cursor_style_blink,
             autoscroll_accum: 0.0,
@@ -1026,6 +1029,7 @@ impl Session {
         // Consulted at pump/resize time rather than per frame, so these need an
         // explicit push here.
         self.osc_color_report_format = config.osc_color_report_format;
+        self.clipboard_map = config.clipboard_codepoint_map.clone();
         self.resize_overlay = config.resize_overlay;
         self.resize_overlay_duration_ms = config.resize_overlay_duration_ms;
         self.clipboard = config.clipboard;
@@ -1563,6 +1567,15 @@ impl Session {
             .filter(|s| !s.is_empty())
     }
 
+    /// The selection as it should reach a clipboard: [`Self::selection_text`]
+    /// with `clipboard-codepoint-map` applied. Every *copy* uses this; search
+    /// and `write_selection_file` deliberately read the unmapped text, since
+    /// upstream scopes the map to copying.
+    pub fn copy_text(&self) -> Option<String> {
+        self.selection_text()
+            .map(|t| config::map_clipboard_text(&self.clipboard_map, &t))
+    }
+
     /// Whether `handle_input` copied since the last call (and reset it).
     pub fn take_copied(&mut self) -> bool {
         std::mem::take(&mut self.copied)
@@ -1688,7 +1701,7 @@ impl Session {
                 // held. Windows-Terminal semantics: with a selection, copy it
                 // (and clear); with none, Ctrl+C is an interrupt.
                 egui::Event::Copy | egui::Event::Cut => {
-                    match copy_or_interrupt(self.selection_text()) {
+                    match copy_or_interrupt(self.copy_text()) {
                         CopyAction::Copy(text) => {
                             ctx.copy_text(text);
                             self.copied = true;
@@ -1976,7 +1989,7 @@ pub(crate) fn key_mods(m: &egui::Modifiers) -> KeyMods {
         shift: m.shift,
         ctrl: m.ctrl || m.command,
         alt: m.alt,
-        sup: false,
+        sup: m.mac_cmd,
     }
 }
 
