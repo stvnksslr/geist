@@ -473,6 +473,8 @@ pub enum Action {
     /// Ghostty `move_tab_to_new_window`: detach the active tab (shells and all)
     /// into a new window.
     MoveTabToNewWindow,
+    /// Ghostty `toggle_tab_overview`: a grid of the window's tabs to pick from.
+    ToggleTabOverview,
     /// Ghostty `toggle_visibility`: hide or show every window.
     ToggleVisibility,
     /// Ghostty `show_on_screen_keyboard`: the Windows touch keyboard.
@@ -597,6 +599,7 @@ impl Action {
             Action::PromptSurfaceTitle => "Change Terminal Title...",
             Action::PromptWindowTitle => "Change Window Title...",
             Action::MoveTabToNewWindow => "Move Tab to New Window",
+            Action::ToggleTabOverview => "Toggle Tab Overview",
             Action::ToggleVisibility => "Toggle Visibility",
             Action::ShowOnScreenKeyboard => "Show On-Screen Keyboard",
             Action::ToggleWindowDecorations => "Toggle Window Decorations",
@@ -648,6 +651,7 @@ impl Action {
             | Action::PromptSurfaceTitle
             | Action::PromptWindowTitle
             | Action::MoveTabToNewWindow
+            | Action::ToggleTabOverview
             | Action::ToggleVisibility
             | Action::ShowOnScreenKeyboard
             | Action::ToggleWindowDecorations => return None,
@@ -777,6 +781,7 @@ impl Action {
             Action::PromptSurfaceTitle => "prompt_surface_title".into(),
             Action::PromptWindowTitle => "prompt_window_title".into(),
             Action::MoveTabToNewWindow => "move_tab_to_new_window".into(),
+            Action::ToggleTabOverview => "toggle_tab_overview".into(),
             Action::ToggleVisibility => "toggle_visibility".into(),
             Action::ShowOnScreenKeyboard => "show_on_screen_keyboard".into(),
             Action::ToggleWindowDecorations => "toggle_window_decorations".into(),
@@ -959,6 +964,7 @@ impl Action {
             "end_key_sequence" => Action::EndKeySequence,
             "prompt_window_title" => Action::PromptWindowTitle,
             "move_tab_to_new_window" => Action::MoveTabToNewWindow,
+            "toggle_tab_overview" => Action::ToggleTabOverview,
             "toggle_visibility" => Action::ToggleVisibility,
             "show_on_screen_keyboard" => Action::ShowOnScreenKeyboard,
             "toggle_window_decorations" => Action::ToggleWindowDecorations,
@@ -1092,6 +1098,7 @@ const BASE_ACTIONS: &[Action] = &[
     Action::PromptSurfaceTitle,
     Action::PromptWindowTitle,
     Action::MoveTabToNewWindow,
+    Action::ToggleTabOverview,
     Action::ShowOnScreenKeyboard,
     Action::ToggleFloatOnTop,
     Action::ToggleBackgroundOpacity,
@@ -1327,6 +1334,7 @@ mod tests {
             "prompt_surface_title",
             "prompt_window_title",
             "move_tab_to_new_window",
+            "toggle_tab_overview",
             "toggle_visibility",
             "show_on_screen_keyboard",
             "toggle_window_decorations",

@@ -1026,6 +1026,21 @@ pub fn paste_is_unsafe(policy: ClipboardPolicy, bracketed: bool, data: &str) -> 
     data.contains('\n') || data.contains(PASTE_END)
 }
 
+/// Ghostty `drag-handle`: when a pane shows the grab handle that drags it to
+/// another split, tab or window.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DragHandle {
+    /// Always drawn, even with a single pane.
+    Always,
+    /// The macOS behaviour: grabbable everywhere except a fullscreen window
+    /// with one pane, and drawn only while the pointer is in the pane's top
+    /// band. The default.
+    #[default]
+    Auto,
+    /// Never: panes cannot be rearranged with the mouse.
+    Never,
+}
+
 /// When to show the grid-size overlay on resize. Ghostty `resize-overlay`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ResizeOverlay {
@@ -1471,6 +1486,8 @@ pub struct Config {
     pub split_preserve_zoom_navigation: bool,
     /// When to show the grid-size overlay on resize. Ghostty `resize-overlay`.
     pub resize_overlay: ResizeOverlay,
+    /// Ghostty `drag-handle`.
+    pub drag_handle: DragHandle,
     /// Where that overlay sits in the pane. Ghostty `resize-overlay-position`.
     pub resize_overlay_position: ResizeOverlayPosition,
     /// How long the overlay stays up, in milliseconds. Ghostty
@@ -1717,6 +1734,7 @@ impl Default for Config {
             initial_window: true,
             split_preserve_zoom_navigation: false,
             resize_overlay: ResizeOverlay::AfterFirst,
+            drag_handle: DragHandle::Auto,
             resize_overlay_position: ResizeOverlayPosition::Center,
             resize_overlay_duration_ms: 750,
             scrollbar: Scrollbar::System,
@@ -2657,6 +2675,15 @@ const SETTERS: &[(&str, Setter)] = &[
             "never" => WindowSaveState::Never,
             "always" => WindowSaveState::Always,
             _ => c.window_save_state,
+        }
+    }),
+    ("drag-handle", |c, v, d| {
+        c.drag_handle = match v.to_ascii_lowercase().as_str() {
+            "" => d.drag_handle,
+            "always" => DragHandle::Always,
+            "auto" => DragHandle::Auto,
+            "never" => DragHandle::Never,
+            _ => c.drag_handle,
         }
     }),
     ("resize-overlay", |c, v, d| {
@@ -4653,6 +4680,21 @@ mod tests {
         assert_eq!(
             parsed("resize-overlay = never\nresize-overlay =").resize_overlay,
             ResizeOverlay::AfterFirst
+        );
+    }
+
+    #[test]
+    fn drag_handle_parses_ghostty_values() {
+        assert_eq!(Config::default().drag_handle, DragHandle::Auto);
+        assert_eq!(parsed("drag-handle = always").drag_handle, DragHandle::Always);
+        assert_eq!(parsed("drag-handle = never").drag_handle, DragHandle::Never);
+        assert_eq!(
+            parsed("drag-handle = never\ndrag-handle = bogus").drag_handle,
+            DragHandle::Never
+        );
+        assert_eq!(
+            parsed("drag-handle = never\ndrag-handle =").drag_handle,
+            DragHandle::Auto
         );
     }
 
