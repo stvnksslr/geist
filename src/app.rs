@@ -5465,6 +5465,7 @@ impl Window {
                 cursor_text: self.config.cursor_text,
                 background_opacity,
                 background_opacity_cells,
+                shaping_break_cursor: self.config.font_shaping_break_cursor,
                 faint_opacity,
                 cursor_opacity,
                 background_color: bg,
@@ -6835,6 +6836,8 @@ fn font_spec(config: &Config) -> render::FontSpec {
         variations: config.font_variations.clone(),
         adjust: config.adjust,
         synthetic: config.font_synthetic_style,
+        codepoint_map: config.font_codepoint_map.clone(),
+        thicken: config.font_thicken.then_some(config.font_thicken_strength),
     }
 }
 

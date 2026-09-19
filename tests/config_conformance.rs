@@ -192,12 +192,15 @@ fn selection_background_and_foreground() {
 
 #[test]
 fn copy_on_select_enum_values() {
-    // Ghostty's copy-on-select is an enum: false / true / clipboard / primary.
-    assert!(!cfg("copy-on-select = false").copy_on_select);
-    assert!(cfg("copy-on-select = true").copy_on_select);
-    assert!(cfg("copy-on-select = clipboard").copy_on_select);
-    // Windows has no primary selection, so `primary` behaves like the others.
-    assert!(cfg("copy-on-select = primary").copy_on_select);
+    use giest::config::CopyOnSelect as C;
+    // Ghostty's copy-on-select enum: none / primary / clipboard / both, plus
+    // the true/false aliases (true = clipboard off Linux).
+    assert_eq!(cfg("copy-on-select = false").copy_on_select, C::None);
+    assert_eq!(cfg("copy-on-select = true").copy_on_select, C::Clipboard);
+    assert_eq!(cfg("copy-on-select = clipboard").copy_on_select, C::Clipboard);
+    // Windows has no system PRIMARY: `primary` writes giest's emulated one.
+    assert_eq!(cfg("copy-on-select = primary").copy_on_select, C::Primary);
+    assert_eq!(cfg("copy-on-select = both").copy_on_select, C::Both);
 }
 
 #[test]
@@ -449,7 +452,7 @@ keybind = ctrl+shift+t=new_tab  # ignored
     assert_eq!(c.padding_y, 8.0);
     assert_eq!(c.selection_bg, rgb(0x28, 0x34, 0x57));
     assert_eq!(c.selection_fg, Some(rgb(0xc0, 0xca, 0xf5)));
-    assert!(c.copy_on_select);
+    assert_ne!(c.copy_on_select, giest::config::CopyOnSelect::None);
     assert_eq!(c.scrollback_limit, 100_000);
     assert_eq!(c.palette[0], rgb(0x15, 0x16, 0x1e));
     assert_eq!(c.palette[1], rgb(0xf7, 0x76, 0x8e));
