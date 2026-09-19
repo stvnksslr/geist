@@ -11,7 +11,7 @@ publish = false # binary app with a vendored path dep — never goes to crates.i
 libghostty-vt = { path = "vendor/libghostty-rs/crates/libghostty-vt" }
 anyhow = "1"
 portable-pty = "0.9.0"
-eframe = { version = "0.34.3", default-features = false, features = ["wgpu", "default_fonts"] }
+eframe = { version = "0.34.3", default-features = false, features = ["wgpu", "default_fonts", "accesskit"] }
 bytemuck = { version = "1.25.0", features = ["derive"] }
 ab_glyph = "0.2.32"
 # Inline (small-string-optimized) string for per-cell grapheme clusters: stores

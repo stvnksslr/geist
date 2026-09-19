@@ -10,6 +10,7 @@
 //! environment — engine snapshots, the PTY, shaping — without going through the
 //! GUI binary.
 
+pub mod a11y;
 pub mod about;
 pub mod app;
 pub mod bell;

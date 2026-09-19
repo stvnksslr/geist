@@ -210,6 +210,11 @@ pub struct Session {
     /// they are pushed here rather than read from a `Config` (see `apply_config`).
     selection_clear_on_typing: bool,
     selection_clear_on_copy: bool,
+    /// `accessibility-announce-output`.
+    pub announce_output: bool,
+    /// Screen-reader text model and live-region state (`a11y.rs`). Only
+    /// touched while an assistive technology is attached.
+    pub a11y: crate::a11y::PaneA11y,
     /// Set when `handle_input` copied the selection (`Event::Copy`), so the app
     /// can show the `clipboard-copy` toast; cleared by [`Self::take_copied`].
     copied: bool,
@@ -422,6 +427,8 @@ impl Session {
             selection_word_chars: config.selection_word_chars.clone(),
             selection_clear_on_typing: config.selection_clear_on_typing,
             selection_clear_on_copy: config.selection_clear_on_copy,
+            announce_output: config.accessibility_announce_output,
+            a11y: Default::default(),
             copied: false,
             clipboard: config.clipboard,
             pending_clipboard: None,
@@ -1140,6 +1147,7 @@ impl Session {
         self.selection_word_chars = config.selection_word_chars.clone();
         self.selection_clear_on_typing = config.selection_clear_on_typing;
         self.selection_clear_on_copy = config.selection_clear_on_copy;
+        self.announce_output = config.accessibility_announce_output;
         self.cursor_style = config.cursor_style;
         self.cursor_style_blink = config.cursor_style_blink;
         // Consulted at pump/resize time rather than per frame, so these need an
@@ -1653,6 +1661,11 @@ impl Session {
             }
         }
         out
+    }
+
+    /// Whether the viewport is scrolled back from the live bottom.
+    pub fn scrolled_back(&self) -> bool {
+        self.engine_pin_lines > 0
     }
 
     /// Absolute screen row of the viewport's top, given the current scroll pin.

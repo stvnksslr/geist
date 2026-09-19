@@ -2268,6 +2268,13 @@ impl Window {
                     .id(edit_id)
                     .desired_width(f32::INFINITY),
             );
+            crate::a11y::label_widget(
+                &te,
+                match what {
+                    TitlePrompt::Surface => "Terminal title",
+                    TitlePrompt::Window => "Window title",
+                },
+            );
             if !te.has_focus() {
                 te.request_focus();
             }
@@ -2565,6 +2572,12 @@ impl Window {
                             resp.rect,
                             self.id(("tab-overview-card", t.id)),
                             egui::Sense::click(),
+                        );
+                        crate::a11y::name_widget(
+                            &resp,
+                            egui::accesskit::Role::Button,
+                            &format!("Tab {}: {}", i + 1, title),
+                            None,
                         );
                         if resp.hovered() {
                             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -4566,6 +4579,7 @@ impl Window {
                             resp.request_focus();
                             state.just_opened = false;
                         }
+                        crate::a11y::label_widget(&resp, "Command palette");
                         if resp.changed() {
                             state.selected = 0;
                         }
@@ -4665,6 +4679,12 @@ impl Window {
                                         );
                                     }
                                     let cmd = &state.catalog[cmd_idx];
+                                    crate::a11y::name_widget(
+                                        &resp,
+                                        egui::accesskit::Role::ListBoxOption,
+                                        &cmd.title,
+                                        Some(selected),
+                                    );
                                     let (ink, dim) = if selected {
                                         (chrome.on_accent, chrome.on_accent)
                                     } else {
@@ -5191,6 +5211,7 @@ impl Window {
                                     .desired_width(220.0)
                                     .font(egui::FontId::proportional(16.0)),
                             );
+                            crate::a11y::label_widget(&resp, "Search terminal");
                             if just_opened {
                                 resp.request_focus();
                             }
@@ -5228,31 +5249,38 @@ impl Window {
                                     ui.add_sized([54.0, 0.0], egui::Label::new(label));
                                 }
                             }
-                            if ui
-                                .selectable_label(case, "Aa")
+                            // Glyph-labelled controls: `named` gives each a
+                            // spoken name (the glyph alone reads as "A a",
+                            // "dot star", "up arrow").
+                            use crate::a11y::named;
+                            if named(ui.selectable_label(case, "Aa"), "Match case")
                                 .on_hover_text("Match case")
                                 .clicked()
                             {
                                 toggle_case = true;
                             }
-                            if ui
-                                .selectable_label(regex, ".*")
+                            if named(ui.selectable_label(regex, ".*"), "Regular expression")
                                 .on_hover_text("Regular expression")
                                 .clicked()
                             {
                                 toggle_regex = true;
                             }
-                            if ui
-                                .button("\u{2191}")
+                            if named(ui.button("\u{2191}"), "Previous match")
                                 .on_hover_text("Previous (Shift+Enter)")
                                 .clicked()
                             {
                                 prev = true;
                             }
-                            if ui.button("\u{2193}").on_hover_text("Next (Enter)").clicked() {
+                            if named(ui.button("\u{2193}"), "Next match")
+                                .on_hover_text("Next (Enter)")
+                                .clicked()
+                            {
                                 next = true;
                             }
-                            if ui.button("\u{00d7}").on_hover_text("Close (Esc)").clicked() {
+                            if named(ui.button("\u{00d7}"), "Close search")
+                                .on_hover_text("Close (Esc)")
+                                .clicked()
+                            {
                                 close = true;
                             }
                         });
@@ -5405,6 +5433,7 @@ impl Window {
                                         [140.0, theme::TAB_H],
                                         egui::TextEdit::singleline(text),
                                     );
+                                    crate::a11y::label_widget(&te, "Tab title");
                                     if !te.has_focus() {
                                         te.request_focus();
                                     }
@@ -5441,6 +5470,12 @@ impl Window {
                                     egui::Sense::click_and_drag(),
                                 );
                                 tab_rects.push(rect);
+                                crate::a11y::name_widget(
+                                    &resp,
+                                    egui::accesskit::Role::Tab,
+                                    &raw,
+                                    Some(is_active),
+                                );
 
                                 let show_close = is_active || resp.hovered();
                                 let fill = if is_active {
@@ -5623,6 +5658,12 @@ impl Window {
                                         egui::TextStyle::Body.resolve(ui.style()),
                                         if cr.hovered() { chrome.text } else { chrome.weak_text },
                                     );
+                                    crate::a11y::name_widget(
+                                        &cr,
+                                        egui::accesskit::Role::Button,
+                                        &format!("Close tab {raw}"),
+                                        None,
+                                    );
                                     if cr.on_hover_text("Close tab (Ctrl+Shift+W)").clicked() {
                                         want_close = Some(i);
                                     }
@@ -5692,15 +5733,14 @@ impl Window {
             // The new-tab controls, pinned: they are laid out in the space
             // reserved above, so they stay put and stay reachable no matter how
             // many tabs are open.
-            if ui
-                .add_sized([26.0, theme::TAB_H], egui::Button::new("+").frame(false))
-                .on_hover_text("New tab (Ctrl+Shift+T)")
-                .clicked()
-            {
+            let plus = ui.add_sized([26.0, theme::TAB_H], egui::Button::new("+").frame(false));
+            // The glyph is the button's only text; give readers words instead.
+            crate::a11y::name_widget(&plus, egui::accesskit::Role::Button, "New tab", None);
+            if plus.on_hover_text("New tab (Ctrl+Shift+T)").clicked() {
                 want_new = Some(default_profile);
             }
             // Profile picker: open a tab running a chosen shell.
-            ui.menu_button("⏷", |ui| {
+            let picker = ui.menu_button("⏷", |ui| {
                 if ui.button("New Tab").clicked() {
                     want_new = Some(default_profile);
                     ui.close();
@@ -5718,8 +5758,14 @@ impl Window {
                     ui.close();
                 }
             })
-            .response
-            .on_hover_text("New tab (pick a shell)");
+            .response;
+            crate::a11y::name_widget(
+                &picker,
+                egui::accesskit::Role::Button,
+                "New tab with profile",
+                None,
+            );
+            picker.on_hover_text("New tab (pick a shell)");
             if !pill_text.is_empty() {
                 let pill = egui::Button::new(egui::RichText::new(&pill_text).size(12.0))
                     .corner_radius(theme::TAB_H / 2.0)
@@ -6768,6 +6814,43 @@ impl Window {
                         }
                     }
                 }
+            }
+
+            // Screen readers (a11y.rs): the pane as a UIA text node on the same
+            // id the focused pane's `interact` above uses, so keyboard focus and
+            // the reader's focus coincide. The probe returns `None` — and all of
+            // this is skipped — unless an assistive technology is attached.
+            let a11y_id = egui::Id::new(("giest-window", win_id, "pane", active_tab, leaf_id));
+            if ctx.accesskit_node_builder(a11y_id, |_| ()).is_some() {
+                let snap = session.snapshot.clone();
+                let announce = session.announce_output;
+                let scrolled_back = session.scrolled_back();
+                session.a11y.update(&snap, announce, scrolled_back);
+                if session.a11y.announcer.flush(now) {
+                    ctx.request_repaint();
+                } else if session.a11y.announcer.has_pending() {
+                    ctx.request_repaint_after(std::time::Duration::from_secs_f64(
+                        crate::a11y::ANNOUNCE_INTERVAL,
+                    ));
+                }
+                let name = match session.title() {
+                    Some(t) if !t.is_empty() => format!("Terminal \u{2014} {t}"),
+                    _ => "Terminal".to_string(),
+                };
+                let grid = egui::pos2(
+                    (prect.min.x * ppp).round() / ppp,
+                    (prect.min.y * ppp).round() / ppp,
+                );
+                crate::a11y::build_nodes(
+                    ui,
+                    a11y_id,
+                    &name,
+                    &session.a11y.text,
+                    leaf_rect,
+                    grid,
+                    egui::vec2(cw / ppp, ch / ppp),
+                    announce.then_some(session.a11y.announcer.current.as_str()),
+                );
             }
 
             // Cheap Rc bump (not a grid clone); the blink toggle rides on a
