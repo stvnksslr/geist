@@ -135,10 +135,10 @@ drag, §C), `auto-update` / `auto-update-channel` (§C).
 | No scrollback pull on resize under ConPTY (c55f213) | ✅ | done (`0458c1c`) |
 | `scrollback-limit-bytes` / `-lines` | ✅ | done |
 | OSC 99 (kitty notifications) | ⬜ | engine parses; route to `notify.rs` alongside 9/777 — S |
-| OSC 5522 kitty clipboard + paste-events mode 5522 | ⬜ | effects → clipboard + existing permission prompts — M |
-| OSC 52 / pwd **effects in lib-vt** | ◐ | could retire the `osc52.rs` / `osc7.rs` side-scanners (pwd callback 002fd41) — M |
-| `ghostty_terminal_paste` | ⬜ | route the paste encoder through it, gate unchanged — S |
-| Native search API (`ghostty_search_*`) | ⬜ | back the search bar; unlocks regex search — M |
+| OSC 5522 kitty clipboard + paste-events mode 5522 | ✅ | `clipboard.rs` + engine callbacks, existing permission prompts; see the ledger "Kitty clipboard (OSC 5522) + engine-side OSC 52 / pwd" |
+| OSC 52 / pwd **effects in lib-vt** | ✅ | `osc52.rs` and `osc7.rs` retired; same ledger |
+| `ghostty_terminal_paste` | ◐ | wrapped (`Terminal::paste`, giest-local) and used for mode-5522 paste events; ordinary text pastes still go through `encode_paste` behind the same gate — S |
+| Native search API (`ghostty_search_*`) | ✅ N/A | evaluated, not adopted: no case-sensitive mode and no regex, so it would lose the `Aa` toggle; regex search built on giest's own wrap-joined text instead — see the ledger "Regex search, and why not the native search API" |
 | Dirty-row iteration | ✅ | `f00c510`: only dirty rows are re-copied; the render state is now acknowledged each frame (it reported `Full` forever before). Needs an eyeball pass for stale cells while typing, scrolling and changing themes. |
 | Selection gesture engine | ⬜ | optional replacement for giest's click-count logic — M |
 | Default cursor style/blink engine options | ✅ N/A | probed: equivalent to `decscusr.rs` for initial, `CSI 0 q`, RIS and mode 12 — except upstream ignores mode 12 when `cursor-style-blink` is set, which only the scanner does. The scanner stays. |
@@ -157,7 +157,7 @@ drag, §C), `auto-update` / `auto-update-channel` (§C).
    menu, indicators, link preview, file drop, About box.
 4. **Shell integration:** ✅ `shell-integration(-features)`, ✅ WSL scripts; `cursor-click-to-move` (M).
 5. **Automation:** CLI args → named-pipe IPC → Explorer entry → Jump List (L).
-6. **Protocols:** OSC 5522; move side-scanners onto lib-vt effects; native search + regex (M each).
+6. **Protocols:** ✅ OSC 5522; ✅ OSC 52 / OSC 7 scanners moved onto lib-vt; ✅ regex search (native search API evaluated, not adopted — see the ledger).
 7. **Chrome:** custom caption + `window-decoration` + titlebar colors; runtime icon (L).
 8. **Long tail:** accessibility (L), auto-update, tab overview, default-terminal handoff (XL), and
    the ConPTY passthrough patch that unblocks every kitty APC feature (L–XL).
@@ -225,7 +225,7 @@ drag, §C), `auto-update` / `auto-update-channel` (§C).
   were emitting a space — now skipped), long ZWJ-emoji clusters (>8 codepoints, heap-buffer retry),
   focus-stealing from a searching pane in splits, resize-while-open recapture, and a scroll-animation tick
   while the overlay is modal.
-  *Limitation: ASCII case-folding, and no regex. **Cross-wrap matches and eviction drift are now
+  *Limitation: ASCII case-folding in substring mode (regex mode folds Unicode). **Regex search is now done.** **Cross-wrap matches and eviction drift are now
   fixed** — see the search ledger below.*
 
 - **fullscreen / split zoom / tab-inherit-cwd** ✅ (Tier-1 UX cluster) `toggle_fullscreen` (`ctrl+enter`)
@@ -331,7 +331,7 @@ gap against upstream's action union is **`show_gtk_inspector`**, which is GTK's 
 inspector and has no Windows counterpart. giest's `inspector:` is now done.)*
 
 **Selection / scroll / search** — upstream's 60%-of-cell threshold for including the clicked/dragged
-cell; the double-click-*drag* word-snapping refinement; regex search. *(scrollback search plus
+cell; the double-click-*drag* word-snapping refinement. *(**regex search** now done — see its ledger; scrollback search plus
 **upstream's five search actions** (`start_search` / `end_search` / `navigate_search:` /
 `search_selection` / `search:`),
 **cross-wrap matches and drift-free tracking**, **semantic selection**, the **full binding-backed
@@ -370,7 +370,7 @@ upstream patch · — pure giest concern.
 | OSC 8 hyperlink URIs *(now wired)* | OSC 9;4 progress | background opacity/blur/image |
 | OSC 133 semantic-prompt marks *(now wired)* | OSC 10/11/12 dynamic colors | custom shaders |
 | Kitty graphics (images, placements; cargo feature) | OSC 52 read *(now wired, security-gated)* | COLRv1 emoji, synthetic bold/italic |
-| Kitty keyboard (auto-applied) | scrollback regex search (build w/ `TrackedGridRef`) | multi-window, quick terminal, fullscreen |
+| Kitty keyboard (auto-applied) | ~~scrollback regex search~~ ✅ | multi-window, quick terminal, fullscreen |
 | Bell `on_bell` *(now wired)*, color-scheme, scrollbar geometry *(deliberately unused — see below)* | | resize overlay, settings UI |
 | Rich selection model (`selection.rs`) | | |
 | Tracked grid refs surviving scroll/reflow | | |
@@ -441,7 +441,7 @@ Effort: **S** <1d · **M** 1–3d · **L** ~1wk · **XL** multi-wk. Status: ✅ 
 | background-image / blur | `bgimage.rs`, `render/mod.rs`, `config.rs` | — | M–L | ✅ (blur via Windows DWM acrylic/mica, `blur.rs`; image via `bgimage.rs` + shader mode 4) |
 | Multi-window (`new_window` / `close_window`) | `app.rs`, `command.rs`, `keybind.rs` | — | L | ✅ |
 | Session / window state restore | `app.rs`, `state.rs` | ◐ | L | ✅ (`window-save-state`; layout only — see the ledger) |
-| Clipboard permission + paste protection | `session.rs`, `app.rs`, `config.rs`, `osc52.rs` | ✋ | M | ✅ |
+| Clipboard permission + paste protection | `session.rs`, `app.rs`, `config.rs`, `clipboard.rs` | ✋ | M | ✅ |
 | Desktop notifications + notify-on-command-finish | `osc_notify.rs`, `notify.rs`, `osc133.rs`, `profiles.rs`, `session.rs`, `app.rs` | ✋ | M | ✅ (both halves; cmd can't report an exit code — see the ledger) |
 | Real scrollbar widget | `scrollbar.rs`, `app.rs`, `session.rs` | ✅ | M | ✅ |
 | Migrate to binding selection model | `session.rs`, `engine` | ✅ | M–L | ✅ (tracked-ref anchor, scrollback-spanning, reflow-correct, plus rectangle mode and drag autoscroll — see the ledgers) |
@@ -853,8 +853,8 @@ Upstream's five (`start_search`, `end_search`, `navigate_search:next|previous`, 
 - **The needle from `search_selection` goes through `selection_text`**, so
   `clipboard-trim-trailing-spaces` applies to it. A needle with an invisible trailing space would
   match nothing and read as a broken feature.
-- Unchanged from the search ledger below: ASCII case-folding, and **no regex**. `search:` sets a
-  substring needle like anything typed into the bar.
+- `search:` has no regex flag (upstream has no regex search at all); it sets a
+  needle like anything typed into the bar, interpreted per the bar's current `.*` toggle.
 
 **Verified**: `cargo test` — round-trip parsing for all five (including the empty-needle form and
 the rejected bare `search`), the `can_perform` gate for each, and the Escape-reaches-the-program
@@ -1267,11 +1267,38 @@ wrap is found, and match rows are corrected when scrollback eviction renumbers t
   would silently fall back to zero and every highlight would go back to being uncorrected — worse
   than useless, since wrong highlights read as right ones. The recapture costs a screen walk, but
   only at the moment a prune actually took the anchored row.
-- **Unchanged, deliberately:** ASCII case folding and no regex. This pass is wrap + drift only.
+- **Unchanged, deliberately:** ASCII case folding. This pass was wrap + drift only; regex came later (next ledger).
 - Verified by pure tests over hand-built rows (wrap join, a non-wrapped boundary *not* joined, a
   trailing wrapped row not running off the end, the shift arithmetic and the drop rule) and by
   engine tests on a real terminal (a real wrap marked and matched across, a wide character pushed
   over a wrap still matching, and the anchor naming the row its line is actually on).
+
+### Regex search, and why not the native search API — ✅ divergences
+
+A `.*` toggle beside `Aa` in the search bar switches the query to a regular expression (the `regex`
+crate's syntax). An invalid pattern — usually one still being typed — shows a red `!` whose tooltip
+gives the parse error, rather than a `0/0` that reads as "no matches".
+
+- **lib-vt's `ghostty_search_*` was evaluated and not adopted.** Its header is explicit: "Matching is
+  byte-exact except ASCII letters, which compare case-insensitively" — there is no case-sensitive
+  mode and no regex. Backing the bar with it would *remove* the `Aa` toggle and still leave regex to
+  be built elsewhere. What it would have added — matches tracked internally across resize, reflow
+  and eviction, and primary-screen results kept across an alt-screen app — giest already covers for
+  the cases that matter (wrap joining, the eviction anchor, recapture on resize). Revisit if
+  upstream grows a case or regex option; its `SELECTED_MATCH`/`VIEWPORT_MATCHES` shape would then be
+  a cleaner fit than giest's capture.
+- **Regex runs over the same wrap-joined logical lines as substring search**, so a match can span
+  a soft wrap. It never spans a hard line break, and `^`/`$` anchor to the logical line — what the
+  program that printed the text meant by a line. Byte offsets are mapped back to chars and then to
+  cell columns, so multi-byte and wide characters highlight the right cells.
+- **Empty matches are skipped** (`a*` against `bbb`): no cell to highlight, and navigation would
+  step through nothing.
+- **Case folding differs by mode, deliberately.** Regex mode folds Unicode (the crate's own
+  behaviour); substring mode still folds ASCII only, as upstream's search does.
+- **No regex in the `search:` action syntax.** Upstream has no regex search, so there is no syntax
+  to mirror; `search:` sets the needle and the bar's `.*` state decides how it's read.
+  `search_selection` escapes the selection in regex mode, since a selection is literal text.
+- **The toggle isn't bindable and doesn't persist** across closing the bar, like `Aa`.
 
 ### Selection migration (engine-owned, scrollback-spanning) — ✅ divergences
 
@@ -1726,8 +1753,9 @@ All five Ghostty keys, with Ghostty's defaults: `clipboard-paste-protection = tr
 - **The pending request lives on the `Session`**, not the app, so the answer routes back without a
   pane index that a split-close or tab reorder could invalidate. A prompt raised by a background
   tab waits until you switch to it — nothing happens without an answer, which is the safe default.
-- **At most one prompt at a time.** A program spamming OSC 52 can't stack dialogs, and only the
-  last set/query of a pump batch is acted on (set first, so a set-then-query reports the new value).
+- **At most one prompt at a time.** A program spamming OSC 52 can't stack dialogs: a newer program
+  write replaces a waiting one (last write wins), and anything else arriving while a dialog is up is
+  refused — which, unlike before, *answers* the program (see the 5522 ledger below).
 - **The dialog has no Enter-to-accept.** Escape denies; allowing takes a click. A security prompt
   that a reflexive Return gets through isn't one. This is a deliberate divergence from the
   close-confirmation dialog, which does map Enter.
@@ -1736,12 +1764,53 @@ All five Ghostty keys, with Ghostty's defaults: `clipboard-paste-protection = tr
   passed through could dress the payload up as dialog chrome, and a megabyte-long paste could push
   the buttons off screen.
 - **OSC 52 read is now answerable.** giest previously refused unconditionally; that is still
-  available as `clipboard-read = deny`, but the default matches Ghostty's `ask`. `osc52.rs` parses
-  only — all policy is in `Session::handle_osc52` — and the reply is always ST-terminated.
+  available as `clipboard-read = deny`, but the default matches Ghostty's `ask`. *(Superseded: the
+  engine now parses OSC 52 and the policy is in `clipboard.rs`; see the next ledger.)*
 - **`clipboard-trim-trailing-spaces` was previously hardcoded on** (`extract_selection` always
   trimmed); it is now the configurable default.
 - Readonly mode and its indicator are now done, and secure input is recorded as N/A on Windows —
   see their ledger.
+
+### Kitty clipboard (OSC 5522) + engine-side OSC 52 / pwd — ✅ divergences
+
+OSC 5522 reads and writes, the targets listing, and paste events (mode 5522) work, under the same
+`clipboard-read` / `clipboard-write` / `clipboard-write-limit-bytes` and the same dialog as OSC 52.
+Probed first: `conpty_passthrough::kitty_clipboard_protocol_survives_conpty` shows every 5522 form
+and `CSI ? 5522 h` reach us through ConPTY.
+
+- **One path for both protocols; the OSC 52 and OSC 7 side-scanners are gone.** Installing the
+  engine's clipboard callbacks (needed for 5522) makes the engine handle OSC 52 too, so keeping
+  `osc52.rs` would have answered every request twice. The engine path is a superset: chunked
+  sequences, both terminators, targets, the "clear" shape. `osc7.rs` went for the same reason
+  the CLAUDE.md gotcha existed: `Terminal::pwd()` used to be empty and now isn't —
+  `ghostty_vt::tests::pwd_comes_from_the_engine` pins BEL/ST, split chunks, percent-escapes and a
+  WSL path. The engine also takes OSC 9;9 and OSC 1337 CurrentDir, which the scanner didn't.
+- **The binding's `on_clipboard_write` was broken, silently.** The pinned C API answers through a
+  `reply` function pointer; the vendored wrapper still *returned* the result, which the C side
+  ignored, so every write would have been denied. Fixed giest-locally, with `on_clipboard_read`,
+  `Terminal::paste` and `Mode::PASTE_EVENTS` added beside it.
+- **`ask` cuts the engine's refusal back out.** The callbacks are synchronous and an unanswered
+  request is refused immediately; upstream's advice is to block on a modal, which the UI thread
+  can't. The callback records the response-buffer offset instead, the refusal written there is cut
+  out after `vt_write` and held, and the answer either releases it, flips it to `DONE` (writes), or
+  replays the read into the engine under a one-shot grant so the engine formats the reply.
+- **A refused OSC 52 read now gets an empty reply** (`ESC]52;c;ESC\`), where giest used to send
+  nothing. That is lib-vt's behaviour and xterm's; a program no longer waits for a reply that
+  never comes.
+- **MIME types: text only.** `text/plain` and its spellings are served; a write keeps its text
+  representation and drops HTML/images (rather than failing the whole write and losing the text),
+  a write with no text is `ENOSYS`, and a read simply omits types it can't serve — the protocol's
+  own "not available". The targets listing reports `text/plain` and needs no permission, as in
+  kitty and upstream.
+- **No `remember`.** A 5522 password could let the user grant a program for the session; the
+  deferred reply goes out after the callback returns, when the engine no longer accepts a grant.
+  Every request under `ask` prompts.
+- **A paste event's follow-up read bypasses `clipboard-read`** and is served the *pasted* text, not
+  whatever the clipboard holds by then. The user already pasted; refusing would break paste.
+  Paste protection doesn't apply to an event either: nothing is typed into the program. The grant
+  is keyed on password *and* name (`name=` must be echoed), as in upstream's own test.
+- **Windows has no primary selection**: `loc=primary` reads and writes the one clipboard, as OSC 52
+  `p`/`s` always did here.
 
 ### Keybind action coverage — ◐
 
