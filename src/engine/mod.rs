@@ -462,6 +462,10 @@ pub struct MouseInput {
 }
 
 /// The backend-agnostic terminal model: bytes in, grid out.
+/// How long terminal activity must be quiet before scrollback compression runs.
+/// Upstream `renderer/Thread.zig` uses the same 250 ms.
+pub const COMPRESS_IDLE: std::time::Duration = std::time::Duration::from_millis(250);
+
 pub trait TerminalEngine {
     /// Feed VT-encoded bytes (typically from the PTY) into the parser.
     fn write(&mut self, bytes: &[u8]);
@@ -542,6 +546,11 @@ pub trait TerminalEngine {
     /// Cap scrollback by line count (Ghostty `scrollback-limit-lines`); `None` =
     /// unlimited. Works alongside the byte cap: whichever is reached first wins.
     fn set_scrollback_lines(&mut self, lines: Option<usize>) -> Result<()>;
+
+    /// Idle-driven scrollback compression (Ghostty `scrollback-compression`).
+    /// Call regularly; once terminal activity has been quiet for
+    /// [`COMPRESS_IDLE`], runs bounded incremental steps within `budget`.
+    fn compress_tick(&mut self, now: std::time::Instant, budget: std::time::Duration) -> Result<()>;
 
     /// Whether the running app has enabled mouse reporting (any tracking mode).
     fn is_mouse_tracking(&self) -> bool;

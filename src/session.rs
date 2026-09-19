@@ -114,6 +114,8 @@ pub struct Session {
     readonly: bool,
     /// `scroll-to-bottom`, read on keystroke and on new output.
     scroll_to_bottom: crate::config::ScrollToBottom,
+    /// Ghostty `scrollback-compression`; drives [`Session::idle_work`].
+    scrollback_compression: bool,
     /// Precision of OSC color-query replies. Read at pump time rather than per
     /// frame, so a config reload must push it (see `apply_config`).
     osc_color_report_format: OscColorReportFormat,
@@ -267,6 +269,7 @@ impl Session {
             mouse_scroll_multiplier: config.mouse_scroll_multiplier,
             readonly: false,
             scroll_to_bottom: config.scroll_to_bottom,
+            scrollback_compression: config.scrollback_compression,
             osc_color_report_format: config.osc_color_report_format,
             cursor_style: config.cursor_style,
             cursor_style_blink: config.cursor_style_blink,
@@ -297,6 +300,16 @@ impl Session {
 
     /// Drain pending PTY output into the engine and flush responses back.
     /// Marks the session dead when the shell has exited (channel disconnected).
+    /// Background housekeeping, run each pump: idle scrollback compression.
+    /// The budget keeps one step from stalling a frame; the app's 500 ms
+    /// heartbeat keeps it going in an otherwise idle window.
+    pub fn idle_work(&mut self) {
+        if self.scrollback_compression {
+            let budget = std::time::Duration::from_millis(2);
+            let _ = self.engine.compress_tick(std::time::Instant::now(), budget);
+        }
+    }
+
     pub fn pump_pty(&mut self) {
         use std::sync::mpsc::TryRecvError;
         let mut clipboard_requests: Vec<Osc52> = Vec::new();
@@ -934,6 +947,7 @@ impl Session {
         self.mouse_reporting = config.mouse_reporting;
         self.mouse_scroll_multiplier = config.mouse_scroll_multiplier;
         self.scroll_to_bottom = config.scroll_to_bottom;
+        self.scrollback_compression = config.scrollback_compression;
     }
 
     /// Route the OSC 9 / OSC 777 requests seen in this pump.

@@ -5047,6 +5047,7 @@ impl Window {
         for tab in &mut self.tabs {
             tab.root.for_each_mut(&mut |pane| {
                 pane.pump_pty();
+                pane.idle_work();
                 rang |= pane.take_bell_effect(now);
                 notifications.append(&mut pane.take_notifications());
                 finished.append(&mut pane.take_command_finishes());

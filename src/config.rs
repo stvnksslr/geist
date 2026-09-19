@@ -1020,6 +1020,8 @@ pub struct Config {
     pub scrollback_limit: usize,
     /// Ghostty `scrollback-limit-lines`; `None` (the default) is `unlimited`.
     pub scrollback_limit_lines: Option<usize>,
+    /// Ghostty `scrollback-compression` (default on).
+    pub scrollback_compression: bool,
     /// Total bytes of image data (kitty graphics) retained per terminal screen.
     /// Ghostty `image-storage-limit`.
     ///
@@ -1218,6 +1220,7 @@ impl Default for Config {
             background_image_repeat: false,
             scrollback_limit: 10_000,
             scrollback_limit_lines: None,
+            scrollback_compression: true,
             // Ghostty's default: 320 MB (decimal), per screen.
             image_storage_limit: 320 * 1000 * 1000,
             selection_bg: Rgb::new(0x38, 0x5a, 0x9c),
@@ -1735,6 +1738,9 @@ const SETTERS: &[(&str, Setter)] = &[
             "unlimited" => usize::MAX,
             _ => v.parse().unwrap_or(d.scrollback_limit),
         };
+    }),
+    ("scrollback-compression", |c, v, d| {
+        c.scrollback_compression = parse_bool(v, d.scrollback_compression);
     }),
     ("scrollback-limit-lines", |c, v, d| {
         c.scrollback_limit_lines = match v {

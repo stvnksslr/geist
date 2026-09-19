@@ -27,6 +27,11 @@ use super::{
 type ResponseSink = Rc<RefCell<Vec<u8>>>;
 
 pub struct GhosttyVtEngine {
+    /// Scrollback-compression idle tracking: the last activity token seen and
+    /// when it last changed (upstream `renderer/Thread.zig` `Compression`).
+    compress_activity: Option<libghostty_vt::terminal::CompressionActivity>,
+    compress_since: std::time::Instant,
+    compress_done: bool,
     term: Terminal<'static, 'static>,
     render_state: RenderState<'static>,
     rows_buf: RowIterator<'static>,
@@ -191,6 +196,9 @@ impl GhosttyVtEngine {
             viewport_moved: false,
             bold_color: BoldColor::None,
             min_contrast: 1.0,
+            compress_activity: None,
+            compress_since: std::time::Instant::now(),
+            compress_done: false,
             placements: PlacementIterator::new()?,
             image_cache: HashMap::new(),
             image_ids_seen: Vec::new(),
@@ -1032,6 +1040,32 @@ mod tests {
         eng.write(b"\x1b]11;?\x07");
         let r = String::from_utf8_lossy(&eng.take_responses()).into_owned();
         assert!(!r.contains("]11;"), "engine now answers itself; drop osc_color.rs: {r:?}");
+    }
+
+    #[test]
+    fn compression_waits_for_idle_and_keeps_contents() {
+        use std::time::{Duration, Instant};
+        let mut eng = GhosttyVtEngine::new(40, 5, 10_000_000).unwrap();
+        for i in 0..3_000 {
+            eng.write(format!("line {i} lorem ipsum dolor sit amet\r\n").as_bytes());
+        }
+        let rows = eng.scrollback_rows();
+        let t0 = Instant::now();
+        eng.compress_tick(t0, Duration::from_secs(1)).unwrap(); // records activity
+        assert!(!eng.compress_done, "must not compress before the idle delay");
+        let later = t0 + crate::engine::COMPRESS_IDLE + Duration::from_millis(1);
+        for _ in 0..1_000 {
+            eng.compress_tick(later, Duration::from_secs(1)).unwrap();
+            if eng.compress_done {
+                break;
+            }
+        }
+        assert!(eng.compress_done, "compression pass never completed");
+        assert_eq!(eng.scrollback_rows(), rows, "compression changed history size");
+        // Writing is activity: the next tick restarts the idle clock.
+        eng.write(b"more\r\n");
+        eng.compress_tick(later, Duration::from_secs(1)).unwrap();
+        assert!(!eng.compress_done);
     }
 
     #[test]
@@ -2005,6 +2039,32 @@ impl TerminalEngine for GhosttyVtEngine {
 
     fn set_scrollback_lines(&mut self, lines: Option<usize>) -> Result<()> {
         self.term.set_scrollback_max_lines(lines)?;
+        Ok(())
+    }
+
+    fn compress_tick(&mut self, now: std::time::Instant, budget: std::time::Duration) -> Result<()> {
+        use libghostty_vt::terminal::{CompressionMode, CompressionResult};
+        let activity = self.term.compression_activity()?;
+        if self.compress_activity != Some(activity) {
+            self.compress_activity = Some(activity);
+            self.compress_since = now;
+            self.compress_done = false;
+            return Ok(());
+        }
+        if self.compress_done || now.duration_since(self.compress_since) < super::COMPRESS_IDLE {
+            return Ok(());
+        }
+        let start = std::time::Instant::now();
+        loop {
+            match self.term.compress(CompressionMode::Incremental)? {
+                CompressionResult::Pending if start.elapsed() < budget => {}
+                CompressionResult::Pending => break,
+                _ => {
+                    self.compress_done = true;
+                    break;
+                }
+            }
+        }
         Ok(())
     }
 
