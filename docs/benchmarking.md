@@ -12,7 +12,7 @@ For the broader test/conformance picture see
 | giest bench | What it measures | Mirrors (Ghostty) |
 | --- | --- | --- |
 | `stream` → `stream/*` | `engine.write()` throughput: VT parse **+** state apply, per grid size & input class (ascii/utf8/osc). The core hot path. | `TerminalStream`, `OscParser` |
-| `stream` → `osc_scan/*` | giest's own `Osc52Scanner`/`Osc7Scanner` side-scanners (run on every PTY chunk). | — (giest-only) |
+| `stream` → `osc_scan/*` | giest's own OSC side-scanners (`OscColorScanner` etc.) (run on every PTY chunk). | — (giest-only) |
 | `snapshot` | Per-frame `GridSnapshot` copy-out from the engine. | `ScreenClone` |
 | `shaping` | rustybuzz shaping over the embedded font (ascii vs ligature-dense). | — (renderer) |
 | `render` → `render_instances/*` | Per-frame instance assembly with a **warm** glyph atlas. | `ScreenClone --mode render` |

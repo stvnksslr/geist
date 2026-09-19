@@ -79,7 +79,7 @@ the upstream repo (`github.com/ghostty-org/ghostty`).
 | Config                        | `src/config.rs`             | 15    | palette well-formedness, hex parse, Ghostty-format overrides, empty-resets, unknown-key tolerance, gamma clamp |
 | Config conformance            | `tests/config_conformance.rs` | 22  | Ghostty config-format parity: unquoted colors, comment/blank/malformed lines, last-wins, empty-resets, repeatable palette, every supported key, realistic pasted Ghostty config |
 | Profiles                      | `src/profiles.rs`           | 4     | shell detection, override, case/exe-insensitive match        |
-| OSC 52                        | `src/osc52.rs`              | 6     | BEL/ST set, split-chunk parsing, query ignore, primary target |
+| OSC 52 / 5522 clipboard       | `src/clipboard.rs`, `src/engine/ghostty_vt.rs` | 18 | MIME choice, policy, ask cut/replay, paste events, write limit |
 | Selection / word / URL        | `src/session.rs`            | 4     | text-flow extraction, word bounds, URL-under-cursor          |
 | Engine snapshot / encode      | `src/engine/ghostty_vt.rs`  | 9     | theme/default colors, styles, newline, title, enter, paste, mouse SGR, ctrl-c |
 | Atlas shaping / raster        | `src/render/atlas.rs`       | 8     | color emoji, CJK fallback, ligatures, constraint classify, fit/scale, cluster map |

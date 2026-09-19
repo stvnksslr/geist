@@ -49,7 +49,7 @@ flowchart LR
 | Shell process + I/O | ConPTY via portable-pty | `pty.rs` |
 | Per-session glue (selection, OSC 52) | giest | `session.rs` |
 | Glyph atlas + instanced-quad renderer | giest + wgpu | `render/mod.rs`, `render/atlas.rs` |
-| Config, shell profiles, clipboard | giest + Windows | `config.rs`, `profiles.rs`, `osc52.rs` |
+| Config, shell profiles, clipboard | giest + Windows | `config.rs`, `profiles.rs`, `clipboard.rs` |
 
 ## Status
 

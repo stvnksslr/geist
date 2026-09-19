@@ -106,6 +106,12 @@ pub struct GhosttyVtEngine {
     /// necessarily dirty the render state, and an otherwise-idle frame taking
     /// the clean fast path would leave the highlight unpainted.
     selection_dirty: bool,
+    /// Clipboard policy, I/O and in-callback bookkeeping shared with the
+    /// OSC 52 / OSC 5522 callbacks; see `crate::clipboard`.
+    clip: Rc<RefCell<ClipState>>,
+    /// `ask` requests whose refusal has been cut back out of the responses,
+    /// waiting for the session to put them to the user.
+    clip_deferrals: Vec<crate::clipboard::Deferral>,
 }
 
 impl GhosttyVtEngine {
@@ -189,6 +195,18 @@ impl GhosttyVtEngine {
             bell_sink.set(true);
         })?;
 
+        // Refuse everything until the session applies the configured policy.
+        let clip = Rc::new(RefCell::new(ClipState {
+            read: crate::config::ClipboardAccess::Deny,
+            write: crate::config::ClipboardAccess::Deny,
+            write_limit: None,
+            io: Box::new(crate::clipboard::SystemClipboard),
+            one_shot: false,
+            paste_text: None,
+            pending: Vec::new(),
+        }));
+        install_clipboard(&mut term, &clip, &responses)?;
+
         Ok(Self {
             term,
             render_state: RenderState::new()?,
@@ -218,8 +236,193 @@ impl GhosttyVtEngine {
             row_anchor: None,
             selection_installed: false,
             selection_dirty: false,
+            clip,
+            clip_deferrals: Vec::new(),
         })
     }
+
+    /// Apply `clipboard-read` / `clipboard-write` / `clipboard-write-limit-bytes`
+    /// to the OSC 52 and OSC 5522 callbacks.
+    pub fn set_clipboard_policy(&mut self, policy: &crate::config::ClipboardPolicy) {
+        let mut st = self.clip.borrow_mut();
+        st.read = policy.read;
+        st.write = policy.write;
+        st.write_limit = policy.write_limit;
+    }
+
+    /// Swap the clipboard the callbacks read and write (tests use a fake).
+    pub fn set_clipboard_io(&mut self, io: Box<dyn crate::clipboard::ClipboardIo>) {
+        self.clip.borrow_mut().io = io;
+    }
+
+    /// Requests waiting on the user (`ask`), oldest first.
+    pub fn take_clipboard_deferrals(&mut self) -> Vec<crate::clipboard::Deferral> {
+        std::mem::take(&mut self.clip_deferrals)
+    }
+
+    /// Answer a deferred request. The reply lands in the response buffer, so
+    /// the caller must flush [`TerminalEngine::take_responses`] afterwards.
+    pub fn resolve_clipboard_deferral(&mut self, d: crate::clipboard::Deferral, allow: bool) {
+        use crate::clipboard::{Deferred, done_packet, replay_request};
+        if !allow {
+            self.responses.borrow_mut().extend_from_slice(&d.packet);
+            return;
+        }
+        match &d.kind {
+            Deferred::Write(text) => {
+                self.clip.borrow_mut().io.write_text(text);
+                self.responses.borrow_mut().extend_from_slice(&done_packet(&d.packet));
+            }
+            Deferred::Read { .. } => match replay_request(&d.kind, &d.packet) {
+                Some(req) => {
+                    self.clip.borrow_mut().one_shot = true;
+                    self.write(&req);
+                    self.clip.borrow_mut().one_shot = false;
+                }
+                // Unrecognised refusal: at least answer the program.
+                None => self.responses.borrow_mut().extend_from_slice(&d.packet),
+            },
+        }
+    }
+
+    /// Cut the refusals of this write's deferred requests back out of the
+    /// response buffer; see `crate::clipboard`. Newest first, so each cut
+    /// leaves the earlier offsets valid.
+    fn collect_clipboard_deferrals(&mut self) {
+        let pending = std::mem::take(&mut self.clip.borrow_mut().pending);
+        if pending.is_empty() {
+            return;
+        }
+        let mut buf = self.responses.borrow_mut();
+        let mut cut: Vec<_> = pending
+            .into_iter()
+            .rev()
+            .map(|p| crate::clipboard::Deferral {
+                packet: crate::clipboard::cut_packet(&mut buf, p.offset),
+                kind: p.kind,
+            })
+            .collect();
+        cut.reverse();
+        self.clip_deferrals.extend(cut);
+    }
+
+    /// The working directory the program last reported (OSC 7, OSC 9;9 or
+    /// OSC 1337 CurrentDir), as the raw URI or path it sent.
+    pub fn pwd(&self) -> Option<String> {
+        self.term.pwd().ok().filter(|s| !s.is_empty()).map(str::to_string)
+    }
+
+    /// Whether the program has turned on kitty paste events (mode 5522).
+    pub fn paste_events(&self) -> bool {
+        self.term.mode(Mode::PASTE_EVENTS).unwrap_or(false)
+    }
+
+    /// Send a kitty paste event for `text` (mode 5522 must be on): the
+    /// program is told a paste happened and reads the text itself through
+    /// the clipboard-read callback. Output lands in the response buffer.
+    pub fn paste_event(&mut self, text: &str) -> bool {
+        use libghostty_vt::terminal::{PasteOutcome, PasteSource};
+        self.clip.borrow_mut().paste_text = Some(text.to_string());
+        matches!(
+            self.term.paste(text, PasteSource::Clipboard, true),
+            Ok(PasteOutcome::Written)
+        )
+    }
+}
+
+/// What the clipboard callbacks share with the engine.
+struct ClipState {
+    read: crate::config::ClipboardAccess,
+    write: crate::config::ClipboardAccess,
+    write_limit: Option<usize>,
+    io: Box<dyn crate::clipboard::ClipboardIo>,
+    /// Serve the next read without asking: set only around the replay of a
+    /// request the user just approved.
+    one_shot: bool,
+    /// The text of the last paste *event* (mode 5522), served to its granted
+    /// follow-up read rather than whatever the clipboard holds by then.
+    paste_text: Option<String>,
+    /// Requests left unanswered during the current `vt_write`.
+    pending: Vec<crate::clipboard::Pending>,
+}
+
+/// Install the OSC 52 / OSC 5522 clipboard callbacks. The engine does all the
+/// protocol work; these only apply giest's policy (see `crate::clipboard`).
+fn install_clipboard(
+    term: &mut Terminal<'static, 'static>,
+    clip: &Rc<RefCell<ClipState>>,
+    sink: &ResponseSink,
+) -> Result<()> {
+    use crate::clipboard::{self as cb, Deferred, Pending, Verdict, WriteText};
+    use libghostty_vt::terminal::{
+        ClipboardLocation, ClipboardReadData, ClipboardReadError, ClipboardWriteError,
+    };
+
+    let (st, out) = (clip.clone(), sink.clone());
+    term.on_clipboard_write(move |_t, w| {
+        let mut st = st.borrow_mut();
+        let contents: Vec<(&str, &[u8])> = w.contents().map(|c| (c.mime, c.data)).collect();
+        let WriteText::Text(text) = cb::write_text(&contents) else {
+            return Err(ClipboardWriteError::Unsupported);
+        };
+        // `clipboard-write-limit-bytes`: an oversized write is refused.
+        if st.write_limit.is_some_and(|n| text.len() > n) {
+            return Err(ClipboardWriteError::Denied);
+        }
+        match cb::decide(st.write, w.granted()) {
+            Verdict::Allow => {
+                st.io.write_text(&text);
+                Ok(())
+            }
+            Verdict::Deny => Err(ClipboardWriteError::Denied),
+            Verdict::Ask => {
+                let offset = out.borrow().len();
+                st.pending.push(Pending { offset, kind: Deferred::Write(text) });
+                Err(ClipboardWriteError::Denied)
+            }
+        }
+    })?;
+
+    let (st, out) = (clip.clone(), sink.clone());
+    term.on_clipboard_read(move |_t, r| {
+        let mut st = st.borrow_mut();
+        let mimes: Vec<String> = r.mimes().into_iter().map(str::to_string).collect();
+        let list = r.list();
+        let serve = |text: Option<String>| {
+            Some(Ok(ClipboardReadData {
+                contents: cb::read_contents(&mimes, text.as_deref()),
+                available: if list { cb::available(text.as_deref()) } else { Vec::new() },
+            }))
+        };
+        // The follow-up read of a paste event: the user already pasted, so it
+        // is served whatever `clipboard-read` says (kitty does the same).
+        if r.granted() {
+            if let Some(text) = st.paste_text.clone() {
+                return serve(Some(text));
+            }
+        }
+        // A bare targets listing reveals only "there is text"; upstream and
+        // kitty serve it without a prompt.
+        if mimes.is_empty() {
+            let text = st.io.read_text();
+            return serve(text);
+        }
+        let granted = r.granted() || std::mem::take(&mut st.one_shot);
+        match cb::decide(st.read, granted) {
+            Verdict::Allow => {
+                let text = st.io.read_text();
+                serve(text)
+            }
+            Verdict::Deny => Some(Err(ClipboardReadError::Denied)),
+            Verdict::Ask => {
+                let offset = out.borrow().len();
+                let primary = r.location() != ClipboardLocation::Standard;
+                st.pending.push(Pending { offset, kind: Deferred::Read { mimes, primary } });
+                None
+            }
+        }
+    })?;
+    Ok(())
 }
 
 /// Expand the VT engine's stored pixel data to straight-alpha RGBA8.
@@ -1039,6 +1242,222 @@ mod tests {
         eng.write(b"\x1b]133;C\x07a\r\nb\r\nc\r\n");
         assert!(eng.select_semantic(SelectKind::Output, 0, 0, &[]));
         assert_eq!(sel_text(&eng).as_deref(), Some("a\nb\nc"));
+    }
+
+    /// A clipboard the tests can inspect, so nothing touches the real one.
+    #[derive(Clone, Default)]
+    struct FakeClip(std::rc::Rc<std::cell::RefCell<Option<String>>>);
+    impl crate::clipboard::ClipboardIo for FakeClip {
+        fn read_text(&mut self) -> Option<String> {
+            self.0.borrow().clone()
+        }
+        fn write_text(&mut self, text: &str) {
+            *self.0.borrow_mut() = Some(text.to_string());
+        }
+    }
+
+    fn clip_engine(
+        read: crate::config::ClipboardAccess,
+        write: crate::config::ClipboardAccess,
+        limit: Option<usize>,
+    ) -> (GhosttyVtEngine, FakeClip) {
+        let mut eng = GhosttyVtEngine::new(20, 5, 100_000).unwrap();
+        let clip = FakeClip::default();
+        eng.set_clipboard_io(Box::new(clip.clone()));
+        eng.set_clipboard_policy(&crate::config::ClipboardPolicy {
+            read,
+            write,
+            trim_trailing_spaces: false,
+            write_limit: limit,
+            ..crate::config::Config::default().clipboard
+        });
+        (eng, clip)
+    }
+
+    fn resp(eng: &mut GhosttyVtEngine) -> String {
+        String::from_utf8_lossy(&eng.take_responses()).into_owned()
+    }
+
+    use crate::config::ClipboardAccess::{Allow, Ask, Deny};
+
+    #[test]
+    fn osc52_write_goes_through_the_engine_callback() {
+        let (mut eng, clip) = clip_engine(Deny, Allow, None);
+        eng.write(b"\x1b]52;c;aGk=\x07");
+        assert_eq!(clip.0.borrow().as_deref(), Some("hi"));
+        assert_eq!(resp(&mut eng), "", "OSC 52 writes have no acknowledgement");
+        // Chunked across writes, ST-terminated.
+        eng.write(b"\x1b]52;c;aGV");
+        eng.write(b"sbG8=\x1b\\");
+        assert_eq!(clip.0.borrow().as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn osc52_read_is_answered_when_allowed_and_empty_when_denied() {
+        let (mut eng, clip) = clip_engine(Allow, Deny, None);
+        *clip.0.borrow_mut() = Some("hi".into());
+        eng.write(b"\x1b]52;c;?\x1b\\");
+        assert!(resp(&mut eng).contains("\x1b]52;c;aGk="));
+        let (mut eng, clip) = clip_engine(Deny, Deny, None);
+        *clip.0.borrow_mut() = Some("hi".into());
+        eng.write(b"\x1b]52;c;?\x1b\\");
+        assert!(!resp(&mut eng).contains("aGk="));
+    }
+
+    #[test]
+    fn kitty_write_transaction_is_acknowledged() {
+        let (mut eng, clip) = clip_engine(Deny, Allow, None);
+        eng.write(b"\x1b]5522;type=write:id=c1\x1b\\");
+        eng.write(b"\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;R2hvc3Q=\x1b\\");
+        eng.write(b"\x1b]5522;type=wdata:mime=dGV4dC9odG1s;PGI+aGk8L2I+\x1b\\");
+        eng.write(b"\x1b]5522;type=wdata\x1b\\");
+        assert_eq!(clip.0.borrow().as_deref(), Some("Ghost"), "the text rep wins; html is dropped");
+        assert_eq!(resp(&mut eng), "\x1b]5522;type=write:status=DONE:id=c1\x1b\\");
+    }
+
+    #[test]
+    fn kitty_write_of_only_non_text_is_unsupported() {
+        let (mut eng, clip) = clip_engine(Deny, Allow, None);
+        eng.write(b"\x1b]5522;type=write:id=c2\x1b\\");
+        eng.write(b"\x1b]5522;type=wdata:mime=aW1hZ2UvcG5n;AAAA\x1b\\");
+        eng.write(b"\x1b]5522;type=wdata\x1b\\");
+        assert_eq!(*clip.0.borrow(), None);
+        assert_eq!(resp(&mut eng), "\x1b]5522;type=write:status=ENOSYS:id=c2\x1b\\");
+    }
+
+    #[test]
+    fn kitty_write_over_the_limit_is_refused() {
+        let (mut eng, clip) = clip_engine(Deny, Allow, Some(3));
+        eng.write(b"\x1b]5522;type=write:id=c3\x1b\\");
+        eng.write(b"\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;R2hvc3Q=\x1b\\");
+        eng.write(b"\x1b]5522;type=wdata\x1b\\");
+        assert_eq!(*clip.0.borrow(), None);
+        assert_eq!(resp(&mut eng), "\x1b]5522;type=write:status=EPERM:id=c3\x1b\\");
+    }
+
+    #[test]
+    fn kitty_read_serves_text_and_refuses_when_denied() {
+        let (mut eng, clip) = clip_engine(Allow, Deny, None);
+        *clip.0.borrow_mut() = Some("hello".into());
+        eng.write(b"\x1b]5522;type=read:id=r2;dGV4dC9wbGFpbg==\x1b\\");
+        assert_eq!(
+            resp(&mut eng),
+            "\x1b]5522;type=read:status=OK:id=r2\x1b\\\
+             \x1b]5522;type=read:status=DATA:id=r2:mime=dGV4dC9wbGFpbg==;aGVsbG8=\x1b\\\
+             \x1b]5522;type=read:status=DONE:id=r2\x1b\\"
+        );
+        let (mut eng, _) = clip_engine(Deny, Deny, None);
+        eng.write(b"\x1b]5522;type=read:id=r1;dGV4dC9wbGFpbg==\x1b\\");
+        assert_eq!(resp(&mut eng), "\x1b]5522;type=read:status=EPERM:id=r1\x1b\\");
+    }
+
+    #[test]
+    fn kitty_targets_listing_needs_no_permission() {
+        let (mut eng, clip) = clip_engine(Deny, Deny, None);
+        *clip.0.borrow_mut() = Some("x".into());
+        eng.write(b"\x1b]5522;type=read:id=t;Lg==\x1b\\"); // "."
+        let r = resp(&mut eng);
+        assert!(r.contains("status=OK"), "{r:?}");
+        assert!(r.contains(&base64_of("text/plain
+")), "lists text/plain: {r:?}");
+    }
+
+    fn base64_of(s: &str) -> String {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.encode(s)
+    }
+
+    #[test]
+    fn an_asked_kitty_read_waits_for_the_user_then_replays() {
+        let (mut eng, clip) = clip_engine(Ask, Deny, None);
+        *clip.0.borrow_mut() = Some("hello".into());
+        eng.write(b"\x1b]5522;type=read:id=r3;dGV4dC9wbGFpbg==\x1b\\");
+        assert_eq!(resp(&mut eng), "", "the engine's refusal is held back while we ask");
+        let mut d = eng.take_clipboard_deferrals();
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].packet, b"\x1b]5522;type=read:status=EPERM:id=r3\x1b\\");
+        eng.resolve_clipboard_deferral(d.remove(0), true);
+        assert_eq!(
+            resp(&mut eng),
+            "\x1b]5522;type=read:status=OK:id=r3\x1b\\\
+             \x1b]5522;type=read:status=DATA:id=r3:mime=dGV4dC9wbGFpbg==;aGVsbG8=\x1b\\\
+             \x1b]5522;type=read:status=DONE:id=r3\x1b\\"
+        );
+        // The grant was one-shot: the next read asks again.
+        eng.write(b"\x1b]5522;type=read:id=r4;dGV4dC9wbGFpbg==\x1b\\");
+        assert_eq!(resp(&mut eng), "");
+        let d = eng.take_clipboard_deferrals().remove(0);
+        eng.resolve_clipboard_deferral(d, false);
+        assert_eq!(resp(&mut eng), "\x1b]5522;type=read:status=EPERM:id=r4\x1b\\");
+    }
+
+    #[test]
+    fn an_asked_osc52_read_replays_with_its_target() {
+        let (mut eng, clip) = clip_engine(Ask, Deny, None);
+        *clip.0.borrow_mut() = Some("hi".into());
+        eng.write(b"\x1b[5n\x1b]52;c;?\x07\x1b[5n");
+        // The surrounding DSR replies survive the cut, in order.
+        assert_eq!(resp(&mut eng), "\x1b[0n\x1b[0n");
+        let d = eng.take_clipboard_deferrals().remove(0);
+        eng.resolve_clipboard_deferral(d, true);
+        assert!(resp(&mut eng).contains("\x1b]52;c;aGk="));
+    }
+
+    #[test]
+    fn an_asked_write_is_performed_and_acknowledged_on_approval() {
+        let (mut eng, clip) = clip_engine(Deny, Ask, None);
+        eng.write(b"\x1b]5522;type=write:id=w\x1b\\\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;aGk=\x1b\\\x1b]5522;type=wdata\x1b\\");
+        assert_eq!(resp(&mut eng), "");
+        assert_eq!(*clip.0.borrow(), None, "nothing is written before the user answers");
+        let d = eng.take_clipboard_deferrals().remove(0);
+        assert_eq!(d.kind, crate::clipboard::Deferred::Write("hi".into()));
+        eng.resolve_clipboard_deferral(d, true);
+        assert_eq!(clip.0.borrow().as_deref(), Some("hi"));
+        assert_eq!(resp(&mut eng), "\x1b]5522;type=write:status=DONE:id=w\x1b\\");
+        // OSC 52 has no acknowledgement, so there's no packet to hold.
+        eng.write(b"\x1b]52;c;eW8=\x07");
+        let d = eng.take_clipboard_deferrals().remove(0);
+        assert!(d.packet.is_empty());
+        eng.resolve_clipboard_deferral(d, false);
+        assert_eq!(resp(&mut eng), "");
+        assert_eq!(clip.0.borrow().as_deref(), Some("hi"));
+    }
+
+    #[test]
+    fn a_paste_event_serves_the_pasted_text_to_its_follow_up_read() {
+        let (mut eng, clip) = clip_engine(Deny, Deny, None);
+        *clip.0.borrow_mut() = Some("clipboard".into());
+        assert!(!eng.paste_events());
+        eng.write(b"\x1b[?5522h");
+        assert!(eng.paste_events());
+        assert!(eng.paste_event("pasted"));
+        let ev = resp(&mut eng);
+        assert!(ev.starts_with("\x1b]5522;type=read:status=OK"), "{ev:?}");
+        assert!(!ev.contains(&base64_of("pasted")), "an event carries no data: {ev:?}");
+        let pw = ev
+            .split(':')
+            .find_map(|kv| kv.strip_prefix("pw="))
+            .map(|v| v.split(['\x1b', ';', '\x07']).next().unwrap().to_string())
+            .expect("the event carries a one-time password");
+        eng.write(format!("\x1b]5522;type=read:pw={pw}:name=UGFzdGUgZXZlbnQ=;dGV4dC9wbGFpbg==\x1b\\").as_bytes());
+        let r = resp(&mut eng);
+        assert!(r.contains(&base64_of("pasted")), "granted despite clipboard-read = deny: {r:?}");
+    }
+
+    #[test]
+    fn pwd_comes_from_the_engine() {
+        // Pins the retirement of `osc7.rs`: lib-vt's full stream (unlike the
+        // read-only one of the old pin) now keeps OSC 7.
+        let mut eng = GhosttyVtEngine::new(20, 5, 100_000).unwrap();
+        assert_eq!(eng.pwd(), None);
+        eng.write(b"\x1b]7;file://HOST/C:/Users/foo\x07");
+        assert_eq!(eng.pwd().as_deref(), Some("file://HOST/C:/Users/foo"));
+        eng.write(b"\x1b]7;file://h/C:/a%20b");
+        eng.write(b"/c\x1b\\");
+        assert_eq!(eng.pwd().as_deref(), Some("file://h/C:/a%20b/c"));
+        // WSL's scripts report Linux paths; kept verbatim for `osc7_to_path`.
+        eng.write(b"\x1b]7;file://box/mnt/c/x\x07");
+        assert_eq!(eng.pwd().as_deref(), Some("file://box/mnt/c/x"));
     }
 
     #[test]
@@ -1964,6 +2383,7 @@ fn copy_cell(
 impl TerminalEngine for GhosttyVtEngine {
     fn write(&mut self, bytes: &[u8]) {
         self.term.vt_write(bytes);
+        self.collect_clipboard_deferrals();
         // Upstream ignores KAM in termio unless `vt-kam-allowed`; lib-vt has no
         // such switch, so undo it: a locked keyboard is a denial of service.
         if !self.kam_allowed && self.term.mode(Mode::KAM).unwrap_or(false) {

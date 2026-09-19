@@ -73,7 +73,7 @@ nav:
       - pty.rs — ConPTY: components/pty.md
       - render — wgpu pipeline: components/render.md
       - config & profiles: components/config-profiles.md
-      - osc52.rs — clipboard: components/osc52.md
+      - clipboard.rs — OSC 52 / 5522: components/clipboard.md
   - Guides:
       - Building & testing: guides/building.md
       - Configuration: guides/configuration.md

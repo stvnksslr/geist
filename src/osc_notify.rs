@@ -4,8 +4,8 @@
 //! form `ESC ] 9 ; <body> (BEL | ST)` or the rxvt form
 //! `ESC ] 777 ; notify ; <title> ; <body> (BEL | ST)`. libghostty-vt parses both,
 //! but its *read-only* stream drops the payload before it reaches anything we
-//! can read — the same hole as OSC 7 and OSC 52 — so, as in [`crate::osc7`] and
-//! [`crate::osc52`], we run a small streaming parser over the same bytes we feed
+//! can read — the same hole OSC 7 and OSC 52 had before the engine grew
+//! callbacks for them — so we run a small streaming parser over the same bytes we feed
 //! the engine.
 //!
 //! The subtle half is OSC 9, which is **overloaded**: ConEmu claims `9;1`

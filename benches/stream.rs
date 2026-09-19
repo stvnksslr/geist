@@ -7,9 +7,10 @@
 //!
 //! Cases:
 //!   - `ascii` / `utf8` / `osc` engine throughput across grid sizes (Bytes/s).
-//!   - `osc52_scan` / `osc7_scan`: giest's *own* OSC side-scanners (`src/osc52.rs`,
-//!     `src/osc7.rs`), which run over every PTY chunk in `pump_pty` — a hot path
-//!     Ghostty has no analog for (it parses OSC inside the engine).
+//!   - `osc_color_scan` etc.: giest's *own* OSC side-scanners, which run over
+//!     every PTY chunk in `pump_pty` — a hot path Ghostty has no analog for (it
+//!     parses OSC inside the engine). OSC 52 and OSC 7 are no longer scanned:
+//!     the engine handles them.
 //!
 //! Input is the seeded synthetic stream by default; set `GIEST_BENCH_DATA` to a
 //! capture file to run against a real corpus (see `benches/data/README.md`).
@@ -17,8 +18,6 @@
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use giest::engine::{GhosttyVtEngine, TerminalEngine};
-use giest::osc7::Osc7Scanner;
-use giest::osc52::Osc52Scanner;
 use giest::osc_color::OscColorScanner;
 use giest::synthetic;
 
@@ -57,22 +56,6 @@ fn bench_stream(c: &mut Criterion) {
     let mut scan = c.benchmark_group("osc_scan");
     let (osc_data, _) = synthetic::corpus("osc", STREAM_BYTES / 32, 1, synthetic::osc);
     scan.throughput(Throughput::Bytes(osc_data.len() as u64));
-    scan.bench_function("osc52_scan", |b| {
-        let mut s = Osc52Scanner::new();
-        let mut out = Vec::new();
-        b.iter(|| {
-            out.clear();
-            s.feed(&osc_data, &mut out);
-            std::hint::black_box(out.len())
-        })
-    });
-    scan.bench_function("osc7_scan", |b| {
-        let mut s = Osc7Scanner::new();
-        b.iter(|| {
-            s.feed(&osc_data);
-            std::hint::black_box(s.pwd().map(str::len))
-        })
-    });
     scan.bench_function("osc_color_scan", |b| {
         let mut s = OscColorScanner::new();
         let mut out = Vec::new();

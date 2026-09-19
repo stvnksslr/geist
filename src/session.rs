@@ -9,7 +9,7 @@ use anyhow::Result;
 use eframe::egui;
 
 use crate::config::{
-    self, ClipboardAccess, ClipboardPolicy, Config, OscColorReportFormat, ResizeOverlay,
+    self, ClipboardPolicy, Config, OscColorReportFormat, ResizeOverlay,
 };
 use crate::decscusr::DecscusrScanner;
 use crate::engine::{
@@ -17,9 +17,7 @@ use crate::engine::{
     MouseButton, MouseInput, RowText, SelectKind, TerminalEngine,
 };
 use crate::keybind::{Chord, Keymap, Lookup};
-use crate::osc7::Osc7Scanner;
 use crate::search::{SearchHighlight, SearchState};
-use crate::osc52::{Osc52, Osc52Scanner};
 use crate::osc_color::{ColorQuery, OscColorScanner, Terminator};
 use crate::osc_notify::{Notification, Osc9, OscNotifyScanner};
 use crate::osc133::{Mark, Osc133Scanner};
@@ -77,11 +75,6 @@ pub struct Session {
     abnormal_exit_ms: u32,
     /// What was launched, for the abnormal-exit message.
     launched: String,
-    /// Side parser for OSC 52 clipboard-set sequences in the PTY output.
-    osc52: Osc52Scanner,
-    /// Side parser tracking the shell's OSC 7 working directory, so a new split
-    /// can inherit it.
-    osc7: Osc7Scanner,
     /// Side parser tracking DECSCUSR, so the configured default cursor style is
     /// substituted only while the program hasn't picked its own shape.
     decscusr: DecscusrScanner,
@@ -262,6 +255,7 @@ impl Session {
             move || wake_ctx.request_repaint_of(egui::ViewportId::ROOT),
         )?;
         let mut engine = GhosttyVtEngine::new(DEFAULT_COLS, DEFAULT_ROWS, config.scrollback_limit)?;
+        engine.set_clipboard_policy(&config.clipboard);
         engine.apply_theme(config.fg, config.bg, &config.effective_palette())?;
         engine.set_cursor_color(config.cursor)?;
         engine.set_bold_color(config.bold_color)?;
@@ -310,8 +304,6 @@ impl Session {
             scroll_notch_accum: 0.0,
             mouse_down: None,
             alive: true,
-            osc52: Osc52Scanner::new(),
-            osc7: Osc7Scanner::new(),
             decscusr: DecscusrScanner::new(),
             reset_cursor_on_submit: launch.reset_cursor_on_submit,
             osc_color: OscColorScanner::new(),
@@ -374,7 +366,6 @@ impl Session {
 
     pub fn pump_pty(&mut self) {
         use std::sync::mpsc::TryRecvError;
-        let mut clipboard_requests: Vec<Osc52> = Vec::new();
         let mut color_queries: Vec<(ColorQuery, Terminator)> = Vec::new();
         let mut marks: Vec<Mark> = Vec::new();
         let mut osc9: Vec<Osc9> = Vec::new();
@@ -401,8 +392,6 @@ impl Session {
                         log.read(&chunk);
                     }
                     self.engine.write(&chunk);
-                    self.osc52.feed(&chunk, &mut clipboard_requests);
-                    self.osc7.feed(&chunk);
                     self.decscusr.feed(&chunk);
                     self.osc_color.feed(&chunk, &mut color_queries);
                     self.osc_notify.feed(&chunk, &mut osc9);
@@ -415,7 +404,7 @@ impl Session {
                 }
             }
         }
-        self.handle_osc52(&mut clipboard_requests);
+        self.handle_clipboard_deferrals();
         self.handle_command_marks(&marks);
         self.handle_osc9(osc9);
         self.refresh_search_after_prune();
@@ -460,53 +449,34 @@ impl Session {
         }
     }
 
-    /// Apply `clipboard-write` / `clipboard-read` to the OSC 52 requests seen in
-    /// this pump.
+    /// Put the OSC 52 / OSC 5522 requests the engine left for `ask` to the user.
     ///
-    /// Only the **last** set is considered (last write wins — a program that
-    /// copies repeatedly shouldn't stack prompts), and a query is answered from
-    /// the *current* clipboard, so a set-then-query in one batch reports the
-    /// value just written.
-    fn handle_osc52(&mut self, requests: &mut Vec<Osc52>) {
-        if requests.is_empty() {
-            return;
-        }
-        let (set, query) = osc52_reduce(requests);
-        let last_set = set.map(str::to_string);
-        let last_query = query.map(str::to_string);
-        requests.clear();
-
-        // Ghostty `clipboard-write-limit-bytes`: an oversized write is dropped.
-        let last_set = last_set.filter(|t| self.clipboard.write_limit.is_none_or(|n| t.len() <= n));
-        if let Some(text) = last_set {
-            match self.clipboard.write {
-                ClipboardAccess::Allow => write_clipboard(&text),
-                ClipboardAccess::Deny => {}
-                ClipboardAccess::Ask => self.queue_clipboard(ClipboardRequest::Write(text)),
+    /// `allow` and `deny` were already applied inside the engine's callbacks
+    /// (see `crate::clipboard`); only `ask` reaches here. One dialog at a time:
+    /// a newer program write replaces a waiting one (last write wins — a
+    /// program that copies repeatedly shouldn't stack prompts), and anything
+    /// else that arrives while a dialog is up is refused, which answers the
+    /// program rather than leaving it waiting forever.
+    fn handle_clipboard_deferrals(&mut self) {
+        use crate::clipboard::Deferred;
+        for d in self.engine.take_clipboard_deferrals() {
+            let req = match d.kind {
+                Deferred::Write(_) => ClipboardRequest::Write(d),
+                Deferred::Read { .. } => ClipboardRequest::Read(d),
+            };
+            match self.pending_clipboard.take() {
+                None => self.pending_clipboard = Some(req),
+                Some(ClipboardRequest::Write(old)) if matches!(req, ClipboardRequest::Write(_)) => {
+                    self.engine.resolve_clipboard_deferral(old, false);
+                    self.pending_clipboard = Some(req);
+                }
+                Some(waiting) => {
+                    self.pending_clipboard = Some(waiting);
+                    if let ClipboardRequest::Write(d) | ClipboardRequest::Read(d) = req {
+                        self.engine.resolve_clipboard_deferral(d, false);
+                    }
+                }
             }
-        }
-        if let Some(targets) = last_query {
-            match self.clipboard.read {
-                ClipboardAccess::Allow => self.reply_to_clipboard_query(&targets),
-                ClipboardAccess::Deny => {}
-                ClipboardAccess::Ask => self.queue_clipboard(ClipboardRequest::Read(targets)),
-            }
-        }
-    }
-
-    /// Raise a request for confirmation, unless one is already waiting.
-    fn queue_clipboard(&mut self, req: ClipboardRequest) {
-        if self.pending_clipboard.is_none() {
-            self.pending_clipboard = Some(req);
-        }
-    }
-
-    /// Send the clipboard back to the program, echoing `targets`. An empty or
-    /// unreadable clipboard is silently not answered, which is what xterm does
-    /// and avoids telling the program anything it didn't already know.
-    fn reply_to_clipboard_query(&mut self, targets: &str) {
-        if let Some(text) = read_clipboard() {
-            let _ = self.pty.write(&crate::osc52::query_reply(targets, &text));
         }
     }
 
@@ -728,7 +698,7 @@ impl Session {
     /// The shell's current working directory (reported via OSC 7), as a usable
     /// filesystem path. `None` if the shell never reported one.
     pub fn pwd(&self) -> Option<PathBuf> {
-        osc7_to_path(self.osc7.pwd()?)
+        osc7_to_path(&self.engine.pwd()?)
     }
 
     pub fn update_snapshot(&mut self) -> bool {
@@ -963,6 +933,15 @@ impl Session {
         if text.is_empty() {
             return;
         }
+        // Kitty paste events (mode 5522): the program is told a paste happened
+        // and reads the text itself through the clipboard-read callback, so no
+        // bytes are typed into it and paste protection has nothing to guard.
+        if self.engine.paste_events() && self.engine.paste_event(text) {
+            let out = self.engine.take_responses();
+            let _ = self.pty.write(&out);
+            self.scroll_target_px = 0.0;
+            return;
+        }
         let bracketed = self.engine.bracketed_paste();
         if config::paste_is_unsafe(self.clipboard, bracketed, text) {
             // Drop rather than queue if a dialog is already up (see the field).
@@ -993,15 +972,23 @@ impl Session {
         let Some(req) = self.pending_clipboard.take() else {
             return;
         };
-        if !allow {
-            return;
-        }
         match req {
             // Deliberately *not* re-checked: the user has just been shown what
             // makes it unsafe and said yes. This is Ghostty's `allow_unsafe`.
-            ClipboardRequest::Paste(text) => self.write_paste(&text),
-            ClipboardRequest::Write(text) => write_clipboard(&text),
-            ClipboardRequest::Read(targets) => self.reply_to_clipboard_query(&targets),
+            ClipboardRequest::Paste(text) => {
+                if allow {
+                    self.write_paste(&text);
+                }
+            }
+            // A program's request is answered either way: the engine's
+            // refusal (held back while we asked) or the real reply.
+            ClipboardRequest::Write(d) | ClipboardRequest::Read(d) => {
+                self.engine.resolve_clipboard_deferral(d, allow);
+                let out = self.engine.take_responses();
+                if !out.is_empty() {
+                    let _ = self.pty.write(&out);
+                }
+            }
         }
     }
 
@@ -1038,6 +1025,7 @@ impl Session {
         self.resize_overlay = config.resize_overlay;
         self.resize_overlay_duration_ms = config.resize_overlay_duration_ms;
         self.clipboard = config.clipboard;
+        self.engine.set_clipboard_policy(&config.clipboard);
         self.desktop_notifications = config.desktop_notifications;
         self.progress_style = config.progress_style;
         // NOTE: `mouse_reporting` is deliberately re-seeded from the config on
@@ -1973,17 +1961,11 @@ impl Session {
     }
 }
 
-/// Write text to the system clipboard (best-effort; ignores failures).
-fn write_clipboard(text: &str) {
-    if let Ok(mut cb) = arboard::Clipboard::new() {
-        let _ = cb.set_text(text.to_owned());
-    }
-}
-
 /// Read text from the system clipboard (best-effort). Windows has no separate
 /// PRIMARY selection, so middle-click / menu paste reads this.
 pub fn read_clipboard() -> Option<String> {
-    arboard::Clipboard::new().ok()?.get_text().ok()
+    use crate::clipboard::ClipboardIo as _;
+    crate::clipboard::SystemClipboard.read_text()
 }
 
 /// Translate egui modifiers to backend-neutral key modifiers. `pub(crate)` so
@@ -2051,11 +2033,12 @@ fn format_duration(d: std::time::Duration) -> String {
 pub enum ClipboardRequest {
     /// A paste whose contents look unsafe (see [`config::paste_is_unsafe`]).
     Paste(String),
-    /// The program asked to *set* the clipboard, under `clipboard-write = ask`.
-    Write(String),
-    /// The program asked to *read* the clipboard, under `clipboard-read = ask`.
-    /// Carries the OSC 52 target selection to echo in the reply.
-    Read(String),
+    /// The program asked to *set* the clipboard (OSC 52 or OSC 5522), under
+    /// `clipboard-write = ask`.
+    Write(crate::clipboard::Deferral),
+    /// The program asked to *read* the clipboard (OSC 52 or OSC 5522), under
+    /// `clipboard-read = ask`.
+    Read(crate::clipboard::Deferral),
 }
 
 impl ClipboardRequest {
@@ -2090,7 +2073,11 @@ impl ClipboardRequest {
     /// there is nothing to show *yet* — that's the point of asking.
     pub fn preview(&self) -> Option<&str> {
         match self {
-            Self::Paste(t) | Self::Write(t) => Some(t),
+            Self::Paste(t) => Some(t),
+            Self::Write(d) => match &d.kind {
+                crate::clipboard::Deferred::Write(t) => Some(t),
+                crate::clipboard::Deferred::Read { .. } => None,
+            },
             Self::Read(_) => None,
         }
     }
@@ -2366,25 +2353,6 @@ fn scrollbar_rows(scrollback: usize, rows: u16, scroll_px: f32, cell_h: f32) -> 
         offset: scrollback - up,
         len,
     }
-}
-
-/// Reduce a pump's worth of OSC 52 requests to the one set and the one query
-/// worth acting on: `(last set payload, last query targets)`.
-///
-/// Only the last of each survives. A program that copies in a loop should
-/// leave one value on the clipboard, not raise a stack of prompts — and since
-/// the set is applied before the query is answered, a set-then-query in the
-/// same batch correctly reports the value just written.
-fn osc52_reduce(requests: &[Osc52]) -> (Option<&str>, Option<&str>) {
-    let mut set = None;
-    let mut query = None;
-    for r in requests {
-        match r {
-            Osc52::Set(text) => set = Some(text.as_str()),
-            Osc52::Query(targets) => query = Some(targets.as_str()),
-        }
-    }
-    (set, query)
 }
 
 /// Split a continuous pixel scroll position into a whole-line engine viewport
@@ -2782,9 +2750,8 @@ mod tests {
     use super::{
         CommandFinish, CopyAction, KeyAction, bell_effect_due, cell_from_pos, copy_or_interrupt,
         autoscroll_rows, find_url_at, produces_text, format_duration, grid_dims, notch_split, osc7_to_path,
-        px_offset, osc52_reduce, scroll_split, scrollbar_rows, transient_alpha,
+        px_offset, scroll_split, scrollbar_rows, transient_alpha,
     };
-    use crate::osc52::Osc52;
     use crate::engine::{Cell, GridSnapshot, KeyCode, KeyInput, KeyMods};
     use crate::keybind::Keymap;
     use eframe::egui;
@@ -3111,27 +3078,6 @@ mod tests {
     // — are now engine tests in `engine/ghostty_vt.rs`, driving real escape
     // sequences. Keeping a grid-scanning copy here would be a second opinion
     // about what is selected, which is the failure this codebase keeps recording.
-
-    #[test]
-    fn osc52_batch_keeps_only_the_last_set_and_query() {
-        let set = |s: &str| Osc52::Set(s.to_string());
-        let query = |s: &str| Osc52::Query(s.to_string());
-
-        assert_eq!(osc52_reduce(&[]), (None, None));
-        // A program copying in a loop leaves one value, not a stack of prompts.
-        assert_eq!(
-            osc52_reduce(&[set("one"), set("two"), set("three")]),
-            (Some("three"), None)
-        );
-        // Sets and queries are tracked independently…
-        assert_eq!(
-            osc52_reduce(&[set("a"), query("c"), set("b")]),
-            (Some("b"), Some("c"))
-        );
-        // …and the caller applies the set first, so a set-then-query in one
-        // batch reports the value just written.
-        assert_eq!(osc52_reduce(&[query("p"), query("c")]), (None, Some("c")));
-    }
 
     #[test]
     fn detects_url_under_cursor() {

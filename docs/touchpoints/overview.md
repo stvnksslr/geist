@@ -21,7 +21,7 @@ flowchart TB
         direction LR
         ptyrs["pty.rs"]
         sessrs["session.rs"]
-        osc["osc52.rs"]
+        osc["clipboard.rs"]
         apprs["app.rs"]
         renderrs["render/*"]
         cfg["config.rs / profiles.rs"]
@@ -75,5 +75,5 @@ flowchart TB
 That means the libghostty boundary is physically confined to a single file —
 `engine/ghostty_vt.rs`. Every `use libghostty_vt::…` in the entire codebase
 lives there. Similarly, the ConPTY boundary is confined to `pty.rs`, and the
-clipboard boundary to `osc52.rs` + the `Event::Copy/Cut/Paste` arms. This makes
+clipboard boundary to `clipboard.rs` + the `Event::Copy/Cut/Paste` arms. This makes
 each touch point auditable in one place.

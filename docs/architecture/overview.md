@@ -26,7 +26,7 @@ flowchart TB
         engine["engine/mod.rs<br/>TerminalEngine trait"]
         ghostty["engine/ghostty_vt.rs<br/>libghostty-vt backend"]
         render["render/*.rs<br/>wgpu glyph-atlas pipeline"]
-        osc52["osc52.rs<br/>clipboard side-parser"]
+        osc52["clipboard.rs<br/>OSC 52 / 5522 policy"]
     end
 
     vt["libghostty-vt<br/>(native, built with Zig)"]
@@ -65,7 +65,7 @@ flowchart TB
 | `render/atlas.rs` | rustybuzz shaping + ab_glyph rasterization into an R8 atlas; COLR/CPAL color emoji into an RGBA atlas. |
 | `config.rs` | TOML config from `%APPDATA%\giest\config.toml`; the full ANSI 16 + 256-color palette. |
 | `profiles.rs` | Shell profiles (pwsh / powershell / cmd / wsl). |
-| `osc52.rs` | Side-stream parser for OSC 52 clipboard-set. |
+| `clipboard.rs` | Policy for OSC 52 / OSC 5522 via the engine's clipboard callbacks. |
 
 ## Why the layering matters
 

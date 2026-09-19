@@ -30,7 +30,7 @@ sequenceDiagram
     Ctx->>Sess: next frame: pump_pty()
     Sess->>Eng: write(chunk)
     Eng->>VT: vt_write(bytes)
-    Sess->>Sess: osc52.feed(chunk) → clipboard set?
+    Sess->>Sess: engine clipboard callbacks → clipboard set?
     Sess->>Eng: take_responses()
     Eng-->>Sess: device-query replies
     Sess->>ConPTY: pty.write(responses)
