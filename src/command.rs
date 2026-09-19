@@ -81,6 +81,40 @@ pub fn can_perform(action: &Action, ctx: PerformCtx<'_>) -> bool {
     }
 }
 
+/// Which way `resize_split` moves a divider (Ghostty's `SplitResizeDirection`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SplitDir {
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
+impl SplitDir {
+    pub fn name(self) -> &'static str {
+        match self {
+            SplitDir::Up => "up",
+            SplitDir::Down => "down",
+            SplitDir::Left => "left",
+            SplitDir::Right => "right",
+        }
+    }
+
+    fn from_name(s: &str) -> Option<Self> {
+        Some(match s {
+            "up" => SplitDir::Up,
+            "down" => SplitDir::Down,
+            "left" => SplitDir::Left,
+            "right" => SplitDir::Right,
+            _ => return None,
+        })
+    }
+}
+
+/// The step the palette's "Resize Split" rows use: upstream's default binds all
+/// pass 10.
+pub const RESIZE_SPLIT_STEP: u16 = 10;
+
 /// Whether an action belongs to the **app** or to one **surface** (a pane).
 ///
 /// Ghostty's `Binding.Action.scope`, and the thing `all:` dispatches on: an
@@ -394,6 +428,12 @@ pub enum Action {
     /// Zoom the focused split to fill the tab, hiding the other panes; toggles
     /// (Ghostty `toggle_split_zoom`).
     ToggleSplitZoom,
+    /// Move the divider of the focused pane's nearest split on that axis by
+    /// `amount` points (Ghostty `resize_split:<direction>,<amount>`).
+    ResizeSplit(SplitDir, u16),
+    /// Reset every split in the tab to an even share, weighted by leaf count
+    /// (Ghostty `equalize_splits`).
+    EqualizeSplits,
     ClosePane,
     /// Toggle the window between fullscreen and windowed (Ghostty
     /// `toggle_fullscreen`).
@@ -497,6 +537,11 @@ impl Action {
             Action::SplitRight => "Split Right",
             Action::SplitDown => "Split Down",
             Action::ToggleSplitZoom => "Toggle Split Zoom",
+            Action::ResizeSplit(SplitDir::Up, _) => "Resize Split: Up",
+            Action::ResizeSplit(SplitDir::Down, _) => "Resize Split: Down",
+            Action::ResizeSplit(SplitDir::Left, _) => "Resize Split: Left",
+            Action::ResizeSplit(SplitDir::Right, _) => "Resize Split: Right",
+            Action::EqualizeSplits => "Equalize Splits",
             Action::ClosePane => "Close Pane",
             Action::ToggleFullscreen => "Toggle Fullscreen",
             Action::ToggleQuickTerminal => "Toggle Quick Terminal",
@@ -575,6 +620,10 @@ impl Action {
             Action::SplitRight => "Ctrl+Shift+D",
             Action::SplitDown => "Ctrl+Shift+E",
             Action::ToggleSplitZoom => "Ctrl+Shift+Enter",
+            // Upstream's non-macOS defaults are super+ctrl+shift+arrow, which
+            // giest cannot see (egui reports no Win-key modifier), and it has no
+            // non-macOS default for equalize_splits at all.
+            Action::ResizeSplit(..) | Action::EqualizeSplits => return None,
             Action::ClosePane => "Ctrl+Shift+W",
             Action::ToggleFullscreen => "Ctrl+Enter",
             Action::ToggleQuickTerminal => "",
@@ -644,6 +693,8 @@ impl Action {
             Action::SplitRight => "new_split:right".into(),
             Action::SplitDown => "new_split:down".into(),
             Action::ToggleSplitZoom => "toggle_split_zoom".into(),
+            Action::ResizeSplit(d, n) => format!("resize_split:{},{n}", d.name()),
+            Action::EqualizeSplits => "equalize_splits".into(),
             Action::ClosePane => "close_surface".into(),
             Action::ToggleFullscreen => "toggle_fullscreen".into(),
             Action::ToggleQuickTerminal => "toggle_quick_terminal".into(),
@@ -778,6 +829,13 @@ impl Action {
                 _ => None,
             };
         }
+        if let Some(rest) = s.strip_prefix("resize_split:") {
+            // Upstream's parameter is a tuple `<direction>,<amount>` with the
+            // amount a `u16` — both required, nothing defaulted.
+            let (dir, amount) = rest.split_once(',')?;
+            let dir = SplitDir::from_name(dir.trim())?;
+            return amount.trim().parse::<u16>().ok().map(|n| Action::ResizeSplit(dir, n));
+        }
         if let Some(rest) = s.strip_prefix("goto_split:") {
             return match rest.trim() {
                 "left" => Some(Action::FocusSplitLeft),
@@ -825,14 +883,11 @@ impl Action {
             "redo" => Action::Redo,
             "quit" | "close_all_windows" => Action::Quit,
             "prompt_tab_title" => Action::PromptTabTitle,
-            // giest splits are always 50/50, so there is nothing to equalize.
-            // Accepted as a no-op so a Ghostty config binds without an error
-            // rather than logging an "unknown action" the user cannot act on.
+            "equalize_splits" => Action::EqualizeSplits,
             // Ghostty's `ignore`: bind the key to nothing, black-holing it. Not
             // the same as `unbind`, which removes the binding and lets the key
             // reach the shell — that one is handled by the keymap.
             "ignore" => Action::Noop(Arc::from("ignore")),
-            "equalize_splits" => Action::Noop(Arc::from("equalize_splits")),
             // macOS-only upstream and unimplementable on Windows (no API stops
             // other processes reading keystrokes) — accepted so a transferred
             // config binds without an "unknown action" the user cannot act on.
@@ -892,6 +947,11 @@ const BASE_ACTIONS: &[Action] = &[
     Action::SplitRight,
     Action::SplitDown,
     Action::ToggleSplitZoom,
+    Action::EqualizeSplits,
+    Action::ResizeSplit(SplitDir::Left, RESIZE_SPLIT_STEP),
+    Action::ResizeSplit(SplitDir::Right, RESIZE_SPLIT_STEP),
+    Action::ResizeSplit(SplitDir::Up, RESIZE_SPLIT_STEP),
+    Action::ResizeSplit(SplitDir::Down, RESIZE_SPLIT_STEP),
     Action::ClosePane,
     Action::ToggleFullscreen,
     Action::ToggleQuickTerminal,
@@ -1231,25 +1291,40 @@ mod tests {
     }
 
     #[test]
-    fn equalize_splits_binds_to_a_real_no_op() {
-        // It used to parse to `ClearSelection`, so binding a Ghostty config's
-        // `equalize_splits` silently *dropped the user's selection*. A no-op
-        // action that stands for nothing else is the only safe target, and this
-        // pins it because the wrong behaviour is invisible in a config.
+    fn split_ratio_actions_parse_per_upstream() {
+        // It once parsed to `ClearSelection`, which silently dropped the user's
+        // selection; now splits have ratios it is a real action.
         assert_eq!(
             Action::from_name("equalize_splits"),
-            Some(Action::Noop(Arc::from("equalize_splits")))
+            Some(Action::EqualizeSplits)
         );
-        assert_ne!(
-            Action::from_name("equalize_splits"),
-            Some(Action::ClearSelection)
-        );
-        // The no-op carries the name it stands in for, so it round-trips — and
-        // so several unimplementable actions can share it without colliding.
+        assert_eq!(Action::EqualizeSplits.name(), "equalize_splits");
+        // `resize_split:<direction>,<amount>`, both required, amount a u16.
+        for (text, dir) in [
+            ("up", SplitDir::Up),
+            ("down", SplitDir::Down),
+            ("left", SplitDir::Left),
+            ("right", SplitDir::Right),
+        ] {
+            let name = format!("resize_split:{text},10");
+            let a = Action::from_name(&name).expect("parses");
+            assert_eq!(a, Action::ResizeSplit(dir, 10));
+            assert_eq!(a.name(), name, "round-trips");
+        }
         assert_eq!(
-            Action::from_name("equalize_splits").unwrap().name(),
-            "equalize_splits"
+            Action::from_name("resize_split: left , 25"),
+            Some(Action::ResizeSplit(SplitDir::Left, 25))
         );
+        for bad in [
+            "resize_split:left",
+            "resize_split:left,",
+            "resize_split:sideways,10",
+            "resize_split:up,-5",
+            "resize_split:up,70000",
+            "resize_split:",
+        ] {
+            assert_eq!(Action::from_name(bad), None, "{bad}");
+        }
 
         // `toggle_secure_input` is macOS-only upstream and has no Windows
         // equivalent (no API stops other processes reading keystrokes), so it

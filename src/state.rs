@@ -16,7 +16,8 @@
 //! giest-state 1
 //! W                       window
 //! T 1 build               tab, `1` = the active tab, rest = its name (`-` = none)
-//! S v                     split (`v` vertical, `h` horizontal), children follow
+//! S v 0.5                 split (`v` vertical, `h` horizontal) + the first child's share;
+//!                         children follow. No ratio (an older file) reads as 0.5
 //! L 1 C:\src\giest        leaf, `1` = the focused pane, rest = its cwd (`-` = none)
 //! L 0 -
 //! ```
@@ -36,7 +37,7 @@ use std::path::PathBuf;
 const HEADER: &str = "giest-state 1";
 
 /// A saved split tree: the same shape as `app::Node`, minus the live session.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum SavedNode {
     Leaf {
         /// The pane's working directory (OSC 7), if it reported one.
@@ -46,13 +47,15 @@ pub enum SavedNode {
     },
     Split {
         vertical: bool,
+        /// The first child's share of the split, strictly inside `(0, 1)`.
+        ratio: f32,
         first: Box<SavedNode>,
         second: Box<SavedNode>,
     },
 }
 
 /// One saved tab.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SavedTab {
     /// The user's "Rename Tab…" override, if any.
     pub name: Option<String>,
@@ -60,14 +63,14 @@ pub struct SavedTab {
 }
 
 /// One saved window.
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Debug, PartialEq, Default)]
 pub struct SavedWindow {
     pub tabs: Vec<SavedTab>,
     pub active_tab: usize,
 }
 
 /// The whole saved app: every window, in list order (slot 0 is the root).
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Debug, PartialEq, Default)]
 pub struct SavedState {
     pub windows: Vec<SavedWindow>,
 }
@@ -107,10 +110,13 @@ fn write_node(node: &SavedNode, out: &mut String) {
         }
         SavedNode::Split {
             vertical,
+            ratio,
             first,
             second,
         } => {
-            out.push_str(if *vertical { "S v\n" } else { "S h\n" });
+            out.push_str(if *vertical { "S v " } else { "S h " });
+            out.push_str(&ratio.to_string());
+            out.push('\n');
             write_node(first, out);
             write_node(second, out);
         }
@@ -157,13 +163,23 @@ fn read_node(lines: &mut std::iter::Peekable<std::slice::Iter<'_, &str>>) -> Opt
         }
         "S" => {
             lines.next();
-            let vertical = rest.trim() == "v";
+            let mut fields = rest.split_whitespace();
+            let vertical = fields.next() == Some("v");
+            // Files written before split ratios existed carry no second field.
+            // Every split was 50/50 then, so that is what they restore as; a
+            // garbled or out-of-range value falls back the same way.
+            let ratio = fields
+                .next()
+                .and_then(|r| r.parse::<f32>().ok())
+                .filter(|r| r.is_finite() && *r > 0.0 && *r < 1.0)
+                .unwrap_or(0.5);
             // A split with a missing child is a truncated file: drop the whole
             // node rather than inventing a pane the user never had.
             let first = Box::new(read_node(lines)?);
             let second = Box::new(read_node(lines)?);
             Some(SavedNode::Split {
                 vertical,
+                ratio,
                 first,
                 second,
             })
@@ -290,9 +306,11 @@ mod tests {
                             name: Some("build logs".into()),
                             tree: SavedNode::Split {
                                 vertical: true,
+                                ratio: 0.3,
                                 first: Box::new(leaf(Some(r"C:\src\giest"), false)),
                                 second: Box::new(SavedNode::Split {
                                     vertical: false,
+                                    ratio: 0.5,
                                     first: Box::new(leaf(None, true)),
                                     second: Box::new(leaf(Some(r"C:\tmp"), false)),
                                 }),
@@ -326,7 +344,25 @@ mod tests {
         let text = serialize(&sample());
         // Preorder: split, first subtree, second subtree — no delimiters.
         let body: Vec<&str> = text.lines().skip(1).take(6).collect();
-        assert_eq!(body, ["W", "T 0 build logs", "S v", "L 0 C:\\src\\giest", "S h", "L 1 -"]);
+        assert_eq!(
+            body,
+            ["W", "T 0 build logs", "S v 0.3", "L 0 C:\\src\\giest", "S h 0.5", "L 1 -"]
+        );
+    }
+
+    #[test]
+    fn a_split_without_a_ratio_reads_as_an_even_split() {
+        // The pre-ratio grammar: every split was 50/50, so that is the default.
+        // A garbled or out-of-range ratio degrades the same way rather than
+        // dropping the layout.
+        for line in ["S v", "S v nonsense", "S v 1.5", "S v 0", "S v NaN"] {
+            let s = parse(&format!("giest-state 1\nW\nT 1 -\n{line}\nL 1 -\nL 0 -\n"));
+            let SavedNode::Split { vertical, ratio, .. } = &s.windows[0].tabs[0].tree else {
+                panic!("{line}: expected a split");
+            };
+            assert!(*vertical, "{line}");
+            assert_eq!(*ratio, 0.5, "{line}");
+        }
     }
 
     #[test]
