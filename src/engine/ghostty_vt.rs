@@ -1421,6 +1421,22 @@ mod tests {
     }
 
     #[test]
+    fn prompt_rows_mark_input_cells_after_b() {
+        // `cursor-click-to-move` walks input cells: everything typed after the
+        // `B` mark is input, the prompt text before it is not.
+        let mut eng = GhosttyVtEngine::new(20, 4, 100).unwrap();
+        eng.write(b"\x1b]133;A;cl=line\x1b\\> \x1b]133;B\x1b\\abc");
+        assert_eq!(eng.cursor_at_prompt(), Some(true));
+        let rows = eng.prompt_rows();
+        assert_eq!(rows.len(), 4);
+        assert_eq!(rows[0].prompt, crate::engine::RowPrompt::Prompt);
+        let input: Vec<usize> = (0..20).filter(|&x| rows[0].input[x]).collect();
+        assert_eq!(input, vec![2, 3, 4]);
+        // Cursor after `abc` at col 5; a click on `a` is three lefts.
+        assert_eq!(crate::prompt_click::line_move(&rows, (5, 0), (2, 0)), (3, 0));
+    }
+
+    #[test]
     fn jump_to_prompt_finds_marked_prompts() {
         // Without OSC 133 marks there is nothing to jump to, even with scrollback.
         let mut eng = GhosttyVtEngine::new(20, 4, 100).unwrap();
@@ -2021,6 +2037,42 @@ impl TerminalEngine for GhosttyVtEngine {
             sp,
             RowSemanticPrompt::Prompt | RowSemanticPrompt::Continuation
         ))
+    }
+
+    fn prompt_rows(&self) -> Vec<super::PromptRowInfo> {
+        use libghostty_vt::screen::CellSemanticContent;
+        let (Ok(cols), Ok(rows)) = (self.term.cols(), self.term.rows()) else {
+            return Vec::new();
+        };
+        (0..rows as u32)
+            .map(|y| {
+                let row_ref = self
+                    .term
+                    .grid_ref(Point::Viewport(PointCoordinate { x: 0, y }))
+                    .ok();
+                let row = row_ref.as_ref().and_then(|gr| gr.row().ok());
+                let input = (0..cols as u16)
+                    .map(|x| {
+                        self.term
+                            .grid_ref(Point::Viewport(PointCoordinate { x, y }))
+                            .ok()
+                            .and_then(|gr| gr.cell().ok())
+                            .and_then(|c| c.semantic_content().ok())
+                            .is_some_and(|s| s == CellSemanticContent::Input)
+                    })
+                    .collect();
+                super::PromptRowInfo {
+                    input,
+                    wrap: row.is_some_and(|r| r.is_wrapped().unwrap_or(false)),
+                    wrap_continuation: row.is_some_and(|r| r.is_wrap_continuation().unwrap_or(false)),
+                    prompt: match row.and_then(|r| r.semantic_prompt().ok()) {
+                        Some(RowSemanticPrompt::Prompt) => super::RowPrompt::Prompt,
+                        Some(RowSemanticPrompt::Continuation) => super::RowPrompt::Continuation,
+                        _ => super::RowPrompt::None,
+                    },
+                }
+            })
+            .collect()
     }
 
     fn dynamic_colors(&self) -> (Rgb, Rgb, Option<Rgb>) {

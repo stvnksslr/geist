@@ -64,7 +64,7 @@ impl Profile {
             // prompt, then B (prompt end / input start).
             "cmd" => vec![
                 "/K".into(),
-                "prompt $E]133;D$E\\$E]133;A$E\\$E]7;file://%COMPUTERNAME%/$P$E\\$P$G$E]133;B$E\\"
+                "prompt $E]133;D$E\\$E]133;A;cl=line$E\\$E]7;file://%COMPUTERNAME%/$P$E\\$P$G$E]133;B$E\\"
                     .into(),
             ],
             _ => Vec::new(),
@@ -106,7 +106,7 @@ function global:prompt {
     $u = 'file://' + [System.Net.Dns]::GetHostName() + '/' + ($p -replace '\\','/')
     [Console]::Write("$([char]27)]7;$u$([char]27)\")
   }
-  [Console]::Write("$([char]27)]133;A$([char]27)\")
+  [Console]::Write("$([char]27)]133;A;cl=line$([char]27)\")
   $base = & $global:__giestPrompt
   "$base$([char]27)]133;B$([char]27)\"
 }"#;
@@ -207,6 +207,9 @@ mod tests {
         assert!(prompt.contains("]133;A"), "cmd prompt missing OSC 133 A: {prompt}");
         assert!(prompt.contains("]133;B"), "cmd prompt missing OSC 133 B: {prompt}");
         assert!(prompt.contains("]7;"), "cmd prompt should still emit OSC 7");
+        // Both opt in to `cursor-click-to-move` (line editors that take arrows).
+        assert!(PWSH_SHELL_HOOK.contains("]133;A;cl=line"));
+        assert!(prompt.contains("]133;A;cl=line"));
     }
 
     #[test]

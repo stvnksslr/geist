@@ -4570,6 +4570,7 @@ impl Window {
         let copy_on_select = self.config.copy_on_select;
         let right_click_action = self.config.right_click_action;
         let middle_click_action = self.config.middle_click_action;
+        let cursor_click_to_move = self.config.cursor_click_to_move;
         let sel_bg = self.config.selection_bg;
         let sel_fg = self.config.selection_fg;
         // Opacities are read fresh each frame (like the selection colors), so a
@@ -5087,6 +5088,16 @@ impl Window {
                                     .is_some();
                             if !opened {
                                 session.clear_selection();
+                                // `cursor-click-to-move`: only a primary click
+                                // with no modifier, like upstream (a modified
+                                // click is a link or selection gesture).
+                                if resp.clicked_by(egui::PointerButton::Primary)
+                                    && !mods.any()
+                                    && let Some(p) = resp.interact_pointer_pos()
+                                {
+                                    let c = cell_at(p, session);
+                                    session.prompt_click(c, cursor_click_to_move);
+                                }
                             }
                         }
                     }

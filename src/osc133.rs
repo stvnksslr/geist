@@ -21,6 +21,10 @@ pub enum Mark {
     /// when the shell didn't report one (or reported something unparseable,
     /// which the spec says to ignore rather than reject).
     CommandEnd { exit_code: Option<i32> },
+    /// `OSC 133 ; A` carrying a `click_events=` or `cl=` option: how the shell
+    /// wants prompt clicks handled (`cursor-click-to-move`). The engine applies
+    /// the mark but keeps this to itself, so it is read here.
+    PromptClick(crate::prompt_click::ClickMode),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -131,6 +135,10 @@ fn parse_body(body: &[u8]) -> Option<Mark> {
         b'D' => Some(Mark::CommandEnd {
             exit_code: exit_code(tail),
         }),
+        b'A' => {
+            let opts = std::str::from_utf8(tail.strip_prefix(b";")?).ok()?;
+            crate::prompt_click::mode_from_options(opts).map(Mark::PromptClick)
+        }
         _ => None,
     }
 }
@@ -176,6 +184,21 @@ mod tests {
         assert_eq!(scan(&[b"\x1b]133;D;1\x1b\\"]), vec![end(Some(1))]);
         // Shells report signals and .NET exceptions as large or negative codes.
         assert_eq!(scan(&[b"\x1b]133;D;-1073741510\x1b\\"]), vec![end(Some(-1073741510))]);
+    }
+
+    #[test]
+    fn prompt_start_options_select_the_click_mode() {
+        use crate::prompt_click::ClickMode;
+        assert_eq!(
+            scan(&[b"\x1b]133;A;cl=line\x1b\\"]),
+            vec![Mark::PromptClick(ClickMode::Arrows)]
+        );
+        assert_eq!(
+            scan(&[b"\x1b]133;A;aid=9;click_events=1\x07"]),
+            vec![Mark::PromptClick(ClickMode::ClickEvents { relative: false })]
+        );
+        // Options only count on A.
+        assert!(scan(&[b"\x1b]133;B;cl=line\x1b\\"]).is_empty());
     }
 
     #[test]

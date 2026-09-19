@@ -236,6 +236,29 @@ pub struct RowText {
     pub wrapped: bool,
 }
 
+/// A row's OSC 133 semantic-prompt state.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RowPrompt {
+    #[default]
+    None,
+    /// The row a prompt starts on.
+    Prompt,
+    /// A continuation line of a (multi-line) prompt.
+    Continuation,
+}
+
+/// One viewport row as `cursor-click-to-move` sees it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PromptRowInfo {
+    /// Per column: is this cell OSC 133 *input* (typed after `B`)?
+    pub input: Vec<bool>,
+    /// The row soft-wraps onto the next one.
+    pub wrap: bool,
+    /// The row is the soft-wrapped continuation of the previous one.
+    pub wrap_continuation: bool,
+    pub prompt: RowPrompt,
+}
+
 /// Keyboard modifiers, backend-neutral.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct KeyMods {
@@ -512,6 +535,13 @@ pub trait TerminalEngine {
     /// marks — so the caller latches "we have ever seen a mark" to disambiguate.
     fn cursor_at_prompt(&self) -> Option<bool> {
         None
+    }
+
+    /// The semantic facts of each **viewport** row that `cursor-click-to-move`
+    /// walks (see [`crate::prompt_click`]). Empty when the engine can't tell,
+    /// which disables the feature.
+    fn prompt_rows(&self) -> Vec<PromptRowInfo> {
+        Vec::new()
     }
 
     /// The *effective* default foreground / background / cursor colors: the

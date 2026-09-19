@@ -87,6 +87,9 @@ pub struct Session {
     decscusr: DecscusrScanner,
     /// The program's `XTSHIFTESCAPE` request, for `mouse-shift-capture`.
     shift_escape: crate::xtshiftescape::ShiftEscapeScanner,
+    /// How the shell wants prompt clicks handled (`cursor-click-to-move`),
+    /// from its latest `OSC 133;A` options.
+    prompt_click: crate::prompt_click::ClickMode,
     /// Side parser for OSC color *queries*, which the VT engine drops.
     osc_color: OscColorScanner,
     /// Side parser for OSC 9 / OSC 777 desktop-notification requests.
@@ -310,6 +313,7 @@ impl Session {
             osc7: Osc7Scanner::new(),
             decscusr: DecscusrScanner::new(),
             shift_escape: crate::xtshiftescape::ShiftEscapeScanner::new(),
+            prompt_click: crate::prompt_click::ClickMode::None,
             osc_color: OscColorScanner::new(),
             osc_notify: OscNotifyScanner::new(),
             osc133: Osc133Scanner::new(),
@@ -1122,6 +1126,7 @@ impl Session {
             match *mark {
                 // A real `C` from a shell that emits one wins over the Enter
                 // heuristic — it's the actual moment execution began.
+                Mark::PromptClick(mode) => self.prompt_click = mode,
                 Mark::CommandStart => self.command_started = Some(std::time::Instant::now()),
                 Mark::CommandEnd { exit_code } => {
                     if let Some(started) = self.command_started.take() {
@@ -1592,6 +1597,62 @@ impl Session {
     pub fn copy_text(&self) -> Option<String> {
         self.selection_text()
             .map(|t| config::map_clipboard_text(&self.clipboard_map, &t))
+    }
+
+    /// `cursor-click-to-move`: a plain click at `cell` (viewport) on the
+    /// prompt. Returns whether it was handled — `maybePromptClick`'s gates, in
+    /// its order: the shell opted in (`cl`/`click_events`), the option is on,
+    /// the cursor is at a prompt, and the click is not above the prompt. The
+    /// drag/selection gates are the caller's (it only calls on a plain click,
+    /// after clearing the selection as upstream's press does). Also requires
+    /// the viewport at the live bottom, where viewport rows *are* the active
+    /// area the cursor lives in.
+    pub fn prompt_click(&mut self, cell: (u16, u16), enabled: bool) -> bool {
+        use crate::prompt_click::{self as pc, ClickMode};
+        if self.prompt_click == ClickMode::None
+            || !enabled
+            || self.engine.cursor_at_prompt() != Some(true)
+            || self.engine_pin_lines != 0
+        {
+            return false;
+        }
+        let rows = self.engine.prompt_rows();
+        let cursor = (self.snapshot.cursor_x, self.snapshot.cursor_y);
+        let Some(prompt_y) = pc::prompt_row(&rows, cursor.1) else {
+            return false;
+        };
+        if cell.1 < prompt_y {
+            return false;
+        }
+        let bytes = match self.prompt_click {
+            ClickMode::None => return false,
+            ClickMode::ClickEvents { relative } => pc::click_event(cell, prompt_y, relative),
+            ClickMode::Arrows => {
+                let (left, right) = pc::line_move(&rows, cursor, cell);
+                let arrow = |code| KeyInput {
+                    code,
+                    text: None,
+                    mods: KeyMods::default(),
+                    press: true,
+                };
+                // The engine's encoder, so DECCKM's `ESC O D` form is honoured
+                // exactly as upstream picks it.
+                let l = self.engine.encode_key(&arrow(KeyCode::ArrowLeft));
+                let r = self.engine.encode_key(&arrow(KeyCode::ArrowRight));
+                let mut out = Vec::with_capacity((left + right) * 3);
+                for _ in 0..left {
+                    out.extend_from_slice(&l);
+                }
+                for _ in 0..right {
+                    out.extend_from_slice(&r);
+                }
+                out
+            }
+        };
+        if !bytes.is_empty() {
+            let _ = self.pty.write(&bytes);
+        }
+        true
     }
 
     /// Whether `handle_input` copied since the last call (and reset it).

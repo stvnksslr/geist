@@ -32,6 +32,7 @@ pub mod osc_color;
 pub mod osc_notify;
 pub mod profiles;
 pub mod primary;
+pub mod prompt_click;
 pub mod pty;
 pub mod quickterm;
 pub mod render;
