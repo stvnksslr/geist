@@ -350,8 +350,17 @@ fallback engine without app changes:
   forever. Same trap as `BG_IMAGE_CACHE` above, same fix. A missing `rc.exe` only *warns*, so an
   icon-less exe is a build-log line, not a failure. Both assets are **generated**: `mise exec --
   cargo run --example icongen` redraws every size from the per-size geometry tables in
-  `examples/icongen.rs` (each ICO size is drawn on its own integer pixel grid — never downscaled,
-  which is what made earlier revisions mushy). Regenerate; don't hand-edit.
+  `src/iconart.rs` (each ICO size is drawn on its own integer pixel grid — never downscaled,
+  which is what made earlier revisions mushy). Regenerate; don't hand-edit. The same module redraws
+  the master in another palette for `macos-icon*` at runtime; `icon::configure` caches that `Arc` by
+  source, so the shared-`Arc` rule still holds, and a test pins the official palette byte-for-byte
+  against `assets/icon.png`.
+- **The client-drawn caption (`macos-titlebar-style = tabs|hidden`) is a subclass on *every*
+  top-level window**, found by `EnumThreadWindows` each pass (children have no HWND), so all of its
+  inputs are app-global (style, strip height) and the caption buttons are **non-client**
+  (`HTMAXBUTTON` is what triggers Win11 snap layouts). egui therefore never sees the pointer over
+  them: hover/press live in `winchrome` and are matched to a window by screen position. Don't turn
+  them into egui buttons — snap layouts would silently disappear.
 
 - **`egui::Modal` does not stop the terminal grabbing the keyboard.** It blocks pointer interaction
   and tab-traversal focus, but `Memory::request_focus` is unconditional and the pane calls

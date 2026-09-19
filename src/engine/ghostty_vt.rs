@@ -12,6 +12,7 @@ use libghostty_vt::mouse;
 use libghostty_vt::paste;
 use libghostty_vt::render::{CellIteration, CellIterator, CursorVisualStyle, Dirty, RowIterator};
 use libghostty_vt::screen::{CellWide, RowSemanticPrompt, TrackedGridRef};
+use libghostty_vt::selection::gesture;
 use libghostty_vt::style::{StyleColor, Underline};
 use libghostty_vt::terminal::{Mode, Point, PointCoordinate, PointSpace, ScrollViewport};
 use libghostty_vt::{RenderState, Terminal};
@@ -159,6 +160,15 @@ pub struct GhosttyVtEngine {
     /// `ask` requests whose refusal has been cut back out of the responses,
     /// waiting for the session to put them to the user.
     clip_deferrals: Vec<crate::clipboard::Deferral>,
+    /// Upstream's mouse-selection state machine (click count, tracked anchor,
+    /// 60% threshold, word/line snapping while dragging). Declared **after**
+    /// `term` on purpose: fields drop in order, so the terminal is freed first
+    /// and the binding's `Drop` (which passes a NULL terminal) is then the
+    /// documented-safe "terminal already gone" case rather than a leak.
+    gesture: gesture::Gesture<'static>,
+    gesture_press_ev: gesture::PressEvent<'static>,
+    gesture_drag_ev: gesture::DragEvent<'static>,
+    gesture_release_ev: gesture::ReleaseEvent<'static>,
 }
 
 impl GhosttyVtEngine {
@@ -302,6 +312,10 @@ impl GhosttyVtEngine {
             selection_dirty: false,
             clip,
             clip_deferrals: Vec::new(),
+            gesture: gesture::Gesture::new()?,
+            gesture_press_ev: gesture::PressEvent::new()?,
+            gesture_drag_ev: gesture::DragEvent::new()?,
+            gesture_release_ev: gesture::ReleaseEvent::new()?,
         })
     }
 
@@ -1674,6 +1688,26 @@ mod tests {
     }
 
     #[test]
+    fn engine_paste_matches_the_legacy_encoder_and_keeps_pending_replies() {
+        let cases = ["hello", "line1\nline2\r\nline3", "tab\there", "", "x\x1b[201~y"];
+        for bracketed in [false, true] {
+            let mut eng = GhosttyVtEngine::new(20, 5, 100_000).unwrap();
+            if bracketed {
+                eng.write(b"\x1b[?2004h");
+            }
+            for text in cases {
+                let got = eng.encode_paste(text);
+                let want = super::encode_paste_legacy(bracketed, text);
+                assert_eq!(got, want, "bracketed={bracketed} {text:?}");
+            }
+            // An unsent reply (DA1) must survive a paste in between.
+            eng.write(b"\x1b[c");
+            let _ = eng.encode_paste("x");
+            assert!(!eng.take_responses().is_empty(), "pending reply lost");
+        }
+    }
+
+    #[test]
     fn a_cursor_only_move_reaches_the_snapshot() {
         let mut eng = GhosttyVtEngine::new(20, 6, 100_000).unwrap();
         let mut s = GridSnapshot::default();
@@ -1935,6 +1969,206 @@ mod tests {
         assert!(!eng.selection_active());
         assert_eq!(sel_text(&eng), None);
         assert_eq!(sel_span(&mut eng, 0), None);
+    }
+
+    // --- Selection gesture (upstream `SelectionGesture`) -------------------
+    //
+    // Cells are 10x20 px. `gpt(col, frac, row)` is a pointer `frac` pixels into
+    // column `col` — the threshold is round(10 * 0.6) = 6.
+
+    const GCW: f64 = 10.0;
+    const GCH: f64 = 20.0;
+
+    fn gpt(col: u16, frac: f64, row: u16) -> crate::engine::GesturePoint {
+        crate::engine::GesturePoint {
+            px: (col as f64 * GCW + frac, row as f64 * GCH + GCH / 2.0),
+            cell: (col, row),
+        }
+    }
+
+    fn ggeo(rows: u32) -> crate::engine::GestureGeometry {
+        crate::engine::GestureGeometry { cols: 20, cell_w: GCW as u32, height: rows * GCH as u32 }
+    }
+
+    /// Press at `at`, `ms` milliseconds into a monotonic clock.
+    fn gpress(eng: &mut GhosttyVtEngine, at: crate::engine::GesturePoint, ms: u64, output: bool) -> u8 {
+        use std::time::Duration;
+        eng.gesture_press(
+            crate::engine::GesturePress {
+                at,
+                time: Duration::from_millis(1_000 + ms),
+                repeat_interval: Duration::from_millis(500),
+                repeat_distance: GCW,
+                triple: if output { SelectKind::Output } else { SelectKind::Line },
+            },
+            &[],
+        )
+    }
+
+    #[test]
+    fn gesture_single_click_drag_honours_the_60_percent_threshold() {
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        eng.write(b"hello world");
+        let geo = ggeo(3);
+
+        // Pressed in the left 60% of `e`, released in the left 60% of the
+        // second `l`: the pressed cell is in, the cell dragged onto is not.
+        assert_eq!(gpress(&mut eng, gpt(1, 2.0, 0), 0, false), 1);
+        eng.gesture_drag(gpt(3, 2.0, 0), geo, false, &[]);
+        assert_eq!(sel_text(&eng).as_deref(), Some("el"));
+        eng.gesture_release(Some((3, 0)));
+
+        // Pressed past the threshold of `e`, dragged past the threshold of the
+        // second `l`: the pressed cell is out, the dragged-onto cell is in.
+        gpress(&mut eng, gpt(1, 8.0, 0), 5_000, false);
+        eng.gesture_drag(gpt(3, 8.0, 0), geo, false, &[]);
+        assert_eq!(sel_text(&eng).as_deref(), Some("ll"));
+        eng.gesture_release(Some((3, 0)));
+
+        // Within one cell: nothing until the drag crosses the threshold...
+        gpress(&mut eng, gpt(1, 1.0, 0), 10_000, false);
+        assert!(!eng.selection_active(), "a single-click press clears");
+        eng.gesture_drag(gpt(1, 4.0, 0), geo, false, &[]);
+        assert!(!eng.selection_active(), "not across the threshold yet");
+        // ...then the one cell, and the gesture counts as a drag.
+        eng.gesture_drag(gpt(1, 7.0, 0), geo, false, &[]);
+        assert_eq!(sel_text(&eng).as_deref(), Some("e"));
+        assert!(eng.gesture_release(Some((1, 0))), "a threshold crossing is a drag");
+    }
+
+    #[test]
+    fn gesture_single_click_drag_backwards_mirrors_the_threshold() {
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        eng.write(b"hello world");
+        let geo = ggeo(3);
+        // Backwards: the pressed cell is in if pressed *past* its threshold,
+        // the dragged-onto cell is in if the pointer is *before* its threshold.
+        gpress(&mut eng, gpt(4, 8.0, 0), 0, false);
+        eng.gesture_drag(gpt(1, 2.0, 0), geo, false, &[]);
+        assert_eq!(sel_text(&eng).as_deref(), Some("ello"));
+    }
+
+    #[test]
+    fn gesture_double_click_drag_snaps_to_words_in_both_directions() {
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        eng.write(b"hello world again");
+        let geo = ggeo(3);
+
+        // Double-click `hello`, drag forward into the middle of `world`.
+        assert_eq!(gpress(&mut eng, gpt(1, 3.0, 0), 0, false), 1);
+        eng.gesture_release(Some((1, 0)));
+        assert_eq!(gpress(&mut eng, gpt(1, 3.0, 0), 100, false), 2);
+        assert_eq!(sel_text(&eng).as_deref(), Some("hello"), "the press selects the word");
+        eng.gesture_drag(gpt(8, 3.0, 0), geo, false, &[]);
+        assert_eq!(sel_text(&eng).as_deref(), Some("hello world"), "snapped to whole words");
+        eng.gesture_release(Some((8, 0)));
+
+        // Double-click `again`, drag backward into the middle of `hello`: the
+        // anchor word stays whole and the far end snaps to its word's start.
+        gpress(&mut eng, gpt(14, 3.0, 0), 5_000, false);
+        eng.gesture_release(Some((14, 0)));
+        assert_eq!(gpress(&mut eng, gpt(14, 3.0, 0), 5_100, false), 2);
+        eng.gesture_drag(gpt(2, 3.0, 0), geo, false, &[]);
+        assert_eq!(sel_text(&eng).as_deref(), Some("hello world again"));
+    }
+
+    #[test]
+    fn gesture_double_click_drag_honours_selection_word_chars() {
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        eng.write(b"a.b c");
+        let geo = ggeo(3);
+        let dots: &[char] = &[' ', '.'];
+        let press = |eng: &mut GhosttyVtEngine, ms: u64| {
+            eng.gesture_press(
+                crate::engine::GesturePress {
+                    at: gpt(0, 3.0, 0),
+                    time: std::time::Duration::from_millis(1_000 + ms),
+                    repeat_interval: std::time::Duration::from_millis(500),
+                    repeat_distance: GCW,
+                    triple: SelectKind::Line,
+                },
+                dots,
+            )
+        };
+        press(&mut eng, 0);
+        eng.gesture_release(Some((0, 0)));
+        press(&mut eng, 100);
+        assert_eq!(sel_text(&eng).as_deref(), Some("a"), "`.` splits words");
+        eng.gesture_drag(gpt(2, 3.0, 0), geo, false, dots);
+        assert_eq!(sel_text(&eng).as_deref(), Some("a.b"));
+    }
+
+    #[test]
+    fn gesture_triple_click_drag_snaps_to_whole_lines() {
+        let mut eng = GhosttyVtEngine::new(20, 4, 100).unwrap();
+        eng.write(b"first line\r\nsecond line\r\nthird");
+        let geo = ggeo(4);
+        for (i, ms) in [0u64, 100, 200].into_iter().enumerate() {
+            assert_eq!(gpress(&mut eng, gpt(2, 3.0, 0), ms, false) as usize, i + 1);
+            if i < 2 {
+                eng.gesture_release(Some((2, 0)));
+            }
+        }
+        assert_eq!(sel_text(&eng).as_deref(), Some("first line"));
+        // Drag to the middle of the next row: the whole of that line joins.
+        eng.gesture_drag(gpt(3, 3.0, 1), geo, false, &[]);
+        assert_eq!(sel_text(&eng).as_deref(), Some("first line\nsecond line"));
+    }
+
+    #[test]
+    fn gesture_repeat_clicks_reset_when_too_slow_or_too_far() {
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        eng.write(b"hello world");
+        assert_eq!(gpress(&mut eng, gpt(1, 3.0, 0), 0, false), 1);
+        eng.gesture_release(Some((1, 0)));
+        assert_eq!(gpress(&mut eng, gpt(1, 3.0, 0), 900, false), 1, "past the interval");
+        eng.gesture_release(Some((1, 0)));
+        assert_eq!(gpress(&mut eng, gpt(8, 3.0, 0), 1_000, false), 1, "too far away");
+        assert!(!eng.selection_active());
+    }
+
+    #[test]
+    fn gesture_rectangle_drag_selects_a_block() {
+        let mut eng = GhosttyVtEngine::new(20, 4, 100).unwrap();
+        eng.write(b"abcde\r\nfghij\r\nklmno");
+        let geo = ggeo(4);
+        gpress(&mut eng, gpt(1, 1.0, 0), 0, false);
+        eng.gesture_drag(gpt(3, 8.0, 2), geo, true, &[]);
+        assert_eq!(sel_text(&eng).as_deref(), Some("bcd\nghi\nlmn"));
+        // Shift+click extension and adjust_selection keep it a block.
+        assert!(eng.sel_rectangle);
+    }
+
+    #[test]
+    fn gesture_drag_past_an_edge_requests_autoscroll() {
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        eng.write(b"hello");
+        let geo = ggeo(3);
+        gpress(&mut eng, gpt(1, 1.0, 1), 0, false);
+        let mut at = gpt(2, 1.0, 0);
+        at.px.1 = 0.0;
+        assert_eq!(eng.gesture_drag(at, geo, false, &[]), -1, "at the top edge");
+        at.px.1 = -30.0;
+        assert_eq!(eng.gesture_drag(at, geo, false, &[]), -1, "above the pane");
+        let mut at = gpt(2, 1.0, 2);
+        at.px.1 = 60.0;
+        assert_eq!(eng.gesture_drag(at, geo, false, &[]), 1, "at the bottom edge");
+        assert_eq!(eng.gesture_drag(gpt(2, 1.0, 1), geo, false, &[]), 0, "inside");
+        // Release stops it; a drag without a press does nothing.
+        eng.gesture_release(None);
+        eng.gesture_reset();
+        assert_eq!(eng.gesture_drag(at, geo, false, &[]), 0);
+    }
+
+    #[test]
+    fn gesture_single_press_clears_but_a_reset_leaves_the_selection() {
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        eng.write(b"hello world");
+        assert!(eng.select_all());
+        eng.gesture_reset();
+        assert!(eng.selection_active(), "reset is not a clear");
+        gpress(&mut eng, gpt(1, 1.0, 0), 0, false);
+        assert!(!eng.selection_active(), "a single-click press clears, as upstream");
     }
 
     #[test]
@@ -2502,6 +2736,21 @@ fn is_graphics_element(text: &str) -> bool {
 /// (applying `inverse`) against the given defaults and reusing `dst`'s inline
 /// string buffer. Shared by the full-grid snapshot and the smooth-scroll
 /// over-row read.
+/// The pre-`ghostty_terminal_paste` encoder, kept as `encode_paste`'s fallback.
+fn encode_paste_legacy(bracketed: bool, text: &str) -> Vec<u8> {
+    let src = text.as_bytes();
+    let mut data = src.to_vec();
+    // Bracketed markers add 12 bytes; newline→CR is length-preserving.
+    let mut buf = vec![0u8; src.len() + 16];
+    match paste::encode(&mut data, bracketed, &mut buf) {
+        Ok(n) => {
+            buf.truncate(n);
+            buf
+        }
+        Err(_) => src.to_vec(),
+    }
+}
+
 /// Reset a cell to a blank default-colored cell, keeping its string buffer.
 fn blank_cell(cell: &mut Cell) {
     cell.text.clear();
@@ -2895,18 +3144,20 @@ impl TerminalEngine for GhosttyVtEngine {
     }
 
     fn encode_paste(&mut self, text: &str) -> Vec<u8> {
-        let bracketed = self.term.mode(Mode::BRACKETED_PASTE).unwrap_or(false);
-        let src = text.as_bytes();
-        let mut data = src.to_vec();
-        // Bracketed markers add 12 bytes; newline→CR is length-preserving.
-        let mut buf = vec![0u8; src.len() + 16];
-        match paste::encode(&mut data, bracketed, &mut buf) {
-            Ok(n) => {
-                buf.truncate(n);
-                buf
-            }
-            Err(_) => src.to_vec(),
+        // Upstream's shared paste path (`ghostty_terminal_paste`): it applies the
+        // terminal's own encoding rules (bracketing, newline handling) and writes
+        // through the PTY-write callback, i.e. into `responses`. Those may
+        // already hold unsent replies, so set them aside and splice them back.
+        // `allow_unsafe = true`: giest's own gate (`Session::paste_str`) has
+        // already decided; the engine must not second-guess it.
+        use libghostty_vt::terminal::{PasteOutcome, PasteSource};
+        let pending = std::mem::take(&mut *self.responses.borrow_mut());
+        let outcome = self.term.paste(text, PasteSource::Clipboard, true);
+        let encoded = std::mem::replace(&mut *self.responses.borrow_mut(), pending);
+        if matches!(outcome, Ok(PasteOutcome::Written)) && !encoded.is_empty() {
+            return encoded;
         }
+        encode_paste_legacy(self.term.mode(Mode::BRACKETED_PASTE).unwrap_or(false), text)
     }
 
     fn bracketed_paste(&self) -> bool {
@@ -3029,6 +3280,136 @@ impl TerminalEngine for GhosttyVtEngine {
             self.selection_dirty = true;
         }
         self.selection_installed = false;
+    }
+
+    fn gesture_press(&mut self, p: super::GesturePress, word_boundaries: &[char]) -> u8 {
+        use gesture::{Behavior, Behaviors};
+        // Explicit table: the binding's `Behaviors::default()` is the *zeroed*
+        // C struct, i.e. cell/cell/cell — not upstream's cell/word/line.
+        let behaviors = Behaviors::new()
+            .with_single_click_behavior(Behavior::Cell)
+            .with_double_click_behavior(Behavior::Word)
+            .with_triple_click_behavior(match p.triple {
+                SelectKind::Output => Behavior::Output,
+                _ => Behavior::Line,
+            });
+        let ev = &mut self.gesture_press_ev;
+        let configured = (|| -> libghostty_vt::error::Result<()> {
+            // Word chars first: clearing them means replacing the event.
+            if word_boundaries.is_empty() {
+                *ev = gesture::PressEvent::new()?;
+            } else {
+                ev.set_word_boundary_codepoints(word_boundaries)?;
+            }
+            ev.set_position(p.at.px.0, p.at.px.1)?
+                .set_time(p.time)?
+                .set_repeat_interval(p.repeat_interval)?
+                .set_repeat_distance(p.repeat_distance)?
+                .set_behaviors(&behaviors)?;
+            Ok(())
+        })();
+        if configured.is_err() {
+            return 0;
+        }
+        let Ok(gr) = self
+            .term
+            .grid_ref(Point::Viewport(PointCoordinate { x: p.at.cell.0, y: p.at.cell.1 as u32 }))
+        else {
+            return 0;
+        };
+        let installed = match self.gesture_press_ev.apply(&mut self.gesture, &self.term, gr) {
+            Ok(Some(sel)) => self.install_selection(&sel),
+            _ => None,
+        };
+        let count = self.gesture.click_count(&self.term).unwrap_or(0);
+        if installed.is_some() {
+            self.sel_rectangle = false;
+            self.adopt_selection(installed);
+        } else if count == 1 {
+            // Upstream clears on a single-click *press*, not on release.
+            self.selection_clear();
+        }
+        count
+    }
+
+    fn gesture_drag(
+        &mut self,
+        at: super::GesturePoint,
+        geometry: super::GestureGeometry,
+        rectangle: bool,
+        word_boundaries: &[char],
+    ) -> isize {
+        // Only mid-gesture, and only while the press anchor is still on this
+        // screen — upstream bails *without* touching the selection otherwise.
+        if self.gesture.click_count(&self.term).unwrap_or(0) == 0
+            || !matches!(self.gesture.anchor(&self.term), Ok(Some(_)))
+        {
+            return 0;
+        }
+        let ev = &mut self.gesture_drag_ev;
+        let configured = (|| -> libghostty_vt::error::Result<()> {
+            // An empty list means "Ghostty's defaults", which is the *unset*
+            // option — an empty slice would mean no boundaries at all. The
+            // binding has no unset, so a fresh event stands in for one.
+            if word_boundaries.is_empty() {
+                *ev = gesture::DragEvent::new()?;
+            } else {
+                ev.set_word_boundary_codepoints(word_boundaries)?;
+            }
+            ev.set_position(at.px.0, at.px.1)?.set_rectangle(rectangle)?;
+            Ok(())
+        })();
+        if configured.is_err() {
+            return 0;
+        }
+        let Ok(gr) = self
+            .term
+            .grid_ref(Point::Viewport(PointCoordinate { x: at.cell.0, y: at.cell.1 as u32 }))
+        else {
+            return 0;
+        };
+        let geo = gesture::Geometry {
+            columns: geometry.cols.max(1),
+            cell_width: geometry.cell_w.max(1),
+            padding_left: 0,
+            screen_height: geometry.height.max(1),
+        };
+        let sel = self.gesture_drag_ev.apply(&mut self.gesture, &self.term, gr, geo);
+        let installed = match sel {
+            Ok(Some(sel)) => {
+                let rect = sel.is_rectangle();
+                self.install_selection(&sel).map(|i| (i, rect))
+            }
+            _ => None,
+        };
+        match installed {
+            Some((pins, rect)) => {
+                self.sel_rectangle = rect;
+                self.adopt_selection(Some(pins));
+            }
+            // Not across the within-cell threshold yet: upstream installs the
+            // null selection, i.e. clears.
+            None => self.selection_clear(),
+        }
+        match self.gesture.autoscroll(&self.term) {
+            Ok(gesture::Autoscroll::Up) => -1,
+            Ok(gesture::Autoscroll::Down) => 1,
+            _ => 0,
+        }
+    }
+
+    fn gesture_release(&mut self, cell: Option<(u16, u16)>) -> bool {
+        let gr = cell.and_then(|(x, y)| {
+            self.term
+                .grid_ref(Point::Viewport(PointCoordinate { x, y: y as u32 }))
+                .ok()
+        });
+        let _ = self.gesture_release_ev.apply(&mut self.gesture, &self.term, gr);
+        self.gesture.dragged(&self.term).unwrap_or(false)
+    }
+
+    fn gesture_reset(&mut self) {
+        self.gesture.reset(&self.term);
     }
 
     fn select_all(&mut self) -> bool {

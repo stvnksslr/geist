@@ -711,6 +711,46 @@ pub trait TerminalEngine {
     /// Clear any active selection.
     fn selection_clear(&mut self) {}
 
+    /// **Selection gesture** (upstream `SelectionGesture`): a left-button press.
+    ///
+    /// The engine owns the click sequence — repeat timing and distance, the
+    /// click count, and the tracked anchor — and installs the selection the
+    /// click produces: word on a double click, line (or, with
+    /// [`GesturePress::triple`] = `Output`, the command output) on a triple,
+    /// and on a single click it *clears* any selection, as upstream does on
+    /// press. Returns the click count (1..=3), or 0 when unsupported.
+    fn gesture_press(&mut self, _p: GesturePress, _word_boundaries: &[char]) -> u8 {
+        0
+    }
+
+    /// **Selection gesture**: the pointer moved with the button held. Installs
+    /// the drag selection — cell-granular behind upstream's 60%-of-cell
+    /// threshold after a single click, snapped to whole words / lines after a
+    /// double / triple click — and returns the autoscroll direction the
+    /// gesture asks for (`-1` up, `+1` down, `0` none). A drag that has not
+    /// crossed the threshold clears the selection, as upstream does.
+    fn gesture_drag(
+        &mut self,
+        _at: GesturePoint,
+        _geometry: GestureGeometry,
+        _rectangle: bool,
+        _word_boundaries: &[char],
+    ) -> isize {
+        0
+    }
+
+    /// **Selection gesture**: the button was released at `cell` (`None` when
+    /// the pointer is off the grid). Returns whether the gesture *dragged* —
+    /// callers skip click-only actions (opening a link, click-to-move) if so.
+    /// The click count survives, so the next press can become a double click.
+    fn gesture_release(&mut self, _cell: Option<(u16, u16)>) -> bool {
+        false
+    }
+
+    /// **Selection gesture**: abandon the click sequence (mouse tracking took
+    /// over, the pane lost the pointer). Leaves the selection alone.
+    fn gesture_reset(&mut self) {}
+
     /// Move the selection's free end (Ghostty `adjust_selection`), returning the
     /// end's new absolute screen row so the caller can scroll it into view.
     ///
@@ -763,6 +803,39 @@ pub enum SelectionAdjust {
     End,
     BeginningOfLine,
     EndOfLine,
+}
+
+/// A pointer sample for the selection gesture: the position in **pane-local
+/// device pixels** (origin at the grid's top-left) and the viewport cell under
+/// it. Both are needed: the cell picks the row/column, the pixel position
+/// decides the within-cell threshold, repeat-click distance and autoscroll.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GesturePoint {
+    pub px: (f64, f64),
+    pub cell: (u16, u16),
+}
+
+/// Pane geometry the gesture needs to interpret a drag, in device pixels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GestureGeometry {
+    pub cols: u32,
+    pub cell_w: u32,
+    /// Height of the pane's grid: a drag at or past either edge autoscrolls.
+    pub height: u32,
+}
+
+/// A left-button press for [`TerminalEngine::gesture_press`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GesturePress {
+    pub at: GesturePoint,
+    /// Monotonic time of the press.
+    pub time: std::time::Duration,
+    /// Longest gap between presses that still counts as a repeat click.
+    pub repeat_interval: std::time::Duration,
+    /// Farthest (in pixels) a repeat click may land from the first one.
+    pub repeat_distance: f64,
+    /// What a triple click selects: `Line`, or `Output` (Ctrl+triple-click).
+    pub triple: SelectKind,
 }
 
 /// Which semantic extent [`TerminalEngine::select_semantic`] should find.

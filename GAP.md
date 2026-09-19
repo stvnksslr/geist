@@ -54,7 +54,7 @@ Effort: **S** <1d · **M** 1–3d · **L** ~1wk · **XL** multi-week.
 | ~~`command-palette-entry`~~ | ✅ Upstream grammar incl. Zig-literal quoting; `clear` drops the built-ins, empty restores them; unparseable actions are dropped. | — |
 | ~~`window-subtitle`, `window-title-font-family`~~ | ✅ ◐ Subtitle (`working-directory`) is appended to the window caption as `title — cwd` (a Windows caption has one line). The title font applies to the **tab strip** only — the caption is drawn by DWM with the system font; resolved through the renderer's font scan, startup-only. | — |
 | ~~`app-notifications`~~ | ✅ In-app toasts ("Copied to clipboard", "Reloaded the configuration"); `Window::render_toast`, per-window egui temp data. | S |
-| `language` | Only meaningful once the UI is localized — deferred. | — |
+| `language` | **Decided against for now.** Upstream uses it to pick a gettext catalog for its GUI strings; giest ships no translations, so accepting the key would be a no-op that looks supported. Revisit if giest's UI is ever localized. | — |
 
 **A2. Windows analogues of platform keys.** Done (`winchrome.rs`): ✅ `window-decoration`
 (`none`/`false` → `ViewportCommand::Decorations(false)`; `auto`/`client`/`server` all mean "native
@@ -67,7 +67,9 @@ ignores them; unlike GTK not gated on `window-theme = ghostty`), ✅ `window-vsy
 client to whole cells of the non-grid overhead measured each frame; with splits it snaps the whole
 pane area, not each pane), ✅ `quick-terminal-animation-duration` (slide in/out from the anchored
 edge, ease-out cubic; `center` doesn't slide; a newly *created* quick terminal may show one frame at
-rest before the slide starts). Still open: `window-colorspace` (display-p3 → HDR swapchain, L),
+rest before the slide starts). ◐ `window-colorspace` (see the chrome ledger below: `display-p3`
+reinterprets terminal colours as P3 and maps them into the **sRGB** swapchain; a wide-gamut
+swapchain is not reachable through wgpu-hal 29 + egui-wgpu), ✅ `macos-titlebar-style`, ✅ `macos-icon*`,
 ~~`font-thicken` + `-strength`~~ ✅ (1px coverage dilation weighted by strength; upstream is
 macOS-only — needs eyeballing), ~~`drag-handle`~~ ✅ (see §C pane drag), ~~`auto-update` / `auto-update-channel`~~ ✅ (§C).
 
@@ -125,8 +127,8 @@ the sideload the byte never reaches the engine. See the ledger "Protocol leftove
 | Explorer "Open giest here" | ✅ | `giest +register-shell-integration` / `+unregister-shell-integration` (`shellreg.rs`): HKCU `Directory\Background\shell`, `Directory\shell`, `Drive\shell` → `"<exe>" "%V"` → a new tab over IPC. Never registered implicitly. | S / M |
 | Taskbar Jump List (Dock menu) | ✅ | `jumplist.rs`: `ICustomDestinationList` user tasks New Window / New Tab / one per profile (`+new-tab --command=<profile>`); hand-declared vtables pinned by an ignored host test under a throwaway AppUserModelID. Giest key `jump-list = false` deletes the list. **Needs a human glance at the taskbar menu.** | M |
 | Restart restore (`RegisterApplicationRestart`), window frames in `state.rs` | ✅ | `restart.rs`: registered with `--restore-session` (no crash/hang restarts); the root window's subclass writes a ≤2 s-old layout snapshot on `WM_ENDSESSION`, since `on_exit` never runs then (verified by sending the message). State files gain an optional `F x y w h max` record per window — old files parse unchanged and older giests skip it; restored exactly at 150% DPI (verified). A real update/reboot relaunch needs a human. | S |
-| Custom caption / tabs-in-titlebar | ⬜ | `WM_NCCALCSIZE` client-drawn caption | L |
-| Runtime custom app icon | ⬜ | tinted icon via `icongen` + `ViewportCommand::Icon` | M |
+| Custom caption / tabs-in-titlebar | ✅ | `macos-titlebar-style = tabs` (opt-in; see the chrome ledger). `WM_NCCALCSIZE` subclass on every giest top-level window, non-client caption buttons (Win11 snap layouts on the maximize button), strip drag / double-click through `ViewportCommand`. **Needs a human check** (list in the ledger). | L |
+| Runtime custom app icon | ✅ | `macos-icon` / `macos-custom-icon` / `macos-icon-frame` / `-ghost-color` / `-screen-color`: the artwork moved to `src/iconart.rs` (shared with `icongen`, byte-identical output) and is redrawn in the configured palette; one shared `Arc`, live on reload. | M |
 | **Release packaging** | ✅ | `mise package` (`scripts/package.ps1`) → `dist/<v>/`: portable zip (exe + `conpty.dll` + `OpenConsole.exe` + icon + `licenses/`: Ghostty MIT, ConPTY MIT, JetBrains Mono OFL, icon), an MSIX (`makeappx`; manifest template `packaging/AppxManifest.xml.in`, full trust, `giest.exe` execution alias), `giest.appinstaller` (24 h on-launch + background update checks; **not hosted**), and `giest-manifest.json` (per-package SHA-256 + size). Mtimes pinned to the HEAD commit for reproducible zips. **Needs a human:** a code-signing certificate (the MSIX is unsigned and Windows refuses to install an unsigned package; `-CertPath`/`-Publisher` sign it), hosting for the `.appinstaller`/`.msix`, and a giest `LICENSE` file (the repo has none; the script copies one if it appears). winget manifest not written. | M |
 | **Auto-update** | ✅ | `update.rs`: `auto-update = off\|check\|download` (default `check` in release builds, `off` in debug — upstream defers to Sparkle's stored preference), `auto-update-channel = stable\|tip` (default: the running version's channel, as upstream), giest-specific `auto-update-feed` (default: compile-time `GIEST_UPDATE_FEED` or the repo's GitHub `/releases` API). Checks 5 s after start and daily; `check_for_updates` checks now. A release is an update only if it carries `giest-manifest.json`; the zip is downloaded to `%LOCALAPPDATA%\giest\updates`, **SHA-256-verified before extraction** (a mismatch deletes it), extracted with `tar.exe`, and marked `pending.json`. Applied at the **next launch** (`startup_apply`, first thing in `main`): each replaced file is *renamed* to `*.old` (the running exe is never deleted or overwritten), the new ones copied in (rolled back on failure), the new exe relaunched with the same args; `*.old` swept on a later launch. The pill (tab strip, right of ⏷) has upstream's wording: `Update Available: X` (click downloads), `Downloading: N%`, `Restart to Complete Update` (click → native confirm → layout saved → relaunch with `--restore-session` + `GIEST_UPDATE_WAIT_PID`; shells end, as with Sparkle), `No Updates Available` / `Update Failed` (fade after 8 s). HTTP is `curl.exe` from System32 behind an `Http` trait; the tests use a mock and never touch the network. MSIX installs (`GetCurrentPackageFullName`) never self-update. Divergences: no release-notes popover (the tooltip carries the URL), no EdDSA signature like Sparkle's — the hash comes from the same release, so it catches corruption, not a compromised release; Authenticode is the real answer and needs a cert. Unverified live: nothing is published yet, so the end-to-end path ran only against the mock. | L |
 | Default-terminal handoff | ✅ | `giest +register-default-terminal` (HKCU, exact restore), `giest -Embedding` COM server + proxy/stub DLL, handed-off PTY backend, IPC forwarding to a running instance, MSIX terminal-host declaration. Verified live with Windows Terminal's OpenConsole as the console half; **needs a human** for the no-WT case and the packaged Settings path - see "Default-terminal handoff" below | XL |
@@ -199,10 +201,10 @@ real chain, delegation live ~1 s): a `cmd` started with a new console appears in
 | OSC 99 (kitty notifications) | ✅ | side-scanned by `osc_notify.rs` (chunking + `o=`); the engine's notification callback never sees OSC 99, which is why the scanner is not retired — see "Protocol leftovers" |
 | OSC 5522 kitty clipboard + paste-events mode 5522 | ✅ | `clipboard.rs` + engine callbacks, existing permission prompts; see the ledger "Kitty clipboard (OSC 5522) + engine-side OSC 52 / pwd" |
 | OSC 52 / pwd **effects in lib-vt** | ✅ | `osc52.rs` and `osc7.rs` retired; same ledger |
-| `ghostty_terminal_paste` | ◐ | wrapped (`Terminal::paste`, giest-local) and used for mode-5522 paste events; ordinary text pastes still go through `encode_paste` behind the same gate — S |
+| `ghostty_terminal_paste` | ✅ | every paste now encodes through the engine (`encode_paste` → `Terminal::paste`, `allow_unsafe` since giest's own gate has decided), with the old encoder as fallback; byte-identical on plain, multi-line, bracketed and injected-`ESC[201~` input (pinned by test). |
 | Native search API (`ghostty_search_*`) | ✅ N/A | evaluated, not adopted: no case-sensitive mode and no regex, so it would lose the `Aa` toggle; regex search built on giest's own wrap-joined text instead — see the ledger "Regex search, and why not the native search API" |
 | Dirty-row iteration | ✅ | `f00c510`: only dirty rows are re-copied; the render state is now acknowledged each frame (it reported `Full` forever before). Needs an eyeball pass for stale cells while typing, scrolling and changing themes. |
-| Selection gesture engine | ⬜ | optional replacement for giest's click-count logic — M |
+| Selection gesture engine | ✅ | adopted: left-button selection now runs on `ghostty_selection_gesture_*` (press/drag/release) — click counting, the 60%-of-cell threshold, double/triple-click-*drag* word/line snapping, Ctrl+triple-click output, rectangle drag, and the autoscroll *decision*. giest keeps its 15 ms rate clock and smooth scroll instead of `AUTOSCROLL_TICK` (which scrolls the engine viewport behind `animate_scroll`'s back). See the ledger "Selection gesture engine" |
 | Default cursor style/blink engine options | ✅ N/A | probed: equivalent to `decscusr.rs` for initial, `CSI 0 q`, RIS and mode 12 — except upstream ignores mode 12 when `cursor-style-blink` is set, which only the scanner does. The scanner stays. |
 | OSC 72 kitty drag-and-drop | ⬜ blocked | bytes survive both ConPTYs (probed), and the engine parses OSC 72, answers `t=q` and tracks registrations — but the C API has **no way to deliver a drop** (upstream calls `kitty.dnd.State.dragDrop` from Zig; no C export, no `drag_and_drop` effect in the C wrapper). giest therefore **withholds the engine's OSC 72 replies** so no program is told drops will come; file drops keep pasting paths. See the ledger "Protocol leftovers" |
 | Kitty animation / relative placements / glyph protocol | ◐ | unblocked by a **sideloaded ConPTY** (`conpty-passthrough`, `scripts/fetch-conpty.ps1`). Relative placements ✅, client-driven frames (`a=a,c=N`) ✅, transient ✅ (engine-side eviction); autoplay (`s=2/3`) ⬜ — `animationTick` isn't in the C API, and the C API exposes no frame count or per-frame gap either, so giest can't drive frames itself (re-checked at b32f20f); glyph protocol ⬜ — no outline read-back in the C API, so it is **disabled** rather than advertised. See the kitty section |
@@ -220,7 +222,7 @@ real chain, delegation live ~1 s): a `cmd` started with a new console appears in
 4. **Shell integration:** ✅ `shell-integration(-features)`, ✅ WSL scripts; ✅ `cursor-click-to-move`.
 5. ✅ **Automation:** CLI args → named-pipe IPC → Explorer entry → Jump List → restart restore → notification click.
 6. **Protocols:** ✅ OSC 5522; ✅ OSC 52 / OSC 7 scanners moved onto lib-vt; ✅ regex search (native search API evaluated, not adopted — see the ledger).
-7. **Chrome:** custom caption + `window-decoration` + titlebar colors; runtime icon (L).
+7. ✅ **Chrome:** custom caption (`macos-titlebar-style = tabs`) + `window-decoration` + titlebar colors; runtime icon; ◐ `window-colorspace` (sRGB swapchain).
 8. **Long tail:** accessibility (L), ~~auto-update~~ ✅, ~~tab overview~~ ✅, ~~default-terminal handoff~~ ✅ (needs WT or a rebuilt OpenConsole; see above), and
    ~~shipping the out-of-band ConPTY with release builds~~ ✅ (`mise package` bundles it; the dev tree still uses the
    `scripts/fetch-conpty.ps1` step) so kitty graphics work out of the box.
@@ -393,8 +395,10 @@ binding, leader sequences, key tables, `catch_all`, `chain=`, all four trigger f
 gap against upstream's action union is **`show_gtk_inspector`**, which is GTK's own widget
 inspector and has no Windows counterpart. giest's `inspector:` is now done.)*
 
-**Selection / scroll / search** — upstream's 60%-of-cell threshold for including the clicked/dragged
-cell; the double-click-*drag* word-snapping refinement. *(**regex search** now done — see its ledger; scrollback search plus
+**Selection / scroll / search** — deep press (no Windows pressure input). *(double-click on a link now selects the whole link, upstream
+`linkAtPin` override on click 2, OSC 8 or bare URL, one row; the **60%-of-cell
+threshold** and **double/triple-click-drag word/line snapping** are now done via the engine's
+selection gesture — see "Selection gesture engine"; **regex search** now done — see its ledger; scrollback search plus
 **upstream's five search actions** (`start_search` / `end_search` / `navigate_search:` /
 `search_selection` / `search:`),
 **cross-wrap matches and drift-free tracking**, **semantic selection**, the **full binding-backed
@@ -1269,10 +1273,10 @@ needed.
   *Divergence:* the selection end is resolved against the frame's *current* viewport, so it trails
   the scroll by one frame and catches up on the next tick — structurally the same one-frame lag the
   scrollbar drag documents.
-- **Not done:** upstream's **60%-of-cell-width threshold** for whether the clicked and dragged cells
-  are included (`Surface.zig::mouseSelection`) — giest still includes on cell hit, so a drag can
-  grab one more cell than Ghostty would; and the double-click-*drag* word-snapping refinement
-  (`select_word_between`). Both remain from the migration ledger.
+- **Superseded:** the 60%-of-cell threshold and double-click-*drag* word snapping that were "not
+  done" here are now done by the engine's selection gesture — see "Selection gesture engine". The
+  drag path described above (`selection_begin`/`selection_update` + the app's own edge test) is
+  gone; `selection_begin`/`update` survive only for Shift+click extend.
 - Verified by engine tests driving real sequences: adjust moves the free end and leaves the anchor
   (read untrimmed, so the space it crosses is visible), adjust with no selection reports "not
   performed", a block selection takes three equal column spans where a linear one takes everything
@@ -1586,6 +1590,47 @@ Landed: `working-directory`, `window-new-tab-position`, `window-padding-balance`
   reported via OSC 7, which came back as the configured directory. Search colors and padding balance
   are visual and want eyeballing.
 
+### Selection gesture engine — ✅ divergences
+
+Left-button mouse selection moved onto upstream's `SelectionGesture` through the binding's safe
+`selection::gesture` wrappers (no new vendored delta). **Why adopt rather than port:** the gesture
+*is* `Surface.zig`'s selection logic, extracted — the 60%-of-cell threshold (`dragSelection`, both
+directions, and the same-cell crossing that counts as a drag), word/line/output snapping while
+dragging after a double/triple click, repeat-click timing *and distance*, and a tracked anchor that
+drops the gesture when the screen switches. A port would have been a second copy free to drift.
+- **Flow:** `App` feeds raw primary press / held-move / release (not egui's click classification)
+  to `Session::gesture_press/drag/release`, which call `TerminalEngine::gesture_*`. Press clears
+  on a single click (upstream clears on press, not release); a drag that hasn't crossed the
+  threshold installs *no* selection (i.e. clears), as upstream's `setSelection(null)`. Copy-on-select
+  fires on release with a selection. Link-open and click-to-move are skipped when the gesture
+  dragged or the click was a double/triple (`left_click_dragged`, as upstream).
+- **Behaviour table set explicitly.** The binding's `Behaviors::default()` is the *zeroed* C struct —
+  cell/cell/cell, not upstream's cell/word/line — so a default table silently kills double-click.
+- **Empty `selection-word-chars` = "Ghostty's defaults" = the option *unset*.** The binding has no
+  unset for it, so the reused event object is replaced by a fresh one instead of being set to `[]`
+  (which would mean "no boundaries": the whole line is one word).
+- **Autoscroll divergence:** the gesture decides *when* (within 1 px of, or past, the grid's
+  top/bottom edge — upstream's rule, replacing giest's own outside-the-pane test), but giest does
+  **not** use `AUTOSCROLL_TICK`: that calls `scrollViewport` on the engine directly, which would
+  desync `Session::engine_pin_lines` from `animate_scroll`. The rate stays giest's 15 ms clock and
+  the scroll goes through the smooth-scroll target; the next frame's drag resolves against the
+  scrolled viewport — the same "scroll one row, then drag" as the tick, one frame later.
+- **Geometry:** pane-local device pixels; `padding_left = 0` because the pane rect already excludes
+  padding; `screen_height` is the grid height (`rows * cell_h`).
+- **Repeat interval** is `click-repeat-interval` (Windows double-click time by default), per click
+  as upstream — egui allows 2x for the third click, the gesture does not. Repeat distance is one
+  cell width, as upstream.
+- **Unchanged:** Shift+click extend still uses `selection_begin/update` (upstream extends via its own
+  path); mouse-tracking mode resets the gesture. Double-click on a link selects the whole link (OSC 8 span or bare URL, one row; `Session::link_span_at`).
+  **Not done:** deep press (no pressure
+  input on Windows).
+- **Tests (engine, real terminal):** single-click-drag threshold forward, backward and within one
+  cell; double-click-drag word snapping forward and backward; `selection-word-chars` during a drag;
+  triple-click-drag line snapping; repeat reset on time and distance; rectangle drag; autoscroll
+  direction at/past each edge and none after release; single press clears, reset doesn't.
+- **Needs hands:** press/drag/release arbitration against the scrollbar thumb, split dividers and the
+  inspector; the click after focusing an unfocused pane; autoscroll feel at 60/144 Hz.
+
 ### Semantic selection — ✅ divergences
 
 Double-click (word), triple-click (logical line) and Ctrl+triple-click (command output) now come
@@ -1616,7 +1661,7 @@ read off `Surface.zig` rather than guessed.
 - **Not done: the double-click-*drag* refinement.** The binding exposes `select_word_between` with a
   both-directions recipe (upstream uses it at `Surface.zig:4713`) so dragging from one word to
   another snaps to whole words; giest still extends by cell after the initial double-click.
-- **Not matched: upstream checks for a link under the cursor *before* word selection** on
+- **Superseded (now matched): upstream checks for a link under the cursor *before* word selection** on
   double-click, so double-clicking a URL selects the whole link. giest has `hyperlink_at` and could,
   but the double-click path doesn't consult it yet.
 - **Verified by engine tests driving real sequences** — word boundaries with and without a custom
@@ -2350,3 +2395,65 @@ Re-checked against the pinned engine (ghostty b32f20f) and its C API.
   from `renderer/generic.zig`; `kitty_graphics.h` exports no tick, no frame count and no per-frame
   gap, so giest can't even drive frames itself with synthetic `a=a,c=N` writes. Client-driven frames
   keep working.
+
+### Window chrome: client-drawn caption, runtime icon, colorspace
+
+**`macos-titlebar-style`** maps upstream's four values onto Windows: `native` (giest's default -
+a divergence from upstream's `transparent`), `transparent` (native caption tinted to the configured
+`background`/`foreground` through DWM on Win11, unless `window-titlebar-*` is set), `tabs` (the tab
+strip *is* the titlebar, Windows Terminal style), `hidden` (the same client-drawn frame without
+caption buttons; empty strip space still drags). Applies live on reload (upstream: new windows only).
+
+How `tabs` works (`winchrome.rs`): the window keeps `WS_CAPTION | WS_THICKFRAME`, so Aero snap,
+shadow, rounded corners and the side/bottom resize borders stay native. A comctl32 subclass on
+**every** giest top-level window of the UI thread (found per pass by `EnumThreadWindows` + winit's
+`Window Class`; child viewports have no reachable HWND) answers `WM_NCCALCSIZE` by keeping the
+default side/bottom borders and dropping the caption; maximized, the top moves down by the frame
+thickness (`SM_CYFRAME + SM_CXPADDEDBORDER` at the window's DPI) so nothing is off-screen.
+`WM_NCHITTEST` returns `HTTOP`/`HTTOPLEFT`/`HTTOPRIGHT` for the top frame band (not when
+maximized) and `HTMINBUTTON`/`HTMAXBUTTON`/`HTCLOSE` over the three 46-DIP buttons - the
+maximize code is what brings up the **Win11 snap-layouts flyout**. The subclass swallows
+`WM_NCLBUTTONDOWN/UP` for those codes (otherwise `DefWindowProc` paints a classic button) and posts
+`SC_MINIMIZE`/`SC_MAXIMIZE`/`SC_RESTORE`/`SC_CLOSE` on release (close therefore goes through the
+normal confirm-close path). Hover/press is tracked there (`TME_NONCLIENT`) and matched to a window
+by the pointer's screen position, since the client never sees the pointer over a non-client button.
+Empty strip space is an egui interaction registered *under* the tabs: drag sends
+`ViewportCommand::StartDrag`, double-click toggles `Maximized` - both work in every window. The
+geometry is pure and table-tested (`caption_hit`, `caption_buttons`, `nc_client_rect`); a live probe
+at 150% returned `HTCLOSE`/`HTMAXBUTTON`/`HTTOP` at the expected client points and a maximized
+client origin of exactly (0, 0).
+
+Limits: the strip height is app-global (one font), so with `hidden` + `window-show-tab-bar = auto`
+two windows with and without a strip share one value; no system menu on right-click of empty strip
+space (`Alt+Space` still works); Windows 10 shows no top border line (Win11's DWM border covers it);
+the undecorated quick terminal and `window-decoration = none` windows are skipped (they have no
+`WS_CAPTION`). **Needs a human check:** hover the maximize button (snap-layouts flyout appears, and
+choosing a layout snaps); minimize / maximize / restore / close from the buttons, including the
+close-confirm dialog; drag the window by empty strip space (and Aero-snap it to an edge / shake);
+double-click empty strip to maximize and again to restore; maximized: top tab row fully visible,
+buttons reach the top-right screen corner, no strip of wallpaper; resize from the top edge and both
+top corners; drag between monitors with different scaling (button size and top band follow the new
+DPI); the same on a second window (`new_window`) and a torn-out tab; `background-opacity < 1` still
+translucent with no grey band at the top.
+
+**Runtime icon** (`icon.rs` + `iconart.rs`): the icon artwork moved out of `examples/icongen.rs`
+into the library (`icongen` still produces byte-identical assets - verified - and a test pins the
+256 master against `assets/icon.png`). `macos-icon` presets are giest palettes (tile gradient,
+monogram, cursor, rim) in the spirit of upstream's artist-drawn variants; `custom-style` maps
+`-screen-color` (gradient, bottom first) to the tile, `-ghost-color` to the monogram, `-frame` to a
+rim colour; `custom` loads `macos-custom-icon` as PNG/JPEG (no ICNS), shrunk to 256. The drawn
+`Arc` is cached by source, so the one-shared-`Arc` rule holds; a changed source is pushed to the
+root with `ViewportCommand::Icon` and reaches children through `icon::apply`'s `patch`. The
+embedded `.ico` (Explorer, pinned shortcut) stays official. **Needs a human glance** at the
+taskbar button / Alt-Tab after setting e.g. `macos-icon = paper`.
+
+**`window-colorspace`** ◐: `display-p3` interprets terminal colours (config + SGR direct colour,
+and the one egui terminal fill) as Display P3 and converts them to sRGB, clipped to the sRGB gamut
+(`colorspace.rs`; memoized per colour in `GpuResources::color`). Images, emoji and the chrome are
+left alone, as upstream does. A real wide-gamut swapchain is not reachable today: the only DXGI
+route is an FP16 swapchain composited as scRGB; wgpu-hal 29's DX12 backend never calls
+`SetColorSpace1`, egui-wgpu picks the surface format itself (8-bit unorm preferred, no override),
+and egui paints in gamma space, so a linear float target would need a third vendored crate plus a
+conversion pass for all UI. Without HDR/Advanced Color on the display DWM would clamp scRGB to
+sRGB anyway - i.e. to this output. **Needs eyeballing**: saturated reds/greens look slightly
+different from `srgb`; greys are unchanged (pinned by test).

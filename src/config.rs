@@ -1183,6 +1183,64 @@ impl WindowDecoration {
     }
 }
 
+/// Ghostty `macos-titlebar-style`, mapped onto a Windows caption.
+///
+/// - `native` - the system caption (giest's default).
+/// - `transparent` - the system caption, tinted to the terminal background
+///   through DWM (Win11) unless `window-titlebar-background` says otherwise.
+/// - `tabs` - a client-drawn caption: the tab strip *is* the titlebar, with
+///   giest's own minimize/maximize/close buttons (Windows Terminal style).
+/// - `hidden` - the client-drawn frame without caption buttons; the window
+///   keeps its resize border and rounded corners, and empty tab-strip space
+///   still drags it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TitlebarStyle {
+    Native,
+    Transparent,
+    Tabs,
+    Hidden,
+}
+
+impl TitlebarStyle {
+    /// Whether giest draws the caption itself (`WM_NCCALCSIZE` extension).
+    pub fn client_drawn(self) -> bool {
+        matches!(self, TitlebarStyle::Tabs | TitlebarStyle::Hidden)
+    }
+}
+
+/// Ghostty `window-colorspace`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Colorspace {
+    Srgb,
+    DisplayP3,
+}
+
+/// Ghostty `macos-icon`. The named presets are giest palettes over the giest
+/// artwork (upstream's are hand-drawn Ghostty art giest does not ship).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum AppIcon {
+    Official,
+    Blueprint,
+    Chalkboard,
+    Microchip,
+    Glass,
+    Holographic,
+    Paper,
+    Retro,
+    Xray,
+    Custom,
+    CustomStyle,
+}
+
+/// Ghostty `macos-icon-frame`: here, the colour of the tile's rim.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum IconFrame {
+    Aluminum,
+    Beige,
+    Plastic,
+    Chrome,
+}
+
 /// Ghostty `window-show-tab-bar`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShowTabBar {
@@ -1484,6 +1542,19 @@ pub struct Config {
     /// only; older systems ignore them.
     pub window_titlebar_background: Option<Rgb>,
     pub window_titlebar_foreground: Option<Rgb>,
+    /// Ghostty `macos-titlebar-style`, mapped onto Windows (see
+    /// [`TitlebarStyle`]).
+    pub titlebar_style: TitlebarStyle,
+    /// Ghostty `window-colorspace`. `display-p3` reinterprets terminal colors
+    /// as Display P3 and maps them into the (sRGB) swapchain; see
+    /// `colorspace.rs` for why the swapchain itself stays sRGB.
+    pub window_colorspace: Colorspace,
+    /// Ghostty `macos-icon` and its companions: the running window's icon.
+    pub app_icon: AppIcon,
+    pub custom_icon: Option<String>,
+    pub icon_frame: IconFrame,
+    pub icon_ghost_color: Option<Rgb>,
+    pub icon_screen_color: Vec<Rgb>,
     /// Ghostty `window-show-tab-bar`.
     pub window_show_tab_bar: ShowTabBar,
     /// Start new windows maximized / fullscreen. Ghostty `maximize` /
@@ -1760,6 +1831,15 @@ impl Default for Config {
             window_decoration: WindowDecoration::Auto,
             window_titlebar_background: None,
             window_titlebar_foreground: None,
+            // Divergence: upstream's default is `transparent`. The native
+            // caption stays the default on Windows; `tabs` is opt-in.
+            titlebar_style: TitlebarStyle::Native,
+            window_colorspace: Colorspace::Srgb,
+            app_icon: AppIcon::Official,
+            custom_icon: None,
+            icon_frame: IconFrame::Aluminum,
+            icon_ghost_color: None,
+            icon_screen_color: Vec::new(),
             // Divergence: upstream's default is `auto`. giest's tab strip also
             // carries the new-tab profile picker, so hiding it with one tab would
             // hide the only mouse route to cmd / WSL / ... -- keep it by default.
@@ -3012,6 +3092,71 @@ const SETTERS: &[(&str, Setter)] = &[
             _ => parse_color(v).or(c.window_titlebar_foreground),
         }
     }),
+    ("macos-titlebar-style", |c, v, d| {
+        c.titlebar_style = match v.to_ascii_lowercase().as_str() {
+            "" => d.titlebar_style,
+            "native" => TitlebarStyle::Native,
+            "transparent" => TitlebarStyle::Transparent,
+            "tabs" => TitlebarStyle::Tabs,
+            "hidden" => TitlebarStyle::Hidden,
+            _ => c.titlebar_style,
+        }
+    }),
+    ("window-colorspace", |c, v, d| {
+        c.window_colorspace = match v.to_ascii_lowercase().as_str() {
+            "" => d.window_colorspace,
+            "srgb" => Colorspace::Srgb,
+            "display-p3" => Colorspace::DisplayP3,
+            _ => c.window_colorspace,
+        }
+    }),
+    ("macos-icon", |c, v, d| {
+        c.app_icon = match v.to_ascii_lowercase().as_str() {
+            "" => d.app_icon,
+            "official" => AppIcon::Official,
+            "blueprint" => AppIcon::Blueprint,
+            "chalkboard" => AppIcon::Chalkboard,
+            "microchip" => AppIcon::Microchip,
+            "glass" => AppIcon::Glass,
+            "holographic" => AppIcon::Holographic,
+            "paper" => AppIcon::Paper,
+            "retro" => AppIcon::Retro,
+            "xray" => AppIcon::Xray,
+            "custom" => AppIcon::Custom,
+            "custom-style" => AppIcon::CustomStyle,
+            _ => c.app_icon,
+        }
+    }),
+    ("macos-custom-icon", |c, v, d| c.custom_icon = opt_string(v, &d.custom_icon)),
+    ("macos-icon-frame", |c, v, d| {
+        c.icon_frame = match v.to_ascii_lowercase().as_str() {
+            "" => d.icon_frame,
+            "aluminum" => IconFrame::Aluminum,
+            "beige" => IconFrame::Beige,
+            "plastic" => IconFrame::Plastic,
+            "chrome" => IconFrame::Chrome,
+            _ => c.icon_frame,
+        }
+    }),
+    ("macos-icon-ghost-color", |c, v, d| {
+        c.icon_ghost_color = match v {
+            "" => d.icon_ghost_color,
+            _ => parse_color(v).or(c.icon_ghost_color),
+        }
+    }),
+    ("macos-icon-screen-color", |c, v, d| {
+        // Comma-separated, bottom of the gradient first. One bad entry rejects
+        // the whole value rather than silently dropping a stop.
+        c.icon_screen_color = match v.trim() {
+            "" => d.icon_screen_color.clone(),
+            v => v
+                .split(',')
+                .map(|s| parse_color(s.trim()))
+                .collect::<Option<Vec<_>>>()
+                .filter(|l| !l.is_empty() && l.len() <= 64)
+                .unwrap_or_else(|| c.icon_screen_color.clone()),
+        }
+    }),
     ("window-show-tab-bar", |c, v, d| {
         c.window_show_tab_bar = match v.to_ascii_lowercase().as_str() {
             "" => d.window_show_tab_bar,
@@ -3763,6 +3908,34 @@ mod tests {
         assert_eq!(parsed("window-decoration = false").window_decoration, WindowDecoration::None);
         assert_eq!(parsed("window-decoration = true").window_decoration, WindowDecoration::Auto);
         assert_eq!(parsed("window-decoration = server").window_decoration, WindowDecoration::Server);
+        // `macos-titlebar-style`: native by default (divergence), upstream's
+        // four values, junk keeps the previous value.
+        assert_eq!(d.titlebar_style, TitlebarStyle::Native);
+        assert_eq!(parsed("macos-titlebar-style = tabs").titlebar_style, TitlebarStyle::Tabs);
+        assert_eq!(parsed("macos-titlebar-style = hidden").titlebar_style, TitlebarStyle::Hidden);
+        assert_eq!(
+            parsed("macos-titlebar-style = transparent").titlebar_style,
+            TitlebarStyle::Transparent
+        );
+        assert_eq!(
+            parsed("macos-titlebar-style = tabs\nmacos-titlebar-style = bogus").titlebar_style,
+            TitlebarStyle::Tabs
+        );
+        assert!(TitlebarStyle::Tabs.client_drawn() && !TitlebarStyle::Transparent.client_drawn());
+        assert_eq!(d.window_colorspace, Colorspace::Srgb);
+        assert_eq!(
+            parsed("window-colorspace = display-p3").window_colorspace,
+            Colorspace::DisplayP3
+        );
+        assert_eq!(d.app_icon, AppIcon::Official);
+        assert_eq!(parsed("macos-icon = xray").app_icon, AppIcon::Xray);
+        assert_eq!(parsed("macos-icon-frame = chrome").icon_frame, IconFrame::Chrome);
+        assert_eq!(
+            parsed("macos-icon-screen-color = #000000,#ffffff").icon_screen_color,
+            vec![Rgb::new(0, 0, 0), Rgb::new(255, 255, 255)]
+        );
+        // One bad stop rejects the whole list.
+        assert!(parsed("macos-icon-screen-color = #000000,nope").icon_screen_color.is_empty());
         assert!(!WindowDecoration::None.decorated() && WindowDecoration::Client.decorated());
         assert_eq!(
             parsed("window-titlebar-background = #102030").window_titlebar_background,

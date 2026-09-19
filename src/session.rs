@@ -170,6 +170,12 @@ pub struct Session {
     /// once per *frame* instead would scroll at the refresh rate, which is
     /// upstream's speed at 60 Hz and more than twice it at 144 Hz.
     autoscroll_accum: f32,
+    /// A left press on this pane started a selection gesture and its button
+    /// is still down: drags go to the engine gesture until it is released.
+    gesture_held: bool,
+    /// Click count of the last gesture press (1..=3), so a release knows it
+    /// ended a double/triple click rather than a plain click.
+    gesture_clicks: u8,
     /// Explicit pane title from `set_surface_title`, winning over the program's
     /// own OSC 0/2 title until cleared with an empty value.
     title_override: Option<String>,
@@ -442,6 +448,8 @@ impl Session {
             cursor_style: config.cursor_style,
             cursor_style_blink: config.cursor_style_blink,
             autoscroll_accum: 0.0,
+            gesture_held: false,
+            gesture_clicks: 0,
             title_override: None,
             bell_pending: false,
             bell_flash_until: None,
@@ -962,14 +970,164 @@ impl Session {
         )
     }
 
-    /// Begin a drag selection. `rectangle` selects a block rather than a run of
-    /// text — Ghostty's ctrl+alt drag on this platform (see
-    /// [`is_rectangle_select`]).
+    /// Begin a selection at `cell` (the Shift+click fallback when nothing is
+    /// selected yet). `rectangle` selects a block rather than a run of text —
+    /// Ghostty's ctrl+alt drag on this platform (see [`is_rectangle_select`]).
     pub fn begin_selection(&mut self, cell: (u16, u16), rectangle: bool) {
         self.engine.selection_begin(cell.0, cell.1, rectangle);
     }
-    pub fn update_selection(&mut self, cell: (u16, u16), rectangle: bool) {
-        self.engine.selection_update(cell.0, cell.1, rectangle);
+
+    /// A pointer position as the engine's selection gesture wants it: pane-local
+    /// device pixels plus the clamped cell under it.
+    fn gesture_point(
+        &self,
+        pos: egui::Pos2,
+        rect: egui::Rect,
+        ppp: f32,
+        cw: f32,
+        ch: f32,
+    ) -> crate::engine::GesturePoint {
+        crate::engine::GesturePoint {
+            px: (
+                f64::from((pos.x - rect.min.x) * ppp),
+                f64::from((pos.y - rect.min.y) * ppp),
+            ),
+            cell: self.pos_to_cell(pos, rect, ppp, cw, ch),
+        }
+    }
+
+    /// Left-button press on the pane: feed upstream's selection gesture, which
+    /// counts the click (within `repeat` seconds and one cell's width of the
+    /// last) and installs the word / line / output selection — or, for a single
+    /// click, clears. `now` is `egui::InputState::time`. `ctrl` makes a triple
+    /// click select the command's output, as upstream's ctrl-or-super does.
+    /// Returns the click count.
+    #[expect(clippy::too_many_arguments, reason = "pane geometry, as pos_to_cell")]
+    pub fn gesture_press(
+        &mut self,
+        pos: egui::Pos2,
+        rect: egui::Rect,
+        ppp: f32,
+        cw: f32,
+        ch: f32,
+        now: f64,
+        repeat: f64,
+        ctrl: bool,
+    ) -> u8 {
+        let at = self.gesture_point(pos, rect, ppp, cw, ch);
+        let press = crate::engine::GesturePress {
+            at,
+            time: std::time::Duration::from_secs_f64(now.max(0.0)),
+            repeat_interval: std::time::Duration::from_secs_f64(repeat.max(0.0)),
+            repeat_distance: f64::from(cw),
+            triple: if ctrl { SelectKind::Output } else { SelectKind::Line },
+        };
+        self.autoscroll_accum = 0.0;
+        self.gesture_held = true;
+        self.gesture_clicks = self.engine.gesture_press(press, &self.selection_word_chars);
+        // Upstream (`Surface.zig`, click count 2): a double-click on a link
+        // selects the whole link instead of the gesture's word.
+        if self.gesture_clicks == 2
+            && let Some((l, r, y)) = self.link_span_at(self.pos_to_cell(pos, rect, ppp, cw, ch))
+        {
+            self.engine.selection_begin(l, y, false);
+            self.engine.selection_update(r, y, false);
+        }
+        self.gesture_clicks
+    }
+
+    /// The on-row span `(l, r, y)` of the link under `cell`: an OSC 8
+    /// hyperlink (cells sharing its URI), else a bare URL.
+    fn link_span_at(&self, cell: (u16, u16)) -> Option<(u16, u16, u16)> {
+        let (x, y) = cell;
+        if let Some(uri) = self.engine.hyperlink_at(x, y) {
+            let same = |cx: u16| self.engine.hyperlink_at(cx, y).as_deref() == Some(uri.as_str());
+            let (mut l, mut r) = (x, x);
+            while l > 0 && same(l - 1) {
+                l -= 1;
+            }
+            while r + 1 < self.snapshot.cols && same(r + 1) {
+                r += 1;
+            }
+            return Some((l, r, y));
+        }
+        url_span_at(&self.snapshot, x, y).map(|(l, r)| (l, r, y))
+    }
+
+    /// Whether a gesture press is still held (its release not yet seen).
+    pub fn gesture_held(&self) -> bool {
+        self.gesture_held
+    }
+
+    /// Click count of the last gesture press (0 if none yet).
+    pub fn gesture_clicks(&self) -> u8 {
+        self.gesture_clicks
+    }
+
+    /// Pointer at `pos` with the button held: extend the gesture's selection
+    /// (60% cell threshold, word/line snapping after a double/triple click) and
+    /// run drag-autoscroll when the gesture asks for it. `dt` is the frame time.
+    /// Returns whether autoscroll is active, so the caller keeps frames coming.
+    #[expect(clippy::too_many_arguments, reason = "pane geometry, as pos_to_cell")]
+    pub fn gesture_drag(
+        &mut self,
+        pos: egui::Pos2,
+        rect: egui::Rect,
+        ppp: f32,
+        cw: f32,
+        ch: f32,
+        rectangle: bool,
+        dt: f32,
+    ) -> bool {
+        let at = self.gesture_point(pos, rect, ppp, cw, ch);
+        let geometry = crate::engine::GestureGeometry {
+            cols: u32::from(self.cols),
+            cell_w: cw.round().max(1.0) as u32,
+            height: (f32::from(self.rows) * ch).round().max(1.0) as u32,
+        };
+        let dir = self
+            .engine
+            .gesture_drag(at, geometry, rectangle, &self.selection_word_chars);
+        // The gesture decides *whether* to autoscroll (pointer within 1 px of,
+        // or past, the grid's top/bottom edge — upstream's rule); the rate is
+        // giest's 15 ms clock and the scroll goes through the smooth-scroll
+        // target, so the engine viewport stays owned by `animate_scroll`. The
+        // next frame's drag resolves against the scrolled viewport — upstream's
+        // autoscroll tick is exactly "scroll one row, then drag".
+        let rows = self.autoscroll_step(dir, dt);
+        if rows != 0 {
+            self.scroll_lines(rows, ch);
+        }
+        dir != 0
+    }
+
+    /// Button released (`pos` `None` when off the pane). Ends the gesture's
+    /// drag but keeps its click count for a following double/triple click.
+    /// Returns whether the gesture dragged, i.e. whether click-only actions
+    /// (open a link, click-to-move) must be skipped.
+    pub fn gesture_release(
+        &mut self,
+        pos: Option<egui::Pos2>,
+        rect: egui::Rect,
+        ppp: f32,
+        cw: f32,
+        ch: f32,
+    ) -> bool {
+        self.gesture_held = false;
+        self.autoscroll_accum = 0.0;
+        let cell = pos
+            .filter(|p| rect.contains(*p))
+            .map(|p| self.pos_to_cell(p, rect, ppp, cw, ch));
+        self.engine.gesture_release(cell)
+    }
+
+    /// Abandon the gesture (mouse tracking took the pointer over).
+    pub fn gesture_reset(&mut self) {
+        if self.gesture_held {
+            self.gesture_held = false;
+            self.gesture_clicks = 0;
+            self.engine.gesture_reset();
+        }
     }
 
     /// Extend an existing selection to `cell` (Shift+click); starts a new one
@@ -1036,42 +1194,6 @@ impl Session {
             end_row.saturating_sub(self.rows.saturating_sub(1) as u32)
         };
         self.scroll_target_px = scrollback.saturating_sub(target_top) as f32 * cell_h;
-    }
-
-    /// Select the whole word under `cell` (double-click).
-    ///
-    /// Resolved by the VT engine, so word boundaries are the terminal's own
-    /// (honouring `selection-word-chars`) rather than a second opinion computed
-    /// from the rendered grid. The old hand-rolled scan was *replaced* rather
-    /// than kept as a fallback: two selection sources would be free to disagree
-    /// about what a word is, which is the failure this codebase keeps
-    /// documenting elsewhere.
-    pub fn select_word(&mut self, cell: (u16, u16)) {
-        self.select_semantic(SelectKind::Word, cell);
-    }
-
-    /// Select the logical line under `cell` (triple-click) — which **follows
-    /// soft wrapping**, so a command longer than the window selects whole rather
-    /// than one screen row of itself.
-    pub fn select_line(&mut self, cell: (u16, u16)) {
-        self.select_semantic(SelectKind::Line, cell);
-    }
-
-    /// Select the output of the command that produced this row
-    /// (Ctrl+triple-click, as upstream), delimited by its OSC 133 marks.
-    /// A no-op in a shell that doesn't mark its prompts.
-    pub fn select_output(&mut self, cell: (u16, u16)) {
-        self.select_semantic(SelectKind::Output, cell);
-    }
-
-    fn select_semantic(&mut self, kind: SelectKind, cell: (u16, u16)) {
-        // A gesture that finds nothing (an empty cell, or a shell with no prompt
-        // marks) leaves any existing selection alone rather than clearing it, so
-        // a stray double-click doesn't discard what the user had. The engine
-        // enforces that; the return value is ignored here on purpose.
-        let _ = self
-            .engine
-            .select_semantic(kind, cell.0, cell.1, &self.selection_word_chars);
     }
 
     /// Select everything the terminal holds — **including scrollback**, not just
@@ -2652,6 +2774,33 @@ fn px_offset(rel: f32, ppp: f32) -> u32 {
 /// non-whitespace token under the cursor, strip trailing punctuation, and
 /// accept it only if it has a known scheme (or a leading `www.`, which gets an
 /// `https://` prefix). Returns the openable URL, else `None`.
+/// The columns `l..=r` on row `y` of the bare URL under `(x, y)`, trailing
+/// punctuation excluded — the same token and trim rules as [`find_url_at`].
+fn url_span_at(snap: &GridSnapshot, x: u16, y: u16) -> Option<(u16, u16)> {
+    find_url_at(snap, x, y)?;
+    let char_at = |cx: u16| {
+        snap.cell(cx, y)
+            .and_then(|c| c.text.chars().next())
+            .filter(|c| !c.is_whitespace())
+    };
+    let mut l = x;
+    while l > 0 && char_at(l - 1).is_some() {
+        l -= 1;
+    }
+    let mut r = x;
+    while r + 1 < snap.cols && char_at(r + 1).is_some() {
+        r += 1;
+    }
+    while r > l
+        && char_at(r).is_some_and(|c| {
+            matches!(c, '.' | ',' | ')' | ']' | '}' | '>' | '"' | '\'' | ';' | ':')
+        })
+    {
+        r -= 1;
+    }
+    (x <= r).then_some((l, r))
+}
+
 fn find_url_at(snap: &GridSnapshot, x: u16, y: u16) -> Option<String> {
     let cols = snap.cols;
     if cols == 0 || x >= cols {
@@ -3029,7 +3178,7 @@ mod exit_tests {
 mod tests {
     use super::{
         CommandFinish, CopyAction, KeyAction, bell_effect_due, cell_from_pos, copy_or_interrupt,
-        autoscroll_rows, find_url_at, produces_text, format_duration, grid_dims, notch_split, osc7_to_path,
+        autoscroll_rows, find_url_at, url_span_at, produces_text, format_duration, grid_dims, notch_split, osc7_to_path,
         px_offset, scroll_split, scrollbar_rows, transient_alpha,
     };
     use crate::engine::{Cell, GridSnapshot, KeyCode, KeyInput, KeyMods};
@@ -3358,6 +3507,16 @@ mod tests {
     // — are now engine tests in `engine/ghostty_vt.rs`, driving real escape
     // sequences. Keeping a grid-scanning copy here would be a second opinion
     // about what is selected, which is the failure this codebase keeps recording.
+
+    #[test]
+    fn url_span_covers_the_url_without_trailing_punctuation() {
+        let s = grid(&["see https://aka.ms/x, now"], 25);
+        // "https://aka.ms/x" is cols 4..=19; the comma at 20 is excluded.
+        assert_eq!(url_span_at(&s, 10, 0), Some((4, 19)));
+        assert_eq!(url_span_at(&s, 4, 0), Some((4, 19)));
+        assert_eq!(url_span_at(&s, 1, 0), None, "plain word");
+        assert_eq!(url_span_at(&s, 20, 0), None, "the trimmed comma itself");
+    }
 
     #[test]
     fn detects_url_under_cursor() {
