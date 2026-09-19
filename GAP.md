@@ -67,7 +67,9 @@ ignores them; unlike GTK not gated on `window-theme = ghostty`), ✅ `window-vsy
 client to whole cells of the non-grid overhead measured each frame; with splits it snaps the whole
 pane area, not each pane), ✅ `quick-terminal-animation-duration` (slide in/out from the anchored
 edge, ease-out cubic; `center` doesn't slide; a newly *created* quick terminal may show one frame at
-rest before the slide starts). Still open: `window-colorspace` (display-p3 → HDR swapchain, L),
+rest before the slide starts). ◐ `window-colorspace` (see the chrome ledger below: `display-p3`
+reinterprets terminal colours as P3 and maps them into the **sRGB** swapchain; a wide-gamut
+swapchain is not reachable through wgpu-hal 29 + egui-wgpu), ✅ `macos-titlebar-style`, ✅ `macos-icon*`,
 ~~`font-thicken` + `-strength`~~ ✅ (1px coverage dilation weighted by strength; upstream is
 macOS-only — needs eyeballing), ~~`drag-handle`~~ ✅ (see §C pane drag), ~~`auto-update` / `auto-update-channel`~~ ✅ (§C).
 
@@ -125,8 +127,8 @@ the sideload the byte never reaches the engine. See the ledger "Protocol leftove
 | Explorer "Open giest here" | ✅ | `giest +register-shell-integration` / `+unregister-shell-integration` (`shellreg.rs`): HKCU `Directory\Background\shell`, `Directory\shell`, `Drive\shell` → `"<exe>" "%V"` → a new tab over IPC. Never registered implicitly. | S / M |
 | Taskbar Jump List (Dock menu) | ✅ | `jumplist.rs`: `ICustomDestinationList` user tasks New Window / New Tab / one per profile (`+new-tab --command=<profile>`); hand-declared vtables pinned by an ignored host test under a throwaway AppUserModelID. Giest key `jump-list = false` deletes the list. **Needs a human glance at the taskbar menu.** | M |
 | Restart restore (`RegisterApplicationRestart`), window frames in `state.rs` | ✅ | `restart.rs`: registered with `--restore-session` (no crash/hang restarts); the root window's subclass writes a ≤2 s-old layout snapshot on `WM_ENDSESSION`, since `on_exit` never runs then (verified by sending the message). State files gain an optional `F x y w h max` record per window — old files parse unchanged and older giests skip it; restored exactly at 150% DPI (verified). A real update/reboot relaunch needs a human. | S |
-| Custom caption / tabs-in-titlebar | ⬜ | `WM_NCCALCSIZE` client-drawn caption | L |
-| Runtime custom app icon | ⬜ | tinted icon via `icongen` + `ViewportCommand::Icon` | M |
+| Custom caption / tabs-in-titlebar | ✅ | `macos-titlebar-style = tabs` (opt-in; see the chrome ledger). `WM_NCCALCSIZE` subclass on every giest top-level window, non-client caption buttons (Win11 snap layouts on the maximize button), strip drag / double-click through `ViewportCommand`. **Needs a human check** (list in the ledger). | L |
+| Runtime custom app icon | ✅ | `macos-icon` / `macos-custom-icon` / `macos-icon-frame` / `-ghost-color` / `-screen-color`: the artwork moved to `src/iconart.rs` (shared with `icongen`, byte-identical output) and is redrawn in the configured palette; one shared `Arc`, live on reload. | M |
 | **Release packaging** | ✅ | `mise package` (`scripts/package.ps1`) → `dist/<v>/`: portable zip (exe + `conpty.dll` + `OpenConsole.exe` + icon + `licenses/`: Ghostty MIT, ConPTY MIT, JetBrains Mono OFL, icon), an MSIX (`makeappx`; manifest template `packaging/AppxManifest.xml.in`, full trust, `giest.exe` execution alias), `giest.appinstaller` (24 h on-launch + background update checks; **not hosted**), and `giest-manifest.json` (per-package SHA-256 + size). Mtimes pinned to the HEAD commit for reproducible zips. **Needs a human:** a code-signing certificate (the MSIX is unsigned and Windows refuses to install an unsigned package; `-CertPath`/`-Publisher` sign it), hosting for the `.appinstaller`/`.msix`, and a giest `LICENSE` file (the repo has none; the script copies one if it appears). winget manifest not written. | M |
 | **Auto-update** | ✅ | `update.rs`: `auto-update = off\|check\|download` (default `check` in release builds, `off` in debug — upstream defers to Sparkle's stored preference), `auto-update-channel = stable\|tip` (default: the running version's channel, as upstream), giest-specific `auto-update-feed` (default: compile-time `GIEST_UPDATE_FEED` or the repo's GitHub `/releases` API). Checks 5 s after start and daily; `check_for_updates` checks now. A release is an update only if it carries `giest-manifest.json`; the zip is downloaded to `%LOCALAPPDATA%\giest\updates`, **SHA-256-verified before extraction** (a mismatch deletes it), extracted with `tar.exe`, and marked `pending.json`. Applied at the **next launch** (`startup_apply`, first thing in `main`): each replaced file is *renamed* to `*.old` (the running exe is never deleted or overwritten), the new ones copied in (rolled back on failure), the new exe relaunched with the same args; `*.old` swept on a later launch. The pill (tab strip, right of ⏷) has upstream's wording: `Update Available: X` (click downloads), `Downloading: N%`, `Restart to Complete Update` (click → native confirm → layout saved → relaunch with `--restore-session` + `GIEST_UPDATE_WAIT_PID`; shells end, as with Sparkle), `No Updates Available` / `Update Failed` (fade after 8 s). HTTP is `curl.exe` from System32 behind an `Http` trait; the tests use a mock and never touch the network. MSIX installs (`GetCurrentPackageFullName`) never self-update. Divergences: no release-notes popover (the tooltip carries the URL), no EdDSA signature like Sparkle's — the hash comes from the same release, so it catches corruption, not a compromised release; Authenticode is the real answer and needs a cert. Unverified live: nothing is published yet, so the end-to-end path ran only against the mock. | L |
 | Default-terminal handoff | ⬜ | Designed, not built — see "Default-terminal handoff: design" below | XL |
@@ -224,7 +226,7 @@ in total; items 1 and 3 can land (and be unit-tested) before anything is registe
 4. **Shell integration:** ✅ `shell-integration(-features)`, ✅ WSL scripts; ✅ `cursor-click-to-move`.
 5. ✅ **Automation:** CLI args → named-pipe IPC → Explorer entry → Jump List → restart restore → notification click.
 6. **Protocols:** ✅ OSC 5522; ✅ OSC 52 / OSC 7 scanners moved onto lib-vt; ✅ regex search (native search API evaluated, not adopted — see the ledger).
-7. **Chrome:** custom caption + `window-decoration` + titlebar colors; runtime icon (L).
+7. ✅ **Chrome:** custom caption (`macos-titlebar-style = tabs`) + `window-decoration` + titlebar colors; runtime icon; ◐ `window-colorspace` (sRGB swapchain).
 8. **Long tail:** accessibility (L), ~~auto-update~~ ✅, ~~tab overview~~ ✅, default-terminal handoff (XL, design below), and
    ~~shipping the out-of-band ConPTY with release builds~~ ✅ (`mise package` bundles it; the dev tree still uses the
    `scripts/fetch-conpty.ps1` step) so kitty graphics work out of the box.
@@ -2354,3 +2356,65 @@ Re-checked against the pinned engine (ghostty b32f20f) and its C API.
   from `renderer/generic.zig`; `kitty_graphics.h` exports no tick, no frame count and no per-frame
   gap, so giest can't even drive frames itself with synthetic `a=a,c=N` writes. Client-driven frames
   keep working.
+
+### Window chrome: client-drawn caption, runtime icon, colorspace
+
+**`macos-titlebar-style`** maps upstream's four values onto Windows: `native` (giest's default -
+a divergence from upstream's `transparent`), `transparent` (native caption tinted to the configured
+`background`/`foreground` through DWM on Win11, unless `window-titlebar-*` is set), `tabs` (the tab
+strip *is* the titlebar, Windows Terminal style), `hidden` (the same client-drawn frame without
+caption buttons; empty strip space still drags). Applies live on reload (upstream: new windows only).
+
+How `tabs` works (`winchrome.rs`): the window keeps `WS_CAPTION | WS_THICKFRAME`, so Aero snap,
+shadow, rounded corners and the side/bottom resize borders stay native. A comctl32 subclass on
+**every** giest top-level window of the UI thread (found per pass by `EnumThreadWindows` + winit's
+`Window Class`; child viewports have no reachable HWND) answers `WM_NCCALCSIZE` by keeping the
+default side/bottom borders and dropping the caption; maximized, the top moves down by the frame
+thickness (`SM_CYFRAME + SM_CXPADDEDBORDER` at the window's DPI) so nothing is off-screen.
+`WM_NCHITTEST` returns `HTTOP`/`HTTOPLEFT`/`HTTOPRIGHT` for the top frame band (not when
+maximized) and `HTMINBUTTON`/`HTMAXBUTTON`/`HTCLOSE` over the three 46-DIP buttons - the
+maximize code is what brings up the **Win11 snap-layouts flyout**. The subclass swallows
+`WM_NCLBUTTONDOWN/UP` for those codes (otherwise `DefWindowProc` paints a classic button) and posts
+`SC_MINIMIZE`/`SC_MAXIMIZE`/`SC_RESTORE`/`SC_CLOSE` on release (close therefore goes through the
+normal confirm-close path). Hover/press is tracked there (`TME_NONCLIENT`) and matched to a window
+by the pointer's screen position, since the client never sees the pointer over a non-client button.
+Empty strip space is an egui interaction registered *under* the tabs: drag sends
+`ViewportCommand::StartDrag`, double-click toggles `Maximized` - both work in every window. The
+geometry is pure and table-tested (`caption_hit`, `caption_buttons`, `nc_client_rect`); a live probe
+at 150% returned `HTCLOSE`/`HTMAXBUTTON`/`HTTOP` at the expected client points and a maximized
+client origin of exactly (0, 0).
+
+Limits: the strip height is app-global (one font), so with `hidden` + `window-show-tab-bar = auto`
+two windows with and without a strip share one value; no system menu on right-click of empty strip
+space (`Alt+Space` still works); Windows 10 shows no top border line (Win11's DWM border covers it);
+the undecorated quick terminal and `window-decoration = none` windows are skipped (they have no
+`WS_CAPTION`). **Needs a human check:** hover the maximize button (snap-layouts flyout appears, and
+choosing a layout snaps); minimize / maximize / restore / close from the buttons, including the
+close-confirm dialog; drag the window by empty strip space (and Aero-snap it to an edge / shake);
+double-click empty strip to maximize and again to restore; maximized: top tab row fully visible,
+buttons reach the top-right screen corner, no strip of wallpaper; resize from the top edge and both
+top corners; drag between monitors with different scaling (button size and top band follow the new
+DPI); the same on a second window (`new_window`) and a torn-out tab; `background-opacity < 1` still
+translucent with no grey band at the top.
+
+**Runtime icon** (`icon.rs` + `iconart.rs`): the icon artwork moved out of `examples/icongen.rs`
+into the library (`icongen` still produces byte-identical assets - verified - and a test pins the
+256 master against `assets/icon.png`). `macos-icon` presets are giest palettes (tile gradient,
+monogram, cursor, rim) in the spirit of upstream's artist-drawn variants; `custom-style` maps
+`-screen-color` (gradient, bottom first) to the tile, `-ghost-color` to the monogram, `-frame` to a
+rim colour; `custom` loads `macos-custom-icon` as PNG/JPEG (no ICNS), shrunk to 256. The drawn
+`Arc` is cached by source, so the one-shared-`Arc` rule holds; a changed source is pushed to the
+root with `ViewportCommand::Icon` and reaches children through `icon::apply`'s `patch`. The
+embedded `.ico` (Explorer, pinned shortcut) stays official. **Needs a human glance** at the
+taskbar button / Alt-Tab after setting e.g. `macos-icon = paper`.
+
+**`window-colorspace`** ◐: `display-p3` interprets terminal colours (config + SGR direct colour,
+and the one egui terminal fill) as Display P3 and converts them to sRGB, clipped to the sRGB gamut
+(`colorspace.rs`; memoized per colour in `GpuResources::color`). Images, emoji and the chrome are
+left alone, as upstream does. A real wide-gamut swapchain is not reachable today: the only DXGI
+route is an FP16 swapchain composited as scRGB; wgpu-hal 29's DX12 backend never calls
+`SetColorSpace1`, egui-wgpu picks the surface format itself (8-bit unorm preferred, no override),
+and egui paints in gamma space, so a linear float target would need a third vendored crate plus a
+conversion pass for all UI. Without HDR/Advanced Color on the display DWM would clamp scRGB to
+sRGB anyway - i.e. to this output. **Needs eyeballing**: saturated reds/greens look slightly
+different from `srgb`; greys are unchanged (pinned by test).

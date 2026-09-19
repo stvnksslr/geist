@@ -5330,6 +5330,100 @@ impl Window {
         ctx.request_repaint();
     }
 
+    /// Draw the client-drawn caption's minimize / maximize / close buttons at
+    /// the strip's right end.
+    ///
+    /// Drawing only: the buttons are *non-client* (`winchrome`'s hit test
+    /// answers `HTMINBUTTON` etc. over the same rects, which is what brings up
+    /// the Win11 snap-layouts flyout), so egui never sees the pointer there.
+    /// Hover and press come from the subclass, matched to this window by
+    /// screen position.
+    fn paint_caption_buttons(&self, ctx: &egui::Context, strip: egui::Rect) {
+        use crate::winchrome::{CAPTION_BUTTON_W, CaptionHit, CaptionMetrics, caption_buttons};
+        let (inner, native_ppp, maximized) = ctx.input(|i| {
+            let v = i.viewport();
+            (v.inner_rect, v.native_pixels_per_point.unwrap_or(1.0), v.maximized.unwrap_or(false))
+        });
+        let m = CaptionMetrics {
+            strip_h: strip.height(),
+            button_w: CAPTION_BUTTON_W,
+            frame: 0.0,
+            buttons: true,
+        };
+        let hover = inner.and_then(|r| {
+            crate::winchrome::caption_hover([
+                r.min.x * native_ppp,
+                r.min.y * native_ppp,
+                r.max.x * native_ppp,
+                r.max.y * native_ppp,
+            ])
+        });
+        let painter =
+            ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, self.id("caption-buttons")));
+        let chrome = self.chrome;
+        for (hit, [x0, y0, x1, y1]) in caption_buttons(strip.width(), m) {
+            let rect = egui::Rect::from_min_max(
+                egui::pos2(strip.left() + x0, strip.top() + y0),
+                egui::pos2(strip.left() + x1, strip.top() + y1),
+            );
+            let state = hover.filter(|(h, _)| *h == hit).map(|(_, pressed)| pressed);
+            // Windows 11's own caption colours: close goes red on hover.
+            let (fill, ink) = match (hit, state) {
+                (CaptionHit::Close, Some(false)) => {
+                    (egui::Color32::from_rgb(0xC4, 0x2B, 0x1C), egui::Color32::WHITE)
+                }
+                (CaptionHit::Close, Some(true)) => {
+                    (egui::Color32::from_rgb(0xB2, 0x27, 0x1A), egui::Color32::WHITE)
+                }
+                (_, Some(false)) => (chrome.fill_hover, chrome.text),
+                (_, Some(true)) => (chrome.fill_active, chrome.text),
+                (_, None) => (egui::Color32::TRANSPARENT, chrome.text),
+            };
+            if fill != egui::Color32::TRANSPARENT {
+                painter.rect_filled(rect, 0.0, fill);
+            }
+            // 10-point glyphs drawn as strokes (Segoe's caption font is not a
+            // given, and a painted glyph has no font fallback to go wrong).
+            let c = rect.center();
+            let s: f32 = 5.0;
+            let stroke = egui::Stroke::new(1.0_f32, ink);
+            match hit {
+                CaptionHit::Min => {
+                    painter.line_segment([egui::pos2(c.x - s, c.y), egui::pos2(c.x + s, c.y)], stroke);
+                }
+                CaptionHit::Max if maximized => {
+                    // Restore: two offset squares.
+                    let back = egui::Rect::from_min_max(
+                        egui::pos2(c.x - s + 2.0, c.y - s),
+                        egui::pos2(c.x + s, c.y + s - 2.0),
+                    );
+                    let front = back.translate(egui::vec2(-2.0, 2.0));
+                    painter.rect_stroke(back, 1.0, stroke, egui::StrokeKind::Inside);
+                    painter.rect_filled(front, 1.0, if fill == egui::Color32::TRANSPARENT {
+                        chrome.panel_fill
+                    } else {
+                        fill
+                    });
+                    painter.rect_stroke(front, 1.0, stroke, egui::StrokeKind::Inside);
+                }
+                CaptionHit::Max => {
+                    let r = egui::Rect::from_center_size(c, egui::vec2(2.0 * s, 2.0 * s));
+                    painter.rect_stroke(r, 1.0, stroke, egui::StrokeKind::Inside);
+                }
+                _ => {
+                    painter.line_segment(
+                        [egui::pos2(c.x - s, c.y - s), egui::pos2(c.x + s, c.y + s)],
+                        stroke,
+                    );
+                    painter.line_segment(
+                        [egui::pos2(c.x - s, c.y + s), egui::pos2(c.x + s, c.y - s)],
+                        stroke,
+                    );
+                }
+            }
+        }
+    }
+
     fn tab_bar(&mut self, ui: &mut egui::Ui) {
         // Deferred intents collected while `self.tabs` is borrowed immutably for
         // iteration, then applied after the loop (the strip can't mutate the tabs
@@ -5382,7 +5476,15 @@ impl Window {
                 + theme::TAB_GAP
         };
         let mut want_update_click = false;
-        let ctl_w = 30.0 + 26.0 + theme::TAB_GAP + pill_w;
+        // With the client-drawn caption the strip's right end belongs to the
+        // min/max/close buttons (plus a little grab space before them, as
+        // Windows Terminal leaves), painted over it by `paint_caption_buttons`.
+        let caption = !self.quick
+            && crate::winchrome::caption_style() == crate::winchrome::CaptionStyle::Tabs;
+        let caption_w = if caption { 3.0 * crate::winchrome::CAPTION_BUTTON_W + 40.0 } else { 0.0 };
+        let client_caption =
+            !self.quick && crate::winchrome::caption_style() != crate::winchrome::CaptionStyle::Native;
+        let ctl_w = 30.0 + 26.0 + theme::TAB_GAP + pill_w + caption_w;
 
         let row = ui.horizontal(|ui| {
             let avail = (ui.available_width() - ctl_w).max(theme::TAB_MIN_W);
@@ -5408,6 +5510,14 @@ impl Window {
                             egui::scroll_area::ScrollBarVisibility::AlwaysHidden,
                         )
                         .auto_shrink([false, false])
+                        // Drag-to-scroll would claim the empty strip space
+                        // the client-drawn caption moves the window with.
+                        .scroll_source(if client_caption {
+                            egui::scroll_area::ScrollSource::SCROLL_BAR
+                                | egui::scroll_area::ScrollSource::MOUSE_WHEEL
+                        } else {
+                            egui::scroll_area::ScrollSource::ALL
+                        })
                         .show(ui, |ui| {
                             ui.spacing_mut().item_spacing.x = theme::TAB_GAP;
                             for (i, tab) in self.tabs.iter().enumerate() {
@@ -6067,6 +6177,14 @@ impl Window {
         // transparent screen.
         if bg_image.is_none() && custom_shaders.is_empty() {
             let bg_alpha8 = (self.config.background_opacity * 255.0).round() as u8;
+            // `window-colorspace = display-p3`: the same P3 to sRGB mapping the
+            // renderer applies to cell colours, or the fill and a cell painted
+            // in the background colour would visibly disagree.
+            let bg = if self.config.window_colorspace == crate::config::Colorspace::DisplayP3 {
+                crate::colorspace::p3_to_srgb(bg)
+            } else {
+                bg
+            };
             ui.painter().rect_filled(
                 full_area,
                 0.0,
@@ -7182,6 +7300,7 @@ impl Window {
                 faint_opacity,
                 cursor_opacity,
                 background_color: bg,
+                display_p3: self.config.window_colorspace == crate::config::Colorspace::DisplayP3,
                 area_px,
                 // Only the renderer can put the background where a custom
                 // shader will see it; without shaders the app's own
@@ -7857,14 +7976,26 @@ impl Window {
         let a8 = (self.config.background_opacity * 255.0).round() as u8;
         // `window-show-tab-bar`. An inline rename lives in the strip, so it
         // forces the strip on while it's open.
-        let show_strip =
-            self.config.window_show_tab_bar.visible(self.tabs.len()) || self.renaming.is_some();
+        // `macos-titlebar-style = tabs`: the strip *is* the titlebar, so it is
+        // always shown (there would be nothing to drag or close otherwise).
+        // The quick terminal is undecorated and never gets the caption.
+        let caption = if self.quick {
+            crate::winchrome::CaptionStyle::Native
+        } else {
+            crate::winchrome::caption_style()
+        };
+        let show_strip = self.config.window_show_tab_bar.visible(self.tabs.len())
+            || self.renaming.is_some()
+            || caption == crate::winchrome::CaptionStyle::Tabs;
         if !show_strip {
             self.last_strip = None;
             self.last_tab_rects.clear();
+            if caption != crate::winchrome::CaptionStyle::Native {
+                crate::winchrome::set_caption_height(0.0);
+            }
         }
         if show_strip {
-        egui::Panel::top(self.id("tabs"))
+        let strip_resp = egui::Panel::top(self.id("tabs"))
             .frame(
                 egui::Frame::side_top_panel(&ctx.global_style())
                     // A stable margin: the default `(8, 2)` leaves the tabs
@@ -7877,7 +8008,34 @@ impl Window {
                         a8,
                     )),
             )
-            .show_inside(ui, |ui| self.tab_bar(ui));
+            .show_inside(ui, |ui| {
+                // Registered *before* the tabs so every tab and button (later,
+                // hence on top in egui's hit test) wins; what is left is the
+                // empty strip, which moves and maximizes the window.
+                let drag = (caption != crate::winchrome::CaptionStyle::Native).then(|| {
+                    ui.interact(
+                        ui.max_rect().expand2(egui::vec2(6.0, 3.0)),
+                        self.id("caption-drag"),
+                        egui::Sense::click_and_drag(),
+                    )
+                });
+                self.tab_bar(ui);
+                if let Some(drag) = drag {
+                    if drag.double_clicked() {
+                        let max = ui.input(|i| i.viewport().maximized.unwrap_or(false));
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(!max));
+                    } else if drag.drag_started() {
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                    }
+                }
+            });
+        if caption != crate::winchrome::CaptionStyle::Native {
+            let strip_rect = strip_resp.response.rect;
+            crate::winchrome::set_caption_height(strip_rect.height());
+            if caption == crate::winchrome::CaptionStyle::Tabs {
+                self.paint_caption_buttons(&ctx, strip_rect);
+            }
+        }
         }
 
         // No fill here: `render_active` paints the window background across this
@@ -7941,6 +8099,7 @@ impl App {
         // (another thread) and a notification click (a window procedure).
         crate::ipc::set_waker(&cc.egui_ctx);
         crate::notify::set_waker(&cc.egui_ctx);
+        crate::winchrome::set_caption_waker(&cc.egui_ctx);
         if let Some(hwnd) = app.windows[0].hwnd {
             crate::restart::register(hwnd);
         }
@@ -8869,16 +9028,44 @@ impl App {
         ctx.request_repaint();
     }
 
+    /// `macos-titlebar-style` (client-drawn caption) and `macos-icon`, from the
+    /// root window's config — both are process-wide.
+    ///
+    /// The caption subclass is (re)installed on any new top-level window every
+    /// pass; the icon is only pushed when its source changed, and then only to
+    /// the root: children rebuild their `ViewportBuilder` every pass through
+    /// `icon::apply`, whose `patch` sees the new shared `Arc` by itself.
+    fn sync_caption_and_icon(&mut self, ctx: &egui::Context) {
+        let Some(cfg) = self.windows.first().map(|w| &w.config) else {
+            return;
+        };
+        crate::winchrome::set_caption_style(match cfg.titlebar_style {
+            crate::config::TitlebarStyle::Tabs => crate::winchrome::CaptionStyle::Tabs,
+            crate::config::TitlebarStyle::Hidden => crate::winchrome::CaptionStyle::Hidden,
+            _ => crate::winchrome::CaptionStyle::Native,
+        });
+        crate::winchrome::sync_caption();
+        if let Some(icon) = crate::icon::configure(cfg) {
+            ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Icon(Some(icon)));
+        }
+    }
+
     /// Push `window-titlebar-background` / `-foreground` to DWM for every
     /// window, when the colors or the set of windows changed.
     fn sync_titlebar_colors(&mut self) {
         let Some(cfg) = self.windows.first().map(|w| &w.config) else {
             return;
         };
+        // `macos-titlebar-style = transparent`: the native caption takes the
+        // terminal background (upstream's "the titlebar lets the background
+        // come through"), unless a titlebar colour is set explicitly. Read
+        // from the config, not live OSC 11 changes.
+        let tint = (cfg.titlebar_style == crate::config::TitlebarStyle::Transparent)
+            .then_some(cfg.bg);
         let key = (
             self.windows.len(),
-            cfg.window_titlebar_background,
-            cfg.window_titlebar_foreground,
+            cfg.window_titlebar_background.or(tint),
+            cfg.window_titlebar_foreground.or(tint.map(|_| cfg.fg)),
         );
         if self.titlebar_applied == Some(key) {
             return;
@@ -9416,6 +9603,7 @@ impl eframe::App for App {
         self.dispatch_global_binds(&ctx, render_state.as_ref());
         self.autohide_quick_terminal(now);
         self.sync_titlebar_colors();
+        self.sync_caption_and_icon(&ctx);
         // `quit-after-last-window-closed-delay`: nothing reopened in time.
         if self.windows.is_empty()
             && let Some(t) = self.quit_at

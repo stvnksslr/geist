@@ -100,6 +100,7 @@ fn term_frame(snap: GridSnapshot) -> TermFrame {
         faint_opacity: 0.5,
         cursor_opacity: 1.0,
         background_color: Rgb::new(0x10, 0x12, 0x18),
+        display_p3: false,
         area_px: [0.0, 0.0, 0.0, 0.0],
         window_fill: false,
         // No `background-image`: this measures the grid path, and the image is

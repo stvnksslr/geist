@@ -210,6 +210,17 @@ fn main() -> eframe::Result {
         }
     }
 
+    // `macos-icon`: select the configured icon before the root builder takes
+    // it, so the window is created with it (the first call reports no change).
+    let _ = giest::icon::configure(&cfg);
+    // `macos-titlebar-style = tabs | hidden`: the client-drawn caption. Latched
+    // before any window exists so the root is subclassed on its first pass.
+    giest::winchrome::set_caption_style(match cfg.titlebar_style {
+        giest::config::TitlebarStyle::Tabs => giest::winchrome::CaptionStyle::Tabs,
+        giest::config::TitlebarStyle::Hidden => giest::winchrome::CaptionStyle::Hidden,
+        _ => giest::winchrome::CaptionStyle::Native,
+    });
+
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
         viewport: giest::icon::apply(
