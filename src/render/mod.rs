@@ -447,7 +447,37 @@ pub fn init(
         .write()
         .callback_resources
         .insert(resources);
+    // Once per process, like `init` itself: one device for every window.
+    render_state.device.set_device_lost_callback(|reason, msg| {
+        // `Destroyed` is our own teardown at exit, not a failure.
+        if reason != wgpu::DeviceLostReason::Destroyed
+            && let Ok(mut slot) = DEVICE_LOST.lock()
+        {
+            *slot = Some(device_lost_message(&format!("{reason:?}"), &msg));
+        }
+    });
     cell
+}
+
+/// Set by the device-lost callback: why the GPU device went away. Read by
+/// the app, which can then say so instead of leaving a frozen or blank window.
+static DEVICE_LOST: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// The device-lost message, if the GPU device has been lost.
+pub fn device_lost() -> Option<String> {
+    DEVICE_LOST.lock().ok().and_then(|s| s.clone())
+}
+
+/// The text shown when the device is lost: what happened, the driver's words,
+/// and the only remedy (a lost wgpu device cannot be revived in place).
+pub fn device_lost_message(reason: &str, msg: &str) -> String {
+    let msg = msg.trim();
+    let detail = if msg.is_empty() { String::new() } else { format!(": {msg}") };
+    format!(
+        "The GPU device was lost ({reason}){detail}.\n\nThis is usually a driver reset or \
+         crash. Your shells are still running, but giest cannot draw them any more \
+         - restart giest."
+    )
 }
 
 /// Build the renderer's persistent GPU resources for `format` at pixel font size
@@ -2104,6 +2134,15 @@ mod tests {
         );
         // Out-of-range entries are ignored rather than corrupting the tiling.
         assert_eq!(check(&[(3, 9), (99, 9)]), vec![(10..20, None)]);
+    }
+
+    #[test]
+    fn device_lost_message_names_reason_detail_and_remedy() {
+        let m = super::device_lost_message("Unknown", " DXGI_ERROR_DEVICE_REMOVED \n");
+        assert!(m.starts_with("The GPU device was lost (Unknown): DXGI_ERROR_DEVICE_REMOVED."));
+        assert!(m.contains("restart giest"));
+        let m = super::device_lost_message("Unknown", "");
+        assert!(m.starts_with("The GPU device was lost (Unknown)."), "{m}");
     }
 
     #[test]

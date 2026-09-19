@@ -106,7 +106,8 @@ mod imp {
     const TBPF_ERROR: i32 = 0x4;
     const TBPF_PAUSED: i32 = 0x8;
 
-    /// The prefix of `ITaskbarList3`'s vtable up to the two methods we call.
+    /// The prefix of `ITaskbarList3`'s vtable up to the last method we call
+    /// (`SetOverlayIcon`, slot 18).
     ///
     /// The layout is `IUnknown` → `ITaskbarList` → `ITaskbarList2` →
     /// `ITaskbarList3`, in declaration order, and **every** earlier method must
@@ -128,9 +129,21 @@ mod imp {
         set_active_alt: unsafe extern "system" fn(*mut c_void, isize) -> i32,
         // ITaskbarList2
         mark_fullscreen_window: unsafe extern "system" fn(*mut c_void, isize, i32) -> i32,
-        // ITaskbarList3 (the two we use)
+        // ITaskbarList3, in declaration order (ShObjIdl_core.h). The six
+        // between the progress pair and `SetOverlayIcon` are never called, but
+        // must be present: each one shifts the slot `set_overlay_icon` lands in.
         set_progress_value: unsafe extern "system" fn(*mut c_void, isize, u64, u64) -> i32,
         set_progress_state: unsafe extern "system" fn(*mut c_void, isize, i32) -> i32,
+        register_tab: unsafe extern "system" fn(*mut c_void, isize, isize) -> i32,
+        unregister_tab: unsafe extern "system" fn(*mut c_void, isize) -> i32,
+        set_tab_order: unsafe extern "system" fn(*mut c_void, isize, isize) -> i32,
+        set_tab_active: unsafe extern "system" fn(*mut c_void, isize, isize, u32) -> i32,
+        thumb_bar_add_buttons: unsafe extern "system" fn(*mut c_void, isize, u32, *mut c_void) -> i32,
+        thumb_bar_update_buttons:
+            unsafe extern "system" fn(*mut c_void, isize, u32, *mut c_void) -> i32,
+        thumb_bar_set_image_list: unsafe extern "system" fn(*mut c_void, isize, *mut c_void) -> i32,
+        /// Slot 18: `SetOverlayIcon(HWND, HICON, LPCWSTR)`.
+        set_overlay_icon: unsafe extern "system" fn(*mut c_void, isize, *mut c_void, *const u16) -> i32,
     }
 
     #[repr(C)]
@@ -231,6 +244,89 @@ mod imp {
         taskbar().is_some()
     }
 
+    #[repr(C)]
+    struct IconInfo {
+        f_icon: i32,
+        x_hotspot: u32,
+        y_hotspot: u32,
+        hbm_mask: *mut c_void,
+        hbm_color: *mut c_void,
+    }
+
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn CreateIconIndirect(info: *const IconInfo) -> *mut c_void;
+    }
+
+    /// The badge icon, built once per process from [`super::overlay_pixels`].
+    /// Stored as an address because a raw pointer is not `Sync`; the icon is
+    /// never destroyed (one 16x16 icon for the life of the process).
+    fn badge_icon() -> Option<*mut c_void> {
+        use windows_sys::Win32::Graphics::Gdi::{CreateBitmap, DeleteObject};
+        static ICON: OnceLock<usize> = OnceLock::new();
+        let p = *ICON.get_or_init(|| {
+            let n = super::OVERLAY_SIZE;
+            let color = super::overlay_pixels(n);
+            let mask = vec![0u8; (n * n / 8) as usize];
+            // SAFETY: both buffers are exactly the size the bitmaps describe
+            // (32bpp colour; a 1bpp all-zero mask, rows word-aligned at n=16),
+            // and the bitmaps are deleted once the icon has copied them.
+            unsafe {
+                let hbm_color = CreateBitmap(n as i32, n as i32, 1, 32, color.as_ptr().cast());
+                let hbm_mask = CreateBitmap(n as i32, n as i32, 1, 1, mask.as_ptr().cast());
+                if hbm_color.is_null() || hbm_mask.is_null() {
+                    return 0;
+                }
+                let info = IconInfo {
+                    f_icon: 1,
+                    x_hotspot: 0,
+                    y_hotspot: 0,
+                    hbm_mask: hbm_mask as *mut c_void,
+                    hbm_color: hbm_color as *mut c_void,
+                };
+                let icon = CreateIconIndirect(&info);
+                DeleteObject(hbm_color);
+                DeleteObject(hbm_mask);
+                icon as usize
+            }
+        });
+        (p != 0).then_some(p as *mut c_void)
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn set_overlay_icon_is_slot_18() {
+        // A wrong slot calls some other method with these arguments and fails
+        // silently, so pin the layout: 3 IUnknown + 5 ITaskbarList + 1
+        // ITaskbarList2 + 10 ITaskbarList3 slots, SetOverlayIcon the last.
+        let p = std::mem::size_of::<usize>();
+        assert_eq!(std::mem::offset_of!(ITaskbarList3Vtbl, set_progress_value), 9 * p);
+        assert_eq!(std::mem::offset_of!(ITaskbarList3Vtbl, set_overlay_icon), 18 * p);
+        assert_eq!(std::mem::size_of::<ITaskbarList3Vtbl>(), 19 * p);
+    }
+
+    pub fn set_overlay(hwnd: isize, on: bool) {
+        let Some(ptr) = taskbar() else {
+            return;
+        };
+        let icon = if on {
+            match badge_icon() {
+                Some(i) => i,
+                None => return,
+            }
+        } else {
+            std::ptr::null_mut()
+        };
+        // The accessibility text Windows reads for the badge.
+        let desc: Vec<u16> = "Bell".encode_utf16().chain(Some(0)).collect();
+        // SAFETY: `ptr` is a live ITaskbarList3; `icon` is a valid HICON or
+        // null (which removes the overlay); `desc` is NUL-terminated.
+        unsafe {
+            let vtbl = (*(ptr as *mut IUnknownLayout)).vtbl;
+            ((*vtbl).set_overlay_icon)(ptr, hwnd, icon, desc.as_ptr());
+        }
+    }
+
     pub fn set(hwnd: isize, progress: Progress) {
         let Some(ptr) = taskbar() else {
             return;
@@ -263,12 +359,43 @@ mod imp {
         false
     }
     pub fn set(_hwnd: isize, _progress: super::Progress) {}
+    pub fn set_overlay(_hwnd: isize, _on: bool) {}
 }
 
 /// Show `progress` on the window's taskbar button. Best-effort: every failure
 /// path degrades to no indicator rather than surfacing an error.
 pub fn set(hwnd: isize, progress: Progress) {
     imp::set(hwnd, progress);
+}
+
+/// Show or clear the taskbar button's overlay badge (`SetOverlayIcon`): a
+/// small dot meaning "a bell rang in this window while you were elsewhere".
+/// Best-effort like [`set`].
+pub fn set_overlay(hwnd: isize, on: bool) {
+    imp::set_overlay(hwnd, on);
+}
+
+/// The badge's side, in pixels. The shell scales overlays to the small-icon
+/// size; 16 is that size at 100%.
+pub const OVERLAY_SIZE: u32 = 16;
+
+/// The badge bitmap: a filled, anti-aliased red dot on transparency, as
+/// top-down 32bpp `0xAARRGGBB` words (straight alpha, which is what
+/// `CreateIconIndirect` wants for a 32-bit colour bitmap).
+pub fn overlay_pixels(n: u32) -> Vec<u32> {
+    let c = n as f32 / 2.0;
+    let r = c - 1.0;
+    let mut px = Vec::with_capacity((n * n) as usize);
+    for y in 0..n {
+        for x in 0..n {
+            let (dx, dy) = (x as f32 + 0.5 - c, y as f32 + 0.5 - c);
+            let d = (dx * dx + dy * dy).sqrt();
+            let a = (r + 0.5 - d).clamp(0.0, 1.0);
+            let a8 = (a * 255.0).round() as u32;
+            px.push(if a8 == 0 { 0 } else { (a8 << 24) | 0x00E5_484D });
+        }
+    }
+    px
 }
 
 /// Whether the taskbar interface could be created on this thread.
@@ -337,6 +464,24 @@ mod tests {
             "CoCreateInstance(CLSID_TaskbarList, IID_ITaskbarList3) or HrInit failed — \
              check the GUIDs and the vtable prefix in this module"
         );
+    }
+
+    #[test]
+    fn the_badge_is_an_opaque_dot_on_transparency() {
+        let n = super::OVERLAY_SIZE;
+        let px = super::overlay_pixels(n);
+        assert_eq!(px.len(), (n * n) as usize);
+        let at = |x: u32, y: u32| px[(y * n + x) as usize];
+        assert_eq!(at(n / 2, n / 2) >> 24, 0xFF, "centre is opaque");
+        assert_eq!(at(n / 2, n / 2) & 0x00FF_FFFF, 0x00E5_484D);
+        assert_eq!(at(0, 0), 0, "corners are fully transparent");
+        assert_eq!(at(n - 1, n - 1), 0);
+        // Symmetric, so it cannot be drawn off-centre.
+        for y in 0..n {
+            for x in 0..n {
+                assert_eq!(at(x, y), at(n - 1 - x, n - 1 - y));
+            }
+        }
     }
 
     #[test]

@@ -105,6 +105,21 @@ mod imp {
     #[link(name = "user32")]
     unsafe extern "system" {
         fn LoadIconW(hinstance: *mut c_void, name: *const u16) -> *mut c_void;
+        fn MessageBoxW(hwnd: isize, text: *const u16, caption: *const u16, kind: u32) -> i32;
+    }
+
+    /// A blocking, native error box. Used when the GPU is gone and egui can
+    /// no longer draw anything of its own to say so.
+    pub fn error_box(hwnd: isize, title: &str, body: &str) {
+        const MB_OK: u32 = 0x0;
+        const MB_ICONERROR: u32 = 0x10;
+        let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
+        let (t, b) = (wide(title), wide(body));
+        // SAFETY: both strings are NUL-terminated UTF-16 that outlive the call;
+        // `hwnd` may be 0, which parents the box to the desktop.
+        unsafe {
+            MessageBoxW(hwnd, b.as_ptr(), t.as_ptr(), MB_OK | MB_ICONERROR);
+        }
     }
 
     type ShellNotifyIconW = unsafe extern "system" fn(u32, *const NotifyIconDataW) -> i32;
@@ -221,6 +236,12 @@ mod imp {
 mod imp {
     pub fn show(_hwnd: isize, _title: &str, _body: &str) {}
     pub fn shutdown(_hwnd: isize) {}
+    pub fn error_box(_hwnd: isize, _title: &str, _body: &str) {}
+}
+
+/// Show a blocking native error dialog, for failures egui cannot draw.
+pub fn error_box(hwnd: isize, title: &str, body: &str) {
+    imp::error_box(hwnd, title, body);
 }
 
 /// Raise a desktop notification. `title` may be empty (the OSC 9 form carries
