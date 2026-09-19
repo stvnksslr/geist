@@ -786,7 +786,7 @@ fn find_font(family: &str, bold: bool, italic: bool) -> Option<(&'static [u8], u
 /// discovery doesn't constrain on style bits, so this keeps the user on their
 /// configured font when a family ships only a styled master or carries unusual
 /// OS/2 style metadata, rather than dropping the whole selection to the built-in.
-fn find_regular_font(family: &str) -> Option<(&'static [u8], u32)> {
+pub(crate) fn find_regular_font(family: &str) -> Option<(&'static [u8], u32)> {
     find_font(family, false, false)
         .or_else(|| scan_fonts(family, |face| family_name_matches(face, family)))
         // A path is an explicit choice of file: the primary slot uses it whatever

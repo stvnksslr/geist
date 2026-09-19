@@ -147,7 +147,9 @@ fallback engine without app changes:
   split's "inherit the parent's cwd" is built by side-scanning the PTY bytes ourselves in `osc7.rs`
   (`Osc7Scanner`, fed from `pump_pty` like `osc52.rs`) and feeding the URI to `Session::pwd`. PowerShell
   and cmd don't emit OSC 7 by default, so `Profile::launch_args` (`profiles.rs`) injects a prompt hook at
-  spawn (`pwsh`/`powershell` via `-EncodedCommand`, `cmd` via `prompt $E]7;…`); WSL/custom shells just
+  spawn (`pwsh`/`powershell` via `-EncodedCommand`, `cmd` via `prompt $E]7;…`), and WSL runs Ghostty's own
+  scripts (`assets/shell-integration/`, reporting Linux paths that `Pty::spawn` drops unless they map
+  to a Windows dir, e.g. `/mnt/c/…`); custom shells just
   fall back to the default dir. The split's cwd is read in `App::split` and passed through `Session::new`
   → `Pty::spawn` → `CommandBuilder::cwd`.
 

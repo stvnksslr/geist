@@ -46,5 +46,6 @@ pub mod synthetic;
 pub mod taskbar;
 pub mod theme;
 pub mod undo;
+pub mod winchrome;
 pub mod writefile;
 pub mod xtshiftescape;

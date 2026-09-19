@@ -26,16 +26,16 @@ features** that are neither — surveyed from `macos/Sources` and from the 673 u
 between the old pin (b869a6e) and `main`. Key/action extraction is the config-surface ledger's
 method, re-run against the `main` checkout the build fetches.
 
-Scoreboard: **116 of 208** public config keys · **70 of 88** actions · app features in §C.
+Scoreboard: **132 of 208** public config keys · **76 of 88** actions · app features in §C.
 Effort: **S** <1d · **M** 1–3d · **L** ~1wk · **XL** multi-week.
 
-### A. Config keys still unsupported (92)
+### A. Config keys still unsupported (90)
 
 **A1. Real work, cross-platform.** Ordered roughly by value.
 
 | Key(s) | What it takes | Effort |
 |---|---|---|
-| `shell-integration`, `shell-integration-features` | Off switch + feature flags for the prompt hooks `profiles.rs` injects. **Also the WSL story**: ship Ghostty's bash/zsh/fish scripts into WSL. | M |
+| ✅ `shell-integration`, `shell-integration-features` | Done. `none` disables every injected hook (pwsh/cmd prompt hooks + WSL). Features per shell: **pwsh/powershell/cmd** — `cursor` (bar at the prompt, `5`/`6` by `cursor-style-blink`; reset to default by the *session* on Enter, since these shells have no pre-exec hook) and `title` (cwd at the prompt; never the running command, same reason); `sudo`/`ssh-env`/`ssh-terminfo`/`path` N/A (no terminfo on Windows, no `ghostty` CLI). **WSL** — Ghostty's own bash/zsh/fish/elvish/nushell scripts, vendored in `assets/shell-integration/` (embedded, extracted to `%LOCALAPPDATA%\giest\shell-integration`), reached via WSLENV `/p` and injected by `giest-wsl.sh` with upstream's per-shell mechanism (bash `ENV`+`--posix`, zsh `ZDOTDIR`, fish/elvish/nushell `XDG_DATA_DIRS`); `cursor`/`title`/`sudo`/`path` pass through, `ssh-*` are **withheld** (upstream wraps `ssh` in `ghostty +ssh`, which doesn't exist in WSL). `detect` on WSL reads `$SHELL`; a forced `bash`/`zsh`/… only changes the WSL scheme (Ghostty has none for pwsh/cmd). Native Windows bash/zsh (`command = …bash.exe`) are not injected. Verified: pwsh/cmd features and Ghostty's bash script via the bootstrap (Git for Windows bash) in `tests/conpty_passthrough.rs`; zsh/fish/WSL itself unverified (no distro on the dev box). | ✅ |
 | `scrollback-compression` | Engine now exposes `Terminal::compress` + `compression_activity`; needs a per-session idle timer (compress after N s without an activity-token change). | S |
 | ~~`cursor-click-to-move`~~ | ✅ Port of `maybePromptClick`/`promptClickLine` (`prompt_click.rs`). `osc133.rs` side-scans `cl=`/`click_events=` off `A` (the C API exposes neither); the engine reports per-cell OSC 133 *input* content (`prompt_rows`). `cl` → arrows via the engine encoder (DECCKM-aware), `click_events=1|2` → SGR click. The pwsh/cmd hooks now send `A;cl=line`. Needs a live check that ConPTY keeps the typed text's input marking. | — |
 | `link`, `link-previews` | Regex link table (the `link-url` matcher becomes its lowest entry) + hover label (§C). | M |
@@ -46,22 +46,31 @@ Effort: **S** <1d · **M** 1–3d · **L** ~1wk · **XL** multi-week.
 | `grapheme-width-method` | Engine already has mode 2027; expose the option. | S |
 | `cursor-text` | Text color under the cursor (incl. `cell-foreground`). | S |
 | `window-padding-color` | `background` / `extend` / `extend-always`: renderer extends edge cells into the padding. | M |
-| `window-show-tab-bar`, `maximize`, `fullscreen`, `title`, `initial-window`, `quit-after-last-window-closed` (+`-delay`) | Window lifecycle; `initial-window = false` needs a tray/background mode. | S each |
-| `split-preserve-zoom` | Keep zoom across focus/layout changes. | S |
+| ~~`window-show-tab-bar`, `maximize`, `fullscreen`, `title`, `initial-window`, `quit-after-last-window-closed` (+`-delay`)~~ | ✅ Done. **Resident mode** (no window open): the last window is kept as a tab-less template (`App::dormant`) and the root viewport is *hidden*, not closed — closing it is what ends an eframe process (eframe 0.34 still paints invisible windows, so timers and hotkeys run). Only a `global:` keybind (`new_window`, `new_tab`, `toggle_visibility`, `toggle_quick_terminal`) brings a window back — there is no tray icon yet. `quit-after-last-window-closed` defaults **true** (the Windows convention; upstream's default is "Linux only"); `-delay` quits when it expires with no window. `initial-window = false` starts resident (its first shell is spawned and immediately dropped — `Window::first` needs a session) and skips `window-save-state` restore; with no delay it stays resident. `window-show-tab-bar` **defaults to `always`** (divergence from `auto`): the strip holds the profile picker. `title`: a runtime `set_window_title`/`prompt_window_title` outranks it. `fullscreen = non-native*` behaves as `true` (upstream's non-macOS rule). The root × no longer lets eframe close the root itself (`CancelClose`, then the retire decides) — which also fixes the root × quitting giest while other windows were open. | — |
+| ~~`split-preserve-zoom`~~ | ✅ `navigation`: `goto_split` moves the zoom to the newly focused pane. Without it, navigating out of a zoom now **unzooms and moves** (upstream); giest used to refuse to navigate while zoomed. Directional nav while zoomed uses the unzoomed layout (`Node::leaf_rects`). | — |
 | ~~`mouse-shift-capture`, `click-repeat-interval`~~ | ✅ Held Shift takes the mouse back from a tracking program unless captured; `true`/`false` defer to `XTSHIFTESCAPE`, side-scanned (`xtshiftescape.rs`) — whether ConPTY forwards it is unprobed. `click-repeat-interval` sets egui's double-click window; `0` → `GetDoubleClickTime`. | — |
 | `title-report`, `vt-kam-allowed` | Engine options. Title reports are now **off by default** upstream — a behavior change the bump brought in. | S |
 | `palette-generate`, `palette-harmonious` | Generate the 256-color cube from the 16 base colors. | S |
 | ~~`command-palette-entry`~~ | ✅ Upstream grammar incl. Zig-literal quoting; `clear` drops the built-ins, empty restores them; unparseable actions are dropped. | — |
-| `window-subtitle`, `window-title-font-family` | Tab-strip text; subtitle = cwd. | S |
+| ~~`window-subtitle`, `window-title-font-family`~~ | ✅ ◐ Subtitle (`working-directory`) is appended to the window caption as `title — cwd` (a Windows caption has one line). The title font applies to the **tab strip** only — the caption is drawn by DWM with the system font; resolved through the renderer's font scan, startup-only. | — |
 | ~~`app-notifications`~~ | ✅ In-app toasts ("Copied to clipboard", "Reloaded the configuration"); `Window::render_toast`, per-window egui temp data. | S |
 | `language` | Only meaningful once the UI is localized — deferred. | — |
 
-**A2. Windows analogues of platform keys.** `window-decoration` (native vs client-drawn caption),
-`window-titlebar-background` / `-foreground` (Win11 `DWMWA_CAPTION_COLOR` makes this S),
-`window-colorspace` (display-p3 → HDR swapchain, L), `window-vsync` (present mode, S),
-`window-step-resize` (`WM_SIZING` snapping to cells, S), ~~`font-thicken` + `-strength`~~ ✅ (1px
-coverage dilation weighted by strength; upstream is macOS-only — needs eyeballing), `drag-handle` (comes with pane drag, §C), `auto-update` /
-`auto-update-channel` (§C), `quick-terminal-animation-duration` (S).
+**A2. Windows analogues of platform keys.** Done (`winchrome.rs`): ✅ `window-decoration`
+(`none`/`false` → `ViewportCommand::Decorations(false)`; `auto`/`client`/`server` all mean "native
+caption", Windows having one decoration system; a reload re-reads it), ✅ `window-titlebar-background` /
+`-foreground` (Win11 `DWMWA_CAPTION_COLOR` / `DWMWA_TEXT_COLOR`, applied to **every** top-level
+window on the UI thread via `EnumThreadWindows` — child viewports have no reachable HWND; pre-Win11
+ignores them; unlike GTK not gated on `window-theme = ghostty`), ✅ `window-vsync` (`AutoVsync` /
+`AutoNoVsync`, **startup-only**: the swapchain predates the app), ◐ `window-step-resize` (a
+`WM_SIZING` subclass on the **root window only** — the one HWND giest can reach — snapping the
+client to whole cells of the non-grid overhead measured each frame; with splits it snaps the whole
+pane area, not each pane), ✅ `quick-terminal-animation-duration` (slide in/out from the anchored
+edge, ease-out cubic; `center` doesn't slide; a newly *created* quick terminal may show one frame at
+rest before the slide starts). Still open: `window-colorspace` (display-p3 → HDR swapchain, L),
+~~`font-thicken` + `-strength`~~ ✅ (1px coverage dilation weighted by strength; upstream is
+macOS-only — needs eyeballing), `drag-handle` (comes with pane
+drag, §C), `auto-update` / `auto-update-channel` (§C).
 
 **A3. Blocked.** `enquiry-response` — ConPTY strips ENQ (probed; see the config-surface ledger).
 
@@ -75,17 +84,17 @@ coverage dilation weighted by strength; upstream is macOS-only — needs eyeball
 | Action | Plan | Effort |
 |---|---|---|
 | ~~`resize_split`, `equalize_splits`~~ ✅ | Done: `Node::Split::ratio`, nearest-ancestor resize (10–90% + 2-cell clamp), leaf-weighted equalize, ratios persisted (`S v 0.3`; old files read 0.5). Upstream's non-macOS `super+ctrl+shift+arrow` defaults are not bound — giest sees no Win-key modifier. | M |
-| `prompt_window_title`, `prompt_surface_title` | Reuse the tab-rename box. | S |
-| `move_tab_to_new_window` | Detach a `Tab` (undo already does this losslessly) into `spawn_window`. | S |
-| `goto_window`, `toggle_visibility` | Window cycling; hide/show all windows. | S |
+| ~~`prompt_window_title`, `prompt_surface_title`~~ ✅ | A small modal (in both input gates) prefilled with the current title; empty clears the override. A modal rather than the inline tab-rename box: a pane or window has no strip slot to edit in. | S |
+| ~~`move_tab_to_new_window`~~ ✅ | The active tab is moved (shells running) into `Window::sibling_with`; a window's only tab is a no-op, as upstream. Not undoable (upstream neither). | S |
+| ~~`goto_window`, `toggle_visibility`~~ ✅ | `toggle_visibility` is app-scoped: `Visible(false/true)` to every window but the quick terminal, focus restored on show, no-op while fullscreen (upstream). Only a `global:` bind can bring hidden windows back. | S |
 | `reset_window_size` | Re-apply `window-width` / `-height`. | S |
 | `copy_url_to_clipboard` | `url_at` under the pointer → clipboard. | S |
 | `scroll_to_selection`, ~~`paste_from_selection`~~ | `paste_from_selection` ✅: pastes the in-process PRIMARY emulation (`primary.rs`) through `paste_str`. | S |
 | `end_key_sequence` | Flush a pending leader as literal keys. | S |
-| `toggle_window_decorations` | With `window-decoration`. | S |
+| ~~`toggle_window_decorations`~~ ✅ | Per window, via `ViewportCommand::Decorations`. | S |
 | `check_for_updates` | With auto-update. | — |
 | `toggle_tab_overview` | Thumbnail-grid overlay. | M–L |
-| `show_on_screen_keyboard` | Touch keyboard (`IFrameworkInputPane`). | S |
+| ~~`show_on_screen_keyboard`~~ ✅ | `ITipInvocation::Toggle` on the touch-keyboard broker (hand-declared vtable); starts `TabTip.exe` if the broker isn't running; silent without one. It *toggles* — Windows exposes no reliable "is it visible" query on Win11 — so a second press hides it. Needs a human check on a touch-keyboard machine. | S |
 | `crash`, `cursor_key`, `show_gtk_inspector` | Debug-only / internal / GTK — N/A. | — |
 
 ### C. App-level features (no key, no action)
@@ -131,9 +140,9 @@ coverage dilation weighted by strength; upstream is macOS-only — needs eyeball
 | OSC 52 / pwd **effects in lib-vt** | ◐ | could retire the `osc52.rs` / `osc7.rs` side-scanners (pwd callback 002fd41) — M |
 | `ghostty_terminal_paste` | ⬜ | route the paste encoder through it, gate unchanged — S |
 | Native search API (`ghostty_search_*`) | ⬜ | back the search bar; unlocks regex search — M |
-| Dirty-row iteration | ⬜ | skip unchanged rows in the snapshot copy — M |
+| Dirty-row iteration | ✅ | `f00c510`: only dirty rows are re-copied; the render state is now acknowledged each frame (it reported `Full` forever before). Needs an eyeball pass for stale cells while typing, scrolling and changing themes. |
 | Selection gesture engine | ⬜ | optional replacement for giest's click-count logic — M |
-| Default cursor style/blink engine options | ⬜ | set from `cursor-style*` — S |
+| Default cursor style/blink engine options | ✅ N/A | probed: equivalent to `decscusr.rs` for initial, `CSI 0 q`, RIS and mode 12 — except upstream ignores mode 12 when `cursor-style-blink` is set, which only the scanner does. The scanner stays. |
 | OSC 72 kitty drag-and-drop | ⬜ | after file drop — M |
 | Kitty animation / relative placements / glyph protocol | ◐ blocked | all APC; **ConPTY strips APC** — needs the passthrough-mode portable-pty patch first — L–XL |
 | New `middle-click-action` / `copy-on-select` values, `~` in theme paths | ✅ | `clipboard-paste`; `none/primary/clipboard/both` (`true` = clipboard, as off-Linux upstream); `primary-paste` reads the PRIMARY emulation, falling back to the clipboard while it is empty; `~`/`~\` → `%USERPROFILE%` for every theme name incl. light/dark pairs |
@@ -147,7 +156,7 @@ coverage dilation weighted by strength; upstream is macOS-only — needs eyeball
    drag-rearrange + `drag-handle` + `move_tab_to_new_window` (L).
 3. **The S-sized sweep:** A1's window/mouse/cursor options, §B's small actions, §C's right-click
    menu, indicators, link preview, file drop, About box.
-4. **Shell integration:** `shell-integration(-features)`, WSL scripts, `cursor-click-to-move` (M).
+4. **Shell integration:** ✅ `shell-integration(-features)`, ✅ WSL scripts; `cursor-click-to-move` (M).
 5. **Automation:** CLI args → named-pipe IPC → Explorer entry → Jump List (L).
 6. **Protocols:** OSC 5522; move side-scanners onto lib-vt effects; native search + regex (M each).
 7. **Chrome:** custom caption + `window-decoration` + titlebar colors; runtime icon (L).

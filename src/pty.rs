@@ -94,7 +94,10 @@ impl Pty {
         for arg in args {
             cmd.arg(arg);
         }
-        if let Some(cwd) = cwd {
+        // Only a directory that exists *on Windows*: a pane inside WSL reports
+        // Linux paths over OSC 7 (`/home/me`), which CreateProcess cannot start
+        // in — better the default dir than a failed split.
+        if let Some(cwd) = cwd.filter(|p| p.is_dir()) {
             cmd.cwd(cwd);
         }
         for (k, v) in env {
