@@ -53,7 +53,7 @@ Effort: **S** <1d · **M** 1–3d · **L** ~1wk · **XL** multi-week.
 | `palette-generate`, `palette-harmonious` | Generate the 256-color cube from the 16 base colors. | S |
 | `command-palette-entry` | Custom palette rows (title/description/action). | S |
 | `window-subtitle`, `window-title-font-family` | Tab-strip text; subtitle = cwd. | S |
-| `app-notifications` | In-app toasts ("copied", "config reloaded"). | S |
+| ~~`app-notifications`~~ | ✅ In-app toasts ("Copied to clipboard", "Reloaded the configuration"); `Window::render_toast`, per-window egui temp data. | S |
 | `language` | Only meaningful once the UI is localized — deferred. | — |
 
 **A2. Windows analogues of platform keys.** `window-decoration` (native vs client-drawn caption),
@@ -99,7 +99,7 @@ dilation in the rasterizer, S), `drag-handle` (comes with pane drag, §C), `auto
 | **Accessibility** (Narrator/NVDA) | ⬜ | AccessKit via egui; grid as a text node | L |
 | **Child-exited bar** (exit code, abnormal exit, press-any-key) | ⬜ | keep the pane after `reap_dead` when configured | S–M |
 | Renderer-error / spawn-error views | ⬜ | message instead of a blank or vanished pane | S |
-| **Config-errors dialog** | ⬜ | list unknown keys / bad values; Reload / Ignore | S |
+| **Config-errors dialog** | ✅ | parser diagnostics (unknown keys, bad values, malformed lines, unreadable includes, missing theme) collected into `Config::diagnostics`; modal with Reload Configuration / Ignore, re-shown only when the set changes. Not every setter reports a bad value yet — many still keep the old value silently | S |
 | Right-click menu completeness | ◐ | add Copy, Split Left/Up, Inspector, Read-only, title prompts, Copy URL | S |
 | Key-sequence / key-table indicator | ⬜ | draw the pending leader + active table | S |
 | Link hover preview | ⬜ | label at the pane bottom | S |

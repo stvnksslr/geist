@@ -726,6 +726,10 @@ pub struct Window {
     /// A close waiting on the confirmation modal. While `Some`, the modal is
     /// drawn and owns the keyboard — like `palette` and the search overlay.
     confirm: Option<PendingClose>,
+    /// The diagnostics set the user dismissed with "Ignore". The config-errors
+    /// dialog shows while `config.diagnostics` is non-empty and differs from
+    /// this, so an ignored set stays hidden until a reload produces a new one.
+    config_errors_ignored: Option<Vec<String>>,
     /// True once a confirmed *window* close has been issued. Without it the
     /// `ViewportCommand::Close` we send would come straight back as another
     /// `close_requested()` with nothing pending, re-opening the dialog forever.
@@ -1115,6 +1119,24 @@ fn highlight_job(
     job
 }
 
+/// How long an in-app toast stays up (GTK's `adw_toast` default is ~2-3 s).
+const TOAST_SECS: f32 = 2.0;
+
+/// The per-window egui temp-data slot holding the current toast. Namespaced
+/// like `Window::id` (see CLAUDE.md: `Memory::data` is not viewport-keyed).
+/// A free function so pane code that holds a `self.tabs` borrow can still post
+/// a toast with just the window id.
+fn toast_id(window_id: u64) -> egui::Id {
+    egui::Id::new(("giest-window", window_id, "toast"))
+}
+
+/// Show `msg` as this window's toast, replacing any current one. Callers check
+/// the relevant `app-notifications` flag.
+fn push_toast(ctx: &egui::Context, window_id: u64, msg: &str) {
+    ctx.data_mut(|d| d.insert_temp(toast_id(window_id), (msg.to_string(), std::time::Instant::now())));
+    ctx.request_repaint();
+}
+
 /// A dialog's button row: right-aligned, primary first (so it lands right-most,
 /// the Windows convention), both buttons the same width.
 ///
@@ -1291,6 +1313,7 @@ impl Window {
             transparent_surface,
             tab_drag: None,
             confirm: None,
+            config_errors_ignored: None,
             closing: false,
             bell_title: false,
             was_focused: true,
@@ -1401,6 +1424,95 @@ impl Window {
             Some(false) => self.confirm = None,
             None => {}
         }
+    }
+
+    /// Draw the config-errors dialog (macOS `ConfigurationErrorsView`): the
+    /// problems the last load reported, with "Reload Configuration" and
+    /// "Ignore". Ignore (and Esc / a backdrop click) records this exact set so
+    /// it stays hidden until a reload yields a different one.
+    fn render_config_errors(
+        &mut self,
+        ctx: &egui::Context,
+        render_state: Option<&egui_wgpu::RenderState>,
+    ) {
+        if !self.config_errors_open() {
+            return;
+        }
+        let chrome = self.chrome;
+        let diags = &self.config.diagnostics;
+        let mut decision: Option<bool> = None;
+        let modal = egui::Modal::new(self.id("config-errors")).show(ctx, |ui| {
+            ui.set_width(520.0);
+            ui.heading("Configuration Errors");
+            ui.add_space(8.0);
+            ui.label(
+                egui::RichText::new(format!(
+                    "{} error{} found while loading the configuration. Please review the \
+                     errors below and reload your configuration or ignore the erroneous lines.",
+                    diags.len(),
+                    if diags.len() == 1 { " was" } else { "s were" }
+                ))
+                .color(chrome.weak_text),
+            );
+            ui.add_space(8.0);
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .max_height(220.0)
+                    .id_salt(self.id("config-errors-list"))
+                    .show(ui, |ui| {
+                        for d in diags {
+                            ui.add(
+                                egui::Label::new(egui::RichText::new(d).monospace()).wrap(),
+                            );
+                        }
+                    });
+            });
+            ui.add_space(16.0);
+            let (reload, ignore) =
+                dialog_buttons(ui, &chrome, "Reload Configuration", false, "Ignore");
+            if reload {
+                decision = Some(true);
+            }
+            if ignore {
+                decision = Some(false);
+            }
+        });
+        if modal.should_close() {
+            decision = Some(false);
+        }
+        match decision {
+            Some(true) => self.reload_config(render_state),
+            Some(false) => self.config_errors_ignored = Some(self.config.diagnostics.clone()),
+            None => {}
+        }
+    }
+
+    /// Draw the current toast, if any, bottom-centre of the window, fading out
+    /// over its last few hundred milliseconds.
+    fn render_toast(&mut self, ctx: &egui::Context) {
+        let id = toast_id(self.window_id);
+        let Some((msg, at)) = ctx.data(|d| d.get_temp::<(String, std::time::Instant)>(id))
+        else {
+            return;
+        };
+        let age = at.elapsed().as_secs_f32();
+        if age >= TOAST_SECS {
+            ctx.data_mut(|d| d.remove::<(String, std::time::Instant)>(id));
+            return;
+        }
+        let alpha = ((TOAST_SECS - age) / 0.3).clamp(0.0, 1.0);
+        let chrome = self.chrome;
+        egui::Area::new(self.id("toast"))
+            .order(egui::Order::Tooltip)
+            .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -24.0))
+            .interactable(false)
+            .show(ctx, |ui| {
+                ui.set_opacity(alpha);
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.label(egui::RichText::new(msg).color(chrome.weak_text));
+                });
+            });
+        ctx.request_repaint_after(std::time::Duration::from_millis(33));
     }
 
     /// Draw the clipboard-permission modal, if a pane in the active tab is
@@ -1584,6 +1696,9 @@ impl Window {
             transparent_surface: self.transparent_surface,
             tab_drag: None,
             confirm: None,
+            // The errors belong to the config, not a window: the window that
+            // loaded it already shows (or was told to ignore) them.
+            config_errors_ignored: Some(self.config.diagnostics.clone()),
             closing: false,
             bell_title: false,
             was_focused: true,
@@ -1912,6 +2027,14 @@ impl Window {
             || self.confirm.is_some()
             || self.focused_search_open()
             || self.clipboard_prompt().is_some()
+            || self.config_errors_open()
+    }
+
+    /// Whether the config-errors dialog is up: the loaded config had problems
+    /// and the user hasn't ignored this exact set.
+    fn config_errors_open(&self) -> bool {
+        !self.config.diagnostics.is_empty()
+            && self.config_errors_ignored.as_ref() != Some(&self.config.diagnostics)
     }
 
     /// The active tab's first pane waiting on a clipboard decision, if any.
@@ -2509,6 +2632,9 @@ impl Window {
         // `load_bg_image` caches by path), so editing the key applies live like
         // the colors do. Only the *surface's* transparency is startup-only.
         self.config = cfg;
+        if self.config.app_notifications.config_reload {
+            push_toast(&self.egui_ctx, self.window_id, "Reloaded the configuration");
+        }
         // Re-derive the chrome and re-install the egui `Style`, so editing
         // `background`/`foreground`/`palette`/`window-theme` restyles the tab
         // strip, palette, overlays and dialogs live like the terminal colors do.
@@ -2824,10 +2950,15 @@ impl Window {
             Action::DecreaseFontSize => self.font_zoom_by(render_state, -1.0),
             Action::ResetFontSize => self.font_reset(render_state),
             Action::Copy => {
+                let toast = self.config.app_notifications.clipboard_copy;
+                let win_id = self.window_id;
                 if let Some(s) = self.focused_session_mut() {
                     if let Some(text) = s.selection_text() {
                         ctx.copy_text(text);
                         s.clear_selection();
+                        if toast {
+                            push_toast(ctx, win_id, "Copied to clipboard");
+                        }
                     }
                 }
             }
@@ -4146,6 +4277,8 @@ impl Window {
         // Hoisted so the per-pane widget id can be namespaced to this window
         // from inside the leaf loop, which borrows `self.tabs`.
         let win_id = self.window_id;
+        // `app-notifications = clipboard-copy`, read here for the same reason.
+        let copy_toast = self.config.app_notifications.clipboard_copy;
         // While a modal overlay is up it owns input: don't feed keys to the
         // focused pane or let it grab keyboard focus. `egui::Modal` blocks
         // *pointer* interaction and tab traversal on its own, but
@@ -4153,7 +4286,10 @@ impl Window {
         // grab has to be suppressed explicitly, or typing would still reach the
         // shell behind the confirmation dialog.
         let palette_open =
-            self.palette.is_some() || self.confirm.is_some() || self.clipboard_prompt().is_some();
+            self.palette.is_some()
+                || self.confirm.is_some()
+                || self.clipboard_prompt().is_some()
+                || self.config_errors_open();
 
         // The inspector is deliberately **not** in that list — it must never
         // take the keyboard, or its own keyboard log would have nothing to
@@ -4295,6 +4431,11 @@ impl Window {
             leaves[focus_idx]
                 .payload
                 .handle_input(ctx, tracking, ch, &keymap, &tables, undo_state);
+            // Ctrl+C / Ctrl+Shift+C copies happen inside the session (they
+            // arrive as `Event::Copy`), so it reports them back for the toast.
+            if leaves[focus_idx].payload.take_copied() && copy_toast {
+                push_toast(ctx, win_id, "Copied to clipboard");
+            }
         } else if search_open {
             // The search overlay owns the keyboard, so input (and its scroll
             // easing) is skipped — but keep the viewport easing toward the match
@@ -4541,6 +4682,9 @@ impl Window {
                     let copy_sel = |s: &Session| {
                         if let Some(text) = s.selection_text() {
                             ctx.copy_text(text);
+                            if copy_toast {
+                                push_toast(ctx, win_id, "Copied to clipboard");
+                            }
                         }
                     };
                     let paste = |s: &mut Session| {
@@ -5324,12 +5468,17 @@ impl Window {
         self.render_search(&ctx);
         // The inspector: not modal, so it goes *under* every dialog that is.
         self.render_inspector(&ctx);
+        // Config errors: modal but merely informational, so *under* the
+        // dialogs that are waiting on a decision.
+        self.render_config_errors(&ctx, render_state);
         // The close confirmation draws over everything else.
         self.render_confirm_close(&ctx);
         // …and the clipboard permission prompt over that: it's the one dialog
         // whose answer can leak data or run a command, so nothing may sit on
         // top of it and take the click meant for "Deny".
         self.render_clipboard_confirm(&ctx);
+        // Transient, non-interactive, and last so it is never hidden.
+        self.render_toast(&ctx);
 
         std::mem::take(&mut self.requests)
     }

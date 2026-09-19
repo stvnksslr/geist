@@ -174,6 +174,9 @@ pub struct Session {
     /// they are pushed here rather than read from a `Config` (see `apply_config`).
     selection_clear_on_typing: bool,
     selection_clear_on_copy: bool,
+    /// Set when `handle_input` copied the selection (`Event::Copy`), so the app
+    /// can show the `clipboard-copy` toast; cleared by [`Self::take_copied`].
+    copied: bool,
     /// Clipboard permissions and paste protection. Consulted at paste and pump
     /// time rather than per frame, so a config reload must push it
     /// (see `apply_config`).
@@ -293,6 +296,7 @@ impl Session {
             selection_word_chars: config.selection_word_chars.clone(),
             selection_clear_on_typing: config.selection_clear_on_typing,
             selection_clear_on_copy: config.selection_clear_on_copy,
+            copied: false,
             clipboard: config.clipboard,
             pending_clipboard: None,
             scrollbar_shown_until: None,
@@ -1481,6 +1485,11 @@ impl Session {
             .filter(|s| !s.is_empty())
     }
 
+    /// Whether `handle_input` copied since the last call (and reset it).
+    pub fn take_copied(&mut self) -> bool {
+        std::mem::take(&mut self.copied)
+    }
+
     /// Translate keyboard/text/paste events into PTY bytes. `Ctrl+Shift` combos
     /// are reserved for the app (copy, tab management) and never sent to the
     /// shell, as is `Ctrl+Tab`.
@@ -1589,6 +1598,7 @@ impl Session {
                     match copy_or_interrupt(self.selection_text()) {
                         CopyAction::Copy(text) => {
                             ctx.copy_text(text);
+                            self.copied = true;
                             // `selection-clear-on-copy` — **false** by default
                             // upstream, where giest used to clear
                             // unconditionally. Keeping the selection lets you

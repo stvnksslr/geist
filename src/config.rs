@@ -16,6 +16,76 @@ use std::sync::OnceLock;
 
 use crate::engine::{BoldColor, CursorShape, Rgb};
 
+// Parse diagnostics. The setters are plain `fn` pointers with nowhere to put a
+// message, and threading a sink through every one of them would be all noise —
+// so problems go to a thread-local list that the load entry points clear before
+// parsing and drain into `Config::diagnostics` after. Thread-local rather than
+// global so parallel `cargo test` threads can't see each other's messages.
+thread_local! {
+    static DIAGNOSTICS: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Record a config problem: still printed to stderr as before (useful from a
+/// console), and kept for the config-errors dialog — the only place a GUI user
+/// will ever see it.
+fn report(msg: String) {
+    eprintln!("{msg}");
+    let msg = msg.strip_prefix("giest: ").unwrap_or(&msg).to_string();
+    DIAGNOSTICS.with(|d| d.borrow_mut().push(msg));
+}
+
+fn take_diagnostics() -> Vec<String> {
+    DIAGNOSTICS.with(|d| std::mem::take(&mut *d.borrow_mut()))
+}
+
+macro_rules! diag {
+    ($($t:tt)*) => { report(format!($($t)*)) };
+}
+
+/// Which in-app toasts are shown. Ghostty `app-notifications`, a packed struct
+/// parsed like [`BellFeatures`]; both default **on**.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AppNotifications {
+    /// "Copied to clipboard" after an explicit copy.
+    pub clipboard_copy: bool,
+    /// "Reloaded the configuration" after a reload.
+    pub config_reload: bool,
+}
+
+impl Default for AppNotifications {
+    fn default() -> Self {
+        Self { clipboard_copy: true, config_reload: true }
+    }
+}
+
+/// Parse `app-notifications` by the same packed-struct rules as
+/// [`parse_bell_features`]: a strict bare boolean sets every flag, otherwise
+/// start from the defaults, `no-` negates, and one unknown token rejects the
+/// whole value.
+fn parse_app_notifications(value: &str) -> Option<AppNotifications> {
+    let v = value.trim();
+    let all = |on| AppNotifications { clipboard_copy: on, config_reload: on };
+    match v {
+        "1" | "t" | "true" => return Some(all(true)),
+        "0" | "f" | "false" => return Some(all(false)),
+        _ => {}
+    }
+    let mut out = AppNotifications::default();
+    for tok in v.split(',').map(str::trim).filter(|t| !t.is_empty()) {
+        let (name, on) = match tok.strip_prefix("no-") {
+            Some(rest) => (rest, false),
+            None => (tok, true),
+        };
+        match name.to_ascii_lowercase().as_str() {
+            "clipboard-copy" => out.clipboard_copy = on,
+            "config-reload" => out.config_reload = on,
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
 /// What a right-click inside a terminal pane does. Ghostty `right-click-action`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RightClickAction {
@@ -169,7 +239,7 @@ fn terminal_color(v: &str, current: TerminalColor, default: TerminalColor) -> Te
         return default;
     }
     TerminalColor::parse(v).unwrap_or_else(|| {
-        eprintln!("giest: ignoring unparseable color '{v}'");
+        diag!("giest: ignoring unparseable color '{v}'");
         current
     })
 }
@@ -630,7 +700,7 @@ fn adjust_value(v: &str, current: MetricModifier, default: MetricModifier) -> Me
     match MetricModifier::parse(v) {
         Some(m) => m,
         None => {
-            eprintln!("giest: ignoring adjustment '{v}' (expected a number like '1', '-2' or '20%')");
+            diag!("giest: ignoring adjustment '{v}' (expected a number like '1', '-2' or '20%')");
             current
         }
     }
@@ -1154,6 +1224,12 @@ pub struct Config {
     pub undo_timeout_ms: u64,
     /// Which bell effects fire on BEL. Ghostty `bell-features`.
     pub bell: BellFeatures,
+    /// Which in-app toasts are shown. Ghostty `app-notifications`.
+    pub app_notifications: AppNotifications,
+    /// Problems met while loading (unknown keys, bad values, unreadable
+    /// includes, a missing theme), in order. Not a config key: it is what the
+    /// config-errors dialog lists. Empty for a clean load.
+    pub diagnostics: Vec<String>,
     /// Sound file played when `bell-features` includes `audio`. Ghostty
     /// `bell-audio-path`; a relative path resolves against the config directory.
     pub bell_audio_path: Option<String>,
@@ -1296,6 +1372,8 @@ impl Default for Config {
             notify_on_command_finish_after_ms: 5_000,
             undo_timeout_ms: 5_000,
             bell: BellFeatures::default(),
+            app_notifications: AppNotifications::default(),
+            diagnostics: Vec::new(),
             bell_audio_path: None,
             bell_audio_volume: 0.5,
             tab_inherit_working_directory: true,
@@ -1351,6 +1429,13 @@ impl Config {
     /// `?` prefix makes a missing file silent. A file already loaded is skipped
     /// with a message, so a cycle terminates instead of hanging.
     pub fn load_from_file(root: &Path) -> Self {
+        take_diagnostics();
+        let mut cfg = Self::load_files(root);
+        cfg.diagnostics = take_diagnostics();
+        cfg
+    }
+
+    fn load_files(root: &Path) -> Self {
         let mut cfg = Self::default();
         let mut queue: std::collections::VecDeque<(PathBuf, bool)> = Default::default();
         let mut seen: std::collections::HashSet<PathBuf> = Default::default();
@@ -1365,7 +1450,7 @@ impl Config {
 
         while let Some((path, optional)) = queue.pop_front() {
             if !seen.insert(load_key(&path)) {
-                eprintln!(
+                diag!(
                     "giest: config-file {}: already loaded (cycle), ignoring",
                     path.display()
                 );
@@ -1377,7 +1462,7 @@ impl Config {
                     queue.extend(more);
                 }
                 Err(e) if optional && e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => eprintln!("giest: error reading config-file {}: {e}", path.display()),
+                Err(e) => diag!("giest: error reading config-file {}: {e}", path.display()),
             }
         }
         cfg
@@ -1392,7 +1477,9 @@ impl Config {
         // No path, so nothing to resolve a relative `config-file` against: the
         // includes this returns are dropped. `load_from_file` is the entry point
         // that follows them.
+        take_diagnostics();
         let _ = cfg.apply_body(text, config_dir().as_deref());
+        cfg.diagnostics = take_diagnostics();
         cfg
     }
 
@@ -1425,7 +1512,7 @@ impl Config {
             return;
         }
         let Some(path) = resolve_theme_path(&name) else {
-            eprintln!("giest: theme '{name}' not found (looked in <config-dir>/themes/)");
+            diag!("giest: theme '{name}' not found (looked in <config-dir>/themes/)");
             return;
         };
         match std::fs::read_to_string(&path) {
@@ -1433,7 +1520,7 @@ impl Config {
             // nested `theme` key inside a theme file is skipped by `apply`, so
             // this cannot recurse.
             Ok(body) => self.parse(&body),
-            Err(e) => eprintln!("giest: could not read theme file {}: {e}", path.display()),
+            Err(e) => diag!("giest: could not read theme file {}: {e}", path.display()),
         }
     }
 
@@ -1453,7 +1540,7 @@ impl Config {
                 continue;
             }
             let Some((key, value)) = line.split_once('=') else {
-                eprintln!("giest: ignoring malformed config line {}: {raw}", i + 1);
+                diag!("giest: ignoring malformed config line {}: {raw}", i + 1);
                 continue;
             };
             self.apply(key.trim(), unquote(value.trim()), &defaults);
@@ -1471,7 +1558,7 @@ impl Config {
         }
         match SETTERS.iter().find(|(k, _)| *k == key) {
             Some((_, set)) => set(self, value, defaults),
-            None => eprintln!("giest: ignoring unsupported config key '{key}'"),
+            None => diag!("giest: ignoring unsupported config key '{key}'"),
         }
     }
 }
@@ -1572,7 +1659,7 @@ const SETTERS: &[(&str, Setter)] = &[
         c.font_synthetic_style = match v {
             "" => d.font_synthetic_style,
             _ => parse_synthetic_style(v).unwrap_or_else(|| {
-                eprintln!("giest: ignoring invalid font-synthetic-style '{v}'");
+                diag!("giest: ignoring invalid font-synthetic-style '{v}'");
                 c.font_synthetic_style
             }),
         }
@@ -1766,7 +1853,7 @@ const SETTERS: &[(&str, Setter)] = &[
             c.palette[idx as usize] = col;
             c.palette_set[idx as usize / 64] |= 1 << (idx as usize % 64);
         } else {
-            eprintln!("giest: ignoring bad palette entry: {v}");
+            diag!("giest: ignoring bad palette entry: {v}");
         }
     }),
     ("link-osc8", |c, v, d| c.link_osc8 = parse_bool(v, d.link_osc8)),
@@ -1870,7 +1957,7 @@ const SETTERS: &[(&str, Setter)] = &[
             c.keybinds
                 .push((trigger.trim().to_string(), action.trim_start().to_string()));
         } else {
-            eprintln!("giest: ignoring malformed keybind (expected 'trigger=action'): {v}");
+            diag!("giest: ignoring malformed keybind (expected 'trigger=action'): {v}");
         }
     }),
     ("confirm-close-surface", |c, v, d| {
@@ -1954,7 +2041,7 @@ const SETTERS: &[(&str, Setter)] = &[
                 None => {
                     // Ghostty makes a bare number a config *error*; giest logs
                     // and keeps the previous value, since it has no error UI.
-                    eprintln!(
+                    diag!(
                         "giest: ignoring quick-terminal-size '{v}' \
                          (sizes need a % or px suffix, e.g. '25%' or '400px')"
                     );
@@ -1969,7 +2056,7 @@ const SETTERS: &[(&str, Setter)] = &[
     // placing the window on the wrong screen.
     ("quick-terminal-screen", |_c, v, _d| {
         if !v.is_empty() && !v.eq_ignore_ascii_case("main") {
-            eprintln!("giest: quick-terminal-screen '{v}' is not supported; using 'main'");
+            diag!("giest: quick-terminal-screen '{v}' is not supported; using 'main'");
         }
     }),
     ("quick-terminal-autohide", |c, v, d| {
@@ -2168,7 +2255,24 @@ const SETTERS: &[(&str, Setter)] = &[
         }
     }),
     ("bell-features", |c, v, d| {
-        c.bell = if v.is_empty() { d.bell } else { parse_bell_features(v).unwrap_or(c.bell) }
+        c.bell = if v.is_empty() {
+            d.bell
+        } else {
+            parse_bell_features(v).unwrap_or_else(|| {
+                diag!("giest: ignoring invalid bell-features '{v}'");
+                c.bell
+            })
+        }
+    }),
+    ("app-notifications", |c, v, d| {
+        c.app_notifications = if v.is_empty() {
+            d.app_notifications
+        } else {
+            parse_app_notifications(v).unwrap_or_else(|| {
+                diag!("giest: ignoring invalid app-notifications '{v}'");
+                c.app_notifications
+            })
+        }
     }),
     ("bell-audio-path", |c, v, d| {
         c.bell_audio_path = opt_string(v, &d.bell_audio_path)
@@ -2465,7 +2569,7 @@ fn set_font_variation(c: &mut Config, d: &Config, v: &str, slot: usize) {
     }
     match parse_font_variation(v) {
         Some(var) => c.font_variations[slot].push(var),
-        None => eprintln!(
+        None => diag!(
             "giest: font-variation: expected a 4-character axis and a number, e.g. `wght=200`; got {v:?}"
         ),
     }
@@ -4242,5 +4346,78 @@ mod tests {
         let c = parsed("theme = does-not-exist\nfont-size = 21\nbackground = #010203");
         assert_eq!(c.font_points, 21.0);
         assert_eq!(c.bg, Rgb::new(1, 2, 3));
+    }
+
+    #[test]
+    fn diagnostics_collect_unknown_keys_bad_values_and_malformed_lines() {
+        let c = parsed("frobnicate = 1\nnot a key value line\nfont-size = 15\nbell-features = bogus");
+        // Parsing otherwise proceeds exactly as before: the good line applies.
+        assert_eq!(c.font_points, 15.0);
+        assert_eq!(c.diagnostics.len(), 3, "{:?}", c.diagnostics);
+        assert!(c.diagnostics[0].contains("frobnicate"));
+        assert!(c.diagnostics[1].contains("malformed config line 2"));
+        assert!(c.diagnostics[2].contains("bell-features"));
+        // The stderr prefix is stripped for the dialog.
+        assert!(c.diagnostics.iter().all(|d| !d.starts_with("giest: ")));
+    }
+
+    #[test]
+    fn diagnostics_are_empty_for_a_clean_config_and_do_not_leak_between_loads() {
+        let _ = parsed("frobnicate = 1");
+        let c = parsed("font-size = 12");
+        assert!(c.diagnostics.is_empty(), "{:?}", c.diagnostics);
+    }
+
+    #[test]
+    fn diagnostics_report_a_missing_theme() {
+        let c = parsed("theme = does-not-exist");
+        assert!(c.diagnostics.iter().any(|d| d.contains("does-not-exist")));
+    }
+
+    #[test]
+    fn diagnostics_cover_unreadable_includes_across_files() {
+        let s = Scratch::new();
+        s.write("inc", "nope = 1");
+        let root =
+            s.write("config", "config-file = inc\nconfig-file = missing\nconfig-file = ?quiet");
+        let c = Config::load_from_file(&root);
+        assert_eq!(c.diagnostics.len(), 2, "{:?}", c.diagnostics);
+        assert!(c.diagnostics.iter().any(|d| d.contains("'nope'")));
+        assert!(c.diagnostics.iter().any(|d| d.contains("missing")));
+    }
+
+    #[test]
+    fn app_notifications_defaults_are_all_on() {
+        let d = Config::default().app_notifications;
+        assert!(d.clipboard_copy && d.config_reload);
+    }
+
+    #[test]
+    fn app_notifications_parses_flags_from_defaults() {
+        let c = parsed("app-notifications = no-clipboard-copy");
+        assert!(!c.app_notifications.clipboard_copy);
+        assert!(c.app_notifications.config_reload);
+        let c = parsed("app-notifications = no-config-reload, clipboard-copy");
+        assert!(c.app_notifications.clipboard_copy && !c.app_notifications.config_reload);
+        // A second line replaces rather than accumulates.
+        let c = parsed(
+            "app-notifications = no-clipboard-copy\napp-notifications = no-config-reload",
+        );
+        assert!(c.app_notifications.clipboard_copy && !c.app_notifications.config_reload);
+    }
+
+    #[test]
+    fn app_notifications_bool_shorthand_errors_and_reset() {
+        assert_eq!(
+            parsed("app-notifications = false").app_notifications,
+            AppNotifications { clipboard_copy: false, config_reload: false }
+        );
+        // Only the strict packed-struct booleans; `off` is an unknown flag and
+        // rejects the value wholesale (the previous value stays).
+        let c = parsed("app-notifications = false\napp-notifications = off");
+        assert!(!c.app_notifications.clipboard_copy);
+        assert!(c.diagnostics.iter().any(|d| d.contains("app-notifications")));
+        let c = parsed("app-notifications = false\napp-notifications =");
+        assert_eq!(c.app_notifications, AppNotifications::default());
     }
 }
