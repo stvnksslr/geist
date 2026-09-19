@@ -1,4 +1,4 @@
-//! Desktop notifications (`OSC 9`, `OSC 777`) via a side scan of the PTY stream.
+//! Desktop notifications (`OSC 9`, `OSC 777`, kitty `OSC 99`) via a side scan of the PTY stream.
 //!
 //! A program asks the terminal to raise a notification with either the iTerm2
 //! form `ESC ] 9 ; <body> (BEL | ST)` or the rxvt form
@@ -35,10 +35,24 @@ pub enum Osc9 {
 
 /// A requested desktop notification. `title` is empty for the OSC 9 form, which
 /// carries only a body.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Notification {
     pub title: String,
     pub body: String,
+    /// When to show it (kitty `OSC 99` `o=`); OSC 9 / 777 are always `Always`.
+    pub occasion: Occasion,
+}
+
+/// Kitty `OSC 99` `o=`: whether a notification is shown regardless of focus.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Occasion {
+    #[default]
+    Always,
+    /// Only when the window isn't focused.
+    Unfocused,
+    /// Only when the window isn't visible. giest can't see occlusion, so this is
+    /// treated like `Unfocused` — a focused window is certainly visible.
+    Invisible,
 }
 
 /// ConEmu's `OSC 9;4` progress report — what a long-running program uses to
@@ -92,6 +106,8 @@ enum State {
 pub struct OscNotifyScanner {
     state: State,
     buf: Vec<u8>,
+    /// Kitty `OSC 99` notifications still being assembled (`d=0` chunks), by `i=`.
+    kitty: Vec<(String, Notification)>,
     /// True once `buf` overflowed [`MAX_BODY`], so the sequence is abandoned.
     overflowed: bool,
 }
@@ -107,6 +123,7 @@ impl OscNotifyScanner {
         Self {
             state: State::Ground,
             buf: Vec::new(),
+            kitty: Vec::new(),
             overflowed: false,
         }
     }
@@ -156,12 +173,85 @@ impl OscNotifyScanner {
     }
 
     fn finish(&mut self, out: &mut Vec<Osc9>) {
-        if !self.overflowed
-            && let Some(n) = parse_body(&self.buf)
-        {
-            out.push(n);
+        if !self.overflowed {
+            if let Some(rest) = self.buf.strip_prefix(b"99;") {
+                let rest = rest.to_vec();
+                if let Some(n) = self.kitty_99(&rest) {
+                    out.push(Osc9::Notify(n));
+                }
+            } else if let Some(n) = parse_body(&self.buf) {
+                out.push(n);
+            }
         }
         self.reset();
+    }
+
+    /// Kitty's desktop-notification protocol: `OSC 99 ; <metadata> ; <payload>`,
+    /// metadata being `key=value` pairs separated by `:`. Supported: `i` (id),
+    /// `d` (`0` = more chunks follow), `p` (`title`/`body`; anything else —
+    /// `close`, `icon`, `buttons`, `?` queries — is ignored), `e` (base64
+    /// payload) and `o` (occasion). Chunks with the same `i` accumulate until one
+    /// arrives without `d=0`; with no `i` a notification is always one chunk.
+    fn kitty_99(&mut self, rest: &[u8]) -> Option<Notification> {
+        use base64::Engine;
+        let s = std::str::from_utf8(rest).ok()?;
+        let (meta, payload) = s.split_once(';')?;
+        let (mut id, mut done, mut part, mut b64, mut occasion) = ("", true, "title", false, None);
+        for kv in meta.split(':').filter(|kv| !kv.is_empty()) {
+            let (k, v) = kv.split_once('=')?;
+            match k {
+                "i" => id = v,
+                "d" => done = v != "0",
+                "p" => part = v,
+                "e" => b64 = v == "1",
+                "o" => {
+                    occasion = Some(match v {
+                        "unfocused" => Occasion::Unfocused,
+                        "invisible" => Occasion::Invisible,
+                        _ => Occasion::Always,
+                    })
+                }
+                _ => {}
+            }
+        }
+        let text = if b64 {
+            let bytes = base64::engine::general_purpose::STANDARD.decode(payload).ok()?;
+            String::from_utf8(bytes).ok()?
+        } else {
+            payload.to_string()
+        };
+        // Bound the assembly table: a program opening ids it never finishes
+        // must not grow it without limit.
+        const MAX_PENDING: usize = 16;
+        let slot = match self.kitty.iter().position(|(k, _)| !id.is_empty() && k == id) {
+            Some(i) => i,
+            None => {
+                if self.kitty.len() >= MAX_PENDING {
+                    self.kitty.remove(0);
+                }
+                self.kitty.push((id.to_string(), Notification::default()));
+                self.kitty.len() - 1
+            }
+        };
+        let n = &mut self.kitty[slot].1;
+        match part {
+            "title" => n.title.push_str(&text),
+            "body" => n.body.push_str(&text),
+            _ => {}
+        }
+        if let Some(o) = occasion {
+            n.occasion = o;
+        }
+        let whole = n.title.len() + n.body.len();
+        if whole > MAX_BODY {
+            self.kitty.remove(slot);
+            return None;
+        }
+        if !done {
+            return None;
+        }
+        let (_, n) = self.kitty.remove(slot);
+        (!n.is_empty()).then_some(n)
     }
 
     fn reset(&mut self) {
@@ -197,6 +287,7 @@ fn parse_777(rest: &str) -> Option<Notification> {
     Some(Notification {
         title: title.to_string(),
         body: body.to_string(),
+        ..Default::default()
     })
 }
 
@@ -221,6 +312,7 @@ fn parse_osc9(data: &str) -> Option<Osc9> {
         Some(Osc9::Notify(Notification {
             title: String::new(),
             body: data.to_string(),
+            ..Default::default()
         }))
     };
 
@@ -333,7 +425,28 @@ mod tests {
         Notification {
             title: title.to_string(),
             body: body.to_string(),
+            ..Default::default()
         }
+    }
+
+    #[test]
+    fn osc99_kitty_notifications() {
+        // Default part is the title; a single chunk is a whole notification.
+        assert_eq!(scan(&[b"\x1b]99;;Hello\x1b\\"]), vec![note("Hello", "")]);
+        // Chunked by id: title, then body, then done.
+        assert_eq!(
+            scan(&[b"\x1b]99;i=1:d=0;Build\x07", b"\x1b]99;i=1:p=body;finished\x07"]),
+            vec![note("Build", "finished")]
+        );
+        // Unfinished chunks produce nothing yet.
+        assert!(scan(&[b"\x1b]99;i=2:d=0;x\x07"]).is_empty());
+        // Base64 payload.
+        assert_eq!(scan(&[b"\x1b]99;e=1;aGk=\x07"]), vec![note("hi", "")]);
+        // Occasion is carried through.
+        let n = scan(&[b"\x1b]99;o=unfocused;t\x07"]);
+        assert_eq!(n[0].occasion, Occasion::Unfocused);
+        // Parts giest doesn't show are ignored, not shown as text.
+        assert!(scan(&[b"\x1b]99;p=icon;abc\x07"]).is_empty());
     }
 
     #[test]

@@ -5041,6 +5041,7 @@ impl Window {
     /// The bell *effects* are only latched here: firing them needs this window's
     /// own focus state, which is only meaningful inside its own pass.
     fn pump_all(&mut self, now: f64, notifications: &mut Vec<crate::osc_notify::Notification>) {
+        let was_focused = self.was_focused;
         let mut rang = false;
         let mut finished: Vec<session::CommandFinish> = Vec::new();
         let mut progress_changed = false;
@@ -5049,7 +5050,12 @@ impl Window {
                 pane.pump_pty();
                 pane.idle_work();
                 rang |= pane.take_bell_effect(now);
-                notifications.append(&mut pane.take_notifications());
+                let focused = was_focused;
+                notifications.extend(pane.take_notifications().into_iter().filter(|n| {
+                    // Kitty `o=unfocused` / `o=invisible`: nothing to tell a user who
+                    // is already looking at this window.
+                    n.occasion == crate::osc_notify::Occasion::Always || !focused
+                }));
                 finished.append(&mut pane.take_command_finishes());
                 progress_changed |= pane.take_progress().is_some();
             });
@@ -5087,6 +5093,7 @@ impl Window {
                 notifications.push(crate::osc_notify::Notification {
                     title: f.title().to_string(),
                     body: f.body(),
+                    ..Default::default()
                 });
             }
         }
