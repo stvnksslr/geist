@@ -4,3 +4,4 @@
 
 # MkDocs build output
 /site
+.claude/worktrees/

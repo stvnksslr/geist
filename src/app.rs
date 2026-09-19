@@ -2196,6 +2196,11 @@ impl Window {
     /// shell never sees them. `render_state` is `None` here — none of the
     /// keymap-dispatched actions need it (font/reload have their own paths).
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
+        // Mid-composition every key belongs to the IME; a chord reaching us here
+        // must not fire a binding the user was typing *through*.
+        if self.focused_session().is_some_and(|s| s.preedit().is_some()) {
+            return;
+        }
         let events = ctx.input(|i| i.events.clone());
         for event in &events {
             let egui::Event::Key {
