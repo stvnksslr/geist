@@ -24,7 +24,7 @@ use crate::osc_color::{ColorQuery, OscColorScanner, Terminator};
 use crate::osc_notify::{Notification, Osc9, OscNotifyScanner};
 use crate::osc133::{Mark, Osc133Scanner};
 use crate::profiles::Profile;
-use crate::pty::Pty;
+use crate::pty::{ExitInfo, Pty};
 
 const DEFAULT_COLS: u16 = 80;
 const DEFAULT_ROWS: u16 = 24;
@@ -65,6 +65,18 @@ pub struct Session {
     mouse_down: Option<MouseButton>,
     /// False once the shell has exited (PTY output channel disconnected).
     alive: bool,
+    /// How the shell exited and whether the pane is held open for it, set once
+    /// when the exit is first seen. `None` while alive (or if the status was
+    /// unreadable, which reaps like before).
+    exit: Option<(ExitInfo, ExitHold)>,
+    /// A key was pressed on a held exit bar: the pane may now be reaped.
+    exit_dismissed: bool,
+    /// `wait-after-command` / `abnormal-command-exit-runtime`, captured at
+    /// spawn — the decision belongs to the config the shell was started under.
+    wait_after_command: bool,
+    abnormal_exit_ms: u32,
+    /// What was launched, for the abnormal-exit message.
+    launched: String,
     /// Side parser for OSC 52 clipboard-set sequences in the PTY output.
     osc52: Osc52Scanner,
     /// Side parser tracking the shell's OSC 7 working directory, so a new split
@@ -219,10 +231,12 @@ impl Session {
         cwd: Option<&Path>,
     ) -> Result<Self> {
         let wake_ctx = ctx.clone();
-        let pty = Pty::spawn(
+        let args = profile.launch_args();
+        let mut pty = Pty::spawn(
             &profile.program,
-            &profile.launch_args(),
+            &args,
             cwd,
+            &config.env,
             DEFAULT_COLS,
             DEFAULT_ROWS,
             // Wake the **root** viewport, explicitly.
@@ -247,7 +261,32 @@ impl Session {
         // inline images on at all.
         engine.set_image_storage_limit(config.image_storage_limit as u64)?;
 
+        // `input`: written before anything the user types can be, as upstream
+        // does. All-or-nothing — a missing `path:` sends none of it. ConPTY
+        // buffers it until the child reads, so writing this early is safe.
+        if !config.input.is_empty() {
+            match crate::config::resolve_input(&config.input) {
+                Some(bytes) if !bytes.is_empty() => {
+                    let _ = pty.write(&bytes);
+                }
+                Some(_) => {}
+                None => eprintln!("giest: an `input` source could not be read; sending none"),
+            }
+        }
+        // The user-facing command line, for the abnormal-exit message. Only the
+        // args the user gave — our injected prompt hook is noise there.
+        let launched = if profile.args.is_empty() {
+            profile.program.clone()
+        } else {
+            format!("{} {}", profile.program, profile.args.join(" "))
+        };
+
         Ok(Self {
+            exit: None,
+            exit_dismissed: false,
+            wait_after_command: config.wait_after_command,
+            abnormal_exit_ms: config.abnormal_command_exit_runtime_ms,
+            launched,
             pty,
             engine,
             snapshot: Arc::new(GridSnapshot::default()),
@@ -370,6 +409,12 @@ impl Session {
         // Primary exit signal on Windows: poll the shell process itself.
         if self.alive && !self.pty.is_running() {
             self.alive = false;
+        }
+        if !self.alive && self.exit.is_none() {
+            if let Some(info) = self.pty.exit_info() {
+                let hold = exit_hold(self.wait_after_command, self.abnormal_exit_ms, info);
+                self.exit = Some((info, hold));
+            }
         }
         let mut responses = self.engine.take_responses();
         // Answer the color queries the VT engine drops. Built *after* the whole
@@ -616,6 +661,22 @@ impl Session {
     /// Whether the shell backing this session is still running.
     pub fn is_alive(&self) -> bool {
         self.alive
+    }
+
+    /// Whether `reap_dead` should drop this pane: the shell has exited and no
+    /// exit bar is holding it open (or its bar was dismissed with a key).
+    pub fn should_reap(&self) -> bool {
+        !self.alive && (self.exit_dismissed || self.exit.is_none_or(|(_, h)| h == ExitHold::Close))
+    }
+
+    /// The exit bar to draw, as (message, is-error), while the pane is held.
+    pub fn exit_bar(&self) -> Option<(String, bool)> {
+        let (info, hold) = self.exit?;
+        if hold == ExitHold::Close || self.exit_dismissed {
+            return None;
+        }
+        let error = hold == ExitHold::Abnormal || info.code != 0;
+        Some((exit_message(hold, info, &self.launched), error))
     }
 
     /// Whether the program is receiving mouse events right now.
@@ -1508,6 +1569,21 @@ impl Session {
     ) {
         let (events, ppp) = ctx.input(|i| (i.events.clone(), i.pixels_per_point().max(1.0)));
         let cell_h_pts = (cell_h / ppp).max(1.0);
+
+        // A held exit bar: there is no shell left to type into, so any key
+        // press dismisses it and lets `reap_dead` close the pane (upstream
+        // closes "on any key press").
+        if self.exit_bar().is_some() {
+            if events.iter().any(|e| {
+                matches!(e, egui::Event::Key { pressed: true, .. } | egui::Event::Text(_))
+            }) {
+                self.exit_dismissed = true;
+                // The reap happens on the next pass; make sure there is one.
+                ctx.request_repaint();
+            }
+            self.tick_scroll(ctx, cell_h);
+            return;
+        }
 
         let mut bytes: Vec<u8> = Vec::new();
         // Whether this frame typed anything *into the shell*, for
@@ -2569,6 +2645,85 @@ fn is_text_producing(code: KeyCode) -> bool {
             | F11
             | F12
     )
+}
+
+/// What a pane does once its shell has exited. Ghostty `Surface.childExited`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExitHold {
+    /// Close the pane now (the pre-existing `reap_dead` behaviour).
+    Close,
+    /// `wait-after-command`: stay open with a "process exited" bar until a key.
+    Wait,
+    /// Exited non-zero within `abnormal-command-exit-runtime`: stay open with
+    /// an error bar, whatever `wait-after-command` says.
+    Abnormal,
+}
+
+/// Decide [`ExitHold`] for a shell that exited. Mirrors upstream's order: the
+/// abnormal check comes first and wins (`<=`, and it requires a non-zero code
+/// — upstream only waives that on macOS, where its `login` wrapper hides the
+/// code; Windows reports the real one), then `wait-after-command`.
+pub fn exit_hold(wait_after_command: bool, abnormal_ms: u32, info: ExitInfo) -> ExitHold {
+    if info.runtime_ms <= abnormal_ms as u64 && info.code != 0 {
+        ExitHold::Abnormal
+    } else if wait_after_command {
+        ExitHold::Wait
+    } else {
+        ExitHold::Close
+    }
+}
+
+/// The exit bar's text. `command` is what was launched, for the abnormal case
+/// (upstream prints the argv so a typo in `command` is visible).
+pub fn exit_message(hold: ExitHold, info: ExitInfo, command: &str) -> String {
+    match hold {
+        ExitHold::Abnormal => format!(
+            "Failed to launch \"{command}\": exited with code {} after {} ms. Press any key to close.",
+            info.code, info.runtime_ms
+        ),
+        _ => format!(
+            "Process exited with code {}. Press any key to close the terminal.",
+            info.code
+        ),
+    }
+}
+
+#[cfg(test)]
+mod exit_tests {
+    use super::{ExitHold, exit_hold, exit_message};
+    use crate::pty::ExitInfo;
+
+    fn info(code: u32, runtime_ms: u64) -> ExitInfo {
+        ExitInfo { code, runtime_ms }
+    }
+
+    #[test]
+    fn a_fast_nonzero_exit_is_abnormal_regardless_of_wait() {
+        assert_eq!(exit_hold(false, 250, info(1, 40)), ExitHold::Abnormal);
+        assert_eq!(exit_hold(true, 250, info(1, 40)), ExitHold::Abnormal);
+        // Inclusive bound, like upstream's `<=`.
+        assert_eq!(exit_hold(false, 250, info(2, 250)), ExitHold::Abnormal);
+    }
+
+    #[test]
+    fn a_clean_or_slow_exit_follows_wait_after_command() {
+        // Code 0 is a good exit however fast.
+        assert_eq!(exit_hold(false, 250, info(0, 5)), ExitHold::Close);
+        assert_eq!(exit_hold(true, 250, info(0, 5)), ExitHold::Wait);
+        // Slower than the threshold is a normal exit even if non-zero.
+        assert_eq!(exit_hold(false, 250, info(1, 251)), ExitHold::Close);
+        assert_eq!(exit_hold(true, 250, info(1, 251)), ExitHold::Wait);
+        // A zero threshold only catches instant failures.
+        assert_eq!(exit_hold(false, 0, info(1, 1)), ExitHold::Close);
+    }
+
+    #[test]
+    fn messages_name_the_code_and_the_command() {
+        let m = exit_message(ExitHold::Wait, info(3, 900), "pwsh.exe");
+        assert!(m.contains("code 3") && !m.contains("pwsh"));
+        let m = exit_message(ExitHold::Abnormal, info(1, 12), "nosuch.exe");
+        assert!(m.contains("nosuch.exe") && m.contains("12 ms") && m.contains("code 1"));
+    }
 }
 
 #[cfg(test)]

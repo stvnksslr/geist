@@ -5,6 +5,7 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
@@ -19,6 +20,49 @@ pub struct Pty {
     /// Bytes read from the shell. The sender lives on the reader thread, which
     /// exits (closing this channel) when the shell closes its output.
     pub output: Receiver<Vec<u8>>,
+    /// When the shell was spawned; the fallback clock for [`Pty::exit_info`].
+    spawned: Instant,
+}
+
+/// How a shell exited: its exit code and how long it ran.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExitInfo {
+    pub code: u32,
+    pub runtime_ms: u64,
+}
+
+#[repr(C)]
+#[derive(Default)]
+struct FileTime {
+    low: u32,
+    high: u32,
+}
+
+// kernel32 is always linked; declared directly rather than enabling a
+// windows-sys feature module for one function (same call as `bell.rs`).
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn GetProcessTimes(
+        process: *mut std::ffi::c_void,
+        creation: *mut FileTime,
+        exit: *mut FileTime,
+        kernel: *mut FileTime,
+        user: *mut FileTime,
+    ) -> i32;
+}
+
+/// Exited process `handle`'s runtime (exit time − creation time), in ms.
+fn process_runtime_ms(handle: std::os::windows::io::RawHandle) -> Option<u64> {
+    let (mut c, mut e, mut k, mut u) = Default::default();
+    // SAFETY: `handle` is the child's live process handle, owned by
+    // portable-pty for as long as `Pty` exists; the out-params are locals.
+    let ok = unsafe { GetProcessTimes(handle as _, &mut c, &mut e, &mut k, &mut u) };
+    if ok == 0 {
+        return None;
+    }
+    let t = |f: &FileTime| ((f.high as u64) << 32) | f.low as u64;
+    // FILETIME ticks are 100 ns.
+    t(&e).checked_sub(t(&c)).map(|d| d / 10_000)
 }
 
 impl Pty {
@@ -30,6 +74,8 @@ impl Pty {
         program: &str,
         args: &[String],
         cwd: Option<&Path>,
+        // Extra environment (config `env`), layered over the inherited one.
+        env: &[(String, String)],
         cols: u16,
         rows: u16,
         wake: W,
@@ -50,6 +96,9 @@ impl Pty {
         }
         if let Some(cwd) = cwd {
             cmd.cwd(cwd);
+        }
+        for (k, v) in env {
+            cmd.env(k, v);
         }
         let child = pair
             .slave
@@ -91,6 +140,25 @@ impl Pty {
             writer,
             child,
             output: rx,
+            spawned: Instant::now(),
+        })
+    }
+
+    /// How the shell ended, or `None` while it is still running (or its status
+    /// can't be read). The runtime comes from the process's own creation and
+    /// exit times rather than from when we *noticed* — an idle app only polls
+    /// every 500 ms, which would make every fast failure look slow and defeat
+    /// `abnormal-command-exit-runtime`. Falls back to wall time since spawn.
+    pub fn exit_info(&mut self) -> Option<ExitInfo> {
+        let status = self.child.try_wait().ok()??;
+        let runtime_ms = self
+            .child
+            .as_raw_handle()
+            .and_then(process_runtime_ms)
+            .unwrap_or_else(|| self.spawned.elapsed().as_millis() as u64);
+        Some(ExitInfo {
+            code: status.exit_code(),
+            runtime_ms,
         })
     }
 

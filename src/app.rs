@@ -1241,11 +1241,18 @@ impl Window {
 
         let (profiles, default_profile) = profiles::detect(config.shell.as_deref());
         // The very first session predates the `Window`, so it resolves
-        // `working-directory` directly (nothing can be inherited yet).
+        // `working-directory` directly (nothing can be inherited yet). It is
+        // also the one surface `initial-command` applies to (upstream's
+        // `app.first`); every later pane uses `command`.
+        let initial = config
+            .initial_command
+            .as_deref()
+            .filter(|c| !c.trim().is_empty())
+            .map(|c| profiles::for_command(&profiles, c));
         let first = Session::new(
             &cc.egui_ctx,
             &config,
-            &profiles[default_profile],
+            initial.as_ref().unwrap_or(&profiles[default_profile]),
             config.working_directory.as_deref(),
         )?;
 
@@ -2296,7 +2303,7 @@ impl Window {
         let before = self.tabs.len();
         let tabs = std::mem::take(&mut self.tabs);
         let (survivors, active) =
-            reap_tabs(tabs, self.active_tab, &mut |s: &Session| !s.is_alive());
+            reap_tabs(tabs, self.active_tab, &mut |s: &Session| s.should_reap());
         self.tabs = survivors;
         if self.tabs.is_empty() {
             self.requests.push(AppRequest::CloseWindow { undoable: false });
@@ -4467,6 +4474,9 @@ impl Window {
         // pane's in-progress IME composition, painted over the grid below.
         let mut ime_preedit: Option<(egui::Rect, String, crate::engine::Rgb, crate::engine::Rgb)> =
             None;
+        // (pane rect, message, is-error) for panes held open after their shell
+        // exited (`wait-after-command` / `abnormal-command-exit-runtime`).
+        let mut exit_bars: Vec<(egui::Rect, String, bool)> = Vec::new();
         for leaf in leaves.iter_mut() {
             // The pane occupies `leaf.rect`; the grid is inset by the padding so
             // text clears the pane's edges (window border or split divider alike).
@@ -4511,6 +4521,9 @@ impl Window {
             session.fit_grid(prect, ppp, cw, ch, now);
             if session.readonly() {
                 readonly_panes.push(leaf_rect);
+            }
+            if let Some((msg, error)) = session.exit_bar() {
+                exit_bars.push((leaf_rect, msg, error));
             }
             if let Some(a) = session.resize_overlay_alpha(now) {
                 let (cols, rows) = session.grid_size();
@@ -5135,6 +5148,38 @@ impl Window {
                 ui.painter()
                     .galley(text_rect.min, galley, self.chrome.text);
             }
+        }
+
+        // Child-exited bar, the macOS app's `ChildExitedMessageBar`: a strip
+        // along the pane's bottom edge, red for a failure, neutral otherwise.
+        // Painter-only like the badges — the key that dismisses it is read by
+        // `Session::handle_input`, so a widget here would only eat clicks.
+        for (rect, msg, error) in &exit_bars {
+            let font = egui::FontId::proportional(13.0);
+            let (fill, text) = if *error {
+                (self.chrome.danger, self.chrome.on_accent)
+            } else {
+                (self.chrome.window_fill, self.chrome.text)
+            };
+            let galley = ui.painter().layout(
+                msg.clone(),
+                font,
+                text,
+                (rect.width() - 24.0).max(40.0),
+            );
+            let h = galley.size().y + 12.0;
+            let bar = egui::Rect::from_min_max(
+                egui::pos2(rect.left(), rect.bottom() - h),
+                rect.right_bottom(),
+            );
+            ui.painter().rect_filled(bar, 0.0, fill);
+            ui.painter().hline(
+                bar.x_range(),
+                bar.top(),
+                egui::Stroke::new(stroke_w(1.0), self.chrome.divider),
+            );
+            ui.painter()
+                .galley(bar.left_top() + egui::vec2(12.0, 6.0), galley, text);
         }
 
         // Read-only badge: persistent (the state is), painter-only (a widget
