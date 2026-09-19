@@ -382,6 +382,47 @@ pub struct FontSpec {
     pub adjust: crate::config::MetricAdjust,
     /// Which missing styles may be synthesized (`font-synthetic-style`).
     pub synthetic: crate::config::SyntheticStyle,
+    /// `font-codepoint-map`: ranges forced to a named family.
+    pub codepoint_map: Vec<crate::config::FontCodepointMap>,
+    /// `font-thicken` strength (`font-thicken-strength`), or `None` when off.
+    pub thicken: Option<u8>,
+}
+
+/// `font-thicken`: dilate coverage by one pixel, weighted by `strength`.
+///
+/// Upstream only implements this on macOS, where CoreText's font smoothing
+/// thickens strokes; giest has no such rasterizer hook (ab_glyph gives
+/// coverage, not an outline to stroke), so it grows the coverage instead:
+/// every pixel takes the max of itself and `weight x` its 4-neighbours, with
+/// `weight = (strength + 1) / 256` — so `0` is the lightest thickening, not
+/// none, matching upstream's documented scale. The bitmap grows 1px each side
+/// and the bearing moves with it, so the glyph stays centred on its stems.
+fn thicken(src: &Raster, strength: u8) -> Raster {
+    let weight = (f32::from(strength) + 1.0) / 256.0;
+    let (w, h) = (src.w + 2, src.h + 2);
+    let at = |x: i64, y: i64| -> u8 {
+        if x < 0 || y < 0 || x >= src.w as i64 || y >= src.h as i64 {
+            0
+        } else {
+            src.bitmap[(y as u32 * src.w + x as u32) as usize]
+        }
+    };
+    let mut bitmap = vec![0u8; (w * h) as usize];
+    for y in 0..h as i64 {
+        for x in 0..w as i64 {
+            let (sx, sy) = (x - 1, y - 1);
+            let own = at(sx, sy);
+            let n = at(sx - 1, sy).max(at(sx + 1, sy)).max(at(sx, sy - 1)).max(at(sx, sy + 1));
+            let grown = (f32::from(n) * weight).round() as u8;
+            bitmap[(y as u32 * w + x as u32) as usize] = own.max(grown);
+        }
+    }
+    Raster {
+        bitmap,
+        w,
+        h,
+        min: (src.min.0 - 1.0, src.min.1 - 1.0),
+    }
 }
 
 /// The cell and decoration metrics the renderer draws from, in physical pixels,
@@ -745,7 +786,7 @@ fn find_font(family: &str, bold: bool, italic: bool) -> Option<(&'static [u8], u
 /// discovery doesn't constrain on style bits, so this keeps the user on their
 /// configured font when a family ships only a styled master or carries unusual
 /// OS/2 style metadata, rather than dropping the whole selection to the built-in.
-fn find_regular_font(family: &str) -> Option<(&'static [u8], u32)> {
+pub(crate) fn find_regular_font(family: &str) -> Option<(&'static [u8], u32)> {
     find_font(family, false, false)
         .or_else(|| scan_fonts(family, |face| family_name_matches(face, family)))
         // A path is an explicit choice of file: the primary slot uses it whatever
@@ -993,6 +1034,12 @@ pub struct Atlas {
     fallbacks: Vec<FontVec>,
     /// Color (COLR/CPAL) emoji font, if present on the system.
     color_font: Option<ColorFont>,
+    /// `font-codepoint-map` faces, in config order (later lines win).
+    codepoint_faces: Vec<(Vec<(u32, u32)>, FontVec)>,
+    /// Glyphs resolved through `codepoint_faces`, cached by character.
+    codepoint_cache: HashMap<char, Option<GlyphInfo>>,
+    /// `font-thicken` strength, or `None` when off.
+    thicken: Option<u8>,
     /// Reusable shaping buffer (taken out during `shape_run`, returned after).
     shape_buf: Option<UnicodeBuffer>,
     px: f32,
@@ -1112,6 +1159,22 @@ impl Atlas {
             }
         }
 
+        // `font-codepoint-map`: one face per line, resolved like a
+        // `font-family` entry. An unresolvable family is reported and skipped,
+        // so its characters fall through to the normal chain.
+        let mut codepoint_faces = Vec::new();
+        for m in &spec.codepoint_map {
+            match find_regular_font(&m.family)
+                .and_then(|(bytes, idx)| FontVec::try_from_vec_and_index(bytes.to_vec(), idx).ok())
+            {
+                Some(font) => codepoint_faces.push((m.ranges.clone(), font)),
+                None => eprintln!(
+                    "giest: font-codepoint-map family '{}' not found; skipping it",
+                    m.family
+                ),
+            }
+        }
+
         let metrics = derive_metrics(raw_metrics(&fonts[0], &shapers[0], px), &spec.adjust);
         let (cell_w, cell_h, ascent) = (metrics.cell_w, metrics.cell_h, metrics.ascent);
 
@@ -1153,6 +1216,9 @@ impl Atlas {
             features,
             fallbacks,
             color_font: ColorFont::load(COLOR_FONT),
+            codepoint_faces,
+            codepoint_cache: HashMap::new(),
+            thicken: spec.thicken,
             shape_buf: Some(UnicodeBuffer::new()),
             px,
             srgb,
@@ -1201,6 +1267,7 @@ impl Atlas {
         self.fallback_cache.clear();
         self.color_cache.clear();
         self.sprite_cache.clear();
+        self.codepoint_cache.clear();
         // Shaped runs (glyph ids) are size-independent, so this isn't required for
         // correctness, but a font resize is a natural point to bound cache memory.
         for m in &mut self.shape_cache {
@@ -1375,11 +1442,58 @@ impl Atlas {
             }
         }
         let info = raster.map(|r| {
+            let r = self.thickened(r);
             let raw = self.upload(r, queue);
             self.constrain(raw, classify(ch), span)
         });
         self.fallback_cache.insert(ch, info);
         info
+    }
+
+    /// Whether `font-codepoint-map` claims `ch` (with a face that resolved).
+    fn codepoint_face(&self, ch: char) -> Option<&FontVec> {
+        let cp = ch as u32;
+        self.codepoint_faces
+            .iter()
+            .rev()
+            .find(|(ranges, _)| ranges.iter().any(|&(a, b)| a <= cp && cp <= b))
+            .map(|(_, f)| f)
+    }
+
+    /// `font-codepoint-map`: the glyph for `ch` from the family its range is
+    /// forced to, or `None` when no line claims it **or** the mapped face lacks
+    /// it — either way the caller falls through to the normal resolution, as
+    /// upstream's `CodepointResolver` falls back when the forced face has no
+    /// such glyph. Checked by the renderer before the primary font.
+    pub fn mapped_glyph(&mut self, ch: char, span: u16, queue: &wgpu::Queue) -> Option<GlyphInfo> {
+        if self.codepoint_faces.is_empty() {
+            return None;
+        }
+        if let Some(info) = self.codepoint_cache.get(&ch) {
+            return *info;
+        }
+        let raster = self.codepoint_face(ch).and_then(|font| {
+            let gid = font.glyph_id(ch);
+            if gid.0 == 0 {
+                return None;
+            }
+            outline_to_bitmap(font, gid.with_scale_and_position(self.px, point(0.0, 0.0)))
+        });
+        let info = raster.map(|r| {
+            let r = self.thickened(r);
+            let raw = self.upload(r, queue);
+            self.constrain(raw, classify(ch), span)
+        });
+        self.codepoint_cache.insert(ch, info);
+        info
+    }
+
+    /// Apply `font-thicken` to a rasterized text glyph, if enabled.
+    fn thickened(&self, raster: Raster) -> Raster {
+        match self.thicken {
+            Some(strength) => thicken(&raster, strength),
+            None => raster,
+        }
     }
 
     /// Pack a composited RGBA color glyph into the color atlas and return its
@@ -1488,6 +1602,7 @@ impl Atlas {
                 let glyph = GlyphId(glyph_id).with_scale_and_position(self.px, point(0.0, 0.0));
                 let raster = outline_to_bitmap(&self.fonts[style], glyph)?;
                 let raster = self.synthesize(raster, style);
+                let raster = self.thickened(raster);
                 let info = self.upload(raster, queue);
                 Some(self.constrain(info, constraint, span))
             }
@@ -2037,6 +2152,24 @@ mod tests {
             h: 4,
             min: (0.0, -4.0),
         }
+    }
+
+    #[test]
+    fn thicken_grows_one_pixel_weighted_by_strength() {
+        let src = square();
+        let full = crate::render::atlas::thicken(&src, 255);
+        assert_eq!((full.w, full.h), (src.w + 2, src.h + 2));
+        assert_eq!(full.min, (src.min.0 - 1.0, src.min.1 - 1.0));
+        // Interior ink is untouched; an edge neighbour takes full coverage at
+        // 255, and a diagonal corner (not a 4-neighbour) stays empty.
+        assert_eq!(full.bitmap[(2 * full.w + 2) as usize], 255);
+        assert_eq!(full.bitmap[2], 255);
+        assert_eq!(full.bitmap[0], 0);
+        // Strength 0 is the lightest thickening, not none.
+        let light = crate::render::atlas::thicken(&src, 0);
+        assert_eq!(light.bitmap[2], 1);
+        let mid = crate::render::atlas::thicken(&src, 127);
+        assert_eq!(mid.bitmap[2], 128);
     }
 
     #[test]

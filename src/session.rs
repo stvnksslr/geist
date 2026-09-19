@@ -90,6 +90,15 @@ pub struct Session {
     /// Side parser tracking DECSCUSR, so the configured default cursor style is
     /// substituted only while the program hasn't picked its own shape.
     decscusr: DecscusrScanner,
+    /// The program's `XTSHIFTESCAPE` request, for `mouse-shift-capture`.
+    shift_escape: crate::xtshiftescape::ShiftEscapeScanner,
+    /// How the shell wants prompt clicks handled (`cursor-click-to-move`),
+    /// from its latest `OSC 133;A` options.
+    prompt_click: crate::prompt_click::ClickMode,
+    /// The prompt hook set a bar cursor (`shell-integration-features = cursor`)
+    /// and the shell has no pre-exec hook to undo it: restore the default
+    /// cursor when we submit a command line (see `note_command_submitted`).
+    reset_cursor_on_submit: bool,
     /// Side parser for OSC color *queries*, which the VT engine drops.
     osc_color: OscColorScanner,
     /// Side parser for OSC 9 / OSC 777 desktop-notification requests.
@@ -150,6 +159,8 @@ pub struct Session {
     /// Precision of OSC color-query replies. Read at pump time rather than per
     /// frame, so a config reload must push it (see `apply_config`).
     osc_color_report_format: OscColorReportFormat,
+    /// `clipboard-codepoint-map`, applied by [`Session::copy_text`].
+    clipboard_map: Vec<config::ClipboardMap>,
     /// Configured default cursor shape (`cursor-style`), applied via `decscusr`.
     cursor_style: CursorShape,
     /// Configured default cursor blink (`cursor-style-blink`); `None` follows the
@@ -246,12 +257,16 @@ impl Session {
         cwd: Option<&Path>,
     ) -> Result<Self> {
         let wake_ctx = ctx.clone();
-        let args = profile.launch_args();
+        let launch = profile.launch(
+            &crate::profiles::Integration::from_config(config),
+            crate::profiles::shell_integration_dir().as_deref(),
+            &config.env,
+        );
         let pty = Pty::spawn(
             &profile.program,
-            &args,
+            &launch.args,
             cwd,
-            &config.env,
+            &launch.env,
             DEFAULT_COLS,
             DEFAULT_ROWS,
             // Wake the **root** viewport, explicitly.
@@ -265,7 +280,7 @@ impl Session {
             // correct and would silently stop that window updating.
             move || wake_ctx.request_repaint_of(egui::ViewportId::ROOT),
         )?;
-        Self::build(config, profile, Some(pty))
+        Self::build(config, profile, Some(pty), launch.reset_cursor_on_submit)
     }
 
     /// A pane whose shell could not be started. It has a terminal (so the
@@ -273,7 +288,7 @@ impl Session {
     /// and no PTY, and it stays open until a key dismisses it -- the old
     /// behaviour was for the tab or split to simply never appear.
     pub fn failed(config: &Config, profile: &Profile, error: &str) -> Result<Self> {
-        let mut s = Self::build(config, profile, None)?;
+        let mut s = Self::build(config, profile, None, false)?;
         s.alive = false;
         let msg = spawn_error_message(&s.launched, error);
         s.engine.write(msg.replace('\n', "\r\n").as_bytes());
@@ -305,7 +320,12 @@ impl Session {
         self.spawn_error.as_deref()
     }
 
-    fn build(config: &Config, profile: &Profile, mut pty: Option<Pty>) -> Result<Self> {
+    fn build(
+        config: &Config,
+        profile: &Profile,
+        mut pty: Option<Pty>,
+        reset_cursor_on_submit: bool,
+    ) -> Result<Self> {
         let mut engine = GhosttyVtEngine::new(DEFAULT_COLS, DEFAULT_ROWS, config.scrollback_limit)?;
         engine.apply_theme(config.fg, config.bg, &config.effective_palette())?;
         engine.set_cursor_color(config.cursor)?;
@@ -361,6 +381,9 @@ impl Session {
             osc52: Osc52Scanner::new(),
             osc7: Osc7Scanner::new(),
             decscusr: DecscusrScanner::new(),
+            shift_escape: crate::xtshiftescape::ShiftEscapeScanner::new(),
+            prompt_click: crate::prompt_click::ClickMode::None,
+            reset_cursor_on_submit,
             osc_color: OscColorScanner::new(),
             osc_notify: OscNotifyScanner::new(),
             osc133: Osc133Scanner::new(),
@@ -382,6 +405,7 @@ impl Session {
             links: config.links.clone(),
             shell: crate::dropfiles::ShellKind::from_program(&profile.program),
             osc_color_report_format: config.osc_color_report_format,
+            clipboard_map: config.clipboard_codepoint_map.clone(),
             cursor_style: config.cursor_style,
             cursor_style_blink: config.cursor_style_blink,
             autoscroll_accum: 0.0,
@@ -455,6 +479,7 @@ impl Session {
                     self.osc52.feed(&chunk, &mut clipboard_requests);
                     self.osc7.feed(&chunk);
                     self.decscusr.feed(&chunk);
+                    self.shift_escape.feed(&chunk);
                     self.osc_color.feed(&chunk, &mut color_queries);
                     self.osc_notify.feed(&chunk, &mut osc9);
                     self.osc133.feed(&chunk, &mut marks);
@@ -757,6 +782,20 @@ impl Session {
     /// escape a full-screen app that has captured the pointer.
     pub fn is_mouse_tracking(&self) -> bool {
         self.mouse_reporting && self.engine.is_mouse_tracking()
+    }
+
+    /// Whether mouse events should go to the program *this frame*: it tracks
+    /// the mouse, and Shift isn't being held to take the click back for
+    /// selection. Kitty's rule, which Ghostty adopts: a held Shift overrides the
+    /// program's grab unless `mouse-shift-capture` (or the program's
+    /// `XTSHIFTESCAPE`) says Shift belongs to the program.
+    pub fn mouse_reports_now(
+        &self,
+        shift_held: bool,
+        policy: config::MouseShiftCapture,
+    ) -> bool {
+        self.is_mouse_tracking()
+            && !(shift_held && !policy.captured(self.shift_escape.capture()))
     }
 
     /// Toggle `mouse-reporting` for this pane (Ghostty's
@@ -1095,6 +1134,7 @@ impl Session {
         // Consulted at pump/resize time rather than per frame, so these need an
         // explicit push here.
         self.osc_color_report_format = config.osc_color_report_format;
+        self.clipboard_map = config.clipboard_codepoint_map.clone();
         self.resize_overlay = config.resize_overlay;
         self.resize_overlay_duration_ms = config.resize_overlay_duration_ms;
         self.clipboard = config.clipboard;
@@ -1169,6 +1209,7 @@ impl Session {
             match *mark {
                 // A real `C` from a shell that emits one wins over the Enter
                 // heuristic — it's the actual moment execution began.
+                Mark::PromptClick(mode) => self.prompt_click = mode,
                 Mark::CommandStart => self.command_started = Some(std::time::Instant::now()),
                 Mark::CommandEnd { exit_code } => {
                     if let Some(started) = self.command_started.take() {
@@ -1199,6 +1240,15 @@ impl Session {
         if self.engine.cursor_at_prompt() == Some(true) {
             self.saw_prompt_mark = true;
             self.command_started = Some(std::time::Instant::now());
+            // Upstream's scripts reset the bar cursor in their pre-exec hook;
+            // pwsh/cmd have none, so do it here, through the same path shell
+            // output takes (engine + DECSCUSR scanner), as if the shell had
+            // sent `CSI 0 SP q` itself.
+            if self.reset_cursor_on_submit {
+                const RESET: &[u8] = b"\x1b[0 q";
+                self.engine.write(RESET);
+                self.decscusr.feed(RESET);
+            }
         }
     }
 
@@ -1651,6 +1701,71 @@ impl Session {
             .filter(|s| !s.is_empty())
     }
 
+    /// The selection as it should reach a clipboard: [`Self::selection_text`]
+    /// with `clipboard-codepoint-map` applied. Every *copy* uses this; search
+    /// and `write_selection_file` deliberately read the unmapped text, since
+    /// upstream scopes the map to copying.
+    pub fn copy_text(&self) -> Option<String> {
+        self.selection_text()
+            .map(|t| config::map_clipboard_text(&self.clipboard_map, &t))
+    }
+
+    /// `cursor-click-to-move`: a plain click at `cell` (viewport) on the
+    /// prompt. Returns whether it was handled — `maybePromptClick`'s gates, in
+    /// its order: the shell opted in (`cl`/`click_events`), the option is on,
+    /// the cursor is at a prompt, and the click is not above the prompt. The
+    /// drag/selection gates are the caller's (it only calls on a plain click,
+    /// after clearing the selection as upstream's press does). Also requires
+    /// the viewport at the live bottom, where viewport rows *are* the active
+    /// area the cursor lives in.
+    pub fn prompt_click(&mut self, cell: (u16, u16), enabled: bool) -> bool {
+        use crate::prompt_click::{self as pc, ClickMode};
+        if self.prompt_click == ClickMode::None
+            || !enabled
+            || self.engine.cursor_at_prompt() != Some(true)
+            || self.engine_pin_lines != 0
+        {
+            return false;
+        }
+        let rows = self.engine.prompt_rows();
+        let cursor = (self.snapshot.cursor_x, self.snapshot.cursor_y);
+        let Some(prompt_y) = pc::prompt_row(&rows, cursor.1) else {
+            return false;
+        };
+        if cell.1 < prompt_y {
+            return false;
+        }
+        let bytes = match self.prompt_click {
+            ClickMode::None => return false,
+            ClickMode::ClickEvents { relative } => pc::click_event(cell, prompt_y, relative),
+            ClickMode::Arrows => {
+                let (left, right) = pc::line_move(&rows, cursor, cell);
+                let arrow = |code| KeyInput {
+                    code,
+                    text: None,
+                    mods: KeyMods::default(),
+                    press: true,
+                };
+                // The engine's encoder, so DECCKM's `ESC O D` form is honoured
+                // exactly as upstream picks it.
+                let l = self.engine.encode_key(&arrow(KeyCode::ArrowLeft));
+                let r = self.engine.encode_key(&arrow(KeyCode::ArrowRight));
+                let mut out = Vec::with_capacity((left + right) * 3);
+                for _ in 0..left {
+                    out.extend_from_slice(&l);
+                }
+                for _ in 0..right {
+                    out.extend_from_slice(&r);
+                }
+                out
+            }
+        };
+        if !bytes.is_empty() {
+            let _ = self.pty_write(&bytes);
+        }
+        true
+    }
+
     /// Whether `handle_input` copied since the last call (and reset it).
     pub fn take_copied(&mut self) -> bool {
         std::mem::take(&mut self.copied)
@@ -1776,7 +1891,7 @@ impl Session {
                 // held. Windows-Terminal semantics: with a selection, copy it
                 // (and clear); with none, Ctrl+C is an interrupt.
                 egui::Event::Copy | egui::Event::Cut => {
-                    match copy_or_interrupt(self.selection_text()) {
+                    match copy_or_interrupt(self.copy_text()) {
                         CopyAction::Copy(text) => {
                             ctx.copy_text(text);
                             self.copied = true;
@@ -2064,7 +2179,7 @@ pub(crate) fn key_mods(m: &egui::Modifiers) -> KeyMods {
         shift: m.shift,
         ctrl: m.ctrl || m.command,
         alt: m.alt,
-        sup: false,
+        sup: m.mac_cmd,
     }
 }
 
@@ -2687,7 +2802,11 @@ fn osc7_to_path(raw: &str) -> Option<PathBuf> {
     }
     // Strip the scheme and host: after `file://` (or a bare `//`), everything up
     // to the first `/` is the host, which we drop, keeping the path from `/`.
-    let path = if let Some(rest) = raw.strip_prefix("file:") {
+    // Ghostty's bash script reports `kitty-shell-cwd://HOST/PATH` (unencoded).
+    let path = if let Some(rest) = raw
+        .strip_prefix("file:")
+        .or_else(|| raw.strip_prefix("kitty-shell-cwd:"))
+    {
         let rest = rest.strip_prefix("//").unwrap_or(rest);
         match rest.find('/') {
             Some(i) => &rest[i..],
@@ -2714,6 +2833,18 @@ fn osc7_to_path(raw: &str) -> Option<PathBuf> {
     };
     if trimmed.is_empty() {
         return None;
+    }
+    // A WSL shell on a Windows drive (`/mnt/c/Users`) maps back to `C:/Users`,
+    // so a split of a WSL pane opens where it was. Other Linux paths stay as
+    // they are; `Pty::spawn` ignores a cwd that isn't a Windows directory.
+    let t = trimmed.as_bytes();
+    if t.len() >= 6
+        && trimmed.starts_with("/mnt/")
+        && t[5].is_ascii_alphabetic()
+        && (t.len() == 6 || t[6] == b'/')
+    {
+        let rest = if t.len() > 6 { &trimmed[6..] } else { "/" };
+        return Some(PathBuf::from(format!("{}:{rest}", (t[5] as char).to_ascii_uppercase())));
     }
     Some(PathBuf::from(trimmed))
 }
@@ -3155,6 +3286,14 @@ mod tests {
             p("file://HOST/C:\\Users\\foo"),
             Some(PathBuf::from("C:\\Users\\foo"))
         );
+        // Ghostty's bash script (under WSL): kitty scheme, /mnt/<drive> mapped.
+        assert_eq!(
+            p("kitty-shell-cwd://box/mnt/c/Users/foo"),
+            Some(PathBuf::from("C:/Users/foo"))
+        );
+        assert_eq!(p("file://box/mnt/d"), Some(PathBuf::from("D:/")));
+        assert_eq!(p("file://box/home/me"), Some(PathBuf::from("/home/me")));
+        assert_eq!(p("file://box/mnt/data/x"), Some(PathBuf::from("/mnt/data/x")));
         // Percent-encoded spaces are decoded.
         assert_eq!(
             p("file://HOST/C:/Program%20Files"),

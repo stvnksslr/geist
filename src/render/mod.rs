@@ -189,6 +189,9 @@ pub struct TermFrame {
     pub background_opacity: f32,
     /// `background-opacity-cells`: extend the opacity to explicitly-colored cells.
     pub background_opacity_cells: bool,
+    /// `font-shaping-break = cursor`: shape the cursor cell as its own run, so a
+    /// ligature never hides the character being edited.
+    pub shaping_break_cursor: bool,
     /// `faint-opacity`: alpha for faint/dim (SGR 2) glyphs and decorations.
     pub faint_opacity: f32,
     /// `cursor-opacity`: alpha for a *focused* pane's cursor. An unfocused pane's
@@ -1496,6 +1499,18 @@ impl GpuResources {
                     };
                     let style = Atlas::style_index(cell.bold, cell.italic);
                     let faint = cell.faint;
+                    // `font-shaping-break = cursor` (upstream's default): the
+                    // cursor cell is a run of its own, so `!=` under the cursor
+                    // shows as `!` and `=`. Keyed on the snapshot's visibility,
+                    // not the blink phase — otherwise the ligature would form
+                    // and break twice a second.
+                    let at_cursor = frame.shaping_break_cursor
+                        && snap.cursor_visible
+                        && yu == Some(snap.cursor_y)
+                        && x == snap.cursor_x;
+                    if at_cursor {
+                        cur_open = false;
+                    }
                     if cur_open {
                         let r = &mut runs[run_count - 1];
                         if r.fg == fg && r.style == style && r.faint == faint {
@@ -1524,7 +1539,9 @@ impl GpuResources {
                     r.text.push_str(&cell.text);
                     r.byte_cell.resize(r.text.len(), x);
                     run_count += 1;
-                    cur_open = true;
+                    // The cursor's run closes behind it, so the next cell
+                    // starts fresh too.
+                    cur_open = !at_cursor;
                 }
 
                 let cell_top = oy + y as f32 * ch + shift;
@@ -1550,6 +1567,10 @@ impl GpuResources {
                         let placed: Option<(_, u32)> = if let Some(g) =
                             self.atlas.sprite_glyph(ch_first, queue)
                         {
+                            Some((g, 1))
+                        } else if let Some(g) = self.atlas.mapped_glyph(ch_first, span, queue) {
+                            // `font-codepoint-map` beats the primary font:
+                            // forcing a face is the point of the option.
                             Some((g, 1))
                         } else if sg.glyph_id != 0 {
                             self.atlas
@@ -2231,4 +2252,11 @@ mod tests {
         let m = build_search_mask(&hl, 3, 1);
         assert_eq!(m, vec![0, 0, 2]);
     }
+}
+
+/// Resolve an installed font family (or a font file path) to its bytes and
+/// face index — the lookup `font-family` uses. For UI fonts such as
+/// `window-title-font-family`.
+pub fn find_ui_font(family: &str) -> Option<(&'static [u8], u32)> {
+    atlas::find_regular_font(family)
 }

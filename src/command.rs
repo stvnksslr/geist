@@ -146,6 +146,7 @@ impl Action {
             | Action::ReloadConfig
             | Action::Quit
             | Action::ToggleQuickTerminal
+            | Action::ToggleVisibility
             | Action::Undo
             | Action::Redo
             // App, but special-cased in a surface context upstream.
@@ -173,6 +174,7 @@ impl Action {
                 | Action::SendCsi(_)
                 | Action::SendEsc(_)
                 | Action::Paste
+                | Action::PasteFromSelection
                 | Action::ClearScreen
                 | Action::ResetTerminal
                 | Action::SelectAll
@@ -429,9 +431,6 @@ pub enum Action {
     SplitLeft,
     /// Ghostty `new_split:up`.
     SplitUp,
-    /// Ghostty `prompt_surface_title`: a dialog that sets the focused pane's
-    /// title override.
-    PromptSurfaceTitle,
     /// The About dialog (giest-specific; macOS Ghostty has it in the app menu).
     ShowAbout,
     /// Zoom the focused split to fill the tab, hiding the other panes; toggles
@@ -467,11 +466,27 @@ pub enum Action {
     /// Send the pending leader keys to the shell and end the sequence
     /// (Ghostty `end_key_sequence`).
     EndKeySequence,
+    /// Ghostty `prompt_surface_title` / `prompt_window_title`: ask for a title
+    /// in a small dialog.
+    PromptSurfaceTitle,
+    PromptWindowTitle,
+    /// Ghostty `move_tab_to_new_window`: detach the active tab (shells and all)
+    /// into a new window.
+    MoveTabToNewWindow,
+    /// Ghostty `toggle_visibility`: hide or show every window.
+    ToggleVisibility,
+    /// Ghostty `show_on_screen_keyboard`: the Windows touch keyboard.
+    ShowOnScreenKeyboard,
+    /// Ghostty `toggle_window_decorations`.
+    ToggleWindowDecorations,
     IncreaseFontSize,
     DecreaseFontSize,
     ResetFontSize,
     Copy,
     Paste,
+    /// Paste the emulated PRIMARY selection (`crate::primary`). Ghostty
+    /// `paste_from_selection`.
+    PasteFromSelection,
     SelectAll,
     ClearSelection,
     ResetTerminal,
@@ -559,7 +574,6 @@ impl Action {
             Action::SplitDown => "Split Down",
             Action::SplitLeft => "Split Left",
             Action::SplitUp => "Split Up",
-            Action::PromptSurfaceTitle => "Change Terminal Title",
             Action::ShowAbout => "About giest",
             Action::ToggleSplitZoom => "Toggle Split Zoom",
             Action::ResizeSplit(SplitDir::Up, _) => "Resize Split: Up",
@@ -580,6 +594,12 @@ impl Action {
             Action::CopyUrlToClipboard => "Copy URL",
             Action::ScrollToSelection => "Scroll to Selection",
             Action::EndKeySequence => "End Key Sequence",
+            Action::PromptSurfaceTitle => "Change Terminal Title...",
+            Action::PromptWindowTitle => "Change Window Title...",
+            Action::MoveTabToNewWindow => "Move Tab to New Window",
+            Action::ToggleVisibility => "Toggle Visibility",
+            Action::ShowOnScreenKeyboard => "Show On-Screen Keyboard",
+            Action::ToggleWindowDecorations => "Toggle Window Decorations",
             Action::FocusSplitNext => "Focus Split: Next",
             Action::FocusSplitPrev => "Focus Split: Previous",
             Action::IncreaseFontSize => "Increase Font Size",
@@ -587,6 +607,7 @@ impl Action {
             Action::ResetFontSize => "Reset Font Size",
             Action::Copy => "Copy",
             Action::Paste => "Paste",
+            Action::PasteFromSelection => "Paste from Selection",
             Action::SelectAll => "Select All",
             Action::ClearSelection => "Clear Selection",
             Action::ResetTerminal => "Reset Terminal",
@@ -621,8 +642,15 @@ impl Action {
             | Action::GotoWindowPrev
             | Action::ResetWindowSize
             | Action::CopyUrlToClipboard
+            | Action::PasteFromSelection
             | Action::ScrollToSelection
-            | Action::EndKeySequence => return None,
+            | Action::EndKeySequence
+            | Action::PromptSurfaceTitle
+            | Action::PromptWindowTitle
+            | Action::MoveTabToNewWindow
+            | Action::ToggleVisibility
+            | Action::ShowOnScreenKeyboard
+            | Action::ToggleWindowDecorations => return None,
             Action::NewTab => "Ctrl+Shift+T",
             Action::NewWindow => "Ctrl+Shift+N",
             Action::Inspector(_) => "Ctrl+Shift+I",
@@ -649,7 +677,6 @@ impl Action {
             | Action::PromptTabTitle
             | Action::SplitLeft
             | Action::SplitUp
-            | Action::PromptSurfaceTitle
             | Action::ShowAbout
             | Action::ToggleMaximize
             | Action::ToggleFloatOnTop
@@ -735,7 +762,6 @@ impl Action {
             Action::SplitDown => "new_split:down".into(),
             Action::SplitLeft => "new_split:left".into(),
             Action::SplitUp => "new_split:up".into(),
-            Action::PromptSurfaceTitle => "prompt_surface_title".into(),
             Action::ShowAbout => "show_about".into(),
             Action::ToggleSplitZoom => "toggle_split_zoom".into(),
             Action::ResizeSplit(d, n) => format!("resize_split:{},{n}", d.name()),
@@ -748,6 +774,12 @@ impl Action {
             Action::CopyUrlToClipboard => "copy_url_to_clipboard".into(),
             Action::ScrollToSelection => "scroll_to_selection".into(),
             Action::EndKeySequence => "end_key_sequence".into(),
+            Action::PromptSurfaceTitle => "prompt_surface_title".into(),
+            Action::PromptWindowTitle => "prompt_window_title".into(),
+            Action::MoveTabToNewWindow => "move_tab_to_new_window".into(),
+            Action::ToggleVisibility => "toggle_visibility".into(),
+            Action::ShowOnScreenKeyboard => "show_on_screen_keyboard".into(),
+            Action::ToggleWindowDecorations => "toggle_window_decorations".into(),
             Action::ToggleQuickTerminal => "toggle_quick_terminal".into(),
             Action::FocusSplitLeft => "goto_split:left".into(),
             Action::FocusSplitRight => "goto_split:right".into(),
@@ -760,6 +792,7 @@ impl Action {
             Action::ResetFontSize => "reset_font_size".into(),
             Action::Copy => "copy_to_clipboard".into(),
             Action::Paste => "paste_from_clipboard".into(),
+            Action::PasteFromSelection => "paste_from_selection".into(),
             Action::SelectAll => "select_all".into(),
             Action::ClearSelection => "clear_selection".into(),
             Action::ResetTerminal => "reset".into(),
@@ -924,12 +957,18 @@ impl Action {
             "copy_url_to_clipboard" => Action::CopyUrlToClipboard,
             "scroll_to_selection" => Action::ScrollToSelection,
             "end_key_sequence" => Action::EndKeySequence,
+            "prompt_window_title" => Action::PromptWindowTitle,
+            "move_tab_to_new_window" => Action::MoveTabToNewWindow,
+            "toggle_visibility" => Action::ToggleVisibility,
+            "show_on_screen_keyboard" => Action::ShowOnScreenKeyboard,
+            "toggle_window_decorations" => Action::ToggleWindowDecorations,
             "toggle_quick_terminal" => Action::ToggleQuickTerminal,
             "increase_font_size" => Action::IncreaseFontSize,
             "decrease_font_size" => Action::DecreaseFontSize,
             "reset_font_size" => Action::ResetFontSize,
             "copy_to_clipboard" | "copy" => Action::Copy,
             "paste_from_clipboard" | "paste" => Action::Paste,
+            "paste_from_selection" => Action::PasteFromSelection,
             "select_all" => Action::SelectAll,
             "clear_selection" => Action::ClearSelection,
             "reset" | "reset_terminal" => Action::ResetTerminal,
@@ -1014,7 +1053,6 @@ const BASE_ACTIONS: &[Action] = &[
     Action::SplitDown,
     Action::SplitLeft,
     Action::SplitUp,
-    Action::PromptSurfaceTitle,
     Action::ShowAbout,
     Action::ToggleSplitZoom,
     Action::EqualizeSplits,
@@ -1036,6 +1074,7 @@ const BASE_ACTIONS: &[Action] = &[
     Action::ResetFontSize,
     Action::Copy,
     Action::Paste,
+    Action::PasteFromSelection,
     Action::SelectAll,
     Action::ClearSelection,
     Action::ResetTerminal,
@@ -1048,6 +1087,12 @@ const BASE_ACTIONS: &[Action] = &[
     Action::ToggleSearch,
     Action::ToggleMouseReporting,
     Action::ToggleMaximize,
+    Action::ToggleWindowDecorations,
+    Action::ToggleVisibility,
+    Action::PromptSurfaceTitle,
+    Action::PromptWindowTitle,
+    Action::MoveTabToNewWindow,
+    Action::ShowOnScreenKeyboard,
     Action::ToggleFloatOnTop,
     Action::ToggleBackgroundOpacity,
     Action::OpenConfig,
@@ -1061,6 +1106,9 @@ pub struct Command {
     pub title: String,
     pub keybind: Option<String>,
     pub action: Action,
+    /// A `command-palette-entry` description, shown in place of the action
+    /// name on the row's second line.
+    pub description: Option<String>,
 }
 
 impl Command {
@@ -1069,8 +1117,36 @@ impl Command {
             title: action.title().to_string(),
             keybind: action.keybind().map(str::to_string),
             action,
+            description: None,
         }
     }
+}
+
+/// The palette catalog after `command-palette-entry`: the built-in rows unless
+/// a `clear` removed them, then each custom row whose action parses (keybind
+/// action syntax). A row with an unparseable action is dropped rather than
+/// shown doing nothing.
+pub fn catalog_with_entries(
+    profile_names: &[String],
+    defaults: bool,
+    entries: &[crate::config::PaletteEntry],
+) -> Vec<Command> {
+    let mut catalog = if defaults {
+        build_catalog(profile_names)
+    } else {
+        Vec::new()
+    };
+    for e in entries {
+        if let Some(action) = Action::from_name(&e.action) {
+            catalog.push(Command {
+                title: e.title.clone(),
+                keybind: None,
+                action,
+                description: e.description.clone(),
+            });
+        }
+    }
+    catalog
 }
 
 /// The fixed command set (no per-profile rows). See [`build_catalog`] for the
@@ -1088,6 +1164,7 @@ pub fn build_catalog(profile_names: &[String]) -> Vec<Command> {
             title: format!("New Tab with {name}"),
             keybind: None,
             action: Action::NewTabWithProfile(i),
+            description: None,
         });
     }
     catalog
@@ -1247,6 +1324,12 @@ mod tests {
             "copy_url_to_clipboard",
             "scroll_to_selection",
             "end_key_sequence",
+            "prompt_surface_title",
+            "prompt_window_title",
+            "move_tab_to_new_window",
+            "toggle_visibility",
+            "show_on_screen_keyboard",
+            "toggle_window_decorations",
         ] {
             let a = Action::from_name(raw).unwrap_or_else(|| panic!("parsing {raw:?}"));
             assert_eq!(a.name(), raw, "round-trip {raw:?}");
@@ -1501,5 +1584,30 @@ mod tests {
             && c.action == Action::NewTabWithProfile(0)));
         assert!(cat.iter().any(|c| c.title == "New Tab with Command Prompt"
             && c.action == Action::NewTabWithProfile(1)));
+    }
+
+    fn entry(title: &str, action: &str, description: Option<&str>) -> crate::config::PaletteEntry {
+        crate::config::PaletteEntry {
+            title: title.into(),
+            action: action.into(),
+            description: description.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn custom_palette_rows_append_after_defaults_and_bad_actions_drop() {
+        let base = build_catalog(&[]).len();
+        let entries = [
+            entry("Reset Style", "csi:0m", Some("SGR reset")),
+            entry("Broken", "not_an_action", None),
+        ];
+        let cat = catalog_with_entries(&[], true, &entries);
+        assert_eq!(cat.len(), base + 1);
+        let last = cat.last().unwrap();
+        assert_eq!(last.title, "Reset Style");
+        assert_eq!(last.description.as_deref(), Some("SGR reset"));
+        assert!(matches!(last.action, Action::SendCsi(_)));
+        // `clear` drops the built-ins.
+        assert_eq!(catalog_with_entries(&[], false, &entries[..1]).len(), 1);
     }
 }

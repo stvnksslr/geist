@@ -301,6 +301,24 @@ fn already_shipped_osc_sequences_still_survive_conpty() {
 
 #[test]
 #[ignore = "spawns a real shell; run with --ignored --nocapture"]
+fn the_cmd_prompt_sets_the_bar_cursor_and_title() {
+    let profile = Profile {
+        name: "Command Prompt".into(),
+        program: "cmd.exe".into(),
+        args: Vec::new(),
+    };
+    let out = drive("cmd.exe", &profile.launch_args(), &[("\x1b]133;B", "exit\r")]);
+    let text = String::from_utf8_lossy(&out);
+    assert!(contains(&out, b"\x1b]133;A"), "the cmd prompt hook did not load: {text:?}");
+    assert!(contains(&out, b"\x1b[5 q"), "the bar cursor did not survive ConPTY: {text:?}");
+    assert!(
+        contains(&out, b"\x1b]0;C:") || contains(&out, b"\x1b]2;C:"),
+        "the cwd title did not survive ConPTY: {text:?}"
+    );
+}
+
+#[test]
+#[ignore = "spawns a real shell; run with --ignored --nocapture"]
 fn the_powershell_hook_reports_command_exit_codes() {
     // The real hook, exactly as `Profile::launch_args` builds it — base64 inside
     // `-EncodedCommand`, where a syntax error is invisible.
@@ -339,6 +357,16 @@ fn the_powershell_hook_reports_command_exit_codes() {
         "the hook did not report exit code 3: {text:?}"
     );
     assert!(contains(&out, b"giest-ok"), "the second command never ran: {text:?}");
+    // `shell-integration-features` defaults: `cursor` (blinking bar at the
+    // prompt) and `title` (cwd). ConPTY re-renders both rather than passing
+    // them through, so what arrives is its own form: the DECSCUSR survives as
+    // is, and the title comes back as a title-setting OSC (0 or 2).
+    assert!(contains(&out, b"\x1b[5 q"), "the bar cursor did not survive ConPTY: {text:?}");
+    assert!(
+        contains(&out, b"\x1b]0;~") || contains(&out, b"\x1b]2;~")
+            || contains(&out, b"\x1b]0;C:") || contains(&out, b"\x1b]2;C:"),
+        "the cwd title did not survive ConPTY: {text:?}"
+    );
     // Two `D;0`s: one from the very first prompt (before anything ran — which is
     // why `Session` ignores a `D` with no matching start), and one for the
     // cmdlet that succeeded. Only the second is a real report, and `$?` is what
@@ -401,4 +429,64 @@ fn apc_is_still_stripped_by_conpty() {
         !contains(&out, b"giest-apc-probe"),
         "ConPTY now passes APC through — kitty graphics may be unblocked. Got: {text:?}"
     );
+}
+
+#[test]
+#[ignore = "spawns Git for Windows' bash; run with --ignored --nocapture"]
+fn ghosttys_bash_integration_injects_through_the_wsl_bootstrap() {
+    // No WSL distro is needed to exercise the *bash* half of the WSL story:
+    // Git for Windows ships a real bash and a POSIX sh, so the bootstrap
+    // (`giest-wsl.sh`) and upstream's `ghostty.bash` run exactly as they would
+    // inside WSL — only the path translation WSLENV's `/p` does is replaced by
+    // spelling the MSYS path directly.
+    let sh = r"C:\Program Files\Git\usr\bin\sh.exe";
+    if !std::path::Path::new(sh).is_file() {
+        eprintln!("skipping: Git for Windows not installed");
+        return;
+    }
+    let root = std::env::temp_dir().join(format!("giest-si-bash-{}", std::process::id()));
+    let dir = giest::profiles::extract_shell_integration(&root).expect("extract scripts");
+    let win = dir.to_string_lossy().replace('\\', "/");
+    let msys = format!("/{}{}", win[..1].to_ascii_lowercase(), &win[2..]);
+    let env = vec![
+        ("SHELL".to_string(), "/usr/bin/bash".to_string()),
+        ("GIEST_SHELL_INTEGRATION_DIR".to_string(), msys),
+        ("GHOSTTY_SHELL_FEATURES".to_string(), "cursor:blink,title".to_string()),
+    ];
+    let args = vec![
+        "-c".to_string(),
+        r#"exec /bin/sh "$GIEST_SHELL_INTEGRATION_DIR/giest-wsl.sh""#.to_string(),
+    ];
+    let mut pty = Pty::spawn(sh, &args, None, &env, 80, 24, || {}).expect("spawn sh");
+    let steps: [(&[u8], &[u8]); 2] = [
+        (b"\x1b]133;A", b"echo giest-bash-ok; false\r"),
+        (b"giest-bash-ok\r\n", b"exit\r"),
+    ];
+    let mut out = Vec::new();
+    let started = Instant::now();
+    let mut step = 0;
+    while started.elapsed() < DEADLINE {
+        match pty.output.recv_timeout(QUIET) {
+            Ok(chunk) => {
+                if contains(&chunk, b"\x1b[6n") {
+                    let _ = pty.write(b"\x1b[1;1R");
+                }
+                out.extend_from_slice(&chunk);
+                if step < steps.len() && contains(&out, steps[step].0) {
+                    let _ = pty.write(steps[step].1);
+                    step += 1;
+                }
+            }
+            Err(RecvTimeoutError::Timeout) if !pty.is_running() => break,
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    let _ = std::fs::remove_dir_all(&root);
+    let text = String::from_utf8_lossy(&out);
+    assert!(contains(&out, b"\x1b]133;A"), "ghostty.bash never marked a prompt: {text:?}");
+    assert!(contains(&out, b"\x1b]133;C"), "no pre-exec C mark: {text:?}");
+    assert!(contains(&out, b"\x1b]133;D;1"), "`false` did not report exit 1: {text:?}");
+    assert!(contains(&out, b"\x1b[5 q"), "no bar cursor at the prompt: {text:?}");
+    assert!(contains(&out, b"\x1b]7;kitty-shell-cwd://"), "no cwd report: {text:?}");
 }
