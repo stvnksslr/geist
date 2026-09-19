@@ -92,7 +92,7 @@ dilation in the rasterizer, S), `drag-handle` (comes with pane drag, §C), `auto
 
 | Feature | giest | Windows shape | Effort |
 |---|---|---|---|
-| **IME / preedit** (CJK, dead keys, Win+. emoji panel) | ⬜ | `IMEAllowed` + `IMERect` at the cursor, `Event::Ime` preedit/commit, draw the preedit | M |
+| **IME / preedit** (CJK, dead keys, Win+. emoji panel) | ◐ | Done: `PlatformOutput::ime` at the cursor cell (candidate window placement), `Event::Ime` preedit/commit (`ime.rs`, commit/Text dedupe, keys held back while composing), preedit drawn underlined at the cursor. Missing: preedit caret/segment styling (egui drops winit's cursor range), overlong preedit doesn't wrap; needs a human check with a real CJK IME | M |
 | **Split divider drag** | ⬜ | see §B | M |
 | **Pane drag-to-rearrange, drag out to tab/window** | ⬜ | drop-zone overlay, detach-then-insert (one process, no IPC) | L |
 | **File drag-and-drop** → shell-quoted path | ⬜ | `dropped_files`, per-shell quoting, through `Session::paste_str` | S |
@@ -1474,7 +1474,7 @@ Landed: `working-directory`, `window-new-tab-position`, `window-padding-balance`
   no longer exists now lands on `working-directory`.
 - **`selection-clear-on-typing` counts only input the program receives.** App shortcuts and reserved
   combos are excluded: they never reach the shell, so clearing on them would drop a selection the
-  user is still working with. IME preedit (which upstream also clears on) doesn't exist in giest.
+  user is still working with. IME preedit commits count as typing (they clear the selection like any Text).
 - **`enquiry-response` is blocked on ConPTY — now measured, not guessed.** The probe this entry
   called for was written and run (`enq_is_still_stripped_by_conpty`): a shell emitting
   `giest-enq-open`, `0x05`, `giest-enq-close` comes back as `giest-enq-opengiest-enq-close`. Both

@@ -20,6 +20,7 @@ pub mod decscusr;
 pub mod engine;
 pub mod hotkey;
 pub mod icon;
+pub mod ime;
 pub mod inspector;
 pub mod keybind;
 pub mod notify;
