@@ -34,38 +34,35 @@ directly — leaving room for a pure-Rust fallback engine without app changes.
 ## Build prerequisites
 
 - **Rust** (stable, edition 2024 — 1.95+).
-- **Zig 0.15.2** on `PATH`. The vendored `libghostty-vt-sys` build script
+- **Zig 0.16.0** on `PATH`. The vendored `libghostty-vt-sys` build script
   compiles Ghostty's VT library with Zig. The pinned Ghostty commit requires
-  exactly the 0.15.x series; **0.16.x will not build it**. Get it from
-  <https://ziglang.org/download/0.15.2/>.
+  the 0.16.x series; **0.15.x will not build it**. Get it from
+  <https://ziglang.org/download/0.16.0/>.
 - A working MSVC toolchain (the default `x86_64-pc-windows-msvc` target).
 - Internet on first build: the build script fetches the pinned Ghostty source.
 
 ## Build & run
 
 ```powershell
-# Make sure Zig 0.15.2 is first on PATH for the build:
-$env:PATH = "C:\path\to\zig-0.15.2;$env:PATH"
+# Make sure Zig 0.16.0 is first on PATH for the build:
+$env:PATH = "C:\path\to\zig-0.16.0;$env:PATH"
 
 cargo run            # debug
 cargo run --release  # release (faster rendering, smaller VT lib)
 ```
 
-If you use [mise], the bundled `mise.toml` pins `zig = "0.15.2"` for this
+If you use [mise], the bundled `mise.toml` pins `zig = "0.16.0"` for this
 project, so `mise trust` once and the right Zig is on `PATH` automatically.
 
 The first build takes a few minutes (it fetches and compiles Ghostty's VT
 library via Zig); subsequent builds are fast and don't re-invoke Zig unless the
 native crate changes.
 
-## Vendoring & the Windows static-link patch
+## Vendoring
 
-`vendor/libghostty-rs/` is a vendored copy of [Uzaaft/libghostty-rs] (@9bf2bd29)
-with one local patch: on Windows the upstream build links `static=ghostty-vt`,
-which resolves to the DLL *import library* (`ghostty-vt.lib`) rather than the
-real static archive (`ghostty-vt-static.lib`). That makes the binary depend on
-`ghostty-vt.dll` at runtime, and the Windows DLL path crashes. The patch links
-the static archive instead, so giest is a single self-contained `.exe`.
+`vendor/libghostty-rs/` is [Uzaaft/libghostty-rs] @5988a0b with Ghostty bumped to upstream
+`main` (@b32f20f). It links Ghostty's real static archive, so giest is a single self-contained
+`.exe`. See CLAUDE.md for how to bump the Ghostty commit.
 
 ## Controls
 

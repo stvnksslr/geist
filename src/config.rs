@@ -1018,6 +1018,8 @@ pub struct Config {
     /// ~7,200 rows). Small values are also floored: the engine keeps at least
     /// one page, so a limit below one page's worth buys nothing.
     pub scrollback_limit: usize,
+    /// Ghostty `scrollback-limit-lines`; `None` (the default) is `unlimited`.
+    pub scrollback_limit_lines: Option<usize>,
     /// Total bytes of image data (kitty graphics) retained per terminal screen.
     /// Ghostty `image-storage-limit`.
     ///
@@ -1215,6 +1217,7 @@ impl Default for Config {
             background_image_fit: BackgroundImageFit::Contain,
             background_image_repeat: false,
             scrollback_limit: 10_000,
+            scrollback_limit_lines: None,
             // Ghostty's default: 320 MB (decimal), per screen.
             image_storage_limit: 320 * 1000 * 1000,
             selection_bg: Rgb::new(0x38, 0x5a, 0x9c),
@@ -1731,6 +1734,13 @@ const SETTERS: &[(&str, Setter)] = &[
             "" => d.scrollback_limit,
             "unlimited" => usize::MAX,
             _ => v.parse().unwrap_or(d.scrollback_limit),
+        };
+    }),
+    ("scrollback-limit-lines", |c, v, d| {
+        c.scrollback_limit_lines = match v {
+            "" => d.scrollback_limit_lines,
+            "unlimited" => None,
+            _ => v.parse().ok().map(Some).unwrap_or(d.scrollback_limit_lines),
         };
     }),
     ("scrollback-limit", |c, v, d| {
@@ -2762,6 +2772,8 @@ mod tests {
         assert_eq!(parsed("scrollback-limit = 50000").scrollback_limit, 50_000);
         assert_eq!(parsed("scrollback-limit-bytes = 70000").scrollback_limit, 70_000);
         assert_eq!(parsed("scrollback-limit-bytes = unlimited").scrollback_limit, usize::MAX);
+        assert_eq!(parsed("scrollback-limit-lines = 5000").scrollback_limit_lines, Some(5000));
+        assert_eq!(parsed("scrollback-limit-lines = unlimited").scrollback_limit_lines, None);
     }
 
     #[test]

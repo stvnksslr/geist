@@ -14,7 +14,7 @@ use libghostty_vt::render::{CellIteration, CellIterator, CursorVisualStyle, Dirt
 use libghostty_vt::screen::{CellWide, RowSemanticPrompt, TrackedGridRef};
 use libghostty_vt::style::{StyleColor, Underline};
 use libghostty_vt::terminal::{Mode, Point, PointCoordinate, PointSpace, ScrollViewport};
-use libghostty_vt::{RenderState, Terminal, TerminalOptions};
+use libghostty_vt::{RenderState, Terminal};
 
 use super::{
     BoldColor, Cell, CursorShape, GridSnapshot, ImageData, ImagePlacement, KeyCode, KeyInput,
@@ -157,11 +157,9 @@ impl GhosttyVtEngine {
         // installed on *this* thread; see `png_decode::install`.
         super::png_decode::install();
 
-        let mut term = Terminal::new(TerminalOptions {
-            cols,
-            rows,
-            max_scrollback,
-        })?;
+        let mut term = Terminal::new(cols, rows)?;
+        // `usize::MAX` is `scrollback-limit-bytes = unlimited`.
+        term.set_scrollback_max_bytes((max_scrollback != usize::MAX).then_some(max_scrollback))?;
 
         let responses: ResponseSink = Rc::new(RefCell::new(Vec::new()));
         let sink = responses.clone();
@@ -333,7 +331,7 @@ fn walk_placements(
                 else {
                     continue;
                 };
-                let Some(rgba) = to_rgba(fmt, comp, w, h, bytes) else {
+                let Some(rgba) = bytes.and_then(|b| to_rgba(fmt, comp, w, h, b)) else {
                     continue;
                 };
                 let d = Arc::new(ImageData { width: w, height: h, rgba });
@@ -1019,6 +1017,23 @@ mod tests {
         eng.write(b"\x1b]133;C\x07a\r\nb\r\nc\r\n");
         assert!(eng.select_semantic(SelectKind::Output, 0, 0, &[]));
         assert_eq!(sel_text(&eng).as_deref(), Some("a\nb\nc"));
+    }
+
+    #[test]
+    fn scrollback_line_cap_bounds_history() {
+        // `scrollback-limit-lines` rounds up to whole pages, so assert a bound
+        // well under the uncapped count rather than the exact figure.
+        let lines = |cap| {
+            let mut eng = GhosttyVtEngine::new(20, 5, 10_000_000).unwrap();
+            eng.set_scrollback_lines(cap).unwrap();
+            for i in 0..4_000 {
+                eng.write(format!("{i}\r\n").as_bytes());
+            }
+            eng.scrollback_rows()
+        };
+        let (capped, uncapped) = (lines(Some(50)), lines(None));
+        assert!(uncapped >= 3_900, "uncapped kept {uncapped}");
+        assert!(capped < uncapped / 2, "capped kept {capped} of {uncapped}");
     }
 
     #[test]
@@ -1903,7 +1918,7 @@ impl TerminalEngine for GhosttyVtEngine {
         }
         self.term.set_default_fg_color(Some(to_c(fg)))?;
         self.term.set_default_bg_color(Some(to_c(bg)))?;
-        self.term.set_default_color_palette(Some(pal))?;
+        self.term.set_default_color_palette(Some(libghostty_vt::style::Palette(pal)))?;
         Ok(())
     }
 
@@ -1963,13 +1978,18 @@ impl TerminalEngine for GhosttyVtEngine {
         // explicitly documents the divergence and survives a change to those
         // defaults.
         self.term.set_kitty_image_from_file_allowed(false)?;
-        self.term.set_kitty_image_from_temp_file_allowed(false)?;
+        self.term.set_kitty_image_temp_file_dir(None)?;
         self.term.set_kitty_image_from_shared_mem_allowed(false)?;
         Ok(())
     }
 
     fn set_min_contrast(&mut self, ratio: f32) -> Result<()> {
         self.min_contrast = ratio;
+        Ok(())
+    }
+
+    fn set_scrollback_lines(&mut self, lines: Option<usize>) -> Result<()> {
+        self.term.set_scrollback_max_lines(lines)?;
         Ok(())
     }
 

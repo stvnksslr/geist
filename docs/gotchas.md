@@ -27,27 +27,25 @@ flowchart LR
 
 See [`pty.rs`](components/pty.md).
 
-## The Windows static-link patch
+## The vendored binding runs ahead of its upstream
 
-`vendor/libghostty-rs/` is vendored from
-[Uzaaft/libghostty-rs](https://github.com/Uzaaft/libghostty-rs) (`@9bf2bd29`)
-**specifically to apply one patch**. On Windows, upstream's
-`static=ghostty-vt` resolves to the DLL **import lib**, making the exe depend on
-`ghostty-vt.dll` — whose runtime path crashes (access violation in `vt_write`).
-The patched `build.rs` links `static=ghostty-vt-static` (the real archive) on
-Windows.
+`vendor/libghostty-rs/` is [Uzaaft/libghostty-rs](https://github.com/Uzaaft/libghostty-rs)
+@5988a0b, but Ghostty is pinned to `ghostty-org/ghostty` `main` (@b32f20f) rather than the
+binding's own, older pin. Bumping that commit means regenerating `bindings.rs` (on Windows:
+libclang plus a *Linux* bindgen target, or every C enum comes out `i32`) and fixing whatever C API
+moved — CLAUDE.md has the exact command.
 
-!!! danger "Don't 'simplify' this back to the upstream form"
-    Upstream's Windows CI only **builds**, never **runs**, so it never hit the
-    DLL-path crash. Reverting the patch produces a binary that compiles and then
-    crashes on first VT write.
+!!! danger "Build *and launch* after every bump"
+    giest used to patch `build.rs` to link `ghostty-vt-static.lib`: upstream linked the DLL
+    *import* lib, and the exe then crashed on first VT write. That fix is upstream now (8272abe),
+    but a regression would compile cleanly and fail only at runtime.
 
 See the [libghostty touch point](touchpoints/libghostty.md).
 
-## Zig version is pinned to 0.15.2
+## Zig version is pinned to 0.16.0
 
-The pinned Ghostty commit declares `minimum_zig_version = 0.15.2`. **0.16.x will
-not build it.** `mise.toml` pins `zig = "0.15.2"`; prefer the `mise dev` /
+The pinned Ghostty commit declares `minimum_zig_version = 0.16.0`. **0.15.x will
+not build it.** `mise.toml` pins `zig = "0.16.0"`; prefer the `mise dev` /
 `mise release` tasks, which put the right Zig on `PATH`.
 
 ## The release profile feeds the Zig build via `DEBUG`

@@ -12,7 +12,7 @@ trait; the shell runs over **ConPTY**. North-star goal: feature parity with the 
 ## Build & test
 
 ```powershell
-mise dev                 # debug build + run (recommended; injects Zig 0.15.2)
+mise dev                 # debug build + run (recommended; injects Zig 0.16.0)
 mise release             # optimized release build (recommended)
 cargo test               # ~79 unit tests (engine, input, selection, paste, mouse, theming, ligatures, OSC 7/52, URL detection)
 cargo test <name>        # single test by name substring
@@ -23,12 +23,12 @@ Benchmarks mirror Ghostty's suite (VT-write/OSC throughput, snapshot copy, shapi
 headless renderer cost) and can be compared against upstream `ghostty-bench` via
 `scripts/bench-vs-ghostty.ps1`. Full guide: **docs/benchmarking.md**.
 
-- **Requires Zig 0.15.2 on PATH** — the vendored `libghostty-vt-sys/build.rs` runs `zig build`
-  to compile Ghostty's VT library. **0.16.x will NOT build it** (the pinned ghostty commit
-  declares `minimum_zig_version = 0.15.2`). `mise.toml` pins `zig = "0.15.2"` and defines the
+- **Requires Zig 0.16.0 on PATH** — the vendored `libghostty-vt-sys/build.rs` runs `zig build`
+  to compile Ghostty's VT library. **0.15.x will NOT build it** (the pinned ghostty commit
+  declares `minimum_zig_version = 0.16.0`). `mise.toml` pins `zig = "0.16.0"` and defines the
   `dev`/`release` tasks above, which run cargo from the project root with the pinned Zig on
-  PATH — prefer them. Run `mise trust` once. Fallbacks: `mise exec zig@0.15.2 -- cargo build`,
-  or plain `cargo build`/`cargo run --release` if Zig 0.15.2 is already on PATH.
+  PATH — prefer them. Run `mise trust` once. Fallbacks: `mise exec zig@0.16.0 -- cargo build`,
+  or plain `cargo build`/`cargo run --release` if Zig 0.16.0 is already on PATH.
 - **Always run cargo from the project root.** Running it from inside `vendor/libghostty-rs/...`
   builds the *vendored crate* instead of giest (cargo walks up to the nearest Cargo.toml). A
   "Finished" that only mentions `libghostty-vt` compiling means you're in the wrong directory.
@@ -97,12 +97,23 @@ fallback engine without app changes:
 
 ## Non-obvious gotchas
 
-- **Vendored binding + Windows static-link patch.** `vendor/libghostty-rs/` is a vendored copy of
-  Uzaaft/libghostty-rs (@9bf2bd29), depended on by path *specifically to apply one patch*: on
-  Windows, upstream's `static=ghostty-vt` resolves to the DLL **import lib**, making the exe depend
-  on `ghostty-vt.dll` whose runtime path crashes (access violation in `vt_write`). The patch in
-  `vendor/.../libghostty-vt-sys/build.rs` links `static=ghostty-vt-static` (the real archive) on
-  Windows. Don't "simplify" this back to the upstream form. Upstream's Windows CI only builds, never runs.
+- **Vendored binding, ahead of its own upstream.** `vendor/libghostty-rs/` is Uzaaft/libghostty-rs
+  @5988a0b with **Ghostty itself bumped past the binding's pin** to `ghostty-org/ghostty` `main`
+  @b32f20f (the binding pins 22d1317, 876 commits older). That bump carries three local deltas:
+  `GHOSTTY_COMMIT` in `libghostty-vt-sys/build.rs`; a **regenerated** `bindings.rs`; and
+  `render.rs::colors()` moved from the removed `ghostty_render_state_colors_get` onto
+  `ghostty_render_state_get(.., RenderStateData::COLORS, ..)`. The old Windows static-link patch
+  (`static=ghostty-vt-static`, without which the exe loads `ghostty-vt.dll` and crashes in
+  `vt_write`) is now **upstream** (8272abe) — don't re-add it, but *do* check it survives a bump.
+  **Regenerating `bindings.rs` on Windows has two traps:** bindgen needs `libclang.dll` (the
+  `libclang` PyPI wheel is a zip that has one; point `LIBCLANG_PATH` at its `clang/native`), and it
+  must target **Linux** — a Windows target types every C enum `i32` instead of upstream's `u32` and
+  the safe crate stops compiling. Zig ships the headers:
+  `BINDGEN_EXTRA_CLANG_ARGS="--target=x86_64-unknown-linux-musl -isystem <zig>/lib/include -isystem
+  <zig>/lib/libc/include/{x86_64-linux-musl,generic-musl,x86-linux-any,any-linux-any}"` (glibc's
+  headers fail on `__STD_TYPE`), then `GHOSTTY_INCLUDE_DIR=<out>/ghostty-install/include cargo run
+  --manifest-path vendor/libghostty-rs/Cargo.toml -p libghostty-vt-sys --features bindgen-tool
+  --bin gen-bindings`. Then build *and launch* — a link-mode regression only shows at runtime.
 - **Detecting shell exit.** On Windows ConPTY the master *output* pipe usually does NOT reach EOF
   when the child exits (portable-pty keeps the pseudoconsole open), so the reader thread stays
   blocked and its channel never disconnects. Detect exit by polling the child process directly

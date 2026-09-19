@@ -6,10 +6,8 @@ publish = false # binary app with a vendored path dep — never goes to crates.i
 
 [dependencies]
 # Safe Rust bindings to libghostty-vt (Ghostty's VT engine). Vendored from
-# Uzaaft/libghostty-rs @ 9bf2bd29 with a local patch: link the real static
-# archive (ghostty-vt-static.lib) on Windows instead of the DLL import lib, so
-# the binary doesn't depend on (and crash via) ghostty-vt.dll at runtime.
-# The sys build.rs fetches the pinned ghostty commit and builds it with Zig 0.15.2.
+# Uzaaft/libghostty-rs @5988a0b, with Ghostty itself bumped to ghostty-org/ghostty main
+# @b32f20f (regenerated bindings.rs + a render.rs fix — see CLAUDE.md). Needs Zig 0.16.0.
 libghostty-vt = { path = "vendor/libghostty-rs/crates/libghostty-vt" }
 anyhow = "1"
 portable-pty = "0.9.0"
@@ -96,7 +94,7 @@ pollster = "0.4"
 
 # Host-environment CPU-path benchmarks. They link the giest *library* (src/lib.rs)
 # so they can drive the engine snapshot and the shaping path directly. Run with
-# `cargo bench` (needs Zig 0.15.2 on PATH to build libghostty-vt).
+# `cargo bench` (needs Zig 0.16.0 on PATH to build libghostty-vt).
 [[bench]]
 name = "snapshot"
 harness = false

@@ -26,13 +26,13 @@ aggregate).
 
 ## Running
 
-Benches need **Zig 0.15.2** on PATH (to build libghostty-vt) and build in release.
+Benches need **Zig 0.16.0** on PATH (to build libghostty-vt) and build in release.
 Prefer `mise`:
 
 ```powershell
-mise exec zig@0.15.2 -- cargo bench                      # all benches
-mise exec zig@0.15.2 -- cargo bench --bench stream       # one bench
-mise exec zig@0.15.2 -- cargo bench --bench stream -- ascii/80x24   # filter by id
+mise exec zig@0.16.0 -- cargo bench                      # all benches
+mise exec zig@0.16.0 -- cargo bench --bench stream       # one bench
+mise exec zig@0.16.0 -- cargo bench --bench stream -- ascii/80x24   # filter by id
 ```
 
 - The `render` bench needs a **wgpu adapter** (real or software GPU). With none
@@ -54,7 +54,7 @@ Two sources, mirroring Ghostty's separate generate→measure approach:
 
    ```powershell
    $env:GIEST_BENCH_DATA = "benches\data\ansi-sample.vt"
-   mise exec zig@0.15.2 -- cargo bench --bench stream
+   mise exec zig@0.16.0 -- cargo bench --bench stream
    Remove-Item Env:\GIEST_BENCH_DATA
    ```
 
@@ -66,8 +66,8 @@ Two sources, mirroring Ghostty's separate generate→measure approach:
 criterion has built-in baselines (Ghostty uses `hyperfine` for the same goal):
 
 ```powershell
-git switch main;        mise exec zig@0.15.2 -- cargo bench --bench stream -- --save-baseline main
-git switch my-branch;   mise exec zig@0.15.2 -- cargo bench --bench stream -- --baseline main
+git switch main;        mise exec zig@0.16.0 -- cargo bench --bench stream -- --save-baseline main
+git switch my-branch;   mise exec zig@0.16.0 -- cargo bench --bench stream -- --baseline main
 ```
 
 The second run prints the percentage change per case. Keep grid dimensions and the

@@ -18,7 +18,7 @@ flowchart LR
     src["engine/ghostty_vt.rs"]
     bind["libghostty-vt<br/>(Rust binding, vendored)"]
     sys["libghostty-vt-sys<br/>(build.rs)"]
-    zig["Zig 0.15.2"]
+    zig["Zig 0.16.0"]
     ghostty["Ghostty VT source<br/>(pinned commit)"]
     archive["ghostty-vt-static.lib"]
 
@@ -33,14 +33,13 @@ flowchart LR
     class bind,sys,zig,ghostty,archive v
 ```
 
-- `vendor/libghostty-rs/` is a **vendored** copy of
-  [Uzaaft/libghostty-rs](https://github.com/Uzaaft/libghostty-rs) (`@9bf2bd29`),
-  depended on by path to apply **one patch**: on Windows, link the real static
-  archive `ghostty-vt-static.lib` instead of the DLL import lib — otherwise the
-  exe depends on `ghostty-vt.dll`, whose runtime path crashes in `vt_write`. See
+- `vendor/libghostty-rs/` is [Uzaaft/libghostty-rs](https://github.com/Uzaaft/libghostty-rs) @5988a0b,
+  with Ghostty bumped past the binding's own pin to `ghostty-org/ghostty` `main` @b32f20f
+  (regenerated `bindings.rs` + one `render.rs` fix). The Windows static-link fix giest used to
+  carry (link `ghostty-vt-static.lib`, not the DLL import lib) is now upstream. See
   [Gotchas](../gotchas.md).
 - `libghostty-vt-sys/build.rs` runs `zig build` against the pinned Ghostty
-  commit, which declares `minimum_zig_version = 0.15.2` — **0.16.x will not
+  commit, which declares `minimum_zig_version = 0.16.0` — **0.15.x will not
   build it**.
 
 ## What crosses the boundary

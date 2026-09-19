@@ -539,6 +539,10 @@ pub trait TerminalEngine {
     /// black or white — whichever contrasts more — as the snapshot is built.
     fn set_min_contrast(&mut self, ratio: f32) -> Result<()>;
 
+    /// Cap scrollback by line count (Ghostty `scrollback-limit-lines`); `None` =
+    /// unlimited. Works alongside the byte cap: whichever is reached first wins.
+    fn set_scrollback_lines(&mut self, lines: Option<usize>) -> Result<()>;
+
     /// Whether the running app has enabled mouse reporting (any tracking mode).
     fn is_mouse_tracking(&self) -> bool;
 

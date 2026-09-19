@@ -71,7 +71,6 @@
 //! ```
 //! use libghostty_vt::{
 //!     Terminal,
-//!     TerminalOptions,
 //!     alloc::{Allocator, Bytes},
 //!     kitty::graphics,
 //! };
@@ -109,79 +108,75 @@
 //! fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     graphics::set_png_decoder(Some(Box::new(StubPngDecoder)))?;
 //!
-//!     let mut terminal = Terminal::new(TerminalOptions {
-//!        cols: 80,
-//!        rows: 24,
-//!        max_scrollback: 0
-//!    })?;
+//!     let mut terminal = Terminal::new(80, 24)?;
 //!
-//!    // Set cell pixel dimensions so kitty graphics can compute grid sizes.
-//!    terminal.resize(80, 24, 8, 16)?;
+//!     // Set cell pixel dimensions so kitty graphics can compute grid sizes.
+//!     terminal.resize(80, 24, 8, 16)?;
 //!
-//!    // Set a storage limit (64MiB) to enable Kitty graphics.
-//!    terminal.set_kitty_image_storage_limit(64 * 1024 * 1024)?;
+//!     // Set a storage limit (64MiB) to enable Kitty graphics.
+//!     terminal.set_kitty_image_storage_limit(64 * 1024 * 1024)?;
 //!
-//!    // Install pty_write to see the protocol response.
-//!    terminal.on_pty_write(|_, data| println!("{}", data.escape_ascii()))?;
+//!     // Install pty_write to see the protocol response.
+//!     terminal.on_pty_write(|_, data| println!("{}", data.escape_ascii()))?;
 //!
-//!    // Send a Kitty graphics command with an inline 1x1 PNG image.
-//!    //
-//!    // The escape sequence is:
-//!    //   ESC _G a=T,f=100,q=1; <base64 PNG data> ESC \
-//!    //
-//!    // Where:
-//!    //   a=T   — transmit and display
-//!    //   f=100 — PNG format
-//!    //   q=1   — request a response (q=0 would suppress it)
-//!    println!("Sending Kitty graphics PNG image:");
-//!    terminal.vt_write(
-//!      b"\x1b_Ga=T,f=100,q=1;\
-//!       iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAA\
-//!       DUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==\
-//!      \x1b\\"
-//!    );
+//!     // Send a Kitty graphics command with an inline 1x1 PNG image.
+//!     //
+//!     // The escape sequence is:
+//!     //   ESC _G a=T,f=100,q=1; <base64 PNG data> ESC \
+//!     //
+//!     // Where:
+//!     //   a=T   — transmit and display
+//!     //   f=100 — PNG format
+//!     //   q=1   — request a response (q=0 would suppress it)
+//!     println!("Sending Kitty graphics PNG image:");
+//!     terminal.vt_write(
+//!       b"\x1b_Ga=T,f=100,q=1;\
+//!        iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAA\
+//!        DUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==\
+//!       \x1b\\"
+//!     );
 //!
-//!    let graphics = terminal.kitty_graphics()?;
-//!    let mut iter = graphics::PlacementIterator::new()?;
-//!    let mut placements = iter.update(&graphics)?;
+//!     let graphics = terminal.kitty_graphics()?;
+//!     let mut iter = graphics::PlacementIterator::new()?;
+//!     let mut placements = iter.update(&graphics)?;
 //!
-//!    let mut placement_count = 0usize;
-//!    while let Some(placement) = placements.next() {
-//!        placement_count += 1;
-//!        let image_id = placement.image_id()?;
+//!     let mut placement_count = 0usize;
+//!     while let Some(placement) = placements.next() {
+//!         placement_count += 1;
+//!         let image_id = placement.image_id()?;
+//!         println!(
+//!             "  placement #{}: image_id={} placement_id={} virtual={} z={}",
+//!             placement_count,
+//!             image_id,
+//!             placement.placement_id()?,
+//!             placement.is_virtual()?,
+//!             placement.z()?,
+//!        );
+//!
+//!        // Look up the image and print its properties.
+//!        let image = graphics.image(image_id).unwrap();
 //!        println!(
-//!            "  placement #{}: image_id={} placement_id={} virtual={} z={}",
-//!            placement_count,
-//!            image_id,
-//!            placement.placement_id()?,
-//!            placement.is_virtual()?,
-//!            placement.z()?,
-//!       );
+//!            "    image: number={} size={}x{} format={:?} data_len={}",
+//!            image.number()?,
+//!            image.width()?,
+//!            image.height()?,
+//!            image.format()?,
+//!            image.data()?.unwrap().len(),
+//!        );
 //!
-//!       // Look up the image and print its properties.
-//!       let image = graphics.image(image_id).unwrap();
-//!       println!(
-//!           "    image: number={} size={}x{} format={:?} data_len={}",
-//!           image.number()?,
-//!           image.width()?,
-//!           image.height()?,
-//!           image.format()?,
-//!           image.data()?.len(),
-//!       );
-//!
-//!       let pixel_size = placement.pixel_size(&image, &terminal)?;
-//!       println!(
-//!           "    rendered pixel size: {}x{}",
-//!           pixel_size.width, pixel_size.height,
-//!       );
-//!       let grid_size = placement.grid_size(&image, &terminal)?;
-//!       println!(
-//!           "    grid size: {} cols x {} rows",
-//!           grid_size.cols, grid_size.rows,
-//!       );
-//!    }
-//!    println!("Total placements: {placement_count}");
-//!    Ok(())
+//!        let pixel_size = placement.pixel_size(&image, &terminal)?;
+//!        println!(
+//!            "    rendered pixel size: {}x{}",
+//!            pixel_size.width, pixel_size.height,
+//!        );
+//!        let grid_size = placement.grid_size(&image, &terminal)?;
+//!        println!(
+//!            "    grid size: {} cols x {} rows",
+//!            grid_size.cols, grid_size.rows,
+//!        );
+//!     }
+//!     println!("Total placements: {placement_count}");
+//!     Ok(())
 //! }
 //! ```
 //!
@@ -190,7 +185,9 @@
 
 use std::{
     cell::RefCell,
+    ffi::OsStr,
     mem::{ManuallyDrop, MaybeUninit},
+    path::Path,
 };
 
 use crate::{
@@ -261,10 +258,35 @@ impl Terminal<'_, '_> {
     pub fn is_kitty_image_from_file_allowed(&self) -> Result<bool> {
         self.get(ffi::TerminalData::KITTY_IMAGE_MEDIUM_FILE)
     }
-    /// Whether the temporary file medium is enabled for Kitty image loading
-    /// on the active screen.
-    pub fn is_kitty_image_from_temp_file_allowed(&self) -> Result<bool> {
-        self.get(ffi::TerminalData::KITTY_IMAGE_MEDIUM_TEMP_FILE)
+    /// The directory allowed for Kitty image loading via the temporary file
+    /// medium on the active screen, or `None` when the medium is disabled.
+    ///
+    /// Returns a borrowed path, valid until the next mutating terminal call
+    /// (e.g. [`Terminal::vt_write`] or [`Terminal::reset`]).
+    pub fn kitty_image_temp_file_dir(&self) -> Result<Option<&Path>> {
+        let str = self.get::<ffi::String>(ffi::TerminalData::KITTY_IMAGE_MEDIUM_TEMP_FILE)?;
+        if str.len == 0 {
+            return Ok(None);
+        }
+        // SAFETY: We trust libghostty to return a valid borrowed string,
+        // while we uphold that no mutation could happen during its lifetime.
+        let bytes = unsafe { std::slice::from_raw_parts(str.ptr, str.len) };
+        // SAFETY:
+        // Whilst the `OsStr::from_encoded_bytes_unchecked` function states that the
+        // exact OsStr encoding format is an implementation detail and no external bytes
+        // should rely on which exact encoding is used... In reality this should always
+        // work without issue, since both Zig and Rust basically share the same underlying
+        // string format.
+        //
+        // On Unix-like platforms, both Zig and Rust agree that a file path is just an
+        // arbitrary sequence of bytes without any NULs in between. The tricky part is
+        // that Windows uses (noncompliant) UTF-16 file paths natively and it just so
+        // happens both Zig and Rust use WTF-8 as a workaround against that whole can
+        // of worms, though in Rust it's more of an implementation detail.
+        // The Kitty graphics protocol itself is poorly defined on Windows, but for all
+        // intents and purposes, the bytes are always valid `OsStr`s and `Path`s.
+        let os_str = unsafe { OsStr::from_encoded_bytes_unchecked(bytes) };
+        Ok(Some(Path::new(os_str)))
     }
     /// Whether the shared memory medium is enabled for Kitty image loading
     /// on the active screen.
@@ -287,11 +309,22 @@ impl Terminal<'_, '_> {
         self.set(ffi::TerminalOption::KITTY_IMAGE_MEDIUM_FILE, &allowed)?;
         Ok(self)
     }
-    /// Enable or disable Kitty image loading via the temporary file medium.
+    /// Enable Kitty image loading via the temporary file medium, restricted
+    /// to the given directory. A `None` value disables the medium. The
+    /// string is copied into the terminal.
     ///
     /// Has no effect when Kitty graphics are disabled at build time.
-    pub fn set_kitty_image_from_temp_file_allowed(&mut self, allowed: bool) -> Result<&mut Self> {
-        self.set(ffi::TerminalOption::KITTY_IMAGE_MEDIUM_TEMP_FILE, &allowed)?;
+    pub fn set_kitty_image_temp_file_dir(&mut self, dir: Option<&Path>) -> Result<&mut Self> {
+        // GhosttyString carries UTF-8, so reject paths that
+        // [`Terminal::kitty_image_temp_file_dir`] could never read back.
+        let dir = dir
+            .map(|dir| dir.to_str().ok_or(Error::InvalidValue))
+            .transpose()?
+            .map(ffi::String::from);
+        self.set_optional(
+            ffi::TerminalOption::KITTY_IMAGE_MEDIUM_TEMP_FILE,
+            dir.as_ref(),
+        )?;
         Ok(self)
     }
     /// Enable or disable Kitty image loading via the shared memory medium.
@@ -314,6 +347,15 @@ impl Terminal<'_, '_> {
 }
 
 impl<'t> Graphics<'t> {
+    fn get<T>(&self, tag: ffi::KittyGraphicsData::Type) -> Result<T> {
+        let mut value = MaybeUninit::<T>::zeroed();
+        let result = unsafe {
+            ffi::ghostty_kitty_graphics_get(self.inner.as_raw(), tag, value.as_mut_ptr().cast())
+        };
+        from_result(result)?;
+        Ok(unsafe { value.assume_init() })
+    }
+
     /// Look up a Kitty graphics image by its image ID.
     ///
     /// Returns `None` if no image with the given ID exists.
@@ -323,6 +365,27 @@ impl<'t> Graphics<'t> {
         Some(Image {
             inner: Ref::new(image.cast_mut()).ok()?,
         })
+    }
+
+    /// Generation stamp of the last content mutation to this storage.
+    ///
+    /// Content mutations are any image transmit or replace, placement add, or
+    /// delete. Zero means the storage has never been mutated and is therefore
+    /// empty.
+    ///
+    /// If the generation is unchanged since a previous query, the set of
+    /// placements and all image data are identical, so placement iteration and
+    /// image staleness checks can be skipped entirely. Note that placement
+    /// geometry may still have changed, since scrolling and resizing move
+    /// placements without changing the storage contents, so rendering geometry
+    /// must still be recomputed for frames marked dirty.
+    ///
+    /// Stamps are unique and monotonically increasing process-wide: a value
+    /// observed from any storage never recurs for different content, even across
+    /// screen switches or terminal resets. It is therefore safe to key caches on
+    /// this value alone.
+    pub fn generation(&self) -> Result<u64> {
+        self.get(ffi::KittyGraphicsData::GENERATION)
     }
 }
 
@@ -358,6 +421,24 @@ impl<'t> Image<'t> {
     pub fn height(&self) -> Result<u32> {
         self.get(ffi::KittyGraphicsImageData::HEIGHT)
     }
+
+    /// Generation stamp assigned when this image was added to (or replaced in)
+    /// the storage.
+    ///
+    /// A changed generation for a given image ID means the pixel contents may
+    /// have changed even when the dimensions, format, and data length are
+    /// identical (e.g. a retransmission of the same image ID), so texture
+    /// caches must key staleness on this value rather than on size heuristics.
+    ///
+    /// Stamps are unique and monotonically increasing process-wide and are
+    /// drawn from the same sequence as [`Graphics::generation`]. Never zero
+    /// for a stored image, so zero can be used as an "empty" sentinel by
+    /// callers. Pending payload completion preserves this value to retain
+    /// image age; consumers detect that completion through
+    /// [`Graphics::generation`] and retry [`Image::data`].
+    pub fn generation(&self) -> Result<u64> {
+        self.get(ffi::KittyGraphicsImageData::GENERATION)
+    }
     /// Pixel format of the image.
     pub fn format(&self) -> Result<ImageFormat> {
         self.get::<ffi::KittyImageFormat::Type>(ffi::KittyGraphicsImageData::FORMAT)
@@ -368,15 +449,29 @@ impl<'t> Image<'t> {
         self.get::<ffi::KittyImageCompression::Type>(ffi::KittyGraphicsImageData::COMPRESSION)
             .and_then(|v| v.try_into().map_err(|_| Error::InvalidValue))
     }
+
     /// Borrowed pointer to the raw pixel data.
     ///
     /// Valid as long as the underlying terminal is not mutated.
-    pub fn data(&self) -> Result<&'t [u8]> {
+    ///
+    /// Returns `None` when the image metadata is resident but its pixel
+    /// payload is pending.
+    ///
+    /// The data is always fully decoded, uncompressed pixels in the format
+    /// reported by [`Image::format`]: zlib payloads are inflated and PNG
+    /// payloads are decoded to RGBA at transmission time, before the image
+    /// is stored. Consumers can upload this directly to the GPU without any
+    /// decode step.
+    pub fn data(&self) -> Result<Option<&'t [u8]>> {
         let ptr = self.get::<*const u8>(ffi::KittyGraphicsImageData::DATA_PTR)?;
+        if ptr.is_null() {
+            return Ok(None);
+        }
+
         let len = self.get::<usize>(ffi::KittyGraphicsImageData::DATA_LEN)?;
 
         // SAFETY: We trust libghostty to return valid results
-        Ok(unsafe { std::slice::from_raw_parts(ptr, len) })
+        Ok(Some(unsafe { std::slice::from_raw_parts(ptr, len) }))
     }
 }
 

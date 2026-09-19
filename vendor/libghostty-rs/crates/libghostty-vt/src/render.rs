@@ -58,14 +58,9 @@ pub use ffi::RenderStateRowSelection as RowSelection;
 /// // Create a terminal and render state, then update the render state
 /// // from the terminal. The render state captures a snapshot of everything
 /// // needed to draw a frame.
-/// use libghostty_vt::{Terminal, TerminalOptions, RenderState};
+/// use libghostty_vt::{Terminal, RenderState};
 ///
-/// let mut terminal = Terminal::new(TerminalOptions {
-///     cols: 40,
-///     rows: 5,
-///     max_scrollback: 10000,
-/// }).unwrap();
-///
+/// let mut terminal = Terminal::new(40, 5).unwrap();
 /// let mut render_state = RenderState::new().unwrap();
 ///
 /// // Feed some styled content into the terminal.
@@ -76,17 +71,35 @@ pub use ffi::RenderStateRowSelection as RowSelection;
 /// assert!(render_state.update(&terminal).is_ok());
 /// ```
 ///
+/// ## Splitting an update
+///
+/// ```rust
+/// use libghostty_vt::{RenderState, Terminal};
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let terminal = Terminal::new(80, 25)?;
+/// let mut render_state = RenderState::new()?;
+///
+/// // Use `update` unless you need to minimize how long terminal access is
+/// // held. `begin_update` copies the terminal-dependent state into an update
+/// // token, then `end` finishes the deferred render-state work.
+/// let update = render_state.begin_update(&terminal)?;
+///
+/// // Terminal access is no longer needed here.
+/// let snapshot = update.end()?;
+///
+/// // Read from the snapshot to draw the frame.
+/// let _dirty = snapshot.dirty()?;
+/// # Ok(())}
+/// ```
+///
 /// ## Checking dirty state
 ///
 /// ```rust
 /// // Check the global dirty state to decide how much work the renderer
 /// // needs to do. After rendering, reset it to false.
-/// # use libghostty_vt::{Terminal, TerminalOptions, RenderState, render::Dirty};
-/// # let terminal = Terminal::new(TerminalOptions {
-/// #     cols: 80,
-/// #     rows: 25,
-/// #     max_scrollback: 10000,
-/// # }).unwrap();
+/// # use libghostty_vt::{Terminal, RenderState, render::Dirty};
+/// # let terminal = Terminal::new(80, 25).unwrap();
 /// # let mut render_state = RenderState::new().unwrap();
 /// let snapshot = render_state.update(&terminal).unwrap();
 ///
@@ -102,12 +115,8 @@ pub use ffi::RenderStateRowSelection as RowSelection;
 /// ```rust
 /// // Retrieve colors (background, foreground, palette) from the render
 /// // state. These are needed to resolve palette-indexed cell colors.
-/// # use libghostty_vt::{Terminal, TerminalOptions, RenderState};
-/// # let terminal = Terminal::new(TerminalOptions {
-/// #     cols: 80,
-/// #     rows: 25,
-/// #     max_scrollback: 10000,
-/// # }).unwrap();
+/// # use libghostty_vt::{Terminal, RenderState};
+/// # let terminal = Terminal::new(80, 25).unwrap();
 /// # let mut render_state = RenderState::new().unwrap();
 /// let snapshot = render_state.update(&terminal).unwrap();
 /// let colors = snapshot.colors().unwrap();
@@ -127,12 +136,8 @@ pub use ffi::RenderStateRowSelection as RowSelection;
 /// ```rust
 /// // Read cursor position and visual style from the render state.
 /// use libghostty_vt::render::CursorViewport;
-/// # use libghostty_vt::{Terminal, TerminalOptions, RenderState};
-/// # let terminal = Terminal::new(TerminalOptions {
-/// #     cols: 80,
-/// #     rows: 25,
-/// #     max_scrollback: 10000,
-/// # }).unwrap();
+/// # use libghostty_vt::{Terminal, RenderState};
+/// # let terminal = Terminal::new(80, 25).unwrap();
 /// # let mut render_state = RenderState::new().unwrap();
 /// let snapshot = render_state.update(&terminal).unwrap();
 ///
@@ -150,15 +155,11 @@ pub use ffi::RenderStateRowSelection as RowSelection;
 /// // Iterate rows via the row iterator. For each dirty row, iterate its
 /// // cells, read codepoints/graphemes and styles, and emit ANSI-colored
 /// // output as a simple "renderer".
-/// use libghostty_vt::{Terminal, TerminalOptions, RenderState};
+/// use libghostty_vt::{Terminal, RenderState};
 /// use libghostty_vt::style::Underline;
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// # let terminal = Terminal::new(TerminalOptions {
-/// #     cols: 80,
-/// #     rows: 25,
-/// #     max_scrollback: 10000,
-/// # }).unwrap();
+/// # let terminal = Terminal::new(80, 25).unwrap();
 /// # let mut render_state = RenderState::new()?;
 /// use libghostty_vt::render::{RowIterator, CellIterator};
 ///
@@ -230,6 +231,16 @@ pub struct RenderState<'alloc>(Object<'alloc, ffi::RenderStateImpl>);
 /// drop the active snapshot (and data that depends on it) before updating.
 #[derive(Debug)]
 pub struct Snapshot<'alloc, 's>(&'s mut RenderState<'alloc>);
+
+/// An in-progress render state update.
+///
+/// This token is returned by [`RenderState::begin_update`] and keeps the render
+/// state borrowed until [`Self::end`] completes the deferred update work. This
+/// makes it impossible to read from the render state while it is incomplete.
+#[derive(Debug)]
+pub struct Update<'alloc, 's> {
+    state: Option<&'s mut RenderState<'alloc>>,
+}
 
 /// Opaque handle to a render-state row iterator.
 ///
@@ -322,11 +333,65 @@ impl<'alloc> RenderState<'alloc> {
         from_result(result)?;
         Ok(Snapshot(self))
     }
+
+    /// Begin an update of a render state instance from a terminal.
+    ///
+    /// Every begin must be completed with [`Update::end`] before the render
+    /// state is read.
+    ///
+    /// This two-phase structure exists for callers that synchronize access to
+    /// the terminal state: only this function requires terminal access, so a
+    /// caller can hold its lock for this call only and then call [`Update::end`]
+    /// after releasing it. The end phase exclusively reads
+    /// and writes memory owned by the render state, so it is safe to call while
+    /// the terminal is being modified.
+    ///
+    /// Work that doesn't require terminal access may be deferred to the end
+    /// phase to keep this call, and therefore lock hold time, as short as
+    /// possible. Callers must treat the render state as incomplete until
+    /// [`Update::end`] is called.
+    ///
+    /// This consumes terminal and screen dirty state in the same way as the
+    /// internal render state update path.
+    pub fn begin_update<'cb>(
+        &mut self,
+        terminal: &Terminal<'alloc, 'cb>,
+    ) -> Result<Update<'alloc, '_>> {
+        let result = unsafe {
+            ffi::ghostty_render_state_begin_update(self.0.as_raw(), terminal.inner.as_raw())
+        };
+        from_result(result)?;
+        Ok(Update { state: Some(self) })
+    }
 }
 
 impl Drop for RenderState<'_> {
     fn drop(&mut self) {
         unsafe { ffi::ghostty_render_state_free(self.0.as_raw()) }
+    }
+}
+
+impl<'alloc, 's> Update<'alloc, 's> {
+    /// Complete a prior [`RenderState::begin_update`] call by performing any deferred work.
+    ///
+    /// This only reads and writes memory owned by the render state, so it is
+    /// safe to call while the terminal is being modified. Consumes the update
+    /// token and returns a snapshot that can be read to draw the frame.
+    pub fn end(mut self) -> Result<Snapshot<'alloc, 's>> {
+        let Some(state) = self.state.take() else {
+            return Err(Error::InvalidValue);
+        };
+        let result = unsafe { ffi::ghostty_render_state_end_update(state.0.as_raw()) };
+        from_result(result)?;
+        Ok(Snapshot(state))
+    }
+}
+
+impl Drop for Update<'_, '_> {
+    fn drop(&mut self) {
+        if let Some(state) = self.state.take() {
+            let _ = unsafe { ffi::ghostty_render_state_end_update(state.0.as_raw()) };
+        }
     }
 }
 
@@ -417,8 +482,15 @@ impl Snapshot<'_, '_> {
     /// Get the current color information from a render state.
     pub fn colors(&self) -> Result<Colors> {
         let mut colors = ffi::sized!(ffi::RenderStateColors);
-        let result =
-            unsafe { ffi::ghostty_render_state_colors_get(self.0.0.as_raw(), &raw mut colors) };
+        // Upstream folded `ghostty_render_state_colors_get` into the generic
+        // query as `RENDER_STATE_DATA_COLORS` (same sized struct).
+        let result = unsafe {
+            ffi::ghostty_render_state_get(
+                self.0.0.as_raw(),
+                ffi::RenderStateData::COLORS,
+                (&raw mut colors).cast(),
+            )
+        };
         from_result(result)?;
 
         Ok(Colors {
@@ -740,6 +812,74 @@ impl CellIteration<'_, '_> {
         from_result(result)
     }
 
+    /// Encode the current cell's full grapheme cluster as UTF-8 into a
+    /// caller-provided string buffer.
+    ///
+    /// The base codepoint is encoded first, followed by any extra grapheme
+    /// codepoints.
+    ///
+    /// May grow the buffer if more space is required.
+    pub fn graphemes_utf8(&self, buf: &mut String) -> Result<()> {
+        // SAFETY: String comes with some very stringent safety requirements,
+        // so we'll detail them here. The safety protocol for the C API is
+        // essentially that, in case of an error, no data will be written
+        // to the String's underlying buffer, and the buffer should appear
+        // as if unmodified. As such, we should be fine to operate on the
+        // original buffer directly and not cause any UB or break any
+        // invariants with the String's internal state.
+        //
+        // Since Strings do not have a `set_len` method like Vecs, in the
+        // happy path we have to recombine the entire string from its
+        // constituents, i.e. its pointer, length and capacity. This should
+        // be fine as the pointer indeed came from the original String,
+        // and that we do not attempt to copy the pointer anywhere and
+        // potentially cause aliasing issues. As for the remaining factors,
+        // we have to trust that the API will not cause length and capacity
+        // to have nonsensical values, and that the underlying bytes are
+        // indeed UTF-8.
+        //
+        // TODO: Use `String::into_raw_parts` to make this slightly simpler
+
+        let cbuf = loop {
+            // Save the old length of the String for later
+            let len = buf.len();
+            let mut cbuf = ffi::Buffer {
+                ptr: buf.as_mut_ptr(),
+                cap: buf.capacity(),
+                len,
+            };
+
+            let result = unsafe {
+                ffi::ghostty_render_state_row_cells_get(
+                    self.iter.0.as_raw(),
+                    ffi::RenderStateRowCellsData::GRAPHEMES_UTF8,
+                    std::ptr::from_mut(&mut cbuf).cast(),
+                )
+            };
+            match result {
+                ffi::Result::SUCCESS => break Ok(cbuf),
+                ffi::Result::OUT_OF_MEMORY => break Err(Error::OutOfMemory),
+                ffi::Result::OUT_OF_SPACE => {
+                    // When OutOfSpace is returned, the new length is written
+                    // to `cbuf.len`, so we reserve additional space for that
+                    buf.reserve(cbuf.len - len);
+                    continue;
+                }
+                ffi::Result::NO_VALUE | ffi::Result::INVALID_VALUE | _ => {
+                    break Err(Error::InvalidValue);
+                }
+            };
+        }?;
+
+        // Reconstitute the original String
+        // WITHOUT DROPPING THE EXISTING STRING OBJECT (!!)
+        // Otherwise, memory corruption, double frees, etc. WILL happen.
+        unsafe {
+            std::ptr::write(buf, String::from_raw_parts(cbuf.ptr, cbuf.len, cbuf.cap));
+        }
+        Ok(())
+    }
+
     /// Whether the cell is contained within the current selection.
     ///
     /// This returns true when the cell's column is within the current row's
@@ -751,6 +891,15 @@ impl CellIteration<'_, '_> {
     /// directly, avoiding one C API call per cell for selection state.
     pub fn is_selected(&self) -> Result<bool> {
         self.get(ffi::RenderStateRowCellsData::SELECTED)
+    }
+
+    /// Whether the cell has any explicit styling.
+    ///
+    /// This is equivalent to querying the raw cell's [`Cell::has_styling`]
+    /// value, but avoids materializing the raw [`Cell`] for renderers that
+    /// only need to know whether fetching the full style is necessary.
+    pub fn has_styling(&self) -> Result<bool> {
+        self.get(ffi::RenderStateRowCellsData::HAS_STYLING)
     }
 }
 
@@ -812,7 +961,7 @@ pub enum CursorVisualStyle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::terminal::{Options, Terminal};
+    use crate::terminal::Terminal;
 
     /// Guards the `set_dirty` → `update` → `dirty()` round-trip. If
     /// `Snapshot::set(value: &T)` calls `from_ref(&value)`, the result has
@@ -821,12 +970,7 @@ mod tests {
     /// propagates them, and `dirty()` fails enum decoding.
     #[test]
     fn dirty_decodes_after_set_dirty_then_update() {
-        let terminal = Terminal::new(Options {
-            cols: 8,
-            rows: 3,
-            max_scrollback: 0,
-        })
-        .unwrap();
+        let terminal = Terminal::new(8, 3).unwrap();
         let mut state = RenderState::new().unwrap();
 
         state

@@ -98,6 +98,7 @@ pub mod build_info;
 pub mod error;
 pub mod fmt;
 pub mod focus;
+pub(crate) mod io;
 pub mod key;
 pub mod kitty;
 pub mod log;
@@ -108,14 +109,16 @@ pub mod render;
 pub mod screen;
 pub mod selection;
 pub mod sgr;
+pub mod snapshot;
 pub mod style;
+pub mod unicode;
 
 #[doc(inline)]
 pub use crate::{
     error::Error,
     log::{Logger, set_logger},
     render::RenderState,
-    terminal::{Options as TerminalOptions, Terminal},
+    terminal::Terminal,
 };
 
 pub(crate) fn sys_set<T>(opt: ffi::SysOption::Type, val: *const T) -> error::Result<()> {

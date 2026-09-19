@@ -3,17 +3,17 @@
 ## Prerequisites
 
 - **Rust** — stable, edition 2024 (1.95+).
-- **Zig 0.15.2** on `PATH`. The vendored `libghostty-vt-sys` build script
+- **Zig 0.16.0** on `PATH`. The vendored `libghostty-vt-sys` build script
   compiles Ghostty's VT library with Zig. The pinned Ghostty commit declares
-  `minimum_zig_version = 0.15.2`, so **0.16.x will not build it**. Get it from
-  <https://ziglang.org/download/0.15.2/>.
+  `minimum_zig_version = 0.16.0`, so **0.15.x will not build it**. Get it from
+  <https://ziglang.org/download/0.16.0/>.
 - **MSVC toolchain** — the default `x86_64-pc-windows-msvc` target.
 - **Internet on the first build** — the build script fetches the pinned Ghostty
   source.
 
 ## Recommended: mise
 
-The repo ships a `mise.toml` that pins `zig = "0.15.2"` and defines tasks that
+The repo ships a `mise.toml` that pins `zig = "0.16.0"` and defines tasks that
 run cargo from the project root with the right Zig on `PATH`.
 
 ```powershell
@@ -25,15 +25,15 @@ mise release    # optimized release build
 ## Cargo directly
 
 ```powershell
-# Put Zig 0.15.2 first on PATH:
-$env:PATH = "C:\path\to\zig-0.15.2;$env:PATH"
+# Put Zig 0.16.0 first on PATH:
+$env:PATH = "C:\path\to\zig-0.16.0;$env:PATH"
 
 cargo run             # debug
 cargo run --release   # release
 ```
 
-Fallbacks: `mise exec zig@0.15.2 -- cargo build`, or plain
-`cargo build`/`cargo run --release` if Zig 0.15.2 is already on `PATH`.
+Fallbacks: `mise exec zig@0.16.0 -- cargo build`, or plain
+`cargo build`/`cargo run --release` if Zig 0.16.0 is already on `PATH`.
 
 !!! warning "Always run cargo from the project root"
     Running cargo from inside `vendor/libghostty-rs/...` builds the **vendored
@@ -50,7 +50,7 @@ library via Zig); later builds skip Zig unless the native crate changes.
 flowchart TB
     cargo["cargo build (project root)"]
     sys["libghostty-vt-sys build.rs"]
-    zig["zig build (0.15.2)"]
+    zig["zig build (0.16.0)"]
     fetch["fetch pinned Ghostty source"]
     archive["ghostty-vt-static.lib"]
     link["link giest.exe (static archive on Windows)"]
@@ -78,7 +78,7 @@ pure-logic seams that don't need a window or a GPU.
 ## Benchmarks
 
 ```powershell
-cargo bench                  # all criterion benches (needs Zig 0.15.2 + release)
+cargo bench                  # all criterion benches (needs Zig 0.16.0 + release)
 cargo bench --bench stream   # one bench (stream / snapshot / shaping / render)
 ```
 

@@ -12,7 +12,7 @@ generator, and label the case `corpus`:
 
 ```powershell
 $env:GIEST_BENCH_DATA = "benches\data\ansi-sample.vt"
-mise exec zig@0.15.2 -- cargo bench --bench stream
+mise exec zig@0.16.0 -- cargo bench --bench stream
 Remove-Item Env:\GIEST_BENCH_DATA   # back to synthetic
 ```
 

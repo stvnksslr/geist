@@ -12,16 +12,12 @@ Rust bindings and safe API for [libghostty-vt](https://ghostty.org), the virtual
 ## Quick Start
 
 ```rust
-use libghostty_vt::{Terminal, TerminalOptions, RenderState};
+use libghostty_vt::{Terminal, RenderState};
 use libghostty_vt::render::{RowIterator, CellIterator};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Create a terminal with 80 columns, 24 rows, and scrollback.
-    let mut terminal = Terminal::new(TerminalOptions {
-        cols: 80,
-        rows: 24,
-        max_scrollback: 10_000,
-    })?;
+    // Create a terminal with 80 columns and 24 rows.
+    let mut terminal = Terminal::new(80, 24)?;
 
     // Register an effect handler for PTY write-back (e.g. query responses).
     terminal.on_pty_write(|_term, data| {
@@ -55,7 +51,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Building
 
-Requires [Zig](https://ziglang.org/) 0.15.x on PATH. By default, the ghostty
+Requires [Zig](https://ziglang.org/) 0.16.x on PATH. By default, the ghostty
 source is fetched automatically at build time from the pinned commit in
 `build.rs`. Set `GHOSTTY_SOURCE_DIR` to make the build use a local Ghostty
 checkout instead. Package managers that need network-free builds can also set
@@ -67,6 +63,11 @@ Vendored builds derive Zig's optimize mode from Cargo's profile: dev builds use
 `Debug`, size-optimized builds use `ReleaseSmall`, and other release builds use
 `ReleaseFast`. Set `LIBGHOSTTY_VT_SYS_OPTIMIZE` to `Debug`, `ReleaseSafe`,
 `ReleaseFast`, or `ReleaseSmall` to override that choice explicitly.
+
+Vendored builds target Zig's portable `baseline` CPU so published binaries can
+run on older processors. For a binary that will run on the build machine, set
+`LIBGHOSTTY_VT_SYS_CPU=native`; a named Zig CPU model such as `x86_64_v3` can be
+used when all deployment machines support that target.
 
 The `pkg-config` path is opt-in. If you enable `libghostty-vt-sys/pkg-config`,
 the build will prefer an installed `libghostty-vt` discovered through
@@ -93,11 +94,27 @@ cargo test -p libghostty-vt-sys
 cargo build -p ghostling_rs
 ```
 
-### Running the example
+### Miri Verification
+
+Run the Rust-owned soundness checks with:
 
 ```sh
-cargo run -p ghostling_rs
-cargo run -p grid_ref_tracked_rs
+nix run .#miri
+```
+
+The command supplies its own nightly Miri toolchain and checks both binding and
+wrapper crates. These checks intentionally stay on Rust-owned unsafe seams such
+as string, slice, and allocator plumbing. They do not execute the native
+Ghostty FFI backend.
+
+Use `nix develop .#miri` when working interactively with the same toolchain.
+
+### Running the example
+
+Run the examples by entering the folder, and run:
+
+```sh
+cargo run
 ```
 
 When building with `link-dynamic`, set `LD_LIBRARY_PATH` on Linux or

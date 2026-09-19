@@ -179,7 +179,7 @@ Behavior-preserving, guarded by the existing 40 tests plus the new ones.
 - **ConPTY throughput harness** (Windows integration; `tests/` ignored-by-
   default test or a dedicated bench): spawn a shell that emits a large known
   stream, measure the read-drain rate through `Pty::output` → `pump_pty` →
-  engine. Document caveats: needs Zig 0.15.2 + a real shell, so it's **not** run
+  engine. Document caveats: needs Zig 0.16.0 + a real shell, so it's **not** run
   in plain `cargo test`/CI — gate behind `#[ignore]` or a feature flag.
 
 ### 5.4 Explicitly out of scope
