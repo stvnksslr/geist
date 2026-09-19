@@ -921,6 +921,12 @@ pub struct Config {
     /// The 256-color palette (indices 0–15 = ANSI, 16–231 = color cube,
     /// 232–255 = grayscale ramp). Ghostty `palette`.
     pub palette: [Rgb; 256],
+    /// Which `palette` indices were set explicitly (a 256-bit mask), so
+    /// `palette-generate` never overwrites them.
+    pub palette_set: [u64; 4],
+    /// Ghostty `palette-generate` / `palette-harmonious`; see [`Config::effective_palette`].
+    pub palette_generate: bool,
+    pub palette_harmonious: bool,
     /// Logical-point padding on the left/right of the grid. Ghostty
     /// `window-padding-x`.
     pub padding_x: f32,
@@ -1199,6 +1205,9 @@ impl Default for Config {
             fg: Rgb::new(0xc5, 0xc8, 0xc6),
             bg: Rgb::new(0x10, 0x12, 0x18),
             palette: xterm_palette(GIEST_ANSI16),
+            palette_set: [0; 4],
+            palette_generate: false,
+            palette_harmonious: false,
             // Ghostty's own defaults. giest used to ship 20 here so the 12pt
             // scrollbar could sit entirely inside the padding gutter, but that
             // put a lopsided 20/2 frame around every pane. The bar is an overlay
@@ -1297,6 +1306,27 @@ impl Default for Config {
 impl Config {
     /// Load configuration, applying the config file's overrides over the
     /// defaults. A missing file is fine; unreadable lines are logged and skipped.
+    /// The palette the terminal should use: `palette` as configured, or with
+    /// indices 16-255 generated from the base 16 when `palette-generate` is on.
+    /// Uses libghostty's own generator (CIELAB cube + bg-to-fg ramp), so the
+    /// result matches Ghostty exactly; explicitly set entries are kept.
+    pub fn effective_palette(&self) -> [Rgb; 256] {
+        if !self.palette_generate {
+            return self.palette;
+        }
+        use libghostty_vt::style::{Palette, PaletteIndex, PaletteMask, RgbColor};
+        let c = |x: Rgb| RgbColor { r: x.r, g: x.g, b: x.b };
+        let mut skip = PaletteMask::new();
+        for i in 0..256usize {
+            if self.palette_set[i / 64] & (1 << (i % 64)) != 0 {
+                skip.set(PaletteIndex(i as u8));
+            }
+        }
+        let base = Palette(self.palette.map(c));
+        let out = Palette::generate(Some(&base), Some(&skip), c(self.bg), c(self.fg), self.palette_harmonious);
+        out.0.map(|x| Rgb { r: x.r, g: x.g, b: x.b })
+    }
+
     pub fn load() -> Self {
         let Some(path) = config_path() else {
             return Self::default();
@@ -1725,8 +1755,10 @@ const SETTERS: &[(&str, Setter)] = &[
     ("palette", |c, v, d| {
         if v.is_empty() {
             c.palette = d.palette;
+            c.palette_set = [0; 4];
         } else if let Some((idx, col)) = parse_palette_entry(v) {
             c.palette[idx as usize] = col;
+            c.palette_set[idx as usize / 64] |= 1 << (idx as usize % 64);
         } else {
             eprintln!("giest: ignoring bad palette entry: {v}");
         }
@@ -2159,6 +2191,10 @@ const SETTERS: &[(&str, Setter)] = &[
     }),
     ("window-inherit-working-directory", |c, v, d| {
         c.window_inherit_working_directory = parse_bool(v, d.window_inherit_working_directory);
+    }),
+    ("palette-generate", |c, v, d| c.palette_generate = parse_bool(v, d.palette_generate)),
+    ("palette-harmonious", |c, v, d| {
+        c.palette_harmonious = parse_bool(v, d.palette_harmonious);
     }),
     ("title-report", |c, v, d| c.title_report = parse_bool(v, d.title_report)),
     ("vt-kam-allowed", |c, v, d| c.vt_kam_allowed = parse_bool(v, d.vt_kam_allowed)),
@@ -2799,6 +2835,20 @@ mod tests {
         assert_eq!(parsed("scrollback-limit-bytes = unlimited").scrollback_limit, usize::MAX);
         assert_eq!(parsed("scrollback-limit-lines = 5000").scrollback_limit_lines, Some(5000));
         assert_eq!(parsed("scrollback-limit-lines = unlimited").scrollback_limit_lines, None);
+    }
+
+    #[test]
+    fn palette_generate_keeps_base_and_explicit_entries() {
+        let off = parsed("palette = 100=#123456");
+        assert_eq!(off.effective_palette(), off.palette, "off by default: palette as configured");
+
+        let c = parsed("palette-generate = true\npalette = 100=#123456\npalette = 1=#ff0000");
+        let p = c.effective_palette();
+        assert_eq!(p[1], Rgb { r: 0xff, g: 0, b: 0 }, "base 16 preserved");
+        assert_eq!(p[100], Rgb { r: 0x12, g: 0x34, b: 0x56 }, "explicit entry kept");
+        assert_ne!(p[101], c.palette[101], "cube regenerated");
+        // Ramp runs background -> foreground.
+        assert_ne!(p[232], c.palette[232]);
     }
 
     #[test]

@@ -230,7 +230,7 @@ impl Session {
             move || wake_ctx.request_repaint_of(egui::ViewportId::ROOT),
         )?;
         let mut engine = GhosttyVtEngine::new(DEFAULT_COLS, DEFAULT_ROWS, config.scrollback_limit)?;
-        engine.apply_theme(config.fg, config.bg, &config.palette)?;
+        engine.apply_theme(config.fg, config.bg, &config.effective_palette())?;
         engine.set_cursor_color(config.cursor)?;
         engine.set_bold_color(config.bold_color)?;
         engine.set_min_contrast(config.min_contrast)?;
@@ -921,7 +921,7 @@ impl Session {
     /// changed here — but `image-storage-limit` genuinely is re-appliable, and
     /// setting it to zero wipes every stored image live.
     pub fn apply_config(&mut self, config: &Config) {
-        let _ = self.engine.apply_theme(config.fg, config.bg, &config.palette);
+        let _ = self.engine.apply_theme(config.fg, config.bg, &config.effective_palette());
         let _ = self.engine.set_cursor_color(config.cursor);
         let _ = self.engine.set_bold_color(config.bold_color);
         let _ = self.engine.set_min_contrast(config.min_contrast);
