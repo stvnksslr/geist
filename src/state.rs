@@ -15,7 +15,8 @@
 //! ```text
 //! giest-state 1
 //! W                       window
-//! T 1 build               tab, `1` = the active tab, rest = its name (`-` = none)
+//! F 100 80 960 600 0      optional frame: outer x/y, inner w/h (points), maximized
+//! T 1 build              tab, `1` = the active tab, rest = its name (`-` = none)
 //! S v 0.5                 split (`v` vertical, `h` horizontal) + the first child's share;
 //!                         children follow. No ratio (an older file) reads as 0.5
 //! L 1 C:\src\giest        leaf, `1` = the focused pane, rest = its cwd (`-` = none)
@@ -62,11 +63,24 @@ pub struct SavedTab {
     pub tree: SavedNode,
 }
 
+/// Where a window was, in egui points: outer top-left and inner size.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WindowFrame {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    pub maximized: bool,
+}
+
 /// One saved window.
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct SavedWindow {
     pub tabs: Vec<SavedTab>,
     pub active_tab: usize,
+    /// Its frame, when known. Files written before frames were saved carry
+    /// none, and such a window opens at the default geometry.
+    pub frame: Option<WindowFrame>,
 }
 
 /// The whole saved app: every window, in list order (slot 0 is the root).
@@ -129,6 +143,16 @@ pub fn serialize(state: &SavedState) -> String {
     out.push('\n');
     for w in &state.windows {
         out.push_str("W\n");
+        if let Some(f) = w.frame {
+            out.push_str(&format!(
+                "F {} {} {} {} {}\n",
+                f.x,
+                f.y,
+                f.w,
+                f.h,
+                if f.maximized { 1 } else { 0 }
+            ));
+        }
         for (i, t) in w.tabs.iter().enumerate() {
             out.push_str("T ");
             out.push(if i == w.active_tab { '1' } else { '0' });
@@ -188,6 +212,18 @@ fn read_node(lines: &mut std::iter::Peekable<std::slice::Iter<'_, &str>>) -> Opt
     }
 }
 
+/// Parse an `F x y w h maximized` record's fields. A garbled or implausible
+/// frame is dropped (the window then opens at the default geometry) rather
+/// than placing a window nowhere.
+fn parse_frame(rest: &str) -> Option<WindowFrame> {
+    let mut f = rest.split_whitespace();
+    let mut num = || f.next()?.parse::<f32>().ok().filter(|v| v.is_finite());
+    let (x, y, w, h) = (num()?, num()?, num()?, num()?);
+    let maximized = num().is_some_and(|m| m != 0.0);
+    (w >= 50.0 && h >= 50.0 && w <= 100_000.0 && h <= 100_000.0 && x.abs() <= 100_000.0 && y.abs() <= 100_000.0)
+        .then_some(WindowFrame { x, y, w, h, maximized })
+}
+
 /// Parse the file format. Returns an empty state for anything unrecognized —
 /// never an error, since a bad state file must not block startup.
 pub fn parse(text: &str) -> SavedState {
@@ -205,6 +241,14 @@ pub fn parse(text: &str) -> SavedState {
         };
         match tag {
             "W" => state.windows.push(SavedWindow::default()),
+            // A window frame. Added without a header bump because it is purely
+            // additive: an older giest skips the unknown `F` tag (the `_` arm
+            // below), and a file without one parses as before.
+            "F" => {
+                if let (Some(w), Some(f)) = (state.windows.last_mut(), parse_frame(rest)) {
+                    w.frame = Some(f);
+                }
+            }
             "T" => {
                 // A tab outside any window is malformed; give it one rather than
                 // dropping the user's layout on a hand-edited file.
@@ -322,6 +366,7 @@ mod tests {
                         },
                     ],
                     active_tab: 1,
+                    frame: Some(WindowFrame { x: -12.5, y: 40.0, w: 960.0, h: 600.0, maximized: true }),
                 },
                 SavedWindow {
                     tabs: vec![SavedTab {
@@ -329,6 +374,7 @@ mod tests {
                         tree: leaf(Some(r"D:\work"), true),
                     }],
                     active_tab: 0,
+                    frame: None,
                 },
             ],
         }
@@ -346,7 +392,7 @@ mod tests {
         let body: Vec<&str> = text.lines().skip(1).take(6).collect();
         assert_eq!(
             body,
-            ["W", "T 0 build logs", "S v 0.3", "L 0 C:\\src\\giest", "S h 0.5", "L 1 -"]
+            ["W", "F -12.5 40 960 600 1", "T 0 build logs", "S v 0.3", "L 0 C:\\src\\giest", "S h 0.5"]
         );
     }
 
@@ -362,6 +408,32 @@ mod tests {
             };
             assert!(*vertical, "{line}");
             assert_eq!(*ratio, 0.5, "{line}");
+        }
+    }
+
+    #[test]
+    fn frames_are_optional_and_old_files_still_parse() {
+        // A file from before frames existed: no `F`, same layout.
+        let s = parse("giest-state 1\nW\nT 1 -\nL 1 -\n");
+        assert_eq!(s.windows[0].frame, None);
+        assert_eq!(s.windows[0].tabs.len(), 1);
+
+        let s = parse("giest-state 1\nW\nF 10 -20.5 800 500 1\nT 1 -\nL 1 -\n");
+        assert_eq!(
+            s.windows[0].frame,
+            Some(WindowFrame { x: 10.0, y: -20.5, w: 800.0, h: 500.0, maximized: true })
+        );
+        // Missing maximized flag reads as not maximized.
+        let s = parse("giest-state 1\nW\nF 1 2 300 400\nT 1 -\nL 1 -\n");
+        assert!(!s.windows[0].frame.unwrap().maximized);
+    }
+
+    #[test]
+    fn an_implausible_frame_is_dropped_but_the_window_kept() {
+        for f in ["F 0 0 1 1 0", "F x 0 800 600 0", "F 0 0 NaN 600 0", "F 0 0 800", "F 1e9 0 800 600 0"] {
+            let s = parse(&format!("giest-state 1\nW\n{f}\nT 1 -\nL 1 -\n"));
+            assert_eq!(s.windows[0].frame, None, "{f}");
+            assert_eq!(s.windows[0].tabs.len(), 1, "{f}");
         }
     }
 
@@ -402,6 +474,7 @@ mod tests {
                     tree: leaf(None, true),
                 }],
                 active_tab: 0,
+                frame: None,
             }],
         };
         let back = parse(&serialize(&st));

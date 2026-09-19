@@ -113,15 +113,15 @@ drag, §C), `auto-update` / `auto-update-channel` (§C).
 | Link hover preview | ⬜ | label at the pane bottom | S |
 | Per-tab bell + progress indicators | ◐ | 🔔 and a thin bar on the tab, not only window title / taskbar | S |
 | Taskbar overlay badge (Dock badge analogue) | ⬜ | `ITaskbarList3::SetOverlayIcon` (add the vtable slot in `taskbar.rs`) | S |
-| Notification click → focus pane (+ highlight flash) | ⬜ | `NIN_BALLOONUSERCLICK` → session; suppress while focused | M |
+| Notification click → focus pane (+ highlight flash) | ✅ | `notify.rs` subclasses the root window for the icon's `CALLBACK_MSG`; `NIN_BALLOONUSERCLICK` (or a click on the tray icon) focuses the **last** notification's `(window id, pane id)` — ids, never slots — with a 0.6 s accent highlight (`Session::request_highlight`). Suppressed per upstream `shouldPresentNotification` (window active *and* pane focused); `notify-on-command-finish` ones are `requireFocus: false`. Verified by posting the callback message; **a real toast click needs a human check** (Windows 11 renders balloons as toasts). | M |
 | Undo feedback ("Undo Close Tab") | ◐ | toast / palette label | S |
 | Search bar match count, drag-to-corner | ◐ | | S |
 | About box | ⬜ | modal (both modal gates!) with version / commit / links | S |
-| **CLI arguments** (`giest <dir>`, `-e`, `+new-window`) | ⬜ | `main.rs` reads none today | S |
-| **Single-instance IPC** (App Intents / AppleScript / Services analogue) | ⬜ | JSON over a named pipe: new window/tab, focus, input text, run action | L |
-| Explorer "Open giest here" | ⬜ | `Directory\Background\shell`; the new-tab form needs IPC | S / M |
-| Taskbar Jump List (Dock menu) | ⬜ | `ICustomDestinationList` tasks via IPC | M |
-| Restart restore (`RegisterApplicationRestart`), window frames in `state.rs` | ◐ | | S |
+| **CLI arguments** (`giest <dir>`, `-e`, `+new-window`) | ✅ | `cli.rs`: positional dir (a file opens its folder; Explorer's `"C:\"` → `C:"` quoting accident repaired), `--working-directory`, `-e argv…` (swallows the rest; initial surface only; standalone instance, as upstream's implied `gtk-single-instance = false`), `--<key>=<value>` / `--config-file` replayed after the files on every load, `+new-window` / `+new-tab` (`--command`, `-e`), `+list` / `+focus` / `+action=` / `+input=`, `--help` / `--version` (a release build `AttachConsole`s to print), `--restore-session`. `--title` is not forwarded by `+new-window`. | S |
+| **Single-instance IPC** (App Intents / AppleScript / Services analogue) | ✅ | `ipc.rs`: `\\.\pipe\giest-<SID>-<session>`, JSON lines with `"v": 1`: `new_window`, `new_tab`, `focus`, `input_text` (through `Session::paste_str` — a newline paste is held by paste protection, verified live), `run_action`, `list` (stable window/tab/pane ids). DACL = user SID + SYSTEM, remote clients rejected, `FILE_FLAG_FIRST_PIPE_INSTANCE`; the client checks the server runs as the same user and grants it `AllowSetForegroundWindow`. Opt-out: giest key `single-instance = false`. A plain relaunch opens a window, a positional dir a tab; `-e` or config overrides start standalone. | L |
+| Explorer "Open giest here" | ✅ | `giest +register-shell-integration` / `+unregister-shell-integration` (`shellreg.rs`): HKCU `Directory\Background\shell`, `Directory\shell`, `Drive\shell` → `"<exe>" "%V"` → a new tab over IPC. Never registered implicitly. | S / M |
+| Taskbar Jump List (Dock menu) | ✅ | `jumplist.rs`: `ICustomDestinationList` user tasks New Window / New Tab / one per profile (`+new-tab --command=<profile>`); hand-declared vtables pinned by an ignored host test under a throwaway AppUserModelID. Giest key `jump-list = false` deletes the list. **Needs a human glance at the taskbar menu.** | M |
+| Restart restore (`RegisterApplicationRestart`), window frames in `state.rs` | ✅ | `restart.rs`: registered with `--restore-session` (no crash/hang restarts); the root window's subclass writes a ≤2 s-old layout snapshot on `WM_ENDSESSION`, since `on_exit` never runs then (verified by sending the message). State files gain an optional `F x y w h max` record per window — old files parse unchanged and older giests skip it; restored exactly at 150% DPI (verified). A real update/reboot relaunch needs a human. | S |
 | Custom caption / tabs-in-titlebar | ⬜ | `WM_NCCALCSIZE` client-drawn caption | L |
 | Runtime custom app icon | ⬜ | tinted icon via `icongen` + `ViewportCommand::Icon` | M |
 | Auto-update | ⬜ | winget manifest (S) → MSIX App Installer (M) → self-updater with a pill (L) | S–L |
@@ -156,7 +156,8 @@ drag, §C), `auto-update` / `auto-update-channel` (§C).
 3. **The S-sized sweep:** A1's window/mouse/cursor options, §B's small actions, §C's right-click
    menu, indicators, link preview, file drop, About box.
 4. **Shell integration:** `shell-integration(-features)`, WSL scripts, `cursor-click-to-move` (M).
-5. **Automation:** CLI args → named-pipe IPC → Explorer entry → Jump List (L).
+5. ✅ **Automation:** CLI args → named-pipe IPC → Explorer entry → Jump List → restart restore →
+   notification click.
 6. **Protocols:** OSC 5522; move side-scanners onto lib-vt effects; native search + regex (M each).
 7. **Chrome:** custom caption + `window-decoration` + titlebar colors; runtime icon (L).
 8. **Long tail:** accessibility (L), auto-update, tab overview, default-terminal handoff (XL), and

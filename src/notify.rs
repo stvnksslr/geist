@@ -58,6 +58,7 @@ mod imp {
     const NIM_MODIFY: u32 = 0x0001;
     const NIM_DELETE: u32 = 0x0002;
 
+    const NIF_MESSAGE: u32 = 0x0001;
     const NIF_ICON: u32 = 0x0002;
     const NIF_TIP: u32 = 0x0004;
     const NIF_INFO: u32 = 0x0010;
@@ -178,8 +179,12 @@ mod imp {
         // Register the icon on first use only. A terminal that never notifies
         // must not put anything in the user's notification area.
         if !ICON_ADDED.load(Ordering::Relaxed) {
+            install_click_hook(hwnd);
             let mut add = base(hwnd);
-            add.flags = NIF_ICON | NIF_TIP;
+            // NIF_MESSAGE routes the icon's events — including a click on the
+            // balloon/toast — to `hwnd` as `CALLBACK_MSG`.
+            add.flags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+            add.callback_message = super::CALLBACK_MSG;
             add.icon = icon;
             wide_into("giest", &mut add.tip);
             // SAFETY: `add` is a fully initialized NOTIFYICONDATAW whose
@@ -202,6 +207,55 @@ mod imp {
         }
     }
 
+    type SubclassProc = unsafe extern "system" fn(HWND, u32, usize, isize, usize, usize) -> isize;
+    const SUBCLASS_ID: usize = 0x6769_6e6f; // "gino"
+    const WM_NCDESTROY: u32 = 0x0082;
+
+    #[link(name = "comctl32")]
+    unsafe extern "system" {
+        fn SetWindowSubclass(hwnd: HWND, f: SubclassProc, id: usize, data: usize) -> i32;
+        fn RemoveWindowSubclass(hwnd: HWND, f: SubclassProc, id: usize) -> i32;
+        fn DefSubclassProc(hwnd: HWND, msg: u32, wp: usize, lp: isize) -> isize;
+    }
+
+    /// Catch the notification icon's callback message on the window it was
+    /// registered with. Runs on the UI thread (inside winit's message loop), so
+    /// it only records the click and wakes the app — the app, not a window
+    /// procedure, decides what to focus.
+    unsafe extern "system" fn subclass(
+        hwnd: HWND,
+        msg: u32,
+        wp: usize,
+        lp: isize,
+        _id: usize,
+        _data: usize,
+    ) -> isize {
+        if msg == super::CALLBACK_MSG {
+            // Legacy (pre-`NOTIFYICON_VERSION_4`) callbacks put the event in
+            // lParam's low word.
+            if super::is_click_event((lp as usize & 0xFFFF) as u32) {
+                super::note_click();
+            }
+            return 0;
+        }
+        if msg == WM_NCDESTROY {
+            // SAFETY: removing our own subclass from the window being destroyed.
+            unsafe {
+                RemoveWindowSubclass(hwnd, subclass, SUBCLASS_ID);
+            }
+        }
+        // SAFETY: forwarding unchanged down the subclass chain.
+        unsafe { DefSubclassProc(hwnd, msg, wp, lp) }
+    }
+
+    fn install_click_hook(hwnd: HWND) {
+        // SAFETY: `hwnd` is the root window, owned by this (the UI) thread.
+        // Re-installing the same proc/id only updates its data.
+        unsafe {
+            SetWindowSubclass(hwnd, subclass, SUBCLASS_ID, 0);
+        }
+    }
+
     pub fn shutdown(hwnd: isize) {
         if !ICON_ADDED.swap(false, Ordering::Relaxed) {
             return;
@@ -221,6 +275,51 @@ mod imp {
 mod imp {
     pub fn show(_hwnd: isize, _title: &str, _body: &str) {}
     pub fn shutdown(_hwnd: isize) {}
+}
+
+/// The window message the notification icon reports its events with
+/// (`WM_APP + 0x47`).
+pub const CALLBACK_MSG: u32 = 0x8000 + 0x47;
+
+/// `NIN_BALLOONUSERCLICK`: the user clicked the balloon — on Windows 10/11, the
+/// toast the shell renders it as.
+pub const NIN_BALLOONUSERCLICK: u32 = 0x0405;
+/// A left click on the tray icon itself (`WM_LBUTTONUP`), treated the same: the
+/// icon only exists because something notified, so it means "take me there".
+const WM_LBUTTONUP: u32 = 0x0202;
+
+/// Whether an icon callback event is a click that should focus the pane the
+/// last notification came from.
+pub fn is_click_event(ev: u32) -> bool {
+    ev == NIN_BALLOONUSERCLICK || ev == WM_LBUTTONUP
+}
+
+static CLICKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static WAKER: std::sync::OnceLock<eframe::egui::Context> = std::sync::OnceLock::new();
+
+/// Give the click hook a way to wake the app.
+pub fn set_waker(ctx: &eframe::egui::Context) {
+    let _ = WAKER.set(ctx.clone());
+}
+
+fn note_click() {
+    CLICKED.store(true, std::sync::atomic::Ordering::Relaxed);
+    if let Some(ctx) = WAKER.get() {
+        ctx.request_repaint_of(eframe::egui::ViewportId::ROOT);
+    }
+}
+
+/// Whether a notification was clicked since the last call.
+pub fn take_clicked() -> bool {
+    CLICKED.swap(false, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Upstream's `shouldPresentNotification`: a notification that requires focus
+/// (every OSC 9 / 777 / 99 one) is shown only when the user *can't already see
+/// it* — its window isn't the active one, or its pane isn't the focused one.
+/// `notify-on-command-finish` notifications pass `require_focus = false`.
+pub fn should_present(require_focus: bool, window_focused: bool, pane_focused: bool) -> bool {
+    !require_focus || !window_focused || !pane_focused
 }
 
 /// Raise a desktop notification. `title` may be empty (the OSC 9 form carries
@@ -278,6 +377,28 @@ mod tests {
         let got = clamp(&cjk, 10);
         assert_eq!(got.chars().count(), 10);
         assert!(got.starts_with("漢漢"));
+    }
+
+    #[test]
+    fn only_a_balloon_or_icon_click_counts_as_a_click() {
+        use super::{NIN_BALLOONUSERCLICK, is_click_event};
+        assert!(is_click_event(NIN_BALLOONUSERCLICK));
+        assert!(is_click_event(0x0202));
+        // NIN_BALLOONSHOW / HIDE / TIMEOUT, mouse move: not clicks.
+        for ev in [0x0402, 0x0403, 0x0404, 0x0200] {
+            assert!(!is_click_event(ev), "{ev:#x}");
+        }
+    }
+
+    #[test]
+    fn should_present_mirrors_upstream() {
+        use super::should_present;
+        // Focused window *and* focused pane: the user is looking at it.
+        assert!(!should_present(true, true, true));
+        assert!(should_present(true, false, true));
+        assert!(should_present(true, true, false));
+        // Command-finish notifications don't require focus.
+        assert!(should_present(false, true, true));
     }
 
     #[test]

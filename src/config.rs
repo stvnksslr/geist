@@ -1224,6 +1224,14 @@ pub struct Config {
     /// Ghostty `quit-after-last-window-closed` (+ `-delay`, in milliseconds).
     pub quit_after_last_window_closed: bool,
     pub quit_after_last_window_closed_delay_ms: Option<u64>,
+    /// giest-specific `single-instance` (default `true`): a second launch hands
+    /// its request to the running giest over the IPC pipe (`ipc.rs`). The
+    /// analogue of GTK's `gtk-single-instance`, which upstream only honours on
+    /// GTK. Read at startup only.
+    pub single_instance: bool,
+    /// giest-specific `jump-list` (default `true`): publish the taskbar Jump
+    /// List tasks (`jumplist.rs`). `false` removes a previously published one.
+    pub jump_list: bool,
     /// Ghostty `initial-window`.
     pub initial_window: bool,
     /// Ghostty `split-preserve-zoom = navigation`.
@@ -1446,6 +1454,8 @@ impl Default for Config {
             // platform convention"; the Windows convention is to quit.
             quit_after_last_window_closed: true,
             quit_after_last_window_closed_delay_ms: None,
+            single_instance: true,
+            jump_list: true,
             initial_window: true,
             split_preserve_zoom_navigation: false,
             resize_overlay: ResizeOverlay::AfterFirst,
@@ -1524,10 +1534,9 @@ impl Config {
     }
 
     pub fn load() -> Self {
-        let Some(path) = config_path() else {
-            return Self::default();
-        };
-        Self::load_from_file(&path)
+        // No config path still gets the command-line overrides: an empty path
+        // just reads as "no file".
+        Self::load_from_file(&config_path().unwrap_or_default())
     }
 
     /// Load `root` plus every file it pulls in with `config-file`, and the files
@@ -1558,11 +1567,27 @@ impl Config {
 
         // A missing *root* config is normal (no file yet) and stays silent;
         // a missing *included* one is a typo the user asked for by name.
-        let Ok(text) = std::fs::read_to_string(root) else {
-            return cfg;
-        };
-        queue.extend(cfg.apply_body(&text, root.parent()));
+        if let Ok(text) = std::fs::read_to_string(root) {
+            queue.extend(cfg.apply_body(&text, root.parent()));
+        }
+        cfg.drain_includes(&mut queue, &mut seen);
 
+        // Command-line `--key=value` overrides go on last — after every file,
+        // and again on every reload — which is upstream's CLI replay order. Any
+        // `--config-file` they name is followed the same way (already absolute).
+        if let Some(body) = CLI_OVERRIDES.get().filter(|b| !b.is_empty()) {
+            queue.extend(cfg.apply_body(body, None));
+            cfg.drain_includes(&mut queue, &mut seen);
+        }
+        cfg
+    }
+
+    fn drain_includes(
+        &mut self,
+        queue: &mut std::collections::VecDeque<(PathBuf, bool)>,
+        seen: &mut std::collections::HashSet<PathBuf>,
+    ) {
+        let cfg = self;
         while let Some((path, optional)) = queue.pop_front() {
             if !seen.insert(load_key(&path)) {
                 diag!(
@@ -1580,7 +1605,6 @@ impl Config {
                 Err(e) => diag!("giest: error reading config-file {}: {e}", path.display()),
             }
         }
-        cfg
     }
 
     /// Build a [`Config`] by applying a Ghostty-format config body over the
@@ -2542,6 +2566,8 @@ const SETTERS: &[(&str, Setter)] = &[
     ("quit-after-last-window-closed", |c, v, d| {
         c.quit_after_last_window_closed = parse_bool(v, d.quit_after_last_window_closed)
     }),
+    ("single-instance", |c, v, d| c.single_instance = parse_bool(v, d.single_instance)),
+    ("jump-list", |c, v, d| c.jump_list = parse_bool(v, d.jump_list)),
     ("quit-after-last-window-closed-delay", |c, v, d| {
         c.quit_after_last_window_closed_delay_ms = if v.is_empty() {
             d.quit_after_last_window_closed_delay_ms
@@ -2599,6 +2625,16 @@ fn parse_bool(v: &str, default: bool) -> bool {
         "false" | "no" | "off" | "0" => false,
         _ => default,
     }
+}
+
+/// The command line's `--key=value` overrides as a config body (see
+/// [`crate::cli`]). Process-wide and set once, before the first load, so every
+/// later load — a reload included — replays them after the files.
+static CLI_OVERRIDES: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Install the command-line override body. Only the first call counts.
+pub fn set_cli_overrides(body: String) {
+    let _ = CLI_OVERRIDES.set(body);
 }
 
 /// Resolve the config file path: `$GIEST_CONFIG` if set, else
