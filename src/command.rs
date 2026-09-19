@@ -479,6 +479,8 @@ pub enum Action {
     ToggleVisibility,
     /// Ghostty `show_on_screen_keyboard`: the Windows touch keyboard.
     ShowOnScreenKeyboard,
+    /// Ghostty `check_for_updates` (`update.rs`).
+    CheckForUpdates,
     /// Ghostty `toggle_window_decorations`.
     ToggleWindowDecorations,
     IncreaseFontSize,
@@ -602,6 +604,7 @@ impl Action {
             Action::ToggleTabOverview => "Toggle Tab Overview",
             Action::ToggleVisibility => "Toggle Visibility",
             Action::ShowOnScreenKeyboard => "Show On-Screen Keyboard",
+            Action::CheckForUpdates => "Check for Updates",
             Action::ToggleWindowDecorations => "Toggle Window Decorations",
             Action::FocusSplitNext => "Focus Split: Next",
             Action::FocusSplitPrev => "Focus Split: Previous",
@@ -654,6 +657,7 @@ impl Action {
             | Action::ToggleTabOverview
             | Action::ToggleVisibility
             | Action::ShowOnScreenKeyboard
+            | Action::CheckForUpdates
             | Action::ToggleWindowDecorations => return None,
             Action::NewTab => "Ctrl+Shift+T",
             Action::NewWindow => "Ctrl+Shift+N",
@@ -784,6 +788,7 @@ impl Action {
             Action::ToggleTabOverview => "toggle_tab_overview".into(),
             Action::ToggleVisibility => "toggle_visibility".into(),
             Action::ShowOnScreenKeyboard => "show_on_screen_keyboard".into(),
+            Action::CheckForUpdates => "check_for_updates".into(),
             Action::ToggleWindowDecorations => "toggle_window_decorations".into(),
             Action::ToggleQuickTerminal => "toggle_quick_terminal".into(),
             Action::FocusSplitLeft => "goto_split:left".into(),
@@ -967,6 +972,7 @@ impl Action {
             "toggle_tab_overview" => Action::ToggleTabOverview,
             "toggle_visibility" => Action::ToggleVisibility,
             "show_on_screen_keyboard" => Action::ShowOnScreenKeyboard,
+            "check_for_updates" => Action::CheckForUpdates,
             "toggle_window_decorations" => Action::ToggleWindowDecorations,
             "toggle_quick_terminal" => Action::ToggleQuickTerminal,
             "increase_font_size" => Action::IncreaseFontSize,
@@ -1100,6 +1106,7 @@ const BASE_ACTIONS: &[Action] = &[
     Action::MoveTabToNewWindow,
     Action::ToggleTabOverview,
     Action::ShowOnScreenKeyboard,
+    Action::CheckForUpdates,
     Action::ToggleFloatOnTop,
     Action::ToggleBackgroundOpacity,
     Action::OpenConfig,
@@ -1362,6 +1369,7 @@ mod tests {
             ("new_split:up", Action::SplitUp),
             ("prompt_surface_title", Action::PromptSurfaceTitle),
             ("show_about", Action::ShowAbout),
+            ("check_for_updates", Action::CheckForUpdates),
         ] {
             assert_eq!(Action::from_name(name), Some(want.clone()), "{name}");
             assert_eq!(want.name(), name);

@@ -133,6 +133,13 @@ fn run_cli(cli: &cli::Cli) -> Option<i32> {
 
 fn main() -> eframe::Result {
     let cli = cli::from_env();
+    // A verified update staged by `auto-update` is installed here, before
+    // anything loads conpty.dll or opens the IPC pipe; the new exe is then
+    // launched with the same arguments and this (old) one steps aside.
+    if matches!(cli.verb, Verb::Help | Verb::Version) {
+    } else if giest::update::startup_apply() {
+        std::process::exit(0);
+    }
     if let Some(code) = run_cli(&cli) {
         std::process::exit(code);
     }

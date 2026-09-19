@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  MSIX manifest template for giest. scripts/package.ps1 fills the @TOKENS@.
+  Publisher MUST equal the Subject of the certificate the package is signed
+  with, or Windows refuses to install it. The default is a placeholder.
+
+  A full-trust Win32 app: giest.exe, conpty.dll and OpenConsole.exe sit in the
+  package root, so the sideloaded ConPTY (kitty graphics) works as it does from
+  the portable zip.
+
+  Not declared (see GAP.md "Default-terminal handoff"): the
+  windows.consoleHandoff / windows.terminalHandoff COM extensions.
+-->
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:uap3="http://schemas.microsoft.com/appx/manifest/uap/windows10/3"
+  xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  IgnorableNamespaces="uap uap3 desktop rescap">
+
+  <Identity Name="giest.giest" Publisher="@PUBLISHER@" Version="@VERSION4@" ProcessorArchitecture="@ARCH@" />
+
+  <Properties>
+    <DisplayName>giest</DisplayName>
+    <PublisherDisplayName>@PUBLISHER_DISPLAY@</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+    <Description>A GPU-accelerated terminal for Windows on Ghostty's VT engine.</Description>
+  </Properties>
+
+  <Dependencies>
+    <!-- 19041 (20H1): the floor for the sideloaded ConPTY and for App Installer auto-update. -->
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.19041.0" MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+
+  <Resources>
+    <Resource Language="en-us" />
+  </Resources>
+
+  <Applications>
+    <Application Id="giest" Executable="giest.exe" EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements
+        DisplayName="giest"
+        Description="giest terminal"
+        BackgroundColor="transparent"
+        Square150x150Logo="Assets\Square150x150Logo.png"
+        Square44x44Logo="Assets\Square44x44Logo.png" />
+      <Extensions>
+        <!-- `giest` on PATH from any shell, like `wt`. -->
+        <uap3:Extension Category="windows.appExecutionAlias" Executable="giest.exe" EntryPoint="Windows.FullTrustApplication">
+          <uap3:AppExecutionAlias>
+            <desktop:ExecutionAlias Alias="giest.exe" />
+          </uap3:AppExecutionAlias>
+        </uap3:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust" />
+  </Capabilities>
+</Package>
