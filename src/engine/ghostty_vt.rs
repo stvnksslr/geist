@@ -1674,6 +1674,26 @@ mod tests {
     }
 
     #[test]
+    fn engine_paste_matches_the_legacy_encoder_and_keeps_pending_replies() {
+        let cases = ["hello", "line1\nline2\r\nline3", "tab\there", "", "x\x1b[201~y"];
+        for bracketed in [false, true] {
+            let mut eng = GhosttyVtEngine::new(20, 5, 100_000).unwrap();
+            if bracketed {
+                eng.write(b"\x1b[?2004h");
+            }
+            for text in cases {
+                let got = eng.encode_paste(text);
+                let want = super::encode_paste_legacy(bracketed, text);
+                assert_eq!(got, want, "bracketed={bracketed} {text:?}");
+            }
+            // An unsent reply (DA1) must survive a paste in between.
+            eng.write(b"\x1b[c");
+            let _ = eng.encode_paste("x");
+            assert!(!eng.take_responses().is_empty(), "pending reply lost");
+        }
+    }
+
+    #[test]
     fn a_cursor_only_move_reaches_the_snapshot() {
         let mut eng = GhosttyVtEngine::new(20, 6, 100_000).unwrap();
         let mut s = GridSnapshot::default();
@@ -2502,6 +2522,21 @@ fn is_graphics_element(text: &str) -> bool {
 /// (applying `inverse`) against the given defaults and reusing `dst`'s inline
 /// string buffer. Shared by the full-grid snapshot and the smooth-scroll
 /// over-row read.
+/// The pre-`ghostty_terminal_paste` encoder, kept as `encode_paste`'s fallback.
+fn encode_paste_legacy(bracketed: bool, text: &str) -> Vec<u8> {
+    let src = text.as_bytes();
+    let mut data = src.to_vec();
+    // Bracketed markers add 12 bytes; newline→CR is length-preserving.
+    let mut buf = vec![0u8; src.len() + 16];
+    match paste::encode(&mut data, bracketed, &mut buf) {
+        Ok(n) => {
+            buf.truncate(n);
+            buf
+        }
+        Err(_) => src.to_vec(),
+    }
+}
+
 /// Reset a cell to a blank default-colored cell, keeping its string buffer.
 fn blank_cell(cell: &mut Cell) {
     cell.text.clear();
@@ -2895,18 +2930,20 @@ impl TerminalEngine for GhosttyVtEngine {
     }
 
     fn encode_paste(&mut self, text: &str) -> Vec<u8> {
-        let bracketed = self.term.mode(Mode::BRACKETED_PASTE).unwrap_or(false);
-        let src = text.as_bytes();
-        let mut data = src.to_vec();
-        // Bracketed markers add 12 bytes; newline→CR is length-preserving.
-        let mut buf = vec![0u8; src.len() + 16];
-        match paste::encode(&mut data, bracketed, &mut buf) {
-            Ok(n) => {
-                buf.truncate(n);
-                buf
-            }
-            Err(_) => src.to_vec(),
+        // Upstream's shared paste path (`ghostty_terminal_paste`): it applies the
+        // terminal's own encoding rules (bracketing, newline handling) and writes
+        // through the PTY-write callback, i.e. into `responses`. Those may
+        // already hold unsent replies, so set them aside and splice them back.
+        // `allow_unsafe = true`: giest's own gate (`Session::paste_str`) has
+        // already decided; the engine must not second-guess it.
+        use libghostty_vt::terminal::{PasteOutcome, PasteSource};
+        let pending = std::mem::take(&mut *self.responses.borrow_mut());
+        let outcome = self.term.paste(text, PasteSource::Clipboard, true);
+        let encoded = std::mem::replace(&mut *self.responses.borrow_mut(), pending);
+        if matches!(outcome, Ok(PasteOutcome::Written)) && !encoded.is_empty() {
+            return encoded;
         }
+        encode_paste_legacy(self.term.mode(Mode::BRACKETED_PASTE).unwrap_or(false), text)
     }
 
     fn bracketed_paste(&self) -> bool {

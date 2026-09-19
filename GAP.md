@@ -205,7 +205,7 @@ in total; items 1 and 3 can land (and be unit-tested) before anything is registe
 | OSC 99 (kitty notifications) | ✅ | side-scanned by `osc_notify.rs` (chunking + `o=`); the engine's notification callback never sees OSC 99, which is why the scanner is not retired — see "Protocol leftovers" |
 | OSC 5522 kitty clipboard + paste-events mode 5522 | ✅ | `clipboard.rs` + engine callbacks, existing permission prompts; see the ledger "Kitty clipboard (OSC 5522) + engine-side OSC 52 / pwd" |
 | OSC 52 / pwd **effects in lib-vt** | ✅ | `osc52.rs` and `osc7.rs` retired; same ledger |
-| `ghostty_terminal_paste` | ◐ | wrapped (`Terminal::paste`, giest-local) and used for mode-5522 paste events; ordinary text pastes still go through `encode_paste` behind the same gate — S |
+| `ghostty_terminal_paste` | ✅ | every paste now encodes through the engine (`encode_paste` → `Terminal::paste`, `allow_unsafe` since giest's own gate has decided), with the old encoder as fallback; byte-identical on plain, multi-line, bracketed and injected-`ESC[201~` input (pinned by test). |
 | Native search API (`ghostty_search_*`) | ✅ N/A | evaluated, not adopted: no case-sensitive mode and no regex, so it would lose the `Aa` toggle; regex search built on giest's own wrap-joined text instead — see the ledger "Regex search, and why not the native search API" |
 | Dirty-row iteration | ✅ | `f00c510`: only dirty rows are re-copied; the render state is now acknowledged each frame (it reported `Full` forever before). Needs an eyeball pass for stale cells while typing, scrolling and changing themes. |
 | Selection gesture engine | ⬜ | optional replacement for giest's click-count logic — M |
