@@ -706,6 +706,9 @@ pub struct ClipboardPolicy {
     pub trim_trailing_spaces: bool,
     pub paste_protection: bool,
     pub paste_bracketed_safe: bool,
+    /// Largest OSC 52 write accepted, in bytes; `None` = `unlimited`.
+    /// Ghostty `clipboard-write-limit-bytes` (default 64 MiB).
+    pub write_limit: Option<usize>,
 }
 
 /// Whether `data` is unsafe to paste and so needs confirmation first.
@@ -1079,6 +1082,10 @@ pub struct Config {
     /// Whether programs may raise desktop notifications (`OSC 9`, `OSC 777`).
     /// Ghostty `desktop-notifications`; `true` by default there and here.
     pub desktop_notifications: bool,
+    /// Ghostty `link-osc8`: OSC 8 hyperlinks are clickable.
+    pub link_osc8: bool,
+    /// Ghostty `link-url`: bare URLs in the text are clickable.
+    pub link_url: bool,
     /// Initial window size in terminal **cells**; `0` means "let the OS decide".
     /// Ghostty `window-width` / `window-height`, including its 10×4 minimum.
     /// Applies to a new window only — resizing later is the user's business.
@@ -1239,8 +1246,11 @@ impl Default for Config {
                 trim_trailing_spaces: true,
                 paste_protection: true,
                 paste_bracketed_safe: true,
+                write_limit: Some(64 << 20),
             },
             desktop_notifications: true,
+            link_osc8: true,
+            link_url: true,
             window_width: 0,
             window_height: 0,
             window_position_x: None,
@@ -1704,6 +1714,24 @@ const SETTERS: &[(&str, Setter)] = &[
         } else {
             eprintln!("giest: ignoring bad palette entry: {v}");
         }
+    }),
+    ("link-osc8", |c, v, d| c.link_osc8 = parse_bool(v, d.link_osc8)),
+    ("link-url", |c, v, d| c.link_url = parse_bool(v, d.link_url)),
+    ("clipboard-write-limit-bytes", |c, v, d| {
+        c.clipboard.write_limit = match v {
+            "" => d.clipboard.write_limit,
+            "unlimited" => None,
+            _ => v.parse().ok().map(Some).unwrap_or(d.clipboard.write_limit),
+        };
+    }),
+    // Upstream renamed `scrollback-limit` to this (same unit, bytes) and added
+    // `unlimited`; both spellings are accepted.
+    ("scrollback-limit-bytes", |c, v, d| {
+        c.scrollback_limit = match v {
+            "" => d.scrollback_limit,
+            "unlimited" => usize::MAX,
+            _ => v.parse().unwrap_or(d.scrollback_limit),
+        };
     }),
     ("scrollback-limit", |c, v, d| {
         if v.is_empty() {
@@ -2732,6 +2760,19 @@ mod tests {
         let c = Config::default();
         assert_eq!(c.scrollback_limit, 10_000);
         assert_eq!(parsed("scrollback-limit = 50000").scrollback_limit, 50_000);
+        assert_eq!(parsed("scrollback-limit-bytes = 70000").scrollback_limit, 70_000);
+        assert_eq!(parsed("scrollback-limit-bytes = unlimited").scrollback_limit, usize::MAX);
+    }
+
+    #[test]
+    fn link_and_clipboard_limit_keys() {
+        let c = parsed("");
+        assert!(c.link_osc8 && c.link_url);
+        assert_eq!(c.clipboard.write_limit, Some(64 << 20));
+        let c = parsed("link-osc8 = false\nlink-url = false\nclipboard-write-limit-bytes = unlimited");
+        assert!(!c.link_osc8 && !c.link_url);
+        assert_eq!(c.clipboard.write_limit, None);
+        assert_eq!(parsed("clipboard-write-limit-bytes = 0").clipboard.write_limit, Some(0));
     }
 
     #[test]

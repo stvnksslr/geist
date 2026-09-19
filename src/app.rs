@@ -657,6 +657,8 @@ pub struct Window {
     default_profile: usize,
     egui_ctx: egui::Context,
     last_window_title: Option<String>,
+    /// `set_window_title:` — replaces the focused pane's title as the window's.
+    title_override: Option<String>,
     /// The active tab's `(leaf id, rect)` layout from the previous frame, cached
     /// by `render_active` so `handle_shortcuts` (which runs before layout) can
     /// resolve directional split-focus navigation geometrically.
@@ -1269,6 +1271,7 @@ impl Window {
             default_profile,
             egui_ctx: cc.egui_ctx.clone(),
             last_window_title: None,
+            title_override: None,
             last_layout: Vec::new(),
             renaming: None,
             palette: None,
@@ -1559,6 +1562,7 @@ impl Window {
             default_profile: self.default_profile,
             egui_ctx: self.egui_ctx.clone(),
             last_window_title: None,
+            title_override: None,
             last_layout: Vec::new(),
             renaming: None,
             palette: None,
@@ -2583,6 +2587,9 @@ impl Window {
                 if let Some(t) = self.tabs.get_mut(i) {
                     t.name = name;
                 }
+            }
+            Action::SetWindowTitle(ref s) => {
+                self.title_override = (!s.is_empty()).then(|| s.to_string());
             }
             Action::SetSurfaceTitle(ref s) => {
                 let s = s.clone();
@@ -4256,6 +4263,7 @@ impl Window {
                 focus_id = l.id;
             }
         }
+        let (link_osc8, link_url) = (self.config.link_osc8, self.config.link_url);
         // `focus-follows-mouse`: hovering a split focuses it, no click needed.
         // Gated on the pointer having actually *moved* — otherwise a parked
         // cursor would drag focus back every frame and make `focus_split_*`
@@ -4470,7 +4478,7 @@ impl Window {
                                 && resp
                                     .interact_pointer_pos()
                                     .map(|p| cell_at(p, session))
-                                    .and_then(|c| session.url_at(c))
+                                    .and_then(|c| session.url_at(c, link_osc8, link_url))
                                     .map(|url| open_url(&url))
                                     .is_some();
                             if !opened {
@@ -5190,9 +5198,9 @@ impl Window {
         // and never re-send the title.
         let shown = {
             let base = self
-                .tabs
-                .get(self.active_tab)
-                .and_then(|t| t.focused_payload().title())
+                .title_override
+                .clone()
+                .or_else(|| self.tabs.get(self.active_tab).and_then(|t| t.focused_payload().title()))
                 .unwrap_or_else(|| "giest".to_string());
             if self.bell_title { format!("🔔 {base}") } else { base }
         };

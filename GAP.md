@@ -8,15 +8,40 @@ the terminal data already exists and just needs wiring).
 
 **Headline finding.** giest has a strong, correct *spine* — real VT engine, splits, tabs, ligatures,
 emoji, smooth scroll, command palette — but it covered a fraction of Ghostty's config surface and
-~90 keybind actions, with little of the macOS app's UX breadth. *(Measured since: **105 of Ghostty's
-187 config keys** are now supported — see the config-surface ledger for the re-runnable audit.)* The encouraging part: **much of the gap
+~90 keybind actions, with little of the macOS app's UX breadth. *(Measured since: **109 of Ghostty's
+193 config keys** (upstream `main`, 2026-09-19) are now supported — see the config-surface ledger
+and the upstream re-audit below.)* The encouraging part: **much of the gap
 is plumbing, not greenfield.** libghostty-vt already surfaces underline styles, faint/overline, OSC 8
 hyperlinks, OSC 133 semantic-prompt marks, kitty graphics, the bell, and a rich selection model — data
 giest's single per-cell chokepoint (`engine/ghostty_vt.rs::copy_cell`) historically discarded.
 
 ---
 
-## Status (updated 2026-08-01)
+## Upstream re-audit against `ghostty-org/ghostty` `main` (2026-09-19)
+
+Every ledger below was measured against the Ghostty source *pinned by the vendored binding*
+(`target/.../out/ghostty-src/`). Upstream has moved on (1.4.0 development), so `Config.zig` and
+`Binding.zig` were fetched from GitHub `main` and diffed against the pinned copy with the same
+key/action extraction the config-surface ledger uses. Result: **+7 / −1 config keys (187 → 193)
+and +3 actions (85 → 88)**; nothing else was removed.
+
+| Upstream addition | giest | Notes |
+|---|---|---|
+| `scrollback-limit-bytes` (replaces `scrollback-limit`) | ✅ | Same unit (bytes); adds `unlimited`. The old spelling stays accepted. |
+| `scrollback-limit-lines` | ⬜ blocked | libghostty-vt's `Screen.init` takes a byte budget only; a line cap needs an upstream C-API field. |
+| `scrollback-compression` | ⬜ N/A for now | Page compression lives in the full app's page allocator, not the VT library the binding exposes. |
+| `clipboard-write-limit-bytes` | ✅ | Default 64 MiB, `unlimited`, `0` rejects every non-empty write; applied in `Session::handle_osc52` before the permission policy. |
+| `link-osc8` | ✅ | Gates OSC 8 in `Session::url_at`. |
+| `link-url` *(pre-existing upstream, newly supported)* | ✅ | Gates bare-URL detection in the same place. |
+| `drag-handle` | ⬜ | Split drag-rearrange doesn't exist in giest yet; the key comes with that feature. |
+| `gtk-horizontal-tab-scroll` | N/A | GTK-only. |
+| `set_window_title:` | ✅ | A per-window override that wins over the focused pane's title; empty clears it. |
+| `prompt_window_title` | ⬜ | Needs a rename box like `prompt_tab_title`'s; next up. |
+| `move_tab_to_new_window` | ⬜ | Needs `Tab` to move between `Window`s (undo already detaches tabs losslessly, so the plumbing exists). |
+
+---
+
+## Status (updated 2026-09-19)
 
 **Phase 0 — Foundations: ✅ complete**
 - **P1 — Config registry + themes** ✅ `config.rs` now uses a declarative `SETTERS` key→setter table
@@ -413,7 +438,9 @@ With Phase 0 done, the remaining Tier-1 items are mostly small, registry-backed 
 37. ✅ **The diagonal legacy-computing families** — smooth mosaics, edge triangles, shaded corner
     triangles and the corner diagonal lines. See the ledger below.
 38. ✅ **The `font-style` family** — named styles and style disabling. See the ledger below.
-39. Next: Tier 3 — `shell-integration` / `-features` (giest's prompt hooks have no off switch
+39. ✅ **Upstream re-audit** against Ghostty `main` — four new keys and `set_window_title:`. See the
+    re-audit table at the top.
+40. Next: `prompt_window_title`, `move_tab_to_new_window`, then Tier 3 — `shell-integration` / `-features` (giest's prompt hooks have no off switch
     today), COLRv1 emoji, window decorations/titlebar, a settings UI.
 
 ### `font-style` and its three siblings — ✅ divergences

@@ -170,6 +170,7 @@ const PAYLOAD_ACTIONS: &[(&str, PayloadCtor)] = &[
     ("esc:", Action::SendEsc),
     ("set_tab_title:", Action::SetTabTitle),
     ("set_surface_title:", Action::SetSurfaceTitle),
+    ("set_window_title:", Action::SetWindowTitle),
     // Checked before the plain-name table below, which is why `search:foo`
     // can coexist with `search_selection` — the prefixes don't overlap.
     ("search:", Action::Search),
@@ -299,6 +300,8 @@ pub enum Action {
     /// Override the focused pane's title (Ghostty `set_surface_title:`). An
     /// empty value hands the title back to the program.
     SetSurfaceTitle(Arc<str>),
+    /// Override the window's title (Ghostty `set_window_title:`); empty clears it.
+    SetWindowTitle(Arc<str>),
     NewTab,
     /// Open a new tab running the shell profile at this index.
     NewTabWithProfile(usize),
@@ -443,6 +446,7 @@ impl Action {
             Action::DeactivateAllKeyTables => "Deactivate All Key Tables",
             Action::SetTabTitle(_) => "Set Tab Title",
             Action::SetSurfaceTitle(_) => "Set Pane Title",
+            Action::SetWindowTitle(_) => "Set Window Title",
             Action::NewTab => "New Tab",
             Action::NewTabWithProfile(_) => "New Tab with Shell",
             Action::NewWindow => "New Window",
@@ -535,7 +539,8 @@ impl Action {
             | Action::DeactivateKeyTable
             | Action::DeactivateAllKeyTables
             | Action::SetTabTitle(_)
-            | Action::SetSurfaceTitle(_) => return None,
+            | Action::SetSurfaceTitle(_)
+            | Action::SetWindowTitle(_) => return None,
             Action::NewTab => "Ctrl+Shift+T",
             Action::NewWindow => "Ctrl+Shift+N",
             Action::Inspector(_) => "Ctrl+Shift+I",
@@ -624,6 +629,7 @@ impl Action {
             Action::DeactivateAllKeyTables => "deactivate_all_key_tables".into(),
             Action::SetTabTitle(s) => format!("set_tab_title:{s}"),
             Action::SetSurfaceTitle(s) => format!("set_surface_title:{s}"),
+            Action::SetWindowTitle(s) => format!("set_window_title:{s}"),
             Action::NewTab => "new_tab".into(),
             Action::NewTabWithProfile(i) => format!("new_tab_with_profile:{i}"),
             Action::NewWindow => "new_window".into(),
@@ -1104,6 +1110,7 @@ mod tests {
             "esc:OA",
             "set_tab_title:build",
             "set_surface_title:",
+            "set_window_title:main",
         ] {
             let a = Action::from_name(raw).unwrap_or_else(|| panic!("parsing {raw:?}"));
             assert_eq!(a.name(), raw, "round-trip {raw:?}");

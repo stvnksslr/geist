@@ -394,6 +394,8 @@ impl Session {
         let last_query = query.map(str::to_string);
         requests.clear();
 
+        // Ghostty `clipboard-write-limit-bytes`: an oversized write is dropped.
+        let last_set = last_set.filter(|t| self.clipboard.write_limit.is_none_or(|n| t.len() <= n));
         if let Some(text) = last_set {
             match self.clipboard.write {
                 ClipboardAccess::Allow => write_clipboard(&text),
@@ -1425,10 +1427,12 @@ impl Session {
     /// hyperlink (the program marked this cell clickable, possibly with display
     /// text that differs from the target) takes priority; otherwise fall back to
     /// detecting a bare URL in the rendered cell text.
-    pub fn url_at(&self, cell: (u16, u16)) -> Option<String> {
-        self.engine
-            .hyperlink_at(cell.0, cell.1)
-            .or_else(|| find_url_at(&self.snapshot, cell.0, cell.1))
+    ///
+    /// `osc8` / `bare` are Ghostty's `link-osc8` / `link-url` switches.
+    pub fn url_at(&self, cell: (u16, u16), osc8: bool, bare: bool) -> Option<String> {
+        osc8.then(|| self.engine.hyperlink_at(cell.0, cell.1))
+            .flatten()
+            .or_else(|| bare.then(|| find_url_at(&self.snapshot, cell.0, cell.1)).flatten())
     }
 
     /// The current selection's text, if any (for copy-on-select).
