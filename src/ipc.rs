@@ -102,6 +102,17 @@ pub enum Request {
         window: Option<u64>,
     },
     List,
+    /// Adopt a default-terminal handoff that the `giest -Embedding` process
+    /// `pid` received. `handles` are valid in *that* process; the server
+    /// duplicates them in, and the sender closes its copies once answered.
+    Handoff {
+        pid: u32,
+        handles: crate::handoff::RawHandles,
+        #[serde(default)]
+        title: String,
+        #[serde(default)]
+        show_window: u16,
+    },
 }
 
 #[derive(Serialize, Deserialize)]

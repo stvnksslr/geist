@@ -71,6 +71,24 @@ fn run_cli(cli: &cli::Cli) -> Option<i32> {
                 }
             });
         }
+        Verb::RegisterDefaultTerminal | Verb::UnregisterDefaultTerminal => {
+            attach_console();
+            let r = if cli.verb == Verb::RegisterDefaultTerminal {
+                giest::handoff::register()
+            } else {
+                giest::handoff::unregister()
+            };
+            return Some(match r {
+                Ok(report) => {
+                    print!("{report}");
+                    0
+                }
+                Err(e) => {
+                    eprintln!("giest: {e}");
+                    1
+                }
+            });
+        }
         _ => {}
     }
 
@@ -131,16 +149,68 @@ fn run_cli(cli: &cli::Cli) -> Option<i32> {
     }
 }
 
+/// `giest -Embedding`: COM started us as the default terminal (`handoff.rs`).
+/// Take OpenConsole's one handoff, then give it to the running instance, or
+/// keep it (returning `None`) and become the instance that shows it.
+fn run_embedding() -> Option<i32> {
+    // COM starts us with no console, so a failure here is otherwise
+    // invisible: the console program just never appears.
+    giest::handoff::log("-Embedding started");
+    let a = match giest::handoff::serve_one(std::time::Duration::from_secs(30)) {
+        Ok(a) => a,
+        Err(e) => {
+            giest::handoff::log(&format!("no session: {e}"));
+            return Some(1);
+        }
+    };
+    giest::handoff::log(&format!(
+        "session received: title {:?}, client pid {}",
+        a.title,
+        giest::handoff::process_id(&a.client)
+    ));
+    if Config::load().single_instance {
+        let req = ipc::Request::Handoff {
+            pid: std::process::id(),
+            handles: a.raw(),
+            title: a.title.clone(),
+            show_window: a.show_window,
+        };
+        match ipc::send(&ipc::pipe_name(), &req) {
+            // The instance duplicated the handles in; ours can go.
+            Ok(resp) if resp.ok => {
+                giest::handoff::log("forwarded to the running instance");
+                return Some(0);
+            }
+            Ok(resp) => giest::handoff::log(&format!("running instance refused: {:?}", resp.error)),
+            Err(SendError::Failed(e)) => giest::handoff::log(&format!("forwarding failed: {e}")),
+            Err(SendError::NoServer) => {
+                ipc::start_server();
+            }
+        }
+    }
+    giest::handoff::set_initial(a);
+    None
+}
+
 fn main() -> eframe::Result {
-    let cli = cli::from_env();
+    let embedding = giest::handoff::is_embedding(&std::env::args().skip(1).collect::<Vec<_>>());
+    let cli = if embedding {
+        // No update apply here: OpenConsole is waiting on the COM call.
+        if let Some(code) = run_embedding() {
+            std::process::exit(code);
+        }
+        cli::Cli::default()
+    } else {
+        cli::from_env()
+    };
     // A verified update staged by `auto-update` is installed here, before
     // anything loads conpty.dll or opens the IPC pipe; the new exe is then
     // launched with the same arguments and this (old) one steps aside.
-    if matches!(cli.verb, Verb::Help | Verb::Version) {
+    if embedding || matches!(cli.verb, Verb::Help | Verb::Version) {
     } else if giest::update::startup_apply() {
         std::process::exit(0);
     }
-    if let Some(code) = run_cli(&cli) {
+    if !embedding && let Some(code) = run_cli(&cli) {
         std::process::exit(code);
     }
     if let Some(argv) = cli.initial_argv() {

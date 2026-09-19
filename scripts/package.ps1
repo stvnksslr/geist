@@ -45,9 +45,11 @@ if (-not $SkipBuild) {
     if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
 }
 & "$PSScriptRoot\fetch-conpty.ps1" -Profiles release | Out-Null
+# The default-terminal handoff proxy/stub (MIDL + MSVC; see src/handoff.rs).
+& "$PSScriptRoot\build-handoff-proxy.ps1" -Profiles release | Out-Null
 
 $rel = Join-Path $root "target\release"
-foreach ($f in "giest.exe", "conpty.dll", "OpenConsole.exe") {
+foreach ($f in "giest.exe", "conpty.dll", "OpenConsole.exe", "giestHandoffProxy.dll") {
     if (-not (Test-Path "$rel\$f")) { throw "missing $rel\$f" }
 }
 
@@ -57,7 +59,7 @@ $stage = Join-Path $out $name
 if (Test-Path $out) { Remove-Item -Recurse -Force $out }
 New-Item -ItemType Directory -Force "$stage\licenses" | Out-Null
 
-Copy-Item "$rel\giest.exe", "$rel\conpty.dll", "$rel\OpenConsole.exe" $stage
+Copy-Item "$rel\giest.exe", "$rel\conpty.dll", "$rel\OpenConsole.exe", "$rel\giestHandoffProxy.dll" $stage
 Copy-Item "assets\icon.ico" $stage
 Copy-Item "assets\shell-integration\LICENSE-ghostty" "$stage\licenses\LICENSE-ghostty.txt"
 Copy-Item "packaging\licenses\LICENSE-conpty.txt" "$stage\licenses\"
@@ -69,7 +71,8 @@ giest $Version ($Channel, $arch)
 
 Run giest.exe. conpty.dll and OpenConsole.exe must stay beside it: they are
 the out-of-band ConPTY that carries kitty graphics (set conpty-passthrough =
-false to use the inbox console host instead).
+false to use the inbox console host instead). giestHandoffProxy.dll is what
+lets giest be the Windows default terminal (giest +register-default-terminal).
 
 Third-party licenses are in licenses\.
 "@ | Set-Content -Encoding ascii "$stage\README.txt"

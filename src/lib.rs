@@ -23,6 +23,7 @@ pub mod config;
 pub mod decscusr;
 pub mod dropfiles;
 pub mod engine;
+pub mod handoff;
 pub mod hotkey;
 pub mod icon;
 pub mod ime;

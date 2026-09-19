@@ -2030,13 +2030,23 @@ impl Window {
                     .filter(|c| !c.trim().is_empty())
                     .map(|c| profiles::for_command(&profiles, c))
             });
-        let first = open_session(
-            &cc.egui_ctx,
-            &config,
-            initial.as_ref().unwrap_or(&profiles[default_profile]),
-            config.working_directory.as_deref(),
-        )
-        .ok_or_else(|| anyhow::anyhow!("could not create a terminal"))?;
+        // Started as the default terminal (`giest -Embedding`): the first pane
+        // is the handed-over console session, not a new shell.
+        let handed = crate::handoff::take_initial().and_then(|a| {
+            Session::from_handoff(&cc.egui_ctx, &config, a)
+                .map_err(|e| eprintln!("giest: handoff session failed: {e:#}"))
+                .ok()
+        });
+        let first = match handed {
+            Some(s) => s,
+            None => open_session(
+                &cc.egui_ctx,
+                &config,
+                initial.as_ref().unwrap_or(&profiles[default_profile]),
+                config.working_directory.as_deref(),
+            )
+            .ok_or_else(|| anyhow::anyhow!("could not create a terminal"))?,
+        };
 
         let keymap = Keymap::from_config(&config.keybinds);
 
@@ -9104,6 +9114,36 @@ impl App {
                         }
                     }
                     None => Response::err("could not start a shell"),
+                }
+            }
+            Request::Handoff { pid, handles, title, show_window } => {
+                // Resident with no window: refuse, and the `-Embedding`
+                // process shows the session in a window of its own.
+                let i = match self.window_slot(None) {
+                    Ok(i) => i,
+                    Err(r) => return r,
+                };
+                let a = match crate::handoff::adopt_remote(*pid, handles, title.clone(), *show_window) {
+                    Ok(a) => a,
+                    Err(e) => return Response::err(format!("could not adopt the handoff: {e}")),
+                };
+                let s = match Session::from_handoff(ctx, &self.windows[i].config, a) {
+                    Ok(s) => s,
+                    Err(e) => return Response::err(format!("{e:#}")),
+                };
+                let w = &mut self.windows[i];
+                let wid = w.window_id;
+                let tab = w.insert_tab(s);
+                let reqs = std::mem::take(&mut w.requests);
+                self.apply_requests(ctx, now, reqs.into_iter().map(|r| (wid, r)).collect());
+                if let Some(i) = self.windows.iter().position(|w| w.window_id == wid) {
+                    self.raise_window(ctx, i);
+                }
+                Response {
+                    window: Some(wid),
+                    tab: Some(tab),
+                    pane: Some(tab),
+                    ..Response::ok()
                 }
             }
             Request::Focus { window, tab, pane } => self.focus_target(ctx, *window, *tab, *pane),

@@ -1,5 +1,10 @@
 //! ConPTY-backed PTY via `portable-pty`: spawn a shell, stream its output on a
 //! background thread, and write input/responses back to it.
+//!
+//! A second backend, [`Pty::from_handoff`], drives a pseudoconsole giest did
+//! **not** create: one handed over by OpenConsole when giest is the Windows
+//! default terminal (`handoff.rs`). It has pipes, a signal pipe for resize and
+//! the client's process handle for exit, but no `HPCON` and no child we spawned.
 
 use std::io::Write;
 use std::path::Path;
@@ -10,13 +15,29 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
+enum Backend {
+    /// A shell giest spawned into a ConPTY it owns.
+    Spawned {
+        master: Box<dyn MasterPty + Send>,
+        /// The shell process; polled via [`Pty::is_running`] to detect exit.
+        child: Box<dyn Child + Send + Sync>,
+    },
+    /// A console session handed to us (default-terminal handoff).
+    Handoff {
+        /// Resize messages go here; dropping it hangs the session up.
+        signal: std::fs::File,
+        client: std::os::windows::io::OwnedHandle,
+        /// Held so the console session stays referenced while we show it.
+        _reference: std::os::windows::io::OwnedHandle,
+        _server: std::os::windows::io::OwnedHandle,
+    },
+}
+
 /// A spawned shell attached to a PTY. Output bytes arrive on `output`; input is
 /// written via [`Pty::write`]. Dropping closes the PTY and ends the shell.
 pub struct Pty {
-    master: Box<dyn MasterPty + Send>,
+    backend: Backend,
     writer: Box<dyn Write + Send>,
-    /// The shell process; polled via [`Pty::is_running`] to detect exit.
-    child: Box<dyn Child + Send + Sync>,
     /// Bytes read from the shell. The sender lives on the reader thread, which
     /// exits (closing this channel) when the shell closes its output.
     pub output: Receiver<Vec<u8>>,
@@ -111,40 +132,46 @@ impl Pty {
         // otherwise the read side never sees EOF when the shell exits.
         drop(pair.slave);
 
-        let mut reader = pair.master.try_clone_reader().context("clone reader")?;
+        let reader = pair.master.try_clone_reader().context("clone reader")?;
         let writer = pair.master.take_writer().context("take writer")?;
-
-        let (tx, rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = channel();
-        thread::Builder::new()
-            .name("pty-reader".into())
-            .spawn(move || {
-                let mut buf = [0u8; 8192];
-                loop {
-                    match std::io::Read::read(&mut reader, &mut buf) {
-                        Ok(0) => break,
-                        Ok(n) => {
-                            if tx.send(buf[..n].to_vec()).is_err() {
-                                break;
-                            }
-                            wake();
-                        }
-                        Err(_) => break,
-                    }
-                }
-                // The shell closed its output (exited). Dropping `tx` here
-                // disconnects the channel; wake the UI so it reaps this pane.
-                drop(tx);
-                wake();
-            })
-            .context("spawn pty reader thread")?;
+        let rx = spawn_reader(reader, wake)?;
 
         Ok(Self {
-            master: pair.master,
+            backend: Backend::Spawned {
+                master: pair.master,
+                child,
+            },
             writer,
-            child,
             output: rx,
             spawned: Instant::now(),
         })
+    }
+
+    /// Drive a pseudoconsole handed over by OpenConsole (default-terminal
+    /// handoff). It is sized to `cols`x`rows` straight away, as Windows
+    /// Terminal does on the first layout of a handed-off connection.
+    pub fn from_handoff<W: Fn() + Send + 'static>(
+        a: crate::handoff::Attached,
+        cols: u16,
+        rows: u16,
+        wake: W,
+    ) -> Result<Self> {
+        let reader = std::fs::File::from(a.output);
+        let writer = std::fs::File::from(a.input);
+        let rx = spawn_reader(Box::new(reader), wake)?;
+        let pty = Self {
+            backend: Backend::Handoff {
+                signal: std::fs::File::from(a.signal),
+                client: a.client,
+                _reference: a.reference,
+                _server: a.server,
+            },
+            writer: Box::new(writer),
+            output: rx,
+            spawned: Instant::now(),
+        };
+        pty.resize(cols, rows)?;
+        Ok(pty)
     }
 
     /// How the shell ended, or `None` while it is still running (or its status
@@ -153,23 +180,31 @@ impl Pty {
     /// every 500 ms, which would make every fast failure look slow and defeat
     /// `abnormal-command-exit-runtime`. Falls back to wall time since spawn.
     pub fn exit_info(&mut self) -> Option<ExitInfo> {
-        let status = self.child.try_wait().ok()??;
-        let runtime_ms = self
-            .child
-            .as_raw_handle()
+        use std::os::windows::io::AsRawHandle;
+        let (code, handle) = match &mut self.backend {
+            Backend::Spawned { child, .. } => {
+                let status = child.try_wait().ok()??;
+                (status.exit_code(), child.as_raw_handle())
+            }
+            Backend::Handoff { client, .. } => {
+                (crate::handoff::process_exit(client)?, Some(client.as_raw_handle()))
+            }
+        };
+        let runtime_ms = handle
             .and_then(process_runtime_ms)
             .unwrap_or_else(|| self.spawned.elapsed().as_millis() as u64);
-        Some(ExitInfo {
-            code: status.exit_code(),
-            runtime_ms,
-        })
+        Some(ExitInfo { code, runtime_ms })
     }
 
     /// Whether the shell process is still running. On Windows ConPTY the output
     /// pipe often doesn't reach EOF when the child exits, so we poll the child
-    /// directly rather than relying on the reader thread seeing EOF.
+    /// directly rather than relying on the reader thread seeing EOF. For a
+    /// handed-off session that is the client program OpenConsole reported.
     pub fn is_running(&mut self) -> bool {
-        matches!(self.child.try_wait(), Ok(None))
+        match &mut self.backend {
+            Backend::Spawned { child, .. } => matches!(child.try_wait(), Ok(None)),
+            Backend::Handoff { client, .. } => crate::handoff::is_process_running(client),
+        }
     }
 
     /// Write bytes to the shell's input.
@@ -181,14 +216,52 @@ impl Pty {
 
     /// Resize the PTY window. Call alongside the engine's resize.
     pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
-        self.master
-            .resize(PtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .context("pty resize")?;
+        match &self.backend {
+            Backend::Spawned { master, .. } => master
+                .resize(PtySize {
+                    rows,
+                    cols,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                })
+                .context("pty resize")?,
+            // Not `ResizePseudoConsole`: there is no HPCON here. The signal
+            // pipe message is what that call writes under the hood.
+            Backend::Handoff { signal, .. } => (&*signal)
+                .write_all(&crate::handoff::resize_message(cols, rows))
+                .context("handoff resize")?,
+        }
         Ok(())
     }
+}
+
+/// Stream `reader` to a channel on its own thread, calling `wake` per chunk.
+fn spawn_reader<W: Fn() + Send + 'static>(
+    mut reader: Box<dyn std::io::Read + Send>,
+    wake: W,
+) -> Result<Receiver<Vec<u8>>> {
+    let (tx, rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = channel();
+    thread::Builder::new()
+        .name("pty-reader".into())
+        .spawn(move || {
+            let mut buf = [0u8; 8192];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if tx.send(buf[..n].to_vec()).is_err() {
+                            break;
+                        }
+                        wake();
+                    }
+                    Err(_) => break,
+                }
+            }
+            // The shell closed its output (exited). Dropping `tx` here
+            // disconnects the channel; wake the UI so it reaps this pane.
+            drop(tx);
+            wake();
+        })
+        .context("spawn pty reader thread")?;
+    Ok(rx)
 }

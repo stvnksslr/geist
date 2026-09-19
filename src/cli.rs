@@ -54,6 +54,10 @@ pub enum Verb {
     Version,
     RegisterShellIntegration,
     UnregisterShellIntegration,
+    /// `+register-default-terminal`: make giest the Windows default terminal
+    /// (HKCU; see `handoff.rs`).
+    RegisterDefaultTerminal,
+    UnregisterDefaultTerminal,
 }
 
 /// A parsed command line.
@@ -102,6 +106,7 @@ Usage: giest [<dir>] [--<config-key>=<value>...] [-e <program> [args...]]
        giest +new-window | +new-tab [--working-directory=<dir>] [--command=<cmd>] [-e ...]
        giest +list | +focus | +action=<action> | +input=<text>
        giest +register-shell-integration | +unregister-shell-integration
+       giest +register-default-terminal | +unregister-default-terminal
 
   <dir>                     Start in this directory (a file opens its folder).
   --working-directory=<dir> Same, as a config key (also 'home' / 'inherit').
@@ -118,6 +123,9 @@ Usage: giest [<dir>] [--<config-key>=<value>...] [-e <program> [args...]]
   +input=<text>             Paste text into the focused pane.
   +register-shell-integration    Add \"Open giest here\" to Explorer (per user).
   +unregister-shell-integration  Remove it again.
+  +register-default-terminal     Make giest the Windows default terminal (per
+                                 user; needs Windows Terminal's OpenConsole).
+  +unregister-default-terminal   Restore the previous default exactly.
 
   -h, --help                Show this help.
   --version                 Show the version.
@@ -186,6 +194,8 @@ pub fn parse(args: &[String], cwd: &Path, home: Option<&Path>, is_file: &dyn Fn(
                 ("version", None) => Verb::Version,
                 ("register-shell-integration", None) => Verb::RegisterShellIntegration,
                 ("unregister-shell-integration", None) => Verb::UnregisterShellIntegration,
+                ("register-default-terminal", None) => Verb::RegisterDefaultTerminal,
+                ("unregister-default-terminal", None) => Verb::UnregisterDefaultTerminal,
                 _ => {
                     cli.errors.push(format!("unknown or malformed action '{first}'"));
                     Verb::Help
@@ -364,7 +374,12 @@ impl Cli {
                     Plan::Forward(Request::NewWindow { cwd, command: None })
                 }
             }
-            Verb::Help | Verb::Version | Verb::RegisterShellIntegration | Verb::UnregisterShellIntegration => {
+            Verb::Help
+            | Verb::Version
+            | Verb::RegisterShellIntegration
+            | Verb::UnregisterShellIntegration
+            | Verb::RegisterDefaultTerminal
+            | Verb::UnregisterDefaultTerminal => {
                 Plan::Local { serve: false }
             }
         }
@@ -540,6 +555,8 @@ mod tests {
         assert_eq!(p(&["+action=new_split:right"]).verb, Verb::Action("new_split:right".into()));
         assert_eq!(p(&["+input=ls"]).verb, Verb::Input("ls".into()));
         assert_eq!(p(&["+register-shell-integration"]).verb, Verb::RegisterShellIntegration);
+        assert_eq!(p(&["+register-default-terminal"]).verb, Verb::RegisterDefaultTerminal);
+        assert_eq!(p(&["+unregister-default-terminal"]).verb, Verb::UnregisterDefaultTerminal);
         // Not first: a positional path.
         assert_eq!(p(&["x", "+new-tab"]).verb, Verb::Launch);
         let bad = p(&["+frobnicate"]);

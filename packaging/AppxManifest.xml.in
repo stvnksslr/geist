@@ -8,16 +8,23 @@
   package root, so the sideloaded ConPTY (kitty graphics) works as it does from
   the portable zip.
 
-  Not declared (see GAP.md "Default-terminal handoff"): the
-  windows.consoleHandoff / windows.terminalHandoff COM extensions.
+  Default-terminal handoff (src/handoff.rs): the terminal half is declared -
+  our ITerminalHandoff3 COM server (giest.exe -Embedding), the proxy/stub
+  (giestHandoffProxy.dll) and the com.microsoft.windows.terminal.host app
+  extension that Settings > For developers > Terminal lists. The console half
+  (com.microsoft.windows.console.host) is NOT declared: the NuGet
+  OpenConsole.exe we ship has Windows Terminal's CLSID compiled in, so
+  declaring it would collide with Windows Terminal. The class and IIDs below
+  must match src/handoff.rs and vendor/terminal-handoff/dlldata.c.
 -->
 <Package
   xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
   xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
   xmlns:uap3="http://schemas.microsoft.com/appx/manifest/uap/windows10/3"
+  xmlns:com="http://schemas.microsoft.com/appx/manifest/com/windows10"
   xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10"
   xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
-  IgnorableNamespaces="uap uap3 desktop rescap">
+  IgnorableNamespaces="uap uap3 com desktop rescap">
 
   <Identity Name="giest.giest" Publisher="@PUBLISHER@" Version="@VERSION4@" ProcessorArchitecture="@ARCH@" />
 
@@ -52,6 +59,30 @@
             <desktop:ExecutionAlias Alias="giest.exe" />
           </uap3:AppExecutionAlias>
         </uap3:Extension>
+        <!-- Default terminal: what Settings lists as a terminal. -->
+        <uap3:Extension Category="windows.appExtension">
+          <uap3:AppExtension Name="com.microsoft.windows.terminal.host" Id="giest" DisplayName="giest" Description="giest terminal" PublicFolder="Public">
+            <uap3:Properties>
+              <Clsid>{2CED21A9-5236-4F72-B71F-10F3949295E5}</Clsid>
+            </uap3:Properties>
+          </uap3:AppExtension>
+        </uap3:Extension>
+        <!-- The proxy/stub that marshals EstablishPtyHandoff's handles. -->
+        <com:Extension Category="windows.comInterface">
+          <com:ComInterface>
+            <com:ProxyStub Id="4CDF6A34-42C2-488C-84D2-4BC3F55F519D" DisplayName="giestHandoffProxy" Path="giestHandoffProxy.dll" />
+            <!-- ITerminalHandoff3 -->
+            <com:Interface Id="6F23DA90-15C5-4203-9DB0-64E73F1B1B00" ProxyStubClsid="4CDF6A34-42C2-488C-84D2-4BC3F55F519D" />
+          </com:ComInterface>
+        </com:Extension>
+        <!-- COM launches `giest.exe -Embedding` for OpenConsole's handoff. -->
+        <com:Extension Category="windows.comServer">
+          <com:ComServer>
+            <com:ExeServer DisplayName="giest" Executable="giest.exe">
+              <com:Class Id="2CED21A9-5236-4F72-B71F-10F3949295E5" />
+            </com:ExeServer>
+          </com:ComServer>
+        </com:Extension>
       </Extensions>
     </Application>
   </Applications>

@@ -55,6 +55,10 @@ fallback engine without app changes:
   `CallbackTrait`. **`render/atlas.rs`** — rustybuzz shaping + ab_glyph rasterization (primary +
   system fallback faces) into an R8 atlas; COLR/CPAL color emoji composited into a separate RGBA atlas.
 - **`pty.rs`** — ConPTY shell via portable-pty with a reader thread that wakes the UI on output.
+  A second backend (`Pty::from_handoff`) drives a pseudoconsole giest did *not* create.
+- **`handoff.rs`** — default-terminal handoff: `giest -Embedding` is an out-of-proc COM server for
+  `ITerminalHandoff3` (hand-declared vtables), `+register-default-terminal` /
+  `+unregister-default-terminal` write HKCU only with exact restore. See GAP.md for the chain.
 - **`bell.rs`** — the non-visual `bell-features`: `MessageBeep` (system), `PlaySoundW` (audio),
   `FlashWindowEx` (attention). Declares user32 directly and resolves winmm lazily rather than
   enabling large `windows-sys` feature modules for three functions.
@@ -378,6 +382,21 @@ fallback engine without app changes:
   cleared: `closing` is what stops a confirmed close's own `ViewportCommand::Close` re-opening the
   dialog forever, and left set on a restored window it swallows every later close request too,
   leaving a window the × cannot shut.
+- **Default-terminal handoff has four silent traps** (`handoff.rs`). (1) Only a **release** exe can
+  be the COM server: a debug build is console-subsystem, COM gives it a console, and creating that
+  console is *itself* delegated (to Windows Terminal, or to giest - a deadlock); it never reaches
+  `main` and the caller sees `CO_E_SERVER_EXEC_FAILURE` after 30 s. `register` refuses such an exe.
+  (2) The proxy DLL must be built with `midl /target NT100` and link `ole32.lib`; without the target
+  flag it links but the first `EstablishPtyHandoff` is an access violation *in the caller*. (3) "Let
+  Windows decide" (`{0…0}`) on Windows 11 **is** Windows Terminal, so any console window a test opens
+  goes through WT's OpenConsole - kill leftover `OpenConsole.exe -Embedding` processes after an aborted
+  test. (4) A crash skips `Drop`, so a live test that registers anything must do its risky COM calls
+  in a **child process** (`tests/handoff_com.rs`) and keep the restore guard in the parent. Also: a
+  stand-in client that exits in < `abnormal-command-exit-runtime` is held open as "failed to launch",
+  which looks exactly like a reaping bug (`ping` spawned from a test does this). Live tests:
+  `cargo test --test handoff_com -- --ignored` (never touches `%%Startup`) and `--test
+  default_terminal` (the real chain, delegation live ~1 s); both need `cargo build --release`,
+  `scripts/build-handoff-proxy.ps1`, and no giest running.
 - **After `cargo test`, the *binary* is still stale.** `cargo test --lib` builds only the test
   harness, so launching `target\debug\giest.exe` to check a change runs the previous build — which
   looks exactly like the feature not working. Run `cargo build` before any manual/screenshot check.

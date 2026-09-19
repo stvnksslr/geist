@@ -286,6 +286,36 @@ impl Session {
         Self::build(config, profile, Some(pty), launch.reset_cursor_on_submit)
     }
 
+    /// A pane showing a console session handed to giest as the Windows default
+    /// terminal (`handoff.rs`): the client program is already running inside
+    /// OpenConsole, so there is nothing to spawn — only pipes to drive.
+    pub fn from_handoff(
+        ctx: &egui::Context,
+        config: &Config,
+        attached: crate::handoff::Attached,
+    ) -> Result<Self> {
+        let name = crate::handoff::client_image_name(&attached.client)
+            .unwrap_or_else(|| "console".to_string());
+        let profile = Profile {
+            name: name.clone(),
+            program: name,
+            args: Vec::new(),
+        };
+        let title: String = attached.title.chars().filter(|c| !c.is_control()).collect();
+        let wake_ctx = ctx.clone();
+        // Wakes ROOT for the same reason as `Session::new`.
+        let pty = Pty::from_handoff(attached, DEFAULT_COLS, DEFAULT_ROWS, move || {
+            wake_ctx.request_repaint_of(egui::ViewportId::ROOT)
+        })?;
+        let mut s = Self::build(config, &profile, Some(pty), false)?;
+        if !title.is_empty() {
+            // Seed the title OpenConsole reported (a shortcut's name, or the
+            // program path) until the program sets its own.
+            s.engine.write(format!("\x1b]2;{title}\x07").as_bytes());
+        }
+        Ok(s)
+    }
+
     /// A pane whose shell could not be started. It has a terminal (so the
     /// failure is printed *in* the pane, like Ghostty's surface error view)
     /// and no PTY, and it stays open until a key dismisses it -- the old

@@ -92,6 +92,67 @@ mod imp {
         ) -> i32;
         fn RegDeleteTreeW(key: Hkey, subkey: *const u16) -> i32;
         fn RegCloseKey(key: Hkey) -> i32;
+        fn RegDeleteKeyValueW(key: Hkey, subkey: *const u16, name: *const u16) -> i32;
+        fn RegQueryInfoKeyW(
+            key: Hkey,
+            class: *mut u16,
+            class_len: *mut u32,
+            reserved: *mut u32,
+            subkeys: *mut u32,
+            max_subkey: *mut u32,
+            max_class: *mut u32,
+            values: *mut u32,
+            max_value_name: *mut u32,
+            max_value: *mut u32,
+            sd: *mut u32,
+            written: *mut c_void,
+        ) -> i32;
+    }
+
+    /// Delete `HKCU\<path>` only if it has no subkeys and no values — for a
+    /// parent key that a registration created and must not leave behind.
+    pub fn delete_if_empty(path: &str) -> std::io::Result<()> {
+        let mut key: Hkey = std::ptr::null_mut();
+        let p = wide(path);
+        let n: *mut u16 = std::ptr::null_mut();
+        let (mut subkeys, mut values) = (0u32, 0u32);
+        // SAFETY: valid string/out-pointers; the key is closed below.
+        unsafe {
+            if RegOpenKeyExW(HKEY_CURRENT_USER, p.as_ptr(), 0, KEY_READ, &mut key) != 0 {
+                return Ok(());
+            }
+            let r = RegQueryInfoKeyW(key, n, n.cast(), n.cast(), &mut subkeys, n.cast(), n.cast(), &mut values, n.cast(), n.cast(), n.cast(), n.cast());
+            RegCloseKey(key);
+            check(r, path)?;
+        }
+        if subkeys == 0 && values == 0 { delete_tree(path) } else { Ok(()) }
+    }
+
+    /// Whether `HKCU\<path>` exists.
+    pub fn key_exists(path: &str) -> bool {
+        let mut key: Hkey = std::ptr::null_mut();
+        let p = wide(path);
+        // SAFETY: valid string/out-pointer; the key is closed below.
+        unsafe {
+            if RegOpenKeyExW(HKEY_CURRENT_USER, p.as_ptr(), 0, KEY_READ, &mut key) != 0 {
+                return false;
+            }
+            RegCloseKey(key);
+        }
+        true
+    }
+
+    /// Delete the value `name` of `HKCU\<path>`. A missing value (or key) is
+    /// not an error.
+    pub fn delete_value(path: &str, name: &str) -> std::io::Result<()> {
+        let p = wide(path);
+        let n = wide(name);
+        // SAFETY: valid strings.
+        let r = unsafe { RegDeleteKeyValueW(HKEY_CURRENT_USER, p.as_ptr(), n.as_ptr()) };
+        if r == ERROR_FILE_NOT_FOUND {
+            return Ok(());
+        }
+        check(r, path)
     }
 
     fn wide(s: &str) -> Vec<u16> {
@@ -192,9 +253,20 @@ mod imp {
     pub fn delete_tree(_: &str) -> std::io::Result<()> {
         Ok(())
     }
+    pub fn delete_if_empty(_: &str) -> std::io::Result<()> {
+        Ok(())
+    }
+    pub fn key_exists(_: &str) -> bool {
+        false
+    }
+    pub fn delete_value(_: &str, _: &str) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 pub use imp::get_string;
+/// Raw HKCU helpers, shared with `handoff.rs`'s registration.
+pub(crate) use imp::{delete_if_empty, delete_tree, delete_value, key_exists, set_string};
 
 /// Write every verb under `HKCU\<root>` for `exe`. On failure the partial
 /// registration is removed again, so a half-installed menu can't linger.

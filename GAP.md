@@ -129,70 +129,66 @@ the sideload the byte never reaches the engine. See the ledger "Protocol leftove
 | Runtime custom app icon | ⬜ | tinted icon via `icongen` + `ViewportCommand::Icon` | M |
 | **Release packaging** | ✅ | `mise package` (`scripts/package.ps1`) → `dist/<v>/`: portable zip (exe + `conpty.dll` + `OpenConsole.exe` + icon + `licenses/`: Ghostty MIT, ConPTY MIT, JetBrains Mono OFL, icon), an MSIX (`makeappx`; manifest template `packaging/AppxManifest.xml.in`, full trust, `giest.exe` execution alias), `giest.appinstaller` (24 h on-launch + background update checks; **not hosted**), and `giest-manifest.json` (per-package SHA-256 + size). Mtimes pinned to the HEAD commit for reproducible zips. **Needs a human:** a code-signing certificate (the MSIX is unsigned and Windows refuses to install an unsigned package; `-CertPath`/`-Publisher` sign it), hosting for the `.appinstaller`/`.msix`, and a giest `LICENSE` file (the repo has none; the script copies one if it appears). winget manifest not written. | M |
 | **Auto-update** | ✅ | `update.rs`: `auto-update = off\|check\|download` (default `check` in release builds, `off` in debug — upstream defers to Sparkle's stored preference), `auto-update-channel = stable\|tip` (default: the running version's channel, as upstream), giest-specific `auto-update-feed` (default: compile-time `GIEST_UPDATE_FEED` or the repo's GitHub `/releases` API). Checks 5 s after start and daily; `check_for_updates` checks now. A release is an update only if it carries `giest-manifest.json`; the zip is downloaded to `%LOCALAPPDATA%\giest\updates`, **SHA-256-verified before extraction** (a mismatch deletes it), extracted with `tar.exe`, and marked `pending.json`. Applied at the **next launch** (`startup_apply`, first thing in `main`): each replaced file is *renamed* to `*.old` (the running exe is never deleted or overwritten), the new ones copied in (rolled back on failure), the new exe relaunched with the same args; `*.old` swept on a later launch. The pill (tab strip, right of ⏷) has upstream's wording: `Update Available: X` (click downloads), `Downloading: N%`, `Restart to Complete Update` (click → native confirm → layout saved → relaunch with `--restore-session` + `GIEST_UPDATE_WAIT_PID`; shells end, as with Sparkle), `No Updates Available` / `Update Failed` (fade after 8 s). HTTP is `curl.exe` from System32 behind an `Http` trait; the tests use a mock and never touch the network. MSIX installs (`GetCurrentPackageFullName`) never self-update. Divergences: no release-notes popover (the tooltip carries the URL), no EdDSA signature like Sparkle's — the hash comes from the same release, so it catches corruption, not a compromised release; Authenticode is the real answer and needs a cert. Unverified live: nothing is published yet, so the end-to-end path ran only against the mock. | L |
-| Default-terminal handoff | ⬜ | Designed, not built — see "Default-terminal handoff: design" below | XL |
+| Default-terminal handoff | ✅ | `giest +register-default-terminal` (HKCU, exact restore), `giest -Embedding` COM server + proxy/stub DLL, handed-off PTY backend, IPC forwarding to a running instance, MSIX terminal-host declaration. Verified live with Windows Terminal's OpenConsole as the console half; **needs a human** for the no-WT case and the packaged Settings path - see "Default-terminal handoff" below | XL |
 | Tab overview | ✅ | see §B (text thumbnails, not rendered previews) | M–L |
 
-#### Default-terminal handoff: design (not implemented)
+#### Default-terminal handoff (built; unpackaged path verified live)
 
-What Windows 11's *Settings → Privacy & security → For developers → Terminal* ("Default terminal
-application") does, and what giest would need. Researched against microsoft/terminal
-(`src/host/srvinit.cpp`, `src/propslib/DelegationConfig.cpp`, `src/host/proxy/ITerminalHandoff.idl`,
-`IConsoleHandoff.idl`, the WT package manifest) from memory of that source, not re-read line by
-line — re-verify signatures against the IDLs before implementing. Nothing was registered on this machine;
-`HKCU\Console\%%Startup` still reads `{00000000-…}` for both values.
+Windows 11's *Settings > Privacy & security > For developers > Terminal*. Built in `src/handoff.rs`;
+every COM detail was re-read from microsoft/terminal `main` (`src/host/proxy/ITerminalHandoff.idl`,
+`IConsoleHandoff.idl`, `src/host/srvinit.cpp`, `src/propslib/DelegationConfig.cpp`,
+`src/cascadia/TerminalConnection/{CTerminalHandoff,ConptyConnection}.cpp`,
+`src/host/PtySignalInputThread.hpp`, Windows Terminal's installed `AppxManifest.xml`). Corrections to
+the earlier from-memory design: `ITerminalHandoff3`'s `in`/`out` are **`[out]`** (the terminal creates
+the pipes and returns OpenConsole's ends); `TERMINAL_STARTUP_INFO` is passed by pointer; conhost uses
+*any* custom `%%Startup` pair verbatim (no package check); WT's `OpenConsoleProxy.dll` is registered
+only in its package's COM catalog and is **invisible to unpackaged processes** (`CoGetPSClsid` =
+`REGDB_E_IIDNOTREG` for both IIDs with WT installed).
 
-**The chain.** A console app started outside any terminal (Win+R `cmd`, a double-clicked `.exe`)
-gets the *inbox* conhost. Before creating a window, conhost reads `HKCU\Console\%%Startup`
-`DelegationConsole` and `DelegationTerminal` (REG_SZ CLSIDs; `{0…0}` = "let Windows decide",
-`{B23D10C0-E52E-411E-9D5B-C09FDF709C7D}` = force conhost). If both name something else it
-`CoCreateInstance`s the **console** CLSID (`CLSCTX_LOCAL_SERVER`) and calls
-`IConsoleHandoff::EstablishHandoff(server handle, input event, CONSOLE_PORTABLE_ATTACH_MSG, signal
-pipe, inbox process, &process)` — that server is **OpenConsole.exe** running `-Embedding`, which
-takes over the console-server end and becomes a ConPTY host. OpenConsole then `CoCreateInstance`s
-the **terminal** CLSID and calls `ITerminalHandoff3::EstablishPtyHandoff(&in, &out, signal,
-reference, server, client, const TERMINAL_STARTUP_INFO*)` (IID `6F23DA90-15C5-4203-9DB0-64E73F1B1B00`;
-v1/v2 are older shapes WT still answers). The terminal returns the pipe ends and from then on
-treats them exactly like a ConPTY it created itself.
+**The chain as built.** conhost -> WT's packaged `OpenConsole.exe -Embedding` (`{2EACA947-...}`,
+`IConsoleHandoff`) -> `CoCreateInstance(giest CLSID {2CED21A9-...})` -> COM starts `giest.exe
+-Embedding` -> `ITerminalHandoff3::EstablishPtyHandoff` through our proxy/stub -> `Pty::from_handoff`
+(second PTY backend: our two anonymous pipes, `PTY_SIGNAL_RESIZE_WINDOW` = `u16 8, cols, rows` on the
+signal pipe instead of `ResizePseudoConsole`, exit = the *client* process handle, the `\Reference` and
+server handles held for the session). With `single-instance` and a giest already running, the
+`-Embedding` process forwards over IPC (`Request::Handoff {pid, handles}`) and the running instance
+`DuplicateHandle`s the handles out of it into a new tab; otherwise it becomes the instance (and IPC
+server) itself. Failures go to `%TEMP%\giest-handoff.log` - the `-Embedding` process has no console.
 
-**What giest would have to ship**, in dependency order:
+**Pieces.** `vendor/terminal-handoff/` (verbatim IDLs + our `dlldata.c`/`proxy.def`, proxy CLSID
+`{4CDF6A34-...}` so it never collides with WT's) built into `giestHandoffProxy.dll` by
+`scripts/build-handoff-proxy.ps1` (vswhere -> vcvars -> `midl /target NT100` + `cl`; `mise package` runs
+it and ships the DLL). `giest +register-default-terminal` / `+unregister-default-terminal` (HKCU only):
+class + proxy + two `Interface` keys, then `%%Startup` = (WT OpenConsole, giest); the replaced values
+(present *or absent*) and any parent key it had to create are backed up under
+`HKCU\Software\giest\DefaultTerminal`, and unregister restores them exactly - unless the user has
+since picked another terminal in Settings, which it leaves alone. Refuses a console-subsystem exe
+(every debug build) and refuses to overwrite another proxy's `Interface` key. The MSIX manifest now
+declares `com.microsoft.windows.terminal.host`, the `ExeServer` and the `ProxyStub`.
 
-1. **A proxy/stub for `ITerminalHandoff3`.** The call is cross-process and its parameters are
-   `[system_handle(sh_pipe|sh_file|sh_process)]`, which only a MIDL-generated proxy marshals (there
-   is no typelib/oleautomation path for handles). WT ships `OpenConsoleProxy.dll` for this and
-   declares it as a packaged `ProxyStub`; the ConPTY NuGet does **not** include it. Needs: the two
-   IDLs vendored, `midl.exe` (present in the Windows SDK here) and a C compiler at build time
-   (`cc` crate + MSVC), producing `giestHandoffProxy.dll`. M.
-2. **An out-of-proc COM server in giest.exe.** `giest -Embedding` (COM's own launch flag):
-   `CoInitializeEx(MTA)`, `CoRegisterClassObject(CLSID_giestTerminalHandoff, factory,
-   CLSCTX_LOCAL_SERVER, REGCLS_MULTIPLEUSE)`, and an `ITerminalHandoff3` implementation whose
-   `EstablishPtyHandoff` creates the two pipes, hands back the far ends, and posts the near ends +
-   `TERMINAL_STARTUP_INFO` (title, icon, size, show-window) to the UI. With `single-instance` it
-   should forward to the running giest over `ipc.rs` — but pipe *handles* can't cross the JSON pipe,
-   so either the COM server lives in the long-running instance (register the class object at
-   normal startup too, the way WT does) or the handles are duplicated into it with
-   `DuplicateHandle` after an IPC handshake giving its PID. Hand-declared vtables, as in
-   `jumplist.rs`/`taskbar.rs`. M–L.
-3. **A PTY without a child.** `pty.rs` / the vendored portable-pty assume giest *spawned* the
-   process and owns an `HPCON`. A handed-off session has pipes, a signal pipe (resize is written to
-   it as `PTY_SIGNAL_RESIZE_WINDOW`, not `ResizePseudoConsole`), the *client* process handle for
-   exit detection (`Pty::is_running` must wait on it), and no command line. A second `Pty` backend. M.
-4. **Registration.** Settings only lists *packaged* apps: the MSIX must declare
-   `com:Extension Category="windows.comServer"` (ExeServer `giest.exe -Embedding` with our CLSID,
-   plus the ProxyStub DLL with the IID) and `uap3:AppExtension Name="com.microsoft.windows.terminal.host"`
-   (and `…console.host` pointing at a bundled OpenConsole's CLSID if we ship our own console side,
-   or reuse the inbox/WT one). An unpackaged install could write `HKCU\Software\Classes\CLSID\{…}\
-   LocalServer32` + `Interface\{IID}\ProxyStubClsid32` + the two `%%Startup` values itself;
-   whether conhost honours an unpackaged registration was **not tested** here, and the console-side CLSID
-   must be an OpenConsole that is registered too (the NuGet's `OpenConsole.exe` serves
-   `IConsoleHandoff` under `-Embedding`, but its compiled-in CLSID is the one WT registers, so two
-   installs would collide). Any `+register-default-terminal` verb must have an exact inverse that
-   restores the previous values. S–M.
-5. **A signed package** for (4), which is the certificate item under Release packaging.
+**Verified live on this machine** (Win 11 26200, WT 1.24.11911 installed, prior `%%Startup` both
+`{00000000-0000-0000-0000-000000000000}`, restored byte-for-byte after every run):
+`tests/handoff_com.rs` (plays OpenConsole over real COM; never touches `%%Startup`): resize on the
+signal pipe, output -> engine (OSC 2 title via `+list`), `+input` -> the `in` pipe, client exit reaps the
+pane and the instance; and the **forwarded** path (a running giest adopts it as a second tab, the
+`-Embedding` process exits, the client's exit closes only that tab). `tests/default_terminal.rs` (the
+real chain, delegation live ~1 s): a `cmd` started with a new console appears in giest, a typed
+`title` command runs in it and its title comes back, typed `exit` ends it and giest with it.
 
-**Why not now.** Item 1 needs a native build step (MIDL + MSVC C) giest does not have, item 3 is
-a second PTY backend, and the only way to exercise any of it end to end is to redirect every
-console launch on the machine — which this task was not allowed to leave registered. Estimated XL
-in total; items 1 and 3 can land (and be unit-tested) before anything is registered.
+**Still needs a human:**
+1. **Without Windows Terminal installed there is no console half.** The NuGet `OpenConsole.exe` we ship
+   has WT's release CLSID `{2EACA947-...}` compiled in, so it cannot be registered under a CLSID of our
+   own (COM would wait for a class object it never registers) and registering it under WT's would hijack
+   WT. Options: build OpenConsole from source with our own `__CLSID_CConsoleHandoff` (the
+   `WT_BRANDING_*` switch in `src/host/exe/CConsoleHandoff.h`), or declare WT as a dependency.
+2. **The Settings UI lists only packaged apps.** The MSIX declares the terminal half, but whether
+   Settings will pair a terminal-only package with WT's (or the inbox) console host was **not tested**:
+   the MSIX needs signing (the certificate item under Release packaging) to install at all.
+3. Eyeball a real handoff once: title/icon from `TERMINAL_STARTUP_INFO` (only the title is used; icon
+   and `wShowWindow` are ignored), and a `.lnk` launch.
+4. A debug build cannot be the COM server (console subsystem: COM gives it a console, whose creation
+   is itself delegated - to giest, i.e. a deadlock; observed as `CO_E_SERVER_EXEC_FAILURE`). Register a
+   release build.
 
 ### D. Protocols and engine features new on `main`
 
@@ -225,7 +221,7 @@ in total; items 1 and 3 can land (and be unit-tested) before anything is registe
 5. ✅ **Automation:** CLI args → named-pipe IPC → Explorer entry → Jump List → restart restore → notification click.
 6. **Protocols:** ✅ OSC 5522; ✅ OSC 52 / OSC 7 scanners moved onto lib-vt; ✅ regex search (native search API evaluated, not adopted — see the ledger).
 7. **Chrome:** custom caption + `window-decoration` + titlebar colors; runtime icon (L).
-8. **Long tail:** accessibility (L), ~~auto-update~~ ✅, ~~tab overview~~ ✅, default-terminal handoff (XL, design below), and
+8. **Long tail:** accessibility (L), ~~auto-update~~ ✅, ~~tab overview~~ ✅, ~~default-terminal handoff~~ ✅ (needs WT or a rebuilt OpenConsole; see above), and
    ~~shipping the out-of-band ConPTY with release builds~~ ✅ (`mise package` bundles it; the dev tree still uses the
    `scripts/fetch-conpty.ps1` step) so kitty graphics work out of the box.
 
