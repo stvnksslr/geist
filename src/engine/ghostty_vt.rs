@@ -160,6 +160,10 @@ impl GhosttyVtEngine {
         let mut term = Terminal::new(cols, rows)?;
         // `usize::MAX` is `scrollback-limit-bytes = unlimited`.
         term.set_scrollback_max_bytes((max_scrollback != usize::MAX).then_some(max_scrollback))?;
+        // ConPTY keeps its own scrollback-less screen buffer; letting a resize
+        // pull rows back from scrollback makes the two disagree and output lands
+        // on the wrong rows. Upstream added this switch for exactly this case.
+        term.set_resize_pull_scrollback(false)?;
 
         let responses: ResponseSink = Rc::new(RefCell::new(Vec::new()));
         let sink = responses.clone();
@@ -1017,6 +1021,17 @@ mod tests {
         eng.write(b"\x1b]133;C\x07a\r\nb\r\nc\r\n");
         assert!(eng.select_semantic(SelectKind::Output, 0, 0, &[]));
         assert_eq!(sel_text(&eng).as_deref(), Some("a\nb\nc"));
+    }
+
+    #[test]
+    fn engine_osc_color_query_replies() {
+        // Pins who answers `OSC 11 ?`: `osc_color.rs` does. Upstream (14c8298) can
+        // answer in lib-vt behind a callback giest doesn't install; if a bump ever
+        // makes it answer by default, every query would get two replies.
+        let mut eng = GhosttyVtEngine::new(20, 5, 100_000).unwrap();
+        eng.write(b"\x1b]11;?\x07");
+        let r = String::from_utf8_lossy(&eng.take_responses()).into_owned();
+        assert!(!r.contains("]11;"), "engine now answers itself; drop osc_color.rs: {r:?}");
     }
 
     #[test]

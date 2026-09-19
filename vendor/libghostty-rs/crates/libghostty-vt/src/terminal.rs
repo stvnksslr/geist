@@ -796,6 +796,15 @@ impl<'alloc: 'cb, 'cb> Terminal<'alloc, 'cb> {
     /// more styles are used for example, line limit can be reached with
     /// a narrower terminal viewport). So, they are useful together.
     ///
+    /// Whether a resize may pull scrollback rows back into the active area
+    /// (default true). Set false under Windows ConPTY, which keeps its own
+    /// scrollback-less screen and would otherwise disagree after a resize.
+    // giest-local addition: upstream binding has no setter for this yet.
+    pub fn set_resize_pull_scrollback(&mut self, pull: bool) -> Result<&mut Self> {
+        self.set(ffi::TerminalOption::RESIZE_PULL_SCROLLBACK, &pull)?;
+        Ok(self)
+    }
+
     /// Lowering the limit immediately removes eligible complete historical
     /// pages. A `None` value pointer removes the line limit.
     pub fn set_scrollback_max_lines(&mut self, v: Option<usize>) -> Result<&mut Self> {
