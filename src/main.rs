@@ -11,6 +11,9 @@ fn main() -> eframe::Result {
     // config here as well as in `App::new` (one small file read). Ghostty has the
     // same restart requirement for `background-opacity` on macOS.
     let cfg = Config::load();
+    // Which ConPTY carries the shells is latched on the first spawn, so it is
+    // decided here, before any window (and so any PTY) exists.
+    cfg.conpty_passthrough.apply();
     let want_transparent = cfg.background_opacity < 1.0 || cfg.background_blur.enabled();
 
     let mut wgpu_options = eframe::egui_wgpu::WgpuConfiguration {

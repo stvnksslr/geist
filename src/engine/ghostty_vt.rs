@@ -71,7 +71,7 @@ pub struct GhosttyVtEngine {
     /// just clone an `Arc`. Entries are evicted by *absence* from the placement
     /// walk — the binding exposes neither image enumeration nor any delete
     /// notification, so absence is the only signal available.
-    image_cache: HashMap<u32, Arc<ImageData>>,
+    image_cache: HashMap<u32, (u64, Arc<ImageData>)>,
     /// Retained scratch: image ids seen during this frame's walk, for eviction.
     image_ids_seen: Vec<u32>,
     /// The selection's fixed end (the drag anchor), as a **tracked** reference:
@@ -176,6 +176,14 @@ impl GhosttyVtEngine {
         // pull rows back from scrollback makes the two disagree and output lands
         // on the wrong rows. Upstream added this switch for exactly this case.
         term.set_resize_pull_scrollback(false)?;
+        // The glyph protocol (APC `25a1`) is on by default in libghostty: it
+        // registers glyf outlines and answers `s` (support) queries with
+        // `fmt=glyf`. But the C API exposes no way to read a registered outline
+        // back, and the renderer half isn't in this pin, so leaving it on would
+        // advertise glyphs giest then draws as tofu. Off until it can render.
+        // (Invisible over the inbox ConPTY, which strips APC; live over a
+        // sideloaded one — see `conpty-passthrough`.)
+        term.set_glyph_protocol_enabled(false)?;
 
         let responses: ResponseSink = Rc::new(RefCell::new(Vec::new()));
         let sink = responses.clone();
@@ -283,7 +291,7 @@ fn to_rgba(fmt: ImageFormat, comp: Compression, w: u32, h: u32, src: &[u8]) -> O
 ///
 /// Eviction by absence is the only strategy the VT engine's API supports: it
 /// exposes no way to enumerate stored images and no delete notification.
-fn evict_absent(cache: &mut HashMap<u32, Arc<ImageData>>, seen: &[u32]) {
+fn evict_absent<V>(cache: &mut HashMap<u32, V>, seen: &[u32]) {
     if cache.len() > seen.len() {
         cache.retain(|id, _| seen.contains(id));
     }
@@ -302,7 +310,7 @@ fn evict_absent(cache: &mut HashMap<u32, Arc<ImageData>>, seen: &[u32]) {
 fn walk_placements(
     term: &Terminal<'static, 'static>,
     iter: &mut PlacementIterator<'static>,
-    cache: &mut HashMap<u32, Arc<ImageData>>,
+    cache: &mut HashMap<u32, (u64, Arc<ImageData>)>,
     seen: &mut Vec<u32>,
     out: &mut Vec<ImagePlacement>,
 ) -> Result<()> {
@@ -341,10 +349,19 @@ fn walk_placements(
             continue;
         };
         let expected = (w as u64).saturating_mul(h as u64).saturating_mul(4);
+        // The image's generation stamp changes on every re-transmit *and*
+        // whenever an animated image's current frame changes (`image.data()`
+        // is the current frame), so keying the copy on it is what makes both
+        // a same-size re-transmit and kitty animation show up. 0 = unknown.
+        let generation = image.generation().unwrap_or(0);
         let data = match cache.get(&image_id) {
-            // Cheap fingerprint: the binding exposes no transmit timestamp, so a
-            // re-transmit at identical dimensions is indistinguishable.
-            Some(d) if d.width == w && d.height == h && d.rgba.len() as u64 == expected => {
+            Some((g, d))
+                if *g == generation
+                    && generation != 0
+                    && d.width == w
+                    && d.height == h
+                    && d.rgba.len() as u64 == expected =>
+            {
                 d.clone()
             }
             _ => {
@@ -357,7 +374,7 @@ fn walk_placements(
                     continue;
                 };
                 let d = Arc::new(ImageData { width: w, height: h, rgba });
-                cache.insert(image_id, d.clone());
+                cache.insert(image_id, (generation, d.clone()));
                 d
             }
         };
@@ -751,6 +768,76 @@ mod tests {
     }
 
     #[test]
+    fn glyph_protocol_is_not_advertised() {
+        let mut eng = kitty_engine();
+        eng.write(b"\x1b_25a1;s\x1b\\");
+        eng.write(b"\x1b_25a1;r;cp=e0a0;AAAAAAAAAAAAAA==\x1b\\");
+        assert!(
+            eng.take_responses().is_empty(),
+            "giest cannot render registered glyphs, so it must not answer the glyph protocol"
+        );
+    }
+
+    #[test]
+    fn kitty_retransmit_same_size_refreshes_pixels() {
+        // Same id, same 1x1 size, different colour: the old size fingerprint
+        // could not see this; the generation stamp does.
+        let mut eng = kitty_engine();
+        eng.write(b"\x1b_Ga=T,f=32,i=5,s=1,v=1,q=2;/wAA/w==\x1b\\"); // red
+        assert_eq!(snap(&mut eng).images[0].data.rgba, vec![255, 0, 0, 255]);
+        eng.write(b"\x1b_Ga=T,f=32,i=5,s=1,v=1,q=2;AAD//w==\x1b\\"); // blue
+        let s = snap(&mut eng);
+        assert!(s.images.iter().all(|p| p.data.rgba == vec![0, 0, 255, 255]));
+    }
+
+    #[test]
+    fn kitty_animation_frame_change_reaches_the_snapshot() {
+        // Client-driven animation: add frame 2 (a=f) and make it current
+        // (a=a,c=2). `image.data()` is the current frame and its generation
+        // changes, so the snapshot must carry the new pixels.
+        let mut eng = kitty_engine();
+        eng.write(b"\x1b_Ga=T,f=32,i=6,s=1,v=1,q=2;/wAA/w==\x1b\\"); // red root
+        eng.write(b"\x1b_Ga=f,f=32,i=6,s=1,v=1,q=2;AP8A/w==\x1b\\"); // green frame 2
+        eng.write(b"\x1b_Ga=a,i=6,c=2,q=2\x1b\\");
+        let s = snap(&mut eng);
+        assert_eq!(s.images.len(), 1);
+        assert_eq!(s.images[0].data.rgba, vec![0, 255, 0, 255]);
+        eng.write(b"\x1b_Ga=a,i=6,c=1,q=2\x1b\\");
+        assert_eq!(snap(&mut eng).images[0].data.rgba, vec![255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn kitty_relative_placement_follows_its_parent() {
+        // Parent image 1 placement 1 at the cursor (0,0); child image 2 placed
+        // relative to it with P=1,Q=1 and a cell offset H=3,V=2.
+        let mut eng = kitty_engine();
+        eng.write(b"\x1b_Ga=T,f=32,i=1,p=1,s=1,v=1,c=2,r=1,q=2;/wAA/w==\x1b\\");
+        eng.write(b"\x1b_Ga=t,f=32,i=2,s=1,v=1,q=2;AAD//w==\x1b\\");
+        eng.write(b"\x1b_Ga=p,i=2,p=1,P=1,Q=1,H=3,V=2,c=1,r=1,q=2\x1b\\");
+        let s = snap(&mut eng);
+        let parent = s.images.iter().find(|p| p.image_id == 1).expect("parent");
+        let child = s.images.iter().find(|p| p.image_id == 2).expect("child placed");
+        assert_eq!((child.col - parent.col, child.row - parent.row), (3, 2));
+    }
+
+    #[test]
+    fn kitty_placement_selects_no_cells() {
+        let mut eng = kitty_engine();
+        eng.write(b"before\r\n");
+        eng.write(KITTY_RGB_1X2);
+        eng.write(b"\r\nafter\r\n");
+        let s = snap(&mut eng);
+        let mut sel = 0;
+        for y in 0..s.rows {
+            for x in 0..s.cols {
+                if s.cell(x, y).is_some_and(|c| c.selected) {
+                    sel += 1;
+                }
+            }
+        }
+        assert_eq!(sel, 0, "a kitty placement must not mark cells selected");    }
+
+    #[test]
     fn kitty_transmit_and_display_yields_a_placement() {
         let mut eng = kitty_engine();
         eng.write(KITTY_RGB_1X2);
@@ -806,7 +893,7 @@ mod tests {
     #[test]
     fn evict_absent_drops_unseen_ids() {
         use super::evict_absent;
-        let mk = || Arc::new(crate::engine::ImageData { width: 1, height: 1, rgba: vec![0; 4] });
+        let mk = || (1u64, Arc::new(crate::engine::ImageData { width: 1, height: 1, rgba: vec![0; 4] }));
         let mut cache = HashMap::from([(1, mk()), (2, mk()), (3, mk())]);
         evict_absent(&mut cache, &[1, 3]);
         assert_eq!(cache.len(), 2);

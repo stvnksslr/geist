@@ -48,6 +48,7 @@ const WARMUP: Duration = Duration::from_secs(3);
 /// no diagnostic at all — the prompt marks simply never appear and every feature
 /// built on them quietly does nothing.
 fn drive(program: &str, args: &[String], steps: &[(&str, &str)]) -> Vec<u8> {
+    select_mode();
     let mut pty = Pty::spawn(program, args, None, &[], 80, 24, || {}).expect("spawn shell");
     let mut out = Vec::new();
     let started = Instant::now();
@@ -106,6 +107,7 @@ fn run(command: &str) -> Vec<u8> {
         "-Command".into(),
         command.into(),
     ];
+    select_mode();
     let mut pty = Pty::spawn("powershell.exe", &args, None, &[], 80, 24, || {}).expect("spawn shell");
 
     let mut out = Vec::new();
@@ -147,6 +149,20 @@ fn run(command: &str) -> Vec<u8> {
         out.extend_from_slice(&chunk);
     }
     out
+}
+
+/// Which ConPTY mode this run probes. `GIEST_TEST_PASSTHROUGH=1` requests
+/// `PSEUDOCONSOLE_PASSTHROUGH_MODE`; the choice is process-global in the
+/// vendored portable-pty, so it is set from the environment (identical for
+/// every test in the run) rather than per test, which would race.
+fn requested_passthrough() -> bool {
+    std::env::var("GIEST_TEST_PASSTHROUGH").is_ok_and(|v| v == "1")
+}
+
+fn select_mode() {
+    let on = requested_passthrough();
+    portable_pty::set_allow_sideload(on);
+    portable_pty::set_passthrough(on);
 }
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
@@ -405,6 +421,14 @@ fn enq_is_still_stripped_by_conpty() {
         contains(&out, b"giest-enq-open") && contains(&out, b"giest-enq-close"),
         "the probe itself did not run: {text:?}"
     );
+    if requested_passthrough() {
+        // Measured: the out-of-band ConPTY forwards ENQ too.
+        assert!(
+            contains(&out, b"giest-enq-open\x05giest-enq-close"),
+            "the sideloaded ConPTY no longer forwards ENQ. Got: {text:?}"
+        );
+        return;
+    }
     assert!(
         !contains(&out, b"giest-enq-open\x05giest-enq-close"),
         "ConPTY now forwards ENQ (0x05) — `enquiry-response` may be unblocked. \
@@ -414,10 +438,11 @@ fn enq_is_still_stripped_by_conpty() {
 
 #[test]
 #[ignore = "spawns a real shell; run with --ignored --nocapture"]
-fn apc_is_still_stripped_by_conpty() {
-    // The documented blocker for kitty graphics. Pinned as a test so that if a
-    // future Windows build *stops* stripping APC, this fails and tells us the
-    // feature is unblocked — the opposite of the usual regression direction.
+fn apc_is_stripped_unless_passthrough() {
+    // The documented blocker for kitty graphics. In the default (re-rendering)
+    // mode this is asserted *inverted*: if a future Windows build stops
+    // stripping APC, it fails and tells us the feature is unblocked there too.
+    // With passthrough on (GIEST_TEST_PASSTHROUGH=1) APC must arrive verbatim.
     let out = run(&emit(&cat(&[
         ESC.into(),
         lit("_Ggiest-apc-probe"),
@@ -425,6 +450,19 @@ fn apc_is_still_stripped_by_conpty() {
     ])));
     let text = String::from_utf8_lossy(&out);
     eprintln!("ConPTY emitted {} bytes: {:?}", out.len(), text);
+    if requested_passthrough() {
+        // The flag alone does nothing on the inbox conhost (measured: S_OK,
+        // APC still stripped). What forwards APC is the out-of-band ConPTY.
+        assert!(
+            portable_pty::sideloaded(),
+            "no conpty.dll next to the test exe — run scripts/fetch-conpty.ps1 first"
+        );
+        assert!(
+            contains(&out, b"\x1b_Ggiest-apc-probe\x1b\\"),
+            "passthrough is on but APC still did not arrive. Got: {text:?}"
+        );
+        return;
+    }
     assert!(
         !contains(&out, b"giest-apc-probe"),
         "ConPTY now passes APC through — kitty graphics may be unblocked. Got: {text:?}"
@@ -457,6 +495,7 @@ fn ghosttys_bash_integration_injects_through_the_wsl_bootstrap() {
         "-c".to_string(),
         r#"exec /bin/sh "$GIEST_SHELL_INTEGRATION_DIR/giest-wsl.sh""#.to_string(),
     ];
+    select_mode();
     let mut pty = Pty::spawn(sh, &args, None, &env, 80, 24, || {}).expect("spawn sh");
     let steps: [(&[u8], &[u8]); 2] = [
         (b"\x1b]133;A", b"echo giest-bash-ok; false\r"),

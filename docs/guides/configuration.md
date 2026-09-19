@@ -109,11 +109,14 @@ than hanging. Includes are re-read on config reload like everything else.
 | --- | --- | --- |
 | `image-storage-limit` | int (default `320000000`) | Bytes of image data retained per terminal screen. **Zero disables the image protocols and deletes everything stored.** Per screen, so the effective budget per pane is double. |
 
-⚠️ **Inline images do not currently work on Windows.** ConPTY re-renders the shell's output rather
-than passing it through, and drops the APC escape sequences the kitty protocol uses, so no image
-command reaches the terminal. This affects every Windows terminal, not just giest. giest's engine
-and rendering support is built and tested and will work once the PTY layer can deliver APC — see
-GAP.md for the detail.
+| `conpty-passthrough` | `auto` \| `true` \| `false` (default `auto`) | **giest-specific.** Which ConPTY runs the shell. `auto`/`true` use a `conpty.dll` + `OpenConsole.exe` placed next to `giest.exe` when present; `false` always uses the one built into Windows. Restart to apply. |
+
+⚠️ **Inline images need the newer ConPTY.** The ConPTY built into Windows re-renders the shell's
+output and drops the APC escape sequences the kitty protocol uses, so no image command reaches the
+terminal. The newer ConPTY that Windows Terminal ships forwards them. Run
+`pwsh scripts/fetch-conpty.ps1` to put it next to `giest.exe` (leave `conpty-passthrough` at
+`auto`), and images work. Animations advance only when the program switches frames itself
+(autoplay is not supported yet) — see GAP.md.
 
 ### Windows and working-directory inheritance
 
