@@ -142,6 +142,20 @@ pub struct Rect {
 /// The size is clamped to the work area — a `200%` or a `4000px` on a 1080p
 /// screen would otherwise put most of the window (and possibly all of its text)
 /// off the edge, with nothing on screen to say why.
+/// How far the quick terminal sits from its resting frame when `shown` (0..=1)
+/// of it is on screen: it slides in from, and out to, its own edge. `Center`
+/// has no edge to slide from and never moves.
+pub fn slide_offset(position: Position, w: f32, h: f32, shown: f32) -> (f32, f32) {
+    let hidden = 1.0 - shown.clamp(0.0, 1.0);
+    match position {
+        Position::Top => (0.0, -h * hidden),
+        Position::Bottom => (0.0, h * hidden),
+        Position::Left => (-w * hidden, 0.0),
+        Position::Right => (w * hidden, 0.0),
+        Position::Center => (0.0, 0.0),
+    }
+}
+
 pub fn frame(position: Position, size: &QuickSize, work: Rect) -> Rect {
     let (w, h) = size.calculate(position, work.w, work.h);
     let w = w.clamp(1.0, work.w);
@@ -326,5 +340,15 @@ mod tests {
             assert_eq!(Position::parse(s), Some(p));
         }
         assert_eq!(Position::parse("middle"), None);
+    }
+
+    #[test]
+    fn slide_offset_moves_toward_the_anchored_edge() {
+        assert_eq!(slide_offset(Position::Top, 800.0, 300.0, 0.0), (0.0, -300.0));
+        assert_eq!(slide_offset(Position::Top, 800.0, 300.0, 1.0), (0.0, 0.0));
+        assert_eq!(slide_offset(Position::Bottom, 800.0, 300.0, 0.5), (0.0, 150.0));
+        assert_eq!(slide_offset(Position::Left, 400.0, 900.0, 0.0), (-400.0, 0.0));
+        assert_eq!(slide_offset(Position::Right, 400.0, 900.0, 0.25), (300.0, 0.0));
+        assert_eq!(slide_offset(Position::Center, 400.0, 900.0, 0.0), (0.0, 0.0));
     }
 }

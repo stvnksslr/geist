@@ -26,7 +26,7 @@ features** that are neither — surveyed from `macos/Sources` and from the 673 u
 between the old pin (b869a6e) and `main`. Key/action extraction is the config-surface ledger's
 method, re-run against the `main` checkout the build fetches.
 
-Scoreboard: **116 of 208** public config keys · **70 of 88** actions · app features in §C.
+Scoreboard: **132 of 208** public config keys · **76 of 88** actions · app features in §C.
 Effort: **S** <1d · **M** 1–3d · **L** ~1wk · **XL** multi-week.
 
 ### A. Config keys still unsupported (92)
@@ -46,22 +46,30 @@ Effort: **S** <1d · **M** 1–3d · **L** ~1wk · **XL** multi-week.
 | `grapheme-width-method` | Engine already has mode 2027; expose the option. | S |
 | `cursor-text` | Text color under the cursor (incl. `cell-foreground`). | S |
 | `window-padding-color` | `background` / `extend` / `extend-always`: renderer extends edge cells into the padding. | M |
-| `window-show-tab-bar`, `maximize`, `fullscreen`, `title`, `initial-window`, `quit-after-last-window-closed` (+`-delay`) | Window lifecycle; `initial-window = false` needs a tray/background mode. | S each |
-| `split-preserve-zoom` | Keep zoom across focus/layout changes. | S |
+| ~~`window-show-tab-bar`, `maximize`, `fullscreen`, `title`, `initial-window`, `quit-after-last-window-closed` (+`-delay`)~~ | ✅ Done. **Resident mode** (no window open): the last window is kept as a tab-less template (`App::dormant`) and the root viewport is *hidden*, not closed — closing it is what ends an eframe process (eframe 0.34 still paints invisible windows, so timers and hotkeys run). Only a `global:` keybind (`new_window`, `new_tab`, `toggle_visibility`, `toggle_quick_terminal`) brings a window back — there is no tray icon yet. `quit-after-last-window-closed` defaults **true** (the Windows convention; upstream's default is "Linux only"); `-delay` quits when it expires with no window. `initial-window = false` starts resident (its first shell is spawned and immediately dropped — `Window::first` needs a session) and skips `window-save-state` restore; with no delay it stays resident. `window-show-tab-bar` **defaults to `always`** (divergence from `auto`): the strip holds the profile picker. `title`: a runtime `set_window_title`/`prompt_window_title` outranks it. `fullscreen = non-native*` behaves as `true` (upstream's non-macOS rule). The root × no longer lets eframe close the root itself (`CancelClose`, then the retire decides) — which also fixes the root × quitting giest while other windows were open. | — |
+| ~~`split-preserve-zoom`~~ | ✅ `navigation`: `goto_split` moves the zoom to the newly focused pane. Without it, navigating out of a zoom now **unzooms and moves** (upstream); giest used to refuse to navigate while zoomed. Directional nav while zoomed uses the unzoomed layout (`Node::leaf_rects`). | — |
 | `mouse-shift-capture`, `click-repeat-interval` | Mouse options (`0` → `GetDoubleClickTime`). | S |
 | `title-report`, `vt-kam-allowed` | Engine options. Title reports are now **off by default** upstream — a behavior change the bump brought in. | S |
 | `palette-generate`, `palette-harmonious` | Generate the 256-color cube from the 16 base colors. | S |
 | `command-palette-entry` | Custom palette rows (title/description/action). | S |
-| `window-subtitle`, `window-title-font-family` | Tab-strip text; subtitle = cwd. | S |
+| ~~`window-subtitle`, `window-title-font-family`~~ | ✅ ◐ Subtitle (`working-directory`) is appended to the window caption as `title — cwd` (a Windows caption has one line). The title font applies to the **tab strip** only — the caption is drawn by DWM with the system font; resolved through the renderer's font scan, startup-only. | — |
 | ~~`app-notifications`~~ | ✅ In-app toasts ("Copied to clipboard", "Reloaded the configuration"); `Window::render_toast`, per-window egui temp data. | S |
 | `language` | Only meaningful once the UI is localized — deferred. | — |
 
-**A2. Windows analogues of platform keys.** `window-decoration` (native vs client-drawn caption),
-`window-titlebar-background` / `-foreground` (Win11 `DWMWA_CAPTION_COLOR` makes this S),
-`window-colorspace` (display-p3 → HDR swapchain, L), `window-vsync` (present mode, S),
-`window-step-resize` (`WM_SIZING` snapping to cells, S), `font-thicken` + `-strength` (stroke
-dilation in the rasterizer, S), `drag-handle` (comes with pane drag, §C), `auto-update` /
-`auto-update-channel` (§C), `quick-terminal-animation-duration` (S).
+**A2. Windows analogues of platform keys.** Done (`winchrome.rs`): ✅ `window-decoration`
+(`none`/`false` → `ViewportCommand::Decorations(false)`; `auto`/`client`/`server` all mean "native
+caption", Windows having one decoration system; a reload re-reads it), ✅ `window-titlebar-background` /
+`-foreground` (Win11 `DWMWA_CAPTION_COLOR` / `DWMWA_TEXT_COLOR`, applied to **every** top-level
+window on the UI thread via `EnumThreadWindows` — child viewports have no reachable HWND; pre-Win11
+ignores them; unlike GTK not gated on `window-theme = ghostty`), ✅ `window-vsync` (`AutoVsync` /
+`AutoNoVsync`, **startup-only**: the swapchain predates the app), ◐ `window-step-resize` (a
+`WM_SIZING` subclass on the **root window only** — the one HWND giest can reach — snapping the
+client to whole cells of the non-grid overhead measured each frame; with splits it snaps the whole
+pane area, not each pane), ✅ `quick-terminal-animation-duration` (slide in/out from the anchored
+edge, ease-out cubic; `center` doesn't slide; a newly *created* quick terminal may show one frame at
+rest before the slide starts). Still open: `window-colorspace` (display-p3 → HDR swapchain, L),
+`font-thicken` + `-strength` (stroke dilation in the rasterizer, S), `drag-handle` (comes with pane
+drag, §C), `auto-update` / `auto-update-channel` (§C).
 
 **A3. Blocked.** `enquiry-response` — ConPTY strips ENQ (probed; see the config-surface ledger).
 
@@ -75,17 +83,17 @@ dilation in the rasterizer, S), `drag-handle` (comes with pane drag, §C), `auto
 | Action | Plan | Effort |
 |---|---|---|
 | ~~`resize_split`, `equalize_splits`~~ ✅ | Done: `Node::Split::ratio`, nearest-ancestor resize (10–90% + 2-cell clamp), leaf-weighted equalize, ratios persisted (`S v 0.3`; old files read 0.5). Upstream's non-macOS `super+ctrl+shift+arrow` defaults are not bound — giest sees no Win-key modifier. | M |
-| `prompt_window_title`, `prompt_surface_title` | Reuse the tab-rename box. | S |
-| `move_tab_to_new_window` | Detach a `Tab` (undo already does this losslessly) into `spawn_window`. | S |
-| `goto_window`, `toggle_visibility` | Window cycling; hide/show all windows. | S |
+| ~~`prompt_window_title`, `prompt_surface_title`~~ ✅ | A small modal (in both input gates) prefilled with the current title; empty clears the override. A modal rather than the inline tab-rename box: a pane or window has no strip slot to edit in. | S |
+| ~~`move_tab_to_new_window`~~ ✅ | The active tab is moved (shells running) into `Window::sibling_with`; a window's only tab is a no-op, as upstream. Not undoable (upstream neither). | S |
+| ~~`goto_window`, `toggle_visibility`~~ ✅ | `toggle_visibility` is app-scoped: `Visible(false/true)` to every window but the quick terminal, focus restored on show, no-op while fullscreen (upstream). Only a `global:` bind can bring hidden windows back. | S |
 | `reset_window_size` | Re-apply `window-width` / `-height`. | S |
 | `copy_url_to_clipboard` | `url_at` under the pointer → clipboard. | S |
 | `scroll_to_selection`, `paste_from_selection` | Scroll to the selection's tracked ref; emulate a primary-selection buffer. | S |
 | `end_key_sequence` | Flush a pending leader as literal keys. | S |
-| `toggle_window_decorations` | With `window-decoration`. | S |
+| ~~`toggle_window_decorations`~~ ✅ | Per window, via `ViewportCommand::Decorations`. | S |
 | `check_for_updates` | With auto-update. | — |
 | `toggle_tab_overview` | Thumbnail-grid overlay. | M–L |
-| `show_on_screen_keyboard` | Touch keyboard (`IFrameworkInputPane`). | S |
+| ~~`show_on_screen_keyboard`~~ ✅ | `ITipInvocation::Toggle` on the touch-keyboard broker (hand-declared vtable); starts `TabTip.exe` if the broker isn't running; silent without one. It *toggles* — Windows exposes no reliable "is it visible" query on Win11 — so a second press hides it. Needs a human check on a touch-keyboard machine. | S |
 | `crash`, `cursor_key`, `show_gtk_inspector` | Debug-only / internal / GTK — N/A. | — |
 
 ### C. App-level features (no key, no action)

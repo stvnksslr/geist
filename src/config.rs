@@ -922,6 +922,42 @@ pub enum OscColorReportFormat {
 }
 
 /// User-facing configuration applied at startup.
+/// Ghostty `window-decoration`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowDecoration {
+    Auto,
+    Client,
+    Server,
+    None,
+}
+
+impl WindowDecoration {
+    /// Whether the native caption/border is drawn. Windows has one decoration
+    /// system, so `auto`, `client` and `server` all mean "yes".
+    pub fn decorated(self) -> bool {
+        self != WindowDecoration::None
+    }
+}
+
+/// Ghostty `window-show-tab-bar`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShowTabBar {
+    Always,
+    Auto,
+    Never,
+}
+
+impl ShowTabBar {
+    /// Whether the strip is shown for a window with `tabs` tabs.
+    pub fn visible(self, tabs: usize) -> bool {
+        match self {
+            ShowTabBar::Always => true,
+            ShowTabBar::Auto => tabs > 1,
+            ShowTabBar::Never => false,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Config {
     /// Logical font size in points (scaled by the display DPI for the atlas).
@@ -1155,6 +1191,43 @@ pub struct Config {
     /// Whether the quick terminal hides itself when it loses focus. Ghostty
     /// `quick-terminal-autohide`, whose default is **false** off macOS.
     pub quick_terminal_autohide: bool,
+    /// Duration of the quick terminal's slide in/out, in seconds; 0 disables
+    /// it. Ghostty `quick-terminal-animation-duration`.
+    pub quick_terminal_animation_duration: f64,
+    /// Ghostty `window-decoration`. `none` removes the native caption and
+    /// border; every other value (Windows has one decoration system) keeps it.
+    pub window_decoration: WindowDecoration,
+    /// Ghostty `window-titlebar-background` / `-foreground`. Applied through
+    /// DWM (`DWMWA_CAPTION_COLOR` / `DWMWA_TEXT_COLOR`), which is Windows 11
+    /// only; older systems ignore them.
+    pub window_titlebar_background: Option<Rgb>,
+    pub window_titlebar_foreground: Option<Rgb>,
+    /// Ghostty `window-show-tab-bar`.
+    pub window_show_tab_bar: ShowTabBar,
+    /// Start new windows maximized / fullscreen. Ghostty `maximize` /
+    /// `fullscreen` (every `non-native*` value behaves as `true`, as upstream
+    /// documents for non-macOS platforms).
+    pub maximize: bool,
+    pub fullscreen: bool,
+    /// A fixed window title that overrides everything the shell sets. Ghostty
+    /// `title`.
+    pub title: Option<String>,
+    /// Ghostty `window-subtitle`: `true` means `working-directory`.
+    pub window_subtitle: bool,
+    /// Font family for the tab strip's titles. Ghostty
+    /// `window-title-font-family`.
+    pub window_title_font_family: Option<String>,
+    /// Resize the window in whole-cell steps. Ghostty `window-step-resize`.
+    pub window_step_resize: bool,
+    /// Present with vsync. Ghostty `window-vsync`; startup-only in giest.
+    pub window_vsync: bool,
+    /// Ghostty `quit-after-last-window-closed` (+ `-delay`, in milliseconds).
+    pub quit_after_last_window_closed: bool,
+    pub quit_after_last_window_closed_delay_ms: Option<u64>,
+    /// Ghostty `initial-window`.
+    pub initial_window: bool,
+    /// Ghostty `split-preserve-zoom = navigation`.
+    pub split_preserve_zoom_navigation: bool,
     /// When to show the grid-size overlay on resize. Ghostty `resize-overlay`.
     pub resize_overlay: ResizeOverlay,
     /// Where that overlay sits in the pane. Ghostty `resize-overlay-position`.
@@ -1354,6 +1427,27 @@ impl Default for Config {
             // to a hidden quick terminal, so hiding it on every focus change is
             // the more surprising behaviour of the two.
             quick_terminal_autohide: false,
+            quick_terminal_animation_duration: 0.2,
+            window_decoration: WindowDecoration::Auto,
+            window_titlebar_background: None,
+            window_titlebar_foreground: None,
+            // Divergence: upstream's default is `auto`. giest's tab strip also
+            // carries the new-tab profile picker, so hiding it with one tab would
+            // hide the only mouse route to cmd / WSL / ... -- keep it by default.
+            window_show_tab_bar: ShowTabBar::Always,
+            maximize: false,
+            fullscreen: false,
+            title: None,
+            window_subtitle: false,
+            window_title_font_family: None,
+            window_step_resize: false,
+            window_vsync: true,
+            // Upstream's default is `builtin.os.tag == .linux`, i.e. "the
+            // platform convention"; the Windows convention is to quit.
+            quit_after_last_window_closed: true,
+            quit_after_last_window_closed_delay_ms: None,
+            initial_window: true,
+            split_preserve_zoom_navigation: false,
             resize_overlay: ResizeOverlay::AfterFirst,
             resize_overlay_position: ResizeOverlayPosition::Center,
             resize_overlay_duration_ms: 750,
@@ -2379,6 +2473,96 @@ const SETTERS: &[(&str, Setter)] = &[
     ("palette-harmonious", |c, v, d| {
         c.palette_harmonious = parse_bool(v, d.palette_harmonious);
     }),
+    ("quick-terminal-animation-duration", |c, v, d| {
+        c.quick_terminal_animation_duration = match v {
+            "" => d.quick_terminal_animation_duration,
+            _ => match v.parse::<f64>() {
+                Ok(x) if x.is_finite() && x >= 0.0 => x.min(10.0),
+                _ => c.quick_terminal_animation_duration,
+            },
+        }
+    }),
+    ("window-decoration", |c, v, d| {
+        c.window_decoration = match v.to_ascii_lowercase().as_str() {
+            "" => d.window_decoration,
+            "auto" | "true" => WindowDecoration::Auto,
+            "client" => WindowDecoration::Client,
+            "server" => WindowDecoration::Server,
+            "none" | "false" => WindowDecoration::None,
+            _ => c.window_decoration,
+        }
+    }),
+    ("window-titlebar-background", |c, v, d| {
+        c.window_titlebar_background = match v {
+            "" => d.window_titlebar_background,
+            _ => parse_color(v).or(c.window_titlebar_background),
+        }
+    }),
+    ("window-titlebar-foreground", |c, v, d| {
+        c.window_titlebar_foreground = match v {
+            "" => d.window_titlebar_foreground,
+            _ => parse_color(v).or(c.window_titlebar_foreground),
+        }
+    }),
+    ("window-show-tab-bar", |c, v, d| {
+        c.window_show_tab_bar = match v.to_ascii_lowercase().as_str() {
+            "" => d.window_show_tab_bar,
+            "always" => ShowTabBar::Always,
+            "auto" => ShowTabBar::Auto,
+            "never" => ShowTabBar::Never,
+            _ => c.window_show_tab_bar,
+        }
+    }),
+    ("maximize", |c, v, d| c.maximize = parse_bool(v, d.maximize)),
+    ("fullscreen", |c, v, d| {
+        c.fullscreen = match v.to_ascii_lowercase().as_str() {
+            "" => d.fullscreen,
+            "non-native" | "non-native-visible-menu" | "non-native-padded-notch" => true,
+            _ => parse_bool(v, c.fullscreen),
+        }
+    }),
+    // An empty value resets (upstream: quote spaces for a blank title), so a
+    // value of only spaces is kept verbatim.
+    ("title", |c, v, _d| c.title = (!v.is_empty()).then(|| v.to_string())),
+    ("window-subtitle", |c, v, d| {
+        c.window_subtitle = match v.to_ascii_lowercase().as_str() {
+            "" => d.window_subtitle,
+            "working-directory" => true,
+            "false" => false,
+            _ => c.window_subtitle,
+        }
+    }),
+    ("window-title-font-family", |c, v, _d| {
+        c.window_title_font_family = (!v.is_empty()).then(|| v.to_string())
+    }),
+    ("window-step-resize", |c, v, d| {
+        c.window_step_resize = parse_bool(v, d.window_step_resize)
+    }),
+    ("window-vsync", |c, v, d| c.window_vsync = parse_bool(v, d.window_vsync)),
+    ("quit-after-last-window-closed", |c, v, d| {
+        c.quit_after_last_window_closed = parse_bool(v, d.quit_after_last_window_closed)
+    }),
+    ("quit-after-last-window-closed-delay", |c, v, d| {
+        c.quit_after_last_window_closed_delay_ms = if v.is_empty() {
+            d.quit_after_last_window_closed_delay_ms
+        } else {
+            parse_duration_ms(v).or(c.quit_after_last_window_closed_delay_ms)
+        }
+    }),
+    ("initial-window", |c, v, d| c.initial_window = parse_bool(v, d.initial_window)),
+    // A packed-struct flag list: `navigation` / `no-navigation`, comma-separated.
+    ("split-preserve-zoom", |c, v, d| {
+        if v.is_empty() {
+            c.split_preserve_zoom_navigation = d.split_preserve_zoom_navigation;
+        }
+        for flag in v.split(',').map(str::trim) {
+            match flag.to_ascii_lowercase().as_str() {
+                "navigation" | "true" => c.split_preserve_zoom_navigation = true,
+                "no-navigation" | "false" => c.split_preserve_zoom_navigation = false,
+                _ => {}
+            }
+        }
+    }),
     ("title-report", |c, v, d| c.title_report = parse_bool(v, d.title_report)),
     ("vt-kam-allowed", |c, v, d| c.vt_kam_allowed = parse_bool(v, d.vt_kam_allowed)),
     ("grapheme-width-method", |c, v, d| {
@@ -3001,6 +3185,64 @@ mod tests {
     /// Parse a Ghostty-format config body over the defaults.
     fn parsed(body: &str) -> Config {
         Config::from_ghostty_config(body)
+    }
+
+    #[test]
+    fn window_chrome_keys_parse() {
+        let d = Config::default();
+        assert_eq!(d.window_decoration, WindowDecoration::Auto);
+        assert!(d.quit_after_last_window_closed && d.initial_window && d.window_vsync);
+        assert_eq!(parsed("window-decoration = none").window_decoration, WindowDecoration::None);
+        assert_eq!(parsed("window-decoration = false").window_decoration, WindowDecoration::None);
+        assert_eq!(parsed("window-decoration = true").window_decoration, WindowDecoration::Auto);
+        assert_eq!(parsed("window-decoration = server").window_decoration, WindowDecoration::Server);
+        assert!(!WindowDecoration::None.decorated() && WindowDecoration::Client.decorated());
+        assert_eq!(
+            parsed("window-titlebar-background = #102030").window_titlebar_background,
+            Some(Rgb::new(0x10, 0x20, 0x30))
+        );
+        assert_eq!(
+            parsed("window-titlebar-foreground = #ffffff\nwindow-titlebar-foreground =")
+                .window_titlebar_foreground,
+            None
+        );
+        assert_eq!(parsed("window-show-tab-bar = auto").window_show_tab_bar, ShowTabBar::Auto);
+        assert!(!ShowTabBar::Auto.visible(1) && ShowTabBar::Auto.visible(2));
+        assert!(!ShowTabBar::Never.visible(5) && ShowTabBar::Always.visible(1));
+        assert!(parsed("maximize = true").maximize);
+        assert!(parsed("fullscreen = non-native").fullscreen);
+        assert!(parsed("fullscreen = true").fullscreen);
+        assert!(!parsed("fullscreen = true\nfullscreen = false").fullscreen);
+        assert_eq!(parsed("title = \"  \"").title.as_deref(), Some("  "));
+        assert_eq!(parsed("title = work\ntitle =").title, None);
+        assert!(parsed("window-subtitle = working-directory").window_subtitle);
+        assert!(!parsed("window-subtitle = false").window_subtitle);
+        assert_eq!(
+            parsed("window-title-font-family = Segoe UI").window_title_font_family.as_deref(),
+            Some("Segoe UI")
+        );
+        assert!(parsed("window-step-resize = true").window_step_resize);
+        assert!(!parsed("window-vsync = false").window_vsync);
+        assert!(!parsed("quit-after-last-window-closed = false").quit_after_last_window_closed);
+        assert_eq!(
+            parsed("quit-after-last-window-closed-delay = 5s")
+                .quit_after_last_window_closed_delay_ms,
+            Some(5000)
+        );
+        assert!(!parsed("initial-window = false").initial_window);
+        assert!(parsed("split-preserve-zoom = navigation").split_preserve_zoom_navigation);
+        assert!(
+            !parsed("split-preserve-zoom = navigation\nsplit-preserve-zoom = no-navigation")
+                .split_preserve_zoom_navigation
+        );
+        assert_eq!(
+            parsed("quick-terminal-animation-duration = 0").quick_terminal_animation_duration,
+            0.0
+        );
+        assert_eq!(
+            parsed("quick-terminal-animation-duration = -1").quick_terminal_animation_duration,
+            0.2
+        );
     }
 
     #[test]
