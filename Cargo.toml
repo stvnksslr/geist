@@ -26,9 +26,11 @@ rustybuzz = "0.20"
 # Clipboard read for Ctrl+Shift+V paste (egui only emits a paste event for
 # Ctrl+V; this lets us read the clipboard for the Ctrl+Shift+V binding too).
 arboard = "3"
-# Base64 decode for OSC 52 clipboard-set sequences; also base64-encode the
+# Base64 for the kitty clipboard (OSC 5522) replay in clipboard.rs; also encode the
 # PowerShell OSC 7 startup hook for `-EncodedCommand` (see profiles.rs).
 base64 = "0.22"
+# Regex scrollback search (search.rs), matched over wrap-joined logical lines.
+regex = "1"
 # Percent-decode the OSC 7 working-directory URI a shell reports, so a new split
 # can inherit the parent pane's directory (see session.rs::osc7_to_path).
 percent-encoding = "2"

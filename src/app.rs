@@ -3458,6 +3458,12 @@ impl Window {
                     // One line only: the overlay is a substring search over
                     // single rows, so a multi-line selection could never match.
                     let needle = needle.lines().next().unwrap_or_default().to_string();
+                    // The selection is literal text; in regex mode, say so.
+                    let needle = if s.search_state().is_some_and(|st| st.regex) {
+                        regex::escape(&needle)
+                    } else {
+                        needle
+                    };
                     if !s.search_active() {
                         s.open_search();
                     }
@@ -4153,7 +4159,7 @@ impl Window {
     fn render_search(&mut self, ctx: &egui::Context) {
         let cell_h = self.cell_h;
         // Snapshot the overlay state (and clear the one-shot focus flag).
-        let (mut query, count, current, case, just_opened) = {
+        let (mut query, count, current, case, regex, error, just_opened) = {
             let Some(s) = self.focused_session_mut() else {
                 return;
             };
@@ -4167,6 +4173,8 @@ impl Window {
                 st.count(),
                 st.current,
                 st.case_sensitive,
+                st.regex,
+                st.error.clone(),
                 just,
             )
         };
@@ -4176,6 +4184,7 @@ impl Window {
         let mut next = false;
         let mut prev = false;
         let mut toggle_case = false;
+        let mut toggle_regex = false;
 
         // Anchor inside the *focused pane*, not the window.
         //
@@ -4246,13 +4255,35 @@ impl Window {
                             } else {
                                 format!("{}/{}", current + 1, count)
                             };
-                            ui.add_sized([54.0, 0.0], egui::Label::new(label));
+                            // A pattern that doesn't compile (usually mid-typing)
+                            // shows as a red "!" whose tooltip says why, rather than
+                            // a "0/0" that reads as "no matches".
+                            match &error {
+                                Some(e) => {
+                                    let red = ui.visuals().error_fg_color;
+                                    ui.add_sized(
+                                        [54.0, 0.0],
+                                        egui::Label::new(egui::RichText::new("!").color(red)),
+                                    )
+                                    .on_hover_text(format!("Invalid regex: {e}"));
+                                }
+                                None => {
+                                    ui.add_sized([54.0, 0.0], egui::Label::new(label));
+                                }
+                            }
                             if ui
                                 .selectable_label(case, "Aa")
                                 .on_hover_text("Match case")
                                 .clicked()
                             {
                                 toggle_case = true;
+                            }
+                            if ui
+                                .selectable_label(regex, ".*")
+                                .on_hover_text("Regular expression")
+                                .clicked()
+                            {
+                                toggle_regex = true;
                             }
                             if ui
                                 .button("\u{2191}")
@@ -4280,6 +4311,9 @@ impl Window {
             } else {
                 if toggle_case {
                     s.toggle_search_case(cell_h);
+                }
+                if toggle_regex {
+                    s.toggle_search_regex(cell_h);
                 }
                 if changed {
                     s.set_search_query(query, cell_h);

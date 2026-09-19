@@ -1463,6 +1463,17 @@ impl Session {
 
     /// Toggle case-sensitivity and re-match, keeping the view near the same place.
     pub fn toggle_search_case(&mut self, cell_h: f32) {
+        self.rematch_search(cell_h, |s| s.case_sensitive = !s.case_sensitive);
+    }
+
+    /// Toggle regex matching and re-match, keeping the view near the same place.
+    pub fn toggle_search_regex(&mut self, cell_h: f32) {
+        self.rematch_search(cell_h, |s| s.regex = !s.regex);
+    }
+
+    /// Change a matching option, re-run the search over the captured text, and
+    /// select the match nearest the viewport.
+    fn rematch_search(&mut self, cell_h: f32, change: impl FnOnce(&mut SearchState)) {
         // `select_nearest` compares against *capture-space* rows, so a live
         // viewport row has to have the drift taken back out of it.
         let target = self.capture_space_row(self.viewport_bottom_row());
@@ -1470,7 +1481,7 @@ impl Session {
             let Some(s) = self.search.as_mut() else {
                 return;
             };
-            s.case_sensitive = !s.case_sensitive;
+            change(s);
             s.run(&self.search_text);
             s.select_nearest(target);
             s.current_match()

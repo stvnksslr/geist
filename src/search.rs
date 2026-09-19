@@ -65,20 +65,91 @@ pub fn search_rows(rows: &[RowText], needle: &str, case_sensitive: bool) -> Vec<
     };
     let pat: Vec<char> = needle.chars().map(fold).collect();
     let mut out = Vec::new();
-
-    // One logical line at a time: `hay` is the folded text, `origin` maps each
-    // char back to the cell it came from.
     let mut hay: Vec<char> = Vec::new();
+    for_each_line(rows, |chars, origin| {
+        if chars.len() < pat.len() {
+            return;
+        }
+        hay.clear();
+        hay.extend(chars.iter().map(|&c| fold(c)));
+        let mut j = 0;
+        while j + pat.len() <= hay.len() {
+            if hay[j..j + pat.len()] == pat[..] {
+                out.push(span(origin, j, j + pat.len() - 1));
+                j += pat.len(); // non-overlapping
+            } else {
+                j += 1;
+            }
+        }
+    });
+    out
+}
+
+/// Compile a regex query. Case-insensitive unless `case_sensitive` — with
+/// Unicode case folding, unlike the substring search's ASCII fold, because
+/// that is what the `regex` crate does and there is no reason to cripple it.
+pub fn compile_regex(needle: &str, case_sensitive: bool) -> Result<regex::Regex, String> {
+    regex::RegexBuilder::new(needle)
+        .case_insensitive(!case_sensitive)
+        .build()
+        .map_err(|e| match e {
+            regex::Error::Syntax(s) => s.lines().last().unwrap_or("invalid pattern").to_string(),
+            other => other.to_string(),
+        })
+}
+
+/// Every non-overlapping, non-empty match of `re` across `rows`, in the same
+/// shape and order as [`search_rows`]. Matching runs over the same wrap-joined
+/// logical lines, so a match may span a soft wrap — but never a hard line
+/// break: `^`/`$` anchor to a logical line, as they would in the program that
+/// printed it. Empty matches (`a*` against `b`) are skipped: there is no cell
+/// to highlight and they would make navigation step through nothing.
+pub fn search_rows_regex(rows: &[RowText], re: &regex::Regex) -> Vec<Match> {
+    let mut out = Vec::new();
+    let mut text = String::new();
+    let mut byte_to_char: Vec<usize> = Vec::new();
+    for_each_line(rows, |chars, origin| {
+        text.clear();
+        byte_to_char.clear();
+        for (i, &c) in chars.iter().enumerate() {
+            text.push(c);
+            byte_to_char.resize(text.len(), i);
+        }
+        for m in re.find_iter(&text) {
+            if m.is_empty() {
+                continue;
+            }
+            out.push(span(origin, byte_to_char[m.start()], byte_to_char[m.end() - 1]));
+        }
+    });
+    out
+}
+
+/// The match covering joined-line chars `first..=last`.
+fn span(origin: &[Origin], first: usize, last: usize) -> Match {
+    let (s, e) = (origin[first], origin[last]);
+    Match {
+        row: s.row,
+        col_start: s.col,
+        end_row: e.row,
+        col_end: e.col,
+    }
+}
+
+/// Call `f` once per logical line: the chars of a row plus every row it
+/// soft-wraps onto, with each char's origin cell.
+fn for_each_line(rows: &[RowText], mut f: impl FnMut(&[char], &[Origin])) {
+    let mut chars: Vec<char> = Vec::new();
     let mut origin: Vec<Origin> = Vec::new();
     let mut i = 0;
     while i < rows.len() {
-        hay.clear();
+        chars.clear();
         origin.clear();
         // Consume this row and every row it wraps onto.
         loop {
             let r = &rows[i];
             for (k, &ch) in r.chars.iter().enumerate() {
-                hay.push(fold(ch));
+                chars.push(ch);
                 origin.push(Origin {
                     row: r.row,
                     col: r.cols.get(k).copied().unwrap_or(0),
@@ -91,27 +162,8 @@ pub fn search_rows(rows: &[RowText], needle: &str, case_sensitive: bool) -> Vec<
             }
             i += 1;
         }
-
-        if hay.len() < pat.len() {
-            continue;
-        }
-        let mut j = 0;
-        while j + pat.len() <= hay.len() {
-            if hay[j..j + pat.len()] == pat[..] {
-                let (s, e) = (origin[j], origin[j + pat.len() - 1]);
-                out.push(Match {
-                    row: s.row,
-                    col_start: s.col,
-                    end_row: e.row,
-                    col_end: e.col,
-                });
-                j += pat.len(); // non-overlapping
-            } else {
-                j += 1;
-            }
-        }
+        f(&chars, &origin);
     }
-    out
 }
 
 /// A match mapped into the current viewport for the renderer: the viewport row
@@ -131,6 +183,12 @@ pub struct SearchState {
     pub query: String,
     /// Whether matching is case-sensitive (default off).
     pub case_sensitive: bool,
+    /// Treat `query` as a regular expression (default off). giest-only:
+    /// Ghostty's search, and lib-vt's native search API, are substring-only.
+    pub regex: bool,
+    /// Why the regex query doesn't compile, for the search bar. `None` when it
+    /// does, or when regex mode is off.
+    pub error: Option<String>,
     /// Matches for the current query over the captured screen text, oldest first.
     pub matches: Vec<Match>,
     /// Index of the emphasized ("current") match; only meaningful when `matches`
@@ -175,6 +233,8 @@ impl SearchState {
         Self {
             query: String::new(),
             case_sensitive: false,
+            regex: false,
+            error: None,
             matches: Vec::new(),
             current: 0,
             just_opened: true,
@@ -185,7 +245,21 @@ impl SearchState {
     /// Recompute matches for the current query over `rows`, clamping `current`
     /// so it stays in range.
     pub fn run(&mut self, rows: &[RowText]) {
-        self.matches = search_rows(rows, &self.query, self.case_sensitive);
+        self.error = None;
+        self.matches = if !self.regex {
+            search_rows(rows, &self.query, self.case_sensitive)
+        } else if self.query.is_empty() {
+            Vec::new()
+        } else {
+            match compile_regex(&self.query, self.case_sensitive) {
+                Ok(re) => search_rows_regex(rows, &re),
+                // Mid-typing (`foo(`) is the common case: show why, match nothing.
+                Err(e) => {
+                    self.error = Some(e);
+                    Vec::new()
+                }
+            }
+        };
         if self.current >= self.matches.len() {
             self.current = 0;
         }
@@ -349,6 +423,66 @@ mod tests {
         };
         let m = search_rows(&[row], "x", false);
         assert_eq!(m[0].col_start, 2, "match column follows the cols map");
+    }
+
+    fn re(p: &str) -> regex::Regex {
+        compile_regex(p, false).unwrap()
+    }
+
+    #[test]
+    fn regex_finds_patterns_with_rows_and_columns() {
+        let r = rows(&["err 404 ok", "err 500"], 3);
+        let m = search_rows_regex(&r, &re(r"\d{3}"));
+        assert_eq!(m, vec![Match::single(3, 4, 6), Match::single(4, 4, 6)]);
+    }
+
+    #[test]
+    fn regex_matches_across_a_soft_wrap_but_not_a_hard_break() {
+        let w = wrapped_rows(&["hello wond", "erful"], 0);
+        let m = search_rows_regex(&w, &re("won.*ful"));
+        assert_eq!(m, vec![Match { row: 0, col_start: 6, end_row: 1, col_end: 4 }]);
+        // `$` anchors to the logical line, so it isn't the wrap point…
+        assert!(search_rows_regex(&w, &re("wond$")).is_empty());
+        // …while unwrapped rows are separate lines.
+        let r = rows(&["abc", "def"], 0);
+        assert!(search_rows_regex(&r, &re("c.d")).is_empty());
+        assert_eq!(search_rows_regex(&r, &re("^d")).len(), 1);
+    }
+
+    #[test]
+    fn regex_maps_multibyte_chars_to_their_columns() {
+        // '世' is 3 UTF-8 bytes and 2 columns wide: byte offsets must not leak
+        // into column numbers.
+        let row = RowText { row: 0, chars: vec!['世', 'x', 'y'], cols: vec![0, 2, 3], wrapped: false };
+        assert_eq!(search_rows_regex(&[row.clone()], &re("xy")), vec![Match::single(0, 2, 3)]);
+        assert_eq!(search_rows_regex(&[row], &re("世x")), vec![Match::single(0, 0, 2)]);
+    }
+
+    #[test]
+    fn regex_skips_empty_matches_and_honours_case() {
+        let r = rows(&["bbb"], 0);
+        assert!(search_rows_regex(&r, &re("a*")).is_empty());
+        let r = rows(&["Foo foo"], 0);
+        assert_eq!(search_rows_regex(&r, &re("foo")).len(), 2);
+        assert_eq!(search_rows_regex(&r, &compile_regex("foo", true).unwrap()).len(), 1);
+        // Unicode folding in regex mode (the substring search folds ASCII only).
+        let r = rows(&["ÉCOLE"], 0);
+        assert_eq!(search_rows_regex(&r, &re("école")).len(), 1);
+    }
+
+    #[test]
+    fn an_invalid_regex_reports_why_and_matches_nothing() {
+        let mut s = SearchState::new();
+        s.regex = true;
+        s.query = "foo(".into();
+        s.run(&rows(&["foo("], 0));
+        assert_eq!(s.count(), 0);
+        assert!(s.error.is_some());
+        // The same text as a plain query is fine, and clears the error.
+        s.regex = false;
+        s.run(&rows(&["foo("], 0));
+        assert_eq!(s.count(), 1);
+        assert_eq!(s.error, None);
     }
 
     #[test]

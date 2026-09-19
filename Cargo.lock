@@ -992,6 +992,7 @@ dependencies = [
  "pollster",
  "portable-pty",
  "raw-window-handle",
+ "regex",
  "rustybuzz",
  "unicode-width",
  "windows-sys 0.61.2",
