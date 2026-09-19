@@ -298,6 +298,33 @@ pub enum PaddingBalance {
     Equal,
 }
 
+/// What colour the padding band around the grid takes. Ghostty
+/// `window-padding-color`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum PaddingColor {
+    /// The configured `background`.
+    #[default]
+    Background,
+    /// Extend the nearest cell's background, except where upstream's
+    /// heuristics say it would look wrong (see `padding::extend_edges`).
+    Extend,
+    /// Extend unconditionally.
+    ExtendAlways,
+}
+
+/// Ghostty `link-previews`: when the URL under the pointer is shown in a
+/// banner at the bottom of the pane.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum LinkPreviews {
+    /// For every matched link.
+    #[default]
+    All,
+    /// Never.
+    Never,
+    /// Only for OSC 8 hyperlinks, whose target can differ from their text.
+    Osc8,
+}
+
 /// Split the leftover pixels on one axis into (leading, trailing) padding.
 ///
 /// A pure function so the three modes can be table-tested. `Balanced` caps the
@@ -1175,6 +1202,15 @@ pub struct Config {
     pub link_osc8: bool,
     /// Ghostty `link-url`: bare URLs in the text are clickable.
     pub link_url: bool,
+    /// Ghostty `link`: extra regex link matchers, earlier ones first. Matched
+    /// text opens with the system opener. Upstream declares the key but cannot
+    /// parse it yet ("TODO: This can't currently be set!"), so giest's syntax
+    /// is the obvious one: `link = <regex>`, repeatable, empty clears.
+    pub links: Vec<regex::Regex>,
+    /// Ghostty `link-previews`.
+    pub link_previews: LinkPreviews,
+    /// Ghostty `window-padding-color`.
+    pub window_padding_color: PaddingColor,
     /// Initial window size in terminal **cells**; `0` means "let the OS decide".
     /// Ghostty `window-width` / `window-height`, including its 10×4 minimum.
     /// Applies to a new window only — resizing later is the user's business.
@@ -1371,6 +1407,9 @@ impl Default for Config {
             desktop_notifications: true,
             link_osc8: true,
             link_url: true,
+            links: Vec::new(),
+            link_previews: LinkPreviews::All,
+            window_padding_color: PaddingColor::Background,
             window_width: 0,
             window_height: 0,
             window_position_x: None,
@@ -1879,6 +1918,34 @@ const SETTERS: &[(&str, Setter)] = &[
     }),
     ("link-osc8", |c, v, d| c.link_osc8 = parse_bool(v, d.link_osc8)),
     ("link-url", |c, v, d| c.link_url = parse_bool(v, d.link_url)),
+    ("link", |c, v, d| {
+        if v.is_empty() {
+            c.links = d.links.clone();
+        } else {
+            match regex::Regex::new(v) {
+                Ok(re) => c.links.push(re),
+                Err(e) => diag!("giest: ignoring bad link regex {v:?}: {e}"),
+            }
+        }
+    }),
+    ("link-previews", |c, v, d| {
+        c.link_previews = match v.to_ascii_lowercase().as_str() {
+            "" => d.link_previews,
+            "true" | "yes" | "on" | "1" => LinkPreviews::All,
+            "false" | "no" | "off" | "0" => LinkPreviews::Never,
+            "osc8" => LinkPreviews::Osc8,
+            _ => c.link_previews,
+        }
+    }),
+    ("window-padding-color", |c, v, d| {
+        c.window_padding_color = match v.to_ascii_lowercase().as_str() {
+            "" => d.window_padding_color,
+            "background" => PaddingColor::Background,
+            "extend" => PaddingColor::Extend,
+            "extend-always" => PaddingColor::ExtendAlways,
+            _ => c.window_padding_color,
+        }
+    }),
     ("clipboard-write-limit-bytes", |c, v, d| {
         c.clipboard.write_limit = match v {
             "" => d.clipboard.write_limit,
@@ -3136,6 +3203,29 @@ mod tests {
         assert_ne!(p[101], c.palette[101], "cube regenerated");
         // Ramp runs background -> foreground.
         assert_ne!(p[232], c.palette[232]);
+    }
+
+    #[test]
+    fn link_table_previews_and_padding_color() {
+        let c = parsed("");
+        assert!(c.links.is_empty());
+        assert_eq!(c.link_previews, LinkPreviews::All);
+        assert_eq!(c.window_padding_color, PaddingColor::Background);
+        let c = parsed(
+            "link = JIRA-\\d+\nlink = [\nlink = ^/tmp/\\S+\nlink-previews = osc8\n\
+             window-padding-color = extend-always",
+        );
+        // The bad regex is skipped; the good ones keep their order.
+        assert_eq!(c.links.len(), 2);
+        assert_eq!(c.links[0].as_str(), r"JIRA-\d+");
+        assert_eq!(c.link_previews, LinkPreviews::Osc8);
+        assert_eq!(c.window_padding_color, PaddingColor::ExtendAlways);
+        let c = parsed(
+            "link = a\nlink =\nlink-previews = false\nwindow-padding-color = extend",
+        );
+        assert!(c.links.is_empty(), "an empty value clears the table");
+        assert_eq!(c.link_previews, LinkPreviews::Never);
+        assert_eq!(c.window_padding_color, PaddingColor::Extend);
     }
 
     #[test]

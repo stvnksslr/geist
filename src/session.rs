@@ -30,7 +30,12 @@ const DEFAULT_COLS: u16 = 80;
 const DEFAULT_ROWS: u16 = 24;
 
 pub struct Session {
-    pty: Pty,
+    /// `None` for a pane whose shell failed to start (see [`Session::failed`]):
+    /// the pane stays open and says why, rather than silently not appearing.
+    pty: Option<Pty>,
+    /// Why the shell could not be started, shown in the exit bar until a key
+    /// dismisses it.
+    spawn_error: Option<String>,
     engine: GhosttyVtEngine,
     /// Shared so the per-frame render copy is a refcount bump, not a deep clone
     /// of the cell grid (see `App::render_active`). `Arc` (not `Rc`) because the
@@ -133,6 +138,13 @@ pub struct Session {
     /// The cell under the mouse pointer this frame, if it is over this pane.
     /// Read by `copy_url_to_clipboard` and the link-hover preview.
     pub hover_cell: Option<(u16, u16)>,
+    /// The link under the pointer when the context menu opened (for its
+    /// "Copy URL" item); the pointer is over the menu after that.
+    pub menu_link: Option<String>,
+    /// The `link` config table, earlier rules first.
+    links: Vec<regex::Regex>,
+    /// The quoting language of this pane's shell, for file drops.
+    shell: crate::dropfiles::ShellKind,
     /// Ghostty `scrollback-compression`; drives [`Session::idle_work`].
     scrollback_compression: bool,
     /// Precision of OSC color-query replies. Read at pump time rather than per
@@ -235,7 +247,7 @@ impl Session {
     ) -> Result<Self> {
         let wake_ctx = ctx.clone();
         let args = profile.launch_args();
-        let mut pty = Pty::spawn(
+        let pty = Pty::spawn(
             &profile.program,
             &args,
             cwd,
@@ -253,6 +265,47 @@ impl Session {
             // correct and would silently stop that window updating.
             move || wake_ctx.request_repaint_of(egui::ViewportId::ROOT),
         )?;
+        Self::build(config, profile, Some(pty))
+    }
+
+    /// A pane whose shell could not be started. It has a terminal (so the
+    /// failure is printed *in* the pane, like Ghostty's surface error view)
+    /// and no PTY, and it stays open until a key dismisses it -- the old
+    /// behaviour was for the tab or split to simply never appear.
+    pub fn failed(config: &Config, profile: &Profile, error: &str) -> Result<Self> {
+        let mut s = Self::build(config, profile, None)?;
+        s.alive = false;
+        let msg = spawn_error_message(&s.launched, error);
+        s.engine.write(msg.replace('\n', "\r\n").as_bytes());
+        s.spawn_error = Some(msg);
+        Ok(s)
+    }
+
+    /// Write to the shell, if there is one (a [`Session::failed`] pane has none).
+    fn pty_write(&mut self, bytes: &[u8]) -> Result<()> {
+        match self.pty.as_mut() {
+            Some(p) => p.write(bytes),
+            None => Ok(()),
+        }
+    }
+
+    /// Type the paths of files dropped onto this pane, quoted for its shell.
+    /// Through [`Self::paste_str`], so paste protection and bracketed paste
+    /// apply exactly as they do to a clipboard paste.
+    pub fn drop_paths(&mut self, paths: &[PathBuf]) {
+        if paths.is_empty() {
+            return;
+        }
+        let text = crate::dropfiles::quote_paths(self.shell, paths);
+        self.paste_str(&text);
+    }
+
+    /// Why this pane's shell failed to start, if it did.
+    pub fn spawn_error(&self) -> Option<&str> {
+        self.spawn_error.as_deref()
+    }
+
+    fn build(config: &Config, profile: &Profile, mut pty: Option<Pty>) -> Result<Self> {
         let mut engine = GhosttyVtEngine::new(DEFAULT_COLS, DEFAULT_ROWS, config.scrollback_limit)?;
         engine.apply_theme(config.fg, config.bg, &config.effective_palette())?;
         engine.set_cursor_color(config.cursor)?;
@@ -270,7 +323,9 @@ impl Session {
         if !config.input.is_empty() {
             match crate::config::resolve_input(&config.input) {
                 Some(bytes) if !bytes.is_empty() => {
-                    let _ = pty.write(&bytes);
+                    if let Some(pty) = pty.as_mut() {
+                        let _ = pty.write(&bytes);
+                    }
                 }
                 Some(_) => {}
                 None => eprintln!("giest: an `input` source could not be read; sending none"),
@@ -285,6 +340,7 @@ impl Session {
         };
 
         Ok(Self {
+            spawn_error: None,
             exit: None,
             exit_dismissed: false,
             wait_after_command: config.wait_after_command,
@@ -322,6 +378,9 @@ impl Session {
             scroll_to_bottom: config.scroll_to_bottom,
             scrollback_compression: config.scrollback_compression,
             hover_cell: None,
+            menu_link: None,
+            links: config.links.clone(),
+            shell: crate::dropfiles::ShellKind::from_program(&profile.program),
             osc_color_report_format: config.osc_color_report_format,
             cursor_style: config.cursor_style,
             cursor_style_blink: config.cursor_style_blink,
@@ -370,7 +429,8 @@ impl Session {
         let mut marks: Vec<Mark> = Vec::new();
         let mut osc9: Vec<Osc9> = Vec::new();
         loop {
-            match self.pty.output.try_recv() {
+            let Some(pty) = self.pty.as_ref() else { break };
+            match pty.output.try_recv() {
                 Ok(chunk) => {
                     // `scroll-to-bottom = output` (off by default): new data
                     // yanks the viewport to the live edge. Off by default in
@@ -411,11 +471,11 @@ impl Session {
         self.handle_osc9(osc9);
         self.refresh_search_after_prune();
         // Primary exit signal on Windows: poll the shell process itself.
-        if self.alive && !self.pty.is_running() {
+        if self.alive && !self.pty.as_mut().is_some_and(Pty::is_running) {
             self.alive = false;
         }
         if !self.alive && self.exit.is_none() {
-            if let Some(info) = self.pty.exit_info() {
+            if let Some(info) = self.pty.as_mut().and_then(Pty::exit_info) {
                 let hold = exit_hold(self.wait_after_command, self.abnormal_exit_ms, info);
                 self.exit = Some((info, hold));
             }
@@ -439,7 +499,7 @@ impl Session {
             }
         }
         if !responses.is_empty() {
-            let _ = self.pty.write(&responses);
+            let _ = self.pty_write(&responses);
         }
         // A BEL during this pump arms both bell paths for the next frame. Two
         // flags, not one: each is consumed by a different caller (see the field
@@ -497,7 +557,7 @@ impl Session {
     /// and avoids telling the program anything it didn't already know.
     fn reply_to_clipboard_query(&mut self, targets: &str) {
         if let Some(text) = read_clipboard() {
-            let _ = self.pty.write(&crate::osc52::query_reply(targets, &text));
+            let _ = self.pty_write(&crate::osc52::query_reply(targets, &text));
         }
     }
 
@@ -670,11 +730,17 @@ impl Session {
     /// Whether `reap_dead` should drop this pane: the shell has exited and no
     /// exit bar is holding it open (or its bar was dismissed with a key).
     pub fn should_reap(&self) -> bool {
+        if self.spawn_error.is_some() {
+            return self.exit_dismissed;
+        }
         !self.alive && (self.exit_dismissed || self.exit.is_none_or(|(_, h)| h == ExitHold::Close))
     }
 
     /// The exit bar to draw, as (message, is-error), while the pane is held.
     pub fn exit_bar(&self) -> Option<(String, bool)> {
+        if let Some(e) = &self.spawn_error {
+            return (!self.exit_dismissed).then(|| (format!("{e}  Press any key to close."), true));
+        }
         let (info, hold) = self.exit?;
         if hold == ExitHold::Close || self.exit_dismissed {
             return None;
@@ -782,7 +848,9 @@ impl Session {
             let _ = self
                 .engine
                 .resize(cols, rows, (cell_w as u32, cell_h as u32));
-            let _ = self.pty.resize(cols, rows);
+            if let Some(p) = &self.pty {
+                let _ = p.resize(cols, rows);
+            }
             // Reflow invalidates the line-based pin; snap back to the live bottom
             // so scroll bookkeeping stays consistent.
             self.scroll_px = 0.0;
@@ -969,7 +1037,7 @@ impl Session {
     /// safety check. Scrolls to the live bottom, like Ghostty and like typing.
     fn write_paste(&mut self, text: &str) {
         let encoded = self.engine.encode_paste(text);
-        let _ = self.pty.write(&encoded);
+        let _ = self.pty_write(&encoded);
         self.scroll_target_px = 0.0;
     }
 
@@ -998,7 +1066,7 @@ impl Session {
 
     /// Send a full terminal reset (RIS) to the shell (menu "Reset Terminal").
     pub fn reset(&mut self) {
-        let _ = self.pty.write(b"\x1bc");
+        let _ = self.pty_write(b"\x1bc");
     }
 
     /// Re-apply runtime-changeable config to the live engine (command palette's
@@ -1008,6 +1076,7 @@ impl Session {
     /// changed here — but `image-storage-limit` genuinely is re-appliable, and
     /// setting it to zero wipes every stored image live.
     pub fn apply_config(&mut self, config: &Config) {
+        self.links = config.links.clone();
         let _ = self.engine.apply_theme(config.fg, config.bg, &config.effective_palette());
         let _ = self.engine.set_cursor_color(config.cursor);
         let _ = self.engine.set_bold_color(config.bold_color);
@@ -1217,7 +1286,7 @@ impl Session {
             return;
         }
         self.scroll_target_px = 0.0;
-        let _ = self.pty.write(text.as_bytes());
+        let _ = self.pty_write(text.as_bytes());
     }
 
     pub fn send_chords(&mut self, chords: &[crate::keybind::Chord]) {
@@ -1232,7 +1301,7 @@ impl Session {
         }
         if !bytes.is_empty() {
             self.scroll_target_px = 0.0;
-            let _ = self.pty.write(&bytes);
+            let _ = self.pty_write(&bytes);
         }
     }
 
@@ -1547,9 +1616,28 @@ impl Session {
     ///
     /// `osc8` / `bare` are Ghostty's `link-osc8` / `link-url` switches.
     pub fn url_at(&self, cell: (u16, u16), osc8: bool, bare: bool) -> Option<String> {
-        osc8.then(|| self.engine.hyperlink_at(cell.0, cell.1))
+        self.link_at(cell, osc8, bare).map(|(url, _)| url)
+    }
+
+    /// [`Self::url_at`], also saying which matcher found it. Upstream's order:
+    /// OSC 8, then the `link` table, then the bare-URL matcher (`link-url`),
+    /// which is documented as always the lowest priority.
+    pub fn link_at(
+        &self,
+        cell: (u16, u16),
+        osc8: bool,
+        bare: bool,
+    ) -> Option<(String, crate::links::LinkSource)> {
+        use crate::links::{LinkSource, rule_match_at};
+        if osc8 && let Some(u) = self.engine.hyperlink_at(cell.0, cell.1) {
+            return Some((u, LinkSource::Osc8));
+        }
+        if let Some(m) = rule_match_at(&self.snapshot, cell.0, cell.1, &self.links) {
+            return Some((m, LinkSource::Rule));
+        }
+        bare.then(|| find_url_at(&self.snapshot, cell.0, cell.1))
             .flatten()
-            .or_else(|| bare.then(|| find_url_at(&self.snapshot, cell.0, cell.1)).flatten())
+            .map(|u| (u, LinkSource::Url))
     }
 
     /// The current selection's text, if any (for copy-on-select).
@@ -1678,7 +1766,7 @@ impl Session {
                 // otherwise the paste would overtake it.
                 egui::Event::Paste(text) => {
                     if !bytes.is_empty() {
-                        let _ = self.pty.write(&bytes);
+                        let _ = self.pty_write(&bytes);
                         bytes.clear();
                     }
                     self.paste_str(text);
@@ -1780,7 +1868,7 @@ impl Session {
             if self.scroll_to_bottom.keystroke {
                 self.scroll_target_px = 0.0;
             }
-            let _ = self.pty.write(&bytes);
+            let _ = self.pty_write(&bytes);
         }
         if typed && self.selection_clear_on_typing {
             self.clear_selection();
@@ -1950,7 +2038,7 @@ impl Session {
         }
 
         if !out.is_empty() {
-            let _ = self.pty.write(&out);
+            let _ = self.pty_write(&out);
         }
     }
 }
@@ -2705,9 +2793,16 @@ pub fn exit_message(hold: ExitHold, info: ExitInfo, command: &str) -> String {
     }
 }
 
+/// The text a [`Session::failed`] pane shows: what was launched and why it
+/// could not start. One line each, so it reads as a message rather than a log.
+pub fn spawn_error_message(command: &str, error: &str) -> String {
+    let error = error.trim();
+    format!("Failed to start \"{command}\": {error}")
+}
+
 #[cfg(test)]
 mod exit_tests {
-    use super::{ExitHold, exit_hold, exit_message};
+    use super::{ExitHold, exit_hold, exit_message, spawn_error_message};
     use crate::pty::ExitInfo;
 
     fn info(code: u32, runtime_ms: u64) -> ExitInfo {
@@ -2732,6 +2827,16 @@ mod exit_tests {
         assert_eq!(exit_hold(true, 250, info(1, 251)), ExitHold::Wait);
         // A zero threshold only catches instant failures.
         assert_eq!(exit_hold(false, 0, info(1, 1)), ExitHold::Close);
+    }
+
+    #[test]
+    fn a_spawn_error_names_the_command_and_the_cause() {
+        let m = spawn_error_message("nosuch.exe -l", "The system cannot find the file specified. (os error 2)
+");
+        assert_eq!(
+            m,
+            "Failed to start \"nosuch.exe -l\": The system cannot find the file specified. (os error 2)"
+        );
     }
 
     #[test]

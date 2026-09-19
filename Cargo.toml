@@ -19,6 +19,9 @@ ab_glyph = "0.2.32"
 # per visible pane per frame — does no per-cell heap allocation in the common
 # case. Derefs to &str, so read sites are unchanged.
 compact_str = "0.8"
+# The `link` config table (user regex link matchers). Already in the tree
+# transitively; this only names it.
+regex = "1"
 # HarfBuzz-equivalent text shaper (pure Rust) for ligature/contextual-alternate
 # substitution. We shape per-style cell runs and snap the resulting glyphs back
 # onto the terminal grid by cluster.

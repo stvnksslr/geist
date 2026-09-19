@@ -425,6 +425,15 @@ pub enum Action {
     JumpToPrompt(i8),
     SplitRight,
     SplitDown,
+    /// Ghostty `new_split:left` -- the new pane goes *before* the focused one.
+    SplitLeft,
+    /// Ghostty `new_split:up`.
+    SplitUp,
+    /// Ghostty `prompt_surface_title`: a dialog that sets the focused pane's
+    /// title override.
+    PromptSurfaceTitle,
+    /// The About dialog (giest-specific; macOS Ghostty has it in the app menu).
+    ShowAbout,
     /// Zoom the focused split to fill the tab, hiding the other panes; toggles
     /// (Ghostty `toggle_split_zoom`).
     ToggleSplitZoom,
@@ -548,6 +557,10 @@ impl Action {
             }
             Action::SplitRight => "Split Right",
             Action::SplitDown => "Split Down",
+            Action::SplitLeft => "Split Left",
+            Action::SplitUp => "Split Up",
+            Action::PromptSurfaceTitle => "Change Terminal Title",
+            Action::ShowAbout => "About giest",
             Action::ToggleSplitZoom => "Toggle Split Zoom",
             Action::ResizeSplit(SplitDir::Up, _) => "Resize Split: Up",
             Action::ResizeSplit(SplitDir::Down, _) => "Resize Split: Down",
@@ -634,6 +647,10 @@ impl Action {
             | Action::ScrollPageFraction(_)
             | Action::Quit
             | Action::PromptTabTitle
+            | Action::SplitLeft
+            | Action::SplitUp
+            | Action::PromptSurfaceTitle
+            | Action::ShowAbout
             | Action::ToggleMaximize
             | Action::ToggleFloatOnTop
             | Action::ToggleBackgroundOpacity
@@ -716,6 +733,10 @@ impl Action {
             Action::LastTab => "last_tab".into(),
             Action::SplitRight => "new_split:right".into(),
             Action::SplitDown => "new_split:down".into(),
+            Action::SplitLeft => "new_split:left".into(),
+            Action::SplitUp => "new_split:up".into(),
+            Action::PromptSurfaceTitle => "prompt_surface_title".into(),
+            Action::ShowAbout => "show_about".into(),
             Action::ToggleSplitZoom => "toggle_split_zoom".into(),
             Action::ResizeSplit(d, n) => format!("resize_split:{},{n}", d.name()),
             Action::EqualizeSplits => "equalize_splits".into(),
@@ -854,8 +875,10 @@ impl Action {
         if let Some(rest) = s.strip_prefix("new_split:") {
             // giest splits the focused pane; left/right share an axis, up/down too.
             return match rest.trim() {
-                "right" | "left" => Some(Action::SplitRight),
-                "down" | "up" => Some(Action::SplitDown),
+                "right" => Some(Action::SplitRight),
+                "left" => Some(Action::SplitLeft),
+                "down" => Some(Action::SplitDown),
+                "up" => Some(Action::SplitUp),
                 _ => None,
             };
         }
@@ -924,6 +947,8 @@ impl Action {
             "redo" => Action::Redo,
             "quit" | "close_all_windows" => Action::Quit,
             "prompt_tab_title" => Action::PromptTabTitle,
+            "prompt_surface_title" => Action::PromptSurfaceTitle,
+            "show_about" => Action::ShowAbout,
             "equalize_splits" => Action::EqualizeSplits,
             // Ghostty's `ignore`: bind the key to nothing, black-holing it. Not
             // the same as `unbind`, which removes the binding and lets the key
@@ -987,6 +1012,10 @@ const BASE_ACTIONS: &[Action] = &[
     Action::PrevTab,
     Action::SplitRight,
     Action::SplitDown,
+    Action::SplitLeft,
+    Action::SplitUp,
+    Action::PromptSurfaceTitle,
+    Action::ShowAbout,
     Action::ToggleSplitZoom,
     Action::EqualizeSplits,
     Action::ResizeSplit(SplitDir::Left, RESIZE_SPLIT_STEP),
@@ -1231,6 +1260,21 @@ mod tests {
             Action::from_name("set_surface_title:"),
             Some(Action::SetSurfaceTitle(Arc::from("")))
         );
+    }
+
+    #[test]
+    fn all_four_split_directions_and_the_title_prompt_round_trip() {
+        for (name, want) in [
+            ("new_split:right", Action::SplitRight),
+            ("new_split:left", Action::SplitLeft),
+            ("new_split:down", Action::SplitDown),
+            ("new_split:up", Action::SplitUp),
+            ("prompt_surface_title", Action::PromptSurfaceTitle),
+            ("show_about", Action::ShowAbout),
+        ] {
+            assert_eq!(Action::from_name(name), Some(want.clone()), "{name}");
+            assert_eq!(want.name(), name);
+        }
     }
 
     #[test]

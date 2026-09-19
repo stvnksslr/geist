@@ -10,6 +10,7 @@
 //! environment — engine snapshots, the PTY, shaping — without going through the
 //! GUI binary.
 
+pub mod about;
 pub mod app;
 pub mod bell;
 pub mod bgimage;
@@ -17,14 +18,19 @@ pub mod blur;
 pub mod command;
 pub mod config;
 pub mod decscusr;
+pub mod dropfiles;
 pub mod engine;
 pub mod hotkey;
 pub mod icon;
 pub mod ime;
+pub mod indicators;
 pub mod inspector;
 pub mod keybind;
+pub mod links;
+pub mod menu;
 pub mod notify;
 pub mod osc133;
+pub mod padding;
 pub mod osc52;
 pub mod osc7;
 pub mod osc_color;

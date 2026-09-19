@@ -26,10 +26,10 @@ features** that are neither — surveyed from `macos/Sources` and from the 673 u
 between the old pin (b869a6e) and `main`. Key/action extraction is the config-surface ledger's
 method, re-run against the `main` checkout the build fetches.
 
-Scoreboard: **116 of 208** public config keys · **70 of 88** actions · app features in §C.
+Scoreboard: **119 of 208** public config keys · **71 of 88** actions · app features in §C.
 Effort: **S** <1d · **M** 1–3d · **L** ~1wk · **XL** multi-week.
 
-### A. Config keys still unsupported (92)
+### A. Config keys still unsupported (89)
 
 **A1. Real work, cross-platform.** Ordered roughly by value.
 
@@ -38,14 +38,14 @@ Effort: **S** <1d · **M** 1–3d · **L** ~1wk · **XL** multi-week.
 | `shell-integration`, `shell-integration-features` | Off switch + feature flags for the prompt hooks `profiles.rs` injects. **Also the WSL story**: ship Ghostty's bash/zsh/fish scripts into WSL. | M |
 | `scrollback-compression` | Engine now exposes `Terminal::compress` + `compression_activity`; needs a per-session idle timer (compress after N s without an activity-token change). | S |
 | `cursor-click-to-move` | OSC 133 `click_events` (engine support landed, 3263ce5): turn a click on the prompt line into arrow keys. | M |
-| `link`, `link-previews` | Regex link table (the `link-url` matcher becomes its lowest entry) + hover label (§C). | M |
+| ~~`link`, `link-previews`~~ | ✅ Done (`links.rs`). Priority is upstream's: OSC 8, then `link` rules in order, then `link-url` last. Divergence: upstream declares `link` but cannot parse it ("TODO: This can't currently be set!"), so giest's syntax is its own — `link = <regex>`, repeatable, empty clears, action always "open"; a match is matched per row (no cross-wrap). `link-previews = true/false/osc8` gates the hover banner. | — |
 | ~~`env`, `input`, `initial-command`, `wait-after-command`, `abnormal-command-exit-runtime`~~ | ✅ Done. `env` is an ordered map (empty resets, `KEY=` removes) passed to `CommandBuilder::env`; `input` decodes Zig escapes for `raw:`/`path:`/untagged, 10MB cap, all-or-nothing; `initial-command` resolves like `command` (a profile name keeps its prompt hooks) for the startup surface only — a `window-save-state` restore replaces it. The abnormal check needs a non-zero code (upstream waives that only on macOS) and measures runtime from `GetProcessTimes`, not from when the 500 ms idle poll noticed. | — |
 | `key-remap` | Modifier swap ahead of `decide_key`. | S |
 | `font-codepoint-map`, `clipboard-codepoint-map` | Per-range face override in `atlas.rs`; a replace table on copy. | M / S |
 | `font-shaping-break` | Run-splitting options in the shaper. | S |
 | `grapheme-width-method` | Engine already has mode 2027; expose the option. | S |
 | `cursor-text` | Text color under the cursor (incl. `cell-foreground`). | S |
-| `window-padding-color` | `background` / `extend` / `extend-always`: renderer extends edge cells into the padding. | M |
+| ~~`window-padding-color`~~ | ✅ Done (`padding.rs`), **needs human visual confirmation**. Upstream extends per pixel in its cell shader; giest paints the same nearest-cell colours as egui rects after the terminal callback (the per-pane scissor is the grid box, so the renderer cannot reach the band). `extend` applies upstream's `neverExtendBg` to the top/bottom rows (default-bg cell or powerline glyph) — minus the prompt-row check, since the snapshot has no per-row OSC 133 marks. A custom shader does not see the fill (it is painted after the offscreen pass). | — |
 | `window-show-tab-bar`, `maximize`, `fullscreen`, `title`, `initial-window`, `quit-after-last-window-closed` (+`-delay`) | Window lifecycle; `initial-window = false` needs a tray/background mode. | S each |
 | `split-preserve-zoom` | Keep zoom across focus/layout changes. | S |
 | `mouse-shift-capture`, `click-repeat-interval` | Mouse options (`0` → `GetDoubleClickTime`). | S |
@@ -70,12 +70,12 @@ dilation in the rasterizer, S), `drag-handle` (comes with pane drag, §C), `auto
 `-space-behavior`, `config-default-files` (CLI-only), `term` (ConPTY sets its own),
 `freetype-load-flags`, and the private `_`-prefixed fields.
 
-### B. Keybind actions still missing (18)
+### B. Keybind actions still missing (17)
 
 | Action | Plan | Effort |
 |---|---|---|
 | ~~`resize_split`, `equalize_splits`~~ ✅ | Done: `Node::Split::ratio`, nearest-ancestor resize (10–90% + 2-cell clamp), leaf-weighted equalize, ratios persisted (`S v 0.3`; old files read 0.5). Upstream's non-macOS `super+ctrl+shift+arrow` defaults are not bound — giest sees no Win-key modifier. | M |
-| `prompt_window_title`, `prompt_surface_title` | Reuse the tab-rename box. | S |
+| `prompt_window_title` (~~`prompt_surface_title`~~ ✅) | `prompt_surface_title` done: a modal "Change Terminal Title" dialog (both gates), addressed by tab id + leaf id; empty restores the program's title. `new_split:left` / `:up` now place the new pane before the focused one instead of aliasing right/down. | S |
 | `move_tab_to_new_window` | Detach a `Tab` (undo already does this losslessly) into `spawn_window`. | S |
 | `goto_window`, `toggle_visibility` | Window cycling; hide/show all windows. | S |
 | `reset_window_size` | Re-apply `window-width` / `-height`. | S |
@@ -95,20 +95,20 @@ dilation in the rasterizer, S), `drag-handle` (comes with pane drag, §C), `auto
 | **IME / preedit** (CJK, dead keys, Win+. emoji panel) | ◐ | Done: `PlatformOutput::ime` at the cursor cell (candidate window placement), `Event::Ime` preedit/commit (`ime.rs`, commit/Text dedupe, keys held back while composing), preedit drawn underlined at the cursor. Missing: preedit caret/segment styling (egui drops winit's cursor range), overlong preedit doesn't wrap; needs a human check with a real CJK IME | M |
 | **Split divider drag** | ✅ | Grab band ±3pt around the gutter, resize cursor, clamped to 2 cells a side; double-click equalizes (upstream). Needs human visual confirmation. | M |
 | **Pane drag-to-rearrange, drag out to tab/window** | ⬜ | drop-zone overlay, detach-then-insert (one process, no IPC) | L |
-| **File drag-and-drop** → shell-quoted path | ⬜ | `dropped_files`, per-shell quoting, through `Session::paste_str` | S |
+| **File drag-and-drop** → shell-quoted path | ✅ | `dropfiles.rs`: PowerShell single quotes, cmd double quotes, WSL `/mnt/c/…` (and `\\wsl$\distro\…` back to its Linux path) with POSIX quoting; through `Session::paste_str`. Lands in the pane under the pointer, else the focused one (Windows may report no pointer motion during an OLE drag); accent outline while hovering. Needs a human drag test. | S |
 | **Accessibility** (Narrator/NVDA) | ⬜ | AccessKit via egui; grid as a text node | L |
 | **Child-exited bar** (exit code, abnormal exit, press-any-key) | ✅ | Painter-only strip at the pane bottom (red on failure); any key dismisses and `reap_dead` closes the pane. A held pane is not alive, so it never counts as busy for quit confirmation. **Needs human visual confirmation.** Divergence: upstream prints its non-GUI fallback into the terminal and also shows it on a normal close for undo; giest shows the bar only while held. | S–M |
-| Renderer-error / spawn-error views | ⬜ | message instead of a blank or vanished pane | S |
+| Renderer-error / spawn-error views | ✅ | A failed spawn becomes `Session::failed`: a PTY-less pane that prints the error and holds a red exit bar until a key (the first window no longer aborts startup). A lost wgpu device (`set_device_lost_callback`) paints a message over the terminal **and** shows a native `MessageBoxW`, because egui draws through the same dead device. Device loss is untested on real hardware. | S |
 | **Config-errors dialog** | ✅ | parser diagnostics (unknown keys, bad values, malformed lines, unreadable includes, missing theme) collected into `Config::diagnostics`; modal with Reload Configuration / Ignore, re-shown only when the set changes. Not every setter reports a bad value yet — many still keep the old value silently | S |
-| Right-click menu completeness | ◐ | add Copy, Split Left/Up, Inspector, Read-only, title prompts, Copy URL | S |
-| Key-sequence / key-table indicator | ⬜ | draw the pending leader + active table | S |
-| Link hover preview | ⬜ | label at the pane bottom | S |
-| Per-tab bell + progress indicators | ◐ | 🔔 and a thin bar on the tab, not only window title / taskbar | S |
-| Taskbar overlay badge (Dock badge analogue) | ⬜ | `ITaskbarList3::SetOverlayIcon` (add the vtable slot in `taskbar.rs`) | S |
+| Right-click menu completeness | ✅ | `menu.rs`: Copy URL (on a link, latched when the menu opens), Copy, Paste, Split Right/Left/Down/Up, Select All, Reset Terminal, Toggle Inspector, Read-only (checked), Change Tab Title…, Change Terminal Title…; routed through `execute_action` | S |
+| Key-sequence / key-table indicator | ✅ | bottom-centre pill: `[table › table]  \|  ctrl+a …`. Divergence: not draggable top/bottom like macOS | S |
+| Link hover preview | ✅ | banner at the pane's bottom-left, hops right when the pointer is over it (macOS `URLHoverBanner`); `link-previews` | S |
+| Per-tab bell + progress indicators | ✅ | warn-coloured dot before the tab title (set for background tabs / unfocused windows, cleared when seen); 2pt `OSC 9;4` bar along the tab's top edge (red error, amber paused, sweeping indeterminate). No per-pane bar | S |
+| Taskbar overlay badge (Dock badge analogue) | ✅ | `SetOverlayIcon` (vtable slot 18, layout pinned by a test) with a generated 16px red dot while a bell rang unseen in a background window. Only windows with a recorded `HWND` (the first) — same limit as progress | S |
 | Notification click → focus pane (+ highlight flash) | ⬜ | `NIN_BALLOONUSERCLICK` → session; suppress while focused | M |
-| Undo feedback ("Undo Close Tab") | ◐ | toast / palette label | S |
-| Search bar match count, drag-to-corner | ◐ | | S |
-| About box | ⬜ | modal (both modal gates!) with version / commit / links | S |
+| Undo feedback ("Undo Close Tab") | ✅ | toast naming the op (`Undo: reopened 2 tabs`, `Redo: closed split`) on the window it touched | S |
+| Search bar match count, drag-to-corner | ✅ | `3/17` (upstream's format); a grip drags the bar and it snaps to the quadrant it was dropped in | S |
+| About box | ✅ | modal (both gates) with version, commit (`build.rs` → `GIEST_GIT_COMMIT`), build profile, links; from the palette ("About giest", `show_about`) and the tab strip's ⏷ menu | S |
 | **CLI arguments** (`giest <dir>`, `-e`, `+new-window`) | ⬜ | `main.rs` reads none today | S |
 | **Single-instance IPC** (App Intents / AppleScript / Services analogue) | ⬜ | JSON over a named pipe: new window/tab, focus, input text, run action | L |
 | Explorer "Open giest here" | ⬜ | `Directory\Background\shell`; the new-tab form needs IPC | S / M |

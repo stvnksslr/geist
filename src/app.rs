@@ -42,6 +42,11 @@ struct Tab<T> {
     /// and the other splits are hidden (Ghostty's `toggle_split_zoom`). Cleared
     /// when the tree structure changes or the zoomed leaf goes away.
     zoomed: Option<u64>,
+    /// A bell rang in this tab while it was not being looked at (a background
+    /// tab, or any tab of an unfocused window). Drawn as a marker on the tab and
+    /// cleared once the tab is active in a focused window -- the per-tab form of
+    /// the macOS app's bell badge.
+    bell: bool,
 }
 
 impl<T> Tab<T> {
@@ -56,6 +61,7 @@ impl<T> Tab<T> {
             name: None,
             color: None,
             zoomed: None,
+            bell: false,
         }
     }
     fn focused_payload(&self) -> &T {
@@ -199,26 +205,42 @@ impl<T> Node<T> {
     /// Replace leaf `target` with a `Split` of the existing pane and a new leaf
     /// (`new_id`/`new_payload`) along `vertical`. Only the focused leaf changes;
     /// the rest of the tree keeps its shape. Returns false if `target` is absent.
+    #[cfg(test)]
     fn split_leaf(&mut self, target: u64, vertical: bool, new_id: u64, new_payload: T) -> bool {
+        self.split_leaf_at(target, vertical, false, new_id, new_payload)
+    }
+
+    /// Split leaf `target`; with `before` the new pane takes the *first* slot
+    /// (Ghostty `new_split:left` / `new_split:up`), otherwise the second.
+    fn split_leaf_at(
+        &mut self,
+        target: u64,
+        vertical: bool,
+        before: bool,
+        new_id: u64,
+        new_payload: T,
+    ) -> bool {
         match self {
             Node::Leaf { id, .. } if *id == target => {
-                let old = std::mem::replace(self, Node::Empty);
+                let old = Box::new(std::mem::replace(self, Node::Empty));
+                let new = Box::new(Node::Leaf {
+                    id: new_id,
+                    payload: new_payload,
+                });
+                let (first, second) = if before { (new, old) } else { (old, new) };
                 *self = Node::Split {
                     vertical,
                     ratio: 0.5,
-                    first: Box::new(old),
-                    second: Box::new(Node::Leaf {
-                        id: new_id,
-                        payload: new_payload,
-                    }),
+                    first,
+                    second,
                 };
                 true
             }
             Node::Split { first, second, .. } => {
                 if first.contains(target) {
-                    first.split_leaf(target, vertical, new_id, new_payload)
+                    first.split_leaf_at(target, vertical, before, new_id, new_payload)
                 } else {
-                    second.split_leaf(target, vertical, new_id, new_payload)
+                    second.split_leaf_at(target, vertical, before, new_id, new_payload)
                 }
             }
             _ => false,
@@ -575,6 +597,7 @@ fn reap_tabs<T>(
             name,
             color,
             zoomed,
+            bell,
         } = tab;
         if let Some(root) = root.prune(&mut *dead) {
             if i <= active {
@@ -594,6 +617,7 @@ fn reap_tabs<T>(
                 name,
                 color,
                 zoomed,
+                bell,
             });
         }
     }
@@ -1021,6 +1045,20 @@ pub struct Window {
     /// selection. `render_active` runs before the window exists, so this is the
     /// previous frame's rect, the same idiom as `last_layout`.
     inspector_rect: Option<egui::Rect>,
+    /// The About dialog is up (modal: in both input gates).
+    about_open: bool,
+    /// The "Change Terminal Title" dialog (`prompt_surface_title`), modal like
+    /// the About box. Addressed by tab *id* and leaf id, never an index.
+    title_prompt: Option<TitlePrompt>,
+    /// Which corner of the pane the search bar is snapped to (dragged there by
+    /// its grip, like macOS Ghostty's `SearchOverlay`), and the live drag.
+    search_corner: crate::indicators::Corner,
+    search_drag: egui::Vec2,
+    /// A bell rang while this window was in the background and has not been
+    /// seen yet: drives the taskbar overlay badge. Cleared on focus.
+    unseen_bell: bool,
+    /// What the taskbar overlay last showed, so it is only pushed on a change.
+    overlay_shown: bool,
     /// Geometry to command this window onto on its next pass, then forget.
     ///
     /// Set when `undo` re-opens a closed window: a restored window has to come
@@ -1149,6 +1187,51 @@ enum UndoOp {
     RestoreWindow { window: Box<Window> },
     /// Close it again (also: undo a `new_window`).
     RemoveWindow { window: u64 },
+}
+
+/// Start a session, or -- when the shell cannot be spawned -- a pane that says
+/// why ([`Session::failed`]). `None` only if even the terminal engine could not
+/// be created, which leaves nothing to show a message in.
+fn open_session(
+    ctx: &egui::Context,
+    config: &Config,
+    profile: &crate::profiles::Profile,
+    cwd: Option<&std::path::Path>,
+) -> Option<Session> {
+    match Session::new(ctx, config, profile, cwd) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            eprintln!("giest: failed to open session: {e:#}");
+            Session::failed(config, profile, &format!("{e:#}"))
+                .map_err(|e| eprintln!("giest: failed to create an error pane: {e:#}"))
+                .ok()
+        }
+    }
+}
+
+impl UndoOp {
+    /// What applying this op does, for the undo/redo toast, and the window
+    /// it acts on.
+    fn describe(&self) -> (crate::indicators::UndoKind, u64) {
+        use crate::indicators::UndoKind;
+        match self {
+            UndoOp::RestorePane { window, .. } => (UndoKind::ReopenSplit, *window),
+            UndoOp::RemovePane { window, .. } => (UndoKind::CloseSplit, *window),
+            UndoOp::RestoreTabs { window, tabs, .. } => (UndoKind::ReopenTabs(tabs.len()), *window),
+            UndoOp::RemoveTabs { window, ids } => (UndoKind::CloseTabs(ids.len()), *window),
+            UndoOp::RestoreWindow { window } => (UndoKind::ReopenWindow, window.window_id),
+            UndoOp::RemoveWindow { window } => (UndoKind::CloseWindow, *window),
+        }
+    }
+}
+
+/// The open "Change Terminal Title" dialog. The pane is named by tab id and
+/// leaf id so a reorder or a reap while it is open cannot retarget it.
+struct TitlePrompt {
+    tab: u64,
+    leaf: u64,
+    text: String,
+    just_opened: bool,
 }
 
 /// Something only [`App`] can do, raised from inside a window's pass.
@@ -1480,12 +1563,13 @@ impl Window {
             .as_deref()
             .filter(|c| !c.trim().is_empty())
             .map(|c| profiles::for_command(&profiles, c));
-        let first = Session::new(
+        let first = open_session(
             &cc.egui_ctx,
             &config,
             initial.as_ref().unwrap_or(&profiles[default_profile]),
             config.working_directory.as_deref(),
-        )?;
+        )
+        .ok_or_else(|| anyhow::anyhow!("could not create a terminal"))?;
 
         let keymap = Keymap::from_config(&config.keybinds);
 
@@ -1571,6 +1655,12 @@ impl Window {
             shader_frame: 0,
             undo_state: crate::command::UndoState::default(),
             inspector_rect: None,
+            about_open: false,
+            title_prompt: None,
+            search_corner: crate::indicators::Corner::TopRight,
+            search_drag: egui::Vec2::ZERO,
+            unseen_bell: false,
+            overlay_shown: false,
             place_geom: None,
         };
         app.apply_backdrop();
@@ -1725,6 +1815,104 @@ impl Window {
             Some(true) => self.reload_config(render_state),
             Some(false) => self.config_errors_ignored = Some(self.config.diagnostics.clone()),
             None => {}
+        }
+    }
+
+    /// The About dialog (the macOS app's `About/` window): version, the commit
+    /// it was built from, and links. Modal, so it is in both input gates.
+    fn render_about(&mut self, ctx: &egui::Context) {
+        if !self.about_open {
+            return;
+        }
+        let chrome = self.chrome;
+        let mut close = false;
+        let modal = egui::Modal::new(self.id("about")).show(ctx, |ui| {
+            ui.set_width(360.0);
+            ui.vertical_centered(|ui| {
+                ui.heading("giest");
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new("A GPU-accelerated terminal for Windows on libghostty-vt")
+                        .color(chrome.weak_text),
+                );
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new(crate::about::version_line()).monospace());
+                if ui
+                    .small_button("Copy version")
+                    .on_hover_text("Copy the version and commit, for a bug report")
+                    .clicked()
+                {
+                    ui.ctx().copy_text(format!("giest {}", crate::about::version_line()));
+                }
+                ui.add_space(8.0);
+                for (label, url) in crate::about::LINKS {
+                    ui.hyperlink_to(*label, *url);
+                }
+                ui.add_space(12.0);
+                if ui.button("Close").clicked() {
+                    close = true;
+                }
+            });
+        });
+        if modal.should_close() {
+            close = true;
+        }
+        if close {
+            self.about_open = false;
+        }
+    }
+
+    /// The "Change Terminal Title" dialog (Ghostty `prompt_surface_title`):
+    /// Enter applies (an empty title hands the title back to the program, as
+    /// `set_surface_title` does), Esc or a backdrop click cancels.
+    fn render_title_prompt(&mut self, ctx: &egui::Context) {
+        let Some(mut prompt) = self.title_prompt.take() else {
+            return;
+        };
+        let chrome = self.chrome;
+        let mut decision: Option<bool> = None;
+        let modal = egui::Modal::new(self.id("title-prompt")).show(ctx, |ui| {
+            ui.set_width(360.0);
+            ui.heading("Change Terminal Title");
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new("Leave blank to restore the default title.")
+                    .color(chrome.weak_text),
+            );
+            ui.add_space(8.0);
+            let te = ui.add(
+                egui::TextEdit::singleline(&mut prompt.text)
+                    .id(self.id("title-prompt-text"))
+                    .desired_width(f32::INFINITY),
+            );
+            if std::mem::take(&mut prompt.just_opened) {
+                te.request_focus();
+            }
+            if te.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                decision = Some(true);
+            }
+            ui.add_space(16.0);
+            let (ok, cancel) = dialog_buttons(ui, &chrome, "OK", false, "Cancel");
+            if ok {
+                decision = Some(true);
+            }
+            if cancel {
+                decision = Some(false);
+            }
+        });
+        if modal.should_close() {
+            decision = Some(false);
+        }
+        match decision {
+            Some(true) => {
+                if let Some(t) = self.tabs.iter_mut().find(|t| t.id == prompt.tab)
+                    && let Some(s) = t.root.payload_mut(prompt.leaf)
+                {
+                    s.set_title_override(prompt.text.trim());
+                }
+            }
+            Some(false) => {}
+            None => self.title_prompt = Some(prompt),
         }
     }
 
@@ -1965,6 +2153,12 @@ impl Window {
             shader_frame: 0,
             undo_state: crate::command::UndoState::default(),
             inspector_rect: None,
+            about_open: false,
+            title_prompt: None,
+            search_corner: crate::indicators::Corner::TopRight,
+            search_drag: egui::Vec2::ZERO,
+            unseen_bell: false,
+            overlay_shown: false,
             place_geom: None,
         })
     }
@@ -2016,6 +2210,7 @@ impl Window {
                 name: st.name.clone(),
                 color: None,
                 zoomed: None,
+                bell: false,
             });
         }
         if tabs.is_empty() {
@@ -2164,9 +2359,7 @@ impl Window {
         // the state-restore path can't drift — a restored directory that no
         // longer exists now lands on `working-directory` too.
         let cwd = cwd.or(self.config.working_directory.as_deref());
-        Session::new(&self.egui_ctx, &self.config, profile, cwd)
-            .map_err(|e| eprintln!("giest: failed to open session: {e}"))
-            .ok()
+        open_session(&self.egui_ctx, &self.config, profile, cwd)
     }
 
     /// Open a new tab running profile `idx`. When
@@ -2216,6 +2409,12 @@ impl Window {
     /// The rest of the tab's split layout is untouched (splits nest). The new
     /// pane inherits the focused pane's working directory (via OSC 7).
     fn split(&mut self, vertical: bool) {
+        self.split_at(vertical, false);
+    }
+
+    /// [`Self::split`], with `before` putting the new pane left of / above the
+    /// focused one (Ghostty `new_split:left` / `new_split:up`).
+    fn split_at(&mut self, vertical: bool, before: bool) {
         let cwd = should_inherit_cwd(NewSurface::Split, &self.config)
             .then(|| self.focused_pwd())
             .flatten();
@@ -2225,7 +2424,7 @@ impl Window {
             let tab = &mut self.tabs[self.active_tab];
             let focus = tab.focus;
             let tab_id = tab.id;
-            tab.root.split_leaf(focus, vertical, id, s);
+            tab.root.split_leaf_at(focus, vertical, before, id, s);
             tab.focus = id;
             // A new split changes the layout, so any zoom is no longer meaningful.
             tab.zoomed = None;
@@ -2300,6 +2499,8 @@ impl Window {
             || self.focused_search_open()
             || self.clipboard_prompt().is_some()
             || self.config_errors_open()
+            || self.about_open
+            || self.title_prompt.is_some()
     }
 
     /// Whether the config-errors dialog is up: the loaded config had problems
@@ -3123,6 +3324,22 @@ impl Window {
                     self.renaming = Some((i, t.name.clone().unwrap_or_default()));
                 }
             }
+            Action::PromptSurfaceTitle => {
+                if let Some(t) = self.tabs.get(self.active_tab) {
+                    let text = t
+                        .root
+                        .payload(t.focus)
+                        .and_then(Session::title)
+                        .unwrap_or_default();
+                    self.title_prompt = Some(TitlePrompt {
+                        tab: t.id,
+                        leaf: t.focus,
+                        text,
+                        just_opened: true,
+                    });
+                }
+            }
+            Action::ShowAbout => self.about_open = true,
             Action::ToggleMaximize => {
                 self.maximized = !self.maximized;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(self.maximized));
@@ -3239,6 +3456,8 @@ impl Window {
             }
             Action::SplitRight => self.split(true),
             Action::SplitDown => self.split(false),
+            Action::SplitLeft => self.split_at(true, true),
+            Action::SplitUp => self.split_at(false, true),
             Action::ToggleSplitZoom => self.toggle_split_zoom(),
             Action::ResizeSplit(dir, amount) => self.resize_split(dir, amount),
             Action::EqualizeSplits => self.tabs[self.active_tab].root.equalize(),
@@ -3952,10 +4171,16 @@ impl Window {
             .map(|(_, r)| *r)
             .unwrap_or_else(|| ctx.content_rect());
 
-        egui::Area::new(self.id("search"))
+        // Snapped to one of the pane's corners, and draggable between them by
+        // the grip (macOS `SurfaceSearchOverlay`): the bar follows the drag,
+        // then snaps to the quadrant its centre was dropped in.
+        let (align, offset) = self.search_corner.anchor(8.0);
+        let mut grip_delta = egui::Vec2::ZERO;
+        let mut grip_released = false;
+        let area = egui::Area::new(self.id("search"))
             .order(egui::Order::Foreground)
             .constrain_to(pane)
-            .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-8.0, 8.0))
+            .anchor(align, offset + self.search_drag)
             .show(ctx, |ui| {
                 // Ghostty's own search overlay: `padding: 6px 8px; margin: 8px;
                 // border-radius: 8px` with a 1px outline (its `style.css`).
@@ -3970,6 +4195,38 @@ impl Window {
                         // latter and leaves them touching the text field.
                         ui.spacing_mut().item_spacing.x = 4.0;
                         ui.horizontal(|ui| {
+                            // The drag grip. A separate widget rather than a
+                            // drag sense on the whole frame: registered over
+                            // the text box, that would win its clicks.
+                            // Painted dots, not a glyph: the chrome font has
+                            // no reliable "grip" character.
+                            let (grip_rect, grip) = ui.allocate_exact_size(
+                                egui::vec2(10.0, 20.0),
+                                egui::Sense::drag(),
+                            );
+                            let dot = ui.visuals().weak_text_color();
+                            for row in 0..3 {
+                                for col in 0..2 {
+                                    ui.painter().circle_filled(
+                                        grip_rect.center()
+                                            + egui::vec2(
+                                                -2.0 + 4.0 * col as f32,
+                                                -5.0 + 5.0 * row as f32,
+                                            ),
+                                        1.2,
+                                        dot,
+                                    );
+                                }
+                            }
+                            let grip = grip
+                                .on_hover_cursor(egui::CursorIcon::Grab)
+                                .on_hover_text("Drag to move to another corner");
+                            if grip.dragged() {
+                                grip_delta = grip.drag_delta();
+                            }
+                            if grip.drag_stopped() {
+                                grip_released = true;
+                            }
                             let resp = ui.add(
                                 egui::TextEdit::singleline(&mut query)
                                     .hint_text("Find…")
@@ -3992,15 +4249,11 @@ impl Window {
                                 }
                                 resp.request_focus();
                             }
-                            let label = if count == 0 {
-                                if query.is_empty() {
-                                    String::new()
-                                } else {
-                                    "0/0".to_string()
-                                }
-                            } else {
-                                format!("{}/{}", current + 1, count)
-                            };
+                            let label = crate::indicators::search_count_label(
+                                count,
+                                current,
+                                query.is_empty(),
+                            );
                             ui.add_sized([54.0, 0.0], egui::Label::new(label));
                             if ui
                                 .selectable_label(case, "Aa")
@@ -4025,6 +4278,12 @@ impl Window {
                         });
                     });
             });
+        self.search_drag += grip_delta;
+        if grip_released {
+            self.search_corner =
+                crate::indicators::closest_corner(area.response.rect.center(), pane);
+            self.search_drag = egui::Vec2::ZERO;
+        }
 
         // Apply the overlay's own widgets first, deferred so no session borrow
         // is held across the egui closure. Fetch the session once, then act on
@@ -4071,6 +4330,7 @@ impl Window {
         // Profile index to open a new tab with (default unless the menu picks one).
         let mut want_new: Option<usize> = None;
         let mut want_rename: Option<usize> = None;
+        let mut want_about = false;
         let mut want_color: Option<(usize, Option<egui::Color32>)> = None;
         let mut commit_rename: Option<(usize, Option<String>)> = None;
         let mut stop_rename = false;
@@ -4245,8 +4505,55 @@ impl Window {
                                 // `TAB_CLOSE_COL` stays reserved whether or not
                                 // the `×` is showing, so nothing reflows on
                                 // hover.
+                                // `OSC 9;4` progress for this tab: a thin bar
+                                // along its top edge (the bottom belongs to
+                                // the active underline and the tint). The
+                                // first pane reporting progress wins.
+                                let progress = tab
+                                    .root
+                                    .find_leaf(&mut |s: &Session| {
+                                        s.progress().is_some_and(|p| {
+                                            p != crate::taskbar::Progress::None
+                                        })
+                                    })
+                                    .and_then(|id| tab.root.payload(id))
+                                    .and_then(Session::progress);
+                                if let Some(prog) = progress {
+                                    let now = ui.input(|i| i.time);
+                                    if let Some((a, b)) = crate::indicators::progress_span(prog, now) {
+                                        let col = match prog {
+                                            crate::taskbar::Progress::Error(_) => chrome.danger,
+                                            crate::taskbar::Progress::Paused(_) => {
+                                                chrome.accent_warn
+                                            }
+                                            _ => chrome.accent,
+                                        };
+                                        let x = |f: f32| rect.left() + 3.0 + f * (rect.width() - 6.0);
+                                        p.rect_filled(
+                                            egui::Rect::from_min_max(
+                                                egui::pos2(x(a), rect.top()),
+                                                egui::pos2(x(b), rect.top() + 2.0),
+                                            ),
+                                            egui::CornerRadius::same(1),
+                                            col,
+                                        );
+                                    }
+                                    if prog == crate::taskbar::Progress::Indeterminate {
+                                        ui.ctx().request_repaint();
+                                    }
+                                }
+                                // Bell marker: a dot before the title of a tab
+                                // that rang while nobody was looking.
+                                let bell_w = if tab.bell { 12.0 } else { 0.0 };
+                                if tab.bell {
+                                    p.circle_filled(
+                                        egui::pos2(rect.left() + 12.0, rect.center().y),
+                                        3.5,
+                                        chrome.accent_warn,
+                                    );
+                                }
                                 let text_max =
-                                    (rect.width() - 8.0 - theme::TAB_CLOSE_COL).max(8.0);
+                                    (rect.width() - 8.0 - bell_w - theme::TAB_CLOSE_COL).max(8.0);
                                 let font = egui::TextStyle::Button.resolve(ui.style());
                                 let ink = if is_active { chrome.text } else { chrome.weak_text };
                                 let label = {
@@ -4263,7 +4570,7 @@ impl Window {
                                     })
                                 };
                                 p.text(
-                                    egui::pos2(rect.left() + 8.0, rect.center().y),
+                                    egui::pos2(rect.left() + 8.0 + bell_w, rect.center().y),
                                     egui::Align2::LEFT_CENTER,
                                     &label,
                                     font,
@@ -4405,10 +4712,18 @@ impl Window {
                         ui.close();
                     }
                 }
+                ui.separator();
+                if ui.button("About giest").clicked() {
+                    want_about = true;
+                    ui.close();
+                }
             })
             .response
             .on_hover_text("New tab (pick a shell)");
         });
+        if want_about {
+            self.about_open = true;
+        }
 
         // Measured from the laid-out row, not from `ui.max_rect()`: a top panel
         // sizes itself to its content, so before the row is built `max_rect` is
@@ -4598,7 +4913,11 @@ impl Window {
             self.palette.is_some()
                 || self.confirm.is_some()
                 || self.clipboard_prompt().is_some()
-                || self.config_errors_open();
+                || self.config_errors_open()
+                // The About box and the terminal-title dialog: also listed in
+                // `modal_open` — a modal needs *both* gates.
+                || self.about_open
+                || self.title_prompt.is_some();
 
         // The inspector is deliberately **not** in that list — it must never
         // take the keyboard, or its own keyboard log would have nothing to
@@ -4654,11 +4973,18 @@ impl Window {
             opacity: self.config.background_image_opacity,
         });
 
+        // Read before `tab` borrows `self.tabs` for the rest of the pass.
+        let key_state = crate::indicators::key_state_label(&self.pending_keys, &self.key_tables);
+        let link_previews = self.config.link_previews;
+        let padding_color = self.config.window_padding_color;
+
         let tab = &mut self.tabs[active_tab];
         let mut focus_id = tab.focus;
-        // Right-click "Split" needs `&mut self`, which we can't take while
-        // `leaves`/`tab` borrow `self.tabs`; defer it past the leaf loop.
-        let mut want_split: Option<bool> = None;
+        // Right-click menu items that need `&mut self` (splits, dialogs, the
+        // inspector), which we can't take while `leaves`/`tab` borrow
+        // `self.tabs`; deferred past the leaf loop and run through
+        // `execute_action`, so the menu and the keybinds share one code path.
+        let mut want_action: Option<Action> = None;
 
         // A zoom on a pane that no longer exists (closed/reaped) is stale; drop it.
         tab.zoomed = tab.zoomed.filter(|id| tab.root.contains(*id));
@@ -4865,6 +5191,10 @@ impl Window {
         // (pane rect, message, is-error) for panes held open after their shell
         // exited (`wait-after-command` / `abnormal-command-exit-runtime`).
         let mut exit_bars: Vec<(egui::Rect, String, bool)> = Vec::new();
+        // (pane rect, URL) for the link-hover banner (`link-previews`).
+        let mut link_preview: Option<(egui::Rect, String)> = None;
+        // `window-padding-color = extend*`: (rect, colour) for the padding band.
+        let mut padding_fills: Vec<(egui::Rect, crate::engine::Rgb)> = Vec::new();
         for leaf in leaves.iter_mut() {
             // The pane occupies `leaf.rect`; the grid is inset by the padding so
             // text clears the pane's edges (window border or split divider alike).
@@ -4921,6 +5251,26 @@ impl Window {
             if !session.update_snapshot() {
                 continue;
             }
+            if padding_color != crate::config::PaddingColor::Background {
+                let snap = &session.snapshot;
+                let edges = crate::padding::extend_edges(padding_color, snap);
+                // The grid box as the renderer places it: the pixel-snapped
+                // origin used for `PaneFrame::origin_px` below.
+                let grid = egui::Rect::from_min_size(
+                    egui::pos2(
+                        (prect.min.x * ppp).round() / ppp,
+                        (prect.min.y * ppp).round() / ppp,
+                    ),
+                    prect.size(),
+                );
+                padding_fills.extend(crate::padding::padding_rects(
+                    snap,
+                    edges,
+                    leaf_rect,
+                    grid,
+                    egui::vec2(cw / ppp, ch / ppp),
+                ));
+            }
 
             // IME: allow it for the focused pane and park the candidate window
             // on the terminal cursor. egui-winit turns `PlatformOutput::ime`
@@ -4974,6 +5324,13 @@ impl Window {
                 });
 
                 session.hover_cell = resp.hover_pos().map(|p| session.pos_to_cell(p, prect, ppp, cw, ch));
+                // The URL banner (macOS `URLHoverBanner`), per `link-previews`.
+                if let Some(c) = session.hover_cell
+                    && let Some((url, src)) = session.link_at(c, link_osc8, link_url)
+                    && crate::links::preview_allowed(link_previews, src)
+                {
+                    link_preview = Some((leaf_rect, url));
+                }
 
                 // `handle_mouse` reads raw `ctx.input` events rather than the
                 // `Response` above, so egui's widget arbitration does *not*
@@ -5097,33 +5454,59 @@ impl Window {
                     };
                     match right_click_action {
                         RightClickAction::ContextMenu => {
+                            // The link under the pointer is latched when the
+                            // menu *opens*: once it is up the pointer is over
+                            // the menu, not the cell.
+                            if resp.secondary_clicked() {
+                                session.menu_link = resp
+                                    .interact_pointer_pos()
+                                    .map(|p| cell_at(p, session))
+                                    .and_then(|c| session.url_at(c, link_osc8, link_url));
+                            }
                             let has_sel = session.has_selection();
+                            let menu_link = session.menu_link.clone();
+                            let readonly = session.readonly();
                             resp.context_menu(|ui| {
-                                if ui.add_enabled(has_sel, egui::Button::new("Copy")).clicked() {
-                                    copy_sel(session);
+                                for item in crate::menu::terminal_menu(
+                                    has_sel,
+                                    menu_link.is_some(),
+                                    readonly,
+                                ) {
+                                    use crate::menu::MenuItem;
+                                    let clicked = match item {
+                                        MenuItem::Separator => {
+                                            ui.separator();
+                                            false
+                                        }
+                                        MenuItem::Item { label, enabled, checked, .. } => {
+                                            let text = if checked {
+                                                format!("\u{2713} {label}")
+                                            } else {
+                                                label.to_string()
+                                            };
+                                            ui.add_enabled(enabled, egui::Button::new(text))
+                                                .clicked()
+                                        }
+                                    };
+                                    if !clicked {
+                                        continue;
+                                    }
                                     ui.close();
-                                }
-                                if ui.button("Paste").clicked() {
-                                    paste(session);
-                                    ui.close();
-                                }
-                                ui.separator();
-                                if ui.button("Split Right").clicked() {
-                                    want_split = Some(true);
-                                    ui.close();
-                                }
-                                if ui.button("Split Down").clicked() {
-                                    want_split = Some(false);
-                                    ui.close();
-                                }
-                                ui.separator();
-                                if ui.button("Select All").clicked() {
-                                    session.select_all();
-                                    ui.close();
-                                }
-                                if ui.button("Reset Terminal").clicked() {
-                                    session.reset();
-                                    ui.close();
+                                    let MenuItem::Item { id, .. } = item else { continue };
+                                    use crate::menu::MenuId;
+                                    match id {
+                                        // Local: they act on this pane, which
+                                        // is exactly what was right-clicked.
+                                        MenuId::Copy => copy_sel(session),
+                                        MenuId::Paste => paste(session),
+                                        MenuId::SelectAll => session.select_all(),
+                                        MenuId::CopyUrl => {
+                                            if let Some(url) = &menu_link {
+                                                ctx.copy_text(url.clone());
+                                            }
+                                        }
+                                        other => want_action = other.action(),
+                                    }
                                 }
                             });
                         }
@@ -5312,6 +5695,30 @@ impl Window {
             }
         }
 
+        // File drag-and-drop (macOS `SurfaceView` drop handling): the dropped
+        // paths are typed into the pane under the pointer — or the focused
+        // one, since Windows does not always report pointer motion during an
+        // OLE drag — quoted for that pane's shell, through `paste_str`.
+        let (hovering_files, dropped): (bool, Vec<std::path::PathBuf>) = ctx.input(|i| {
+            (
+                !i.raw.hovered_files.is_empty(),
+                i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect(),
+            )
+        });
+        let drop_idx = ptr_pos
+            .and_then(|p| leaves.iter().position(|l| l.rect.contains(p)))
+            .unwrap_or(focus_idx);
+        let mut drop_target: Option<egui::Rect> = None;
+        if !palette_open {
+            if hovering_files {
+                drop_target = Some(leaves[drop_idx].rect);
+            }
+            if !dropped.is_empty() {
+                focus_id = leaves[drop_idx].id;
+                leaves[drop_idx].payload.drop_paths(&dropped);
+            }
+        }
+
         // `window-width`/`-height`/`-position-*`, applied exactly once.
         //
         // Deferred to here rather than done at window creation because the size
@@ -5440,6 +5847,25 @@ impl Window {
                 shader_globals,
             },
         ));
+
+        // `window-padding-color = extend*`. Painted *after* the terminal
+        // callback, which is safe because the renderer's per-pane scissor is
+        // the grid box and so never touches the padding band — and necessary,
+        // because with a `background-image` the renderer's own full-area quad
+        // would otherwise cover anything painted before it. The fills take
+        // the same alpha an explicit-background cell does (`bg_alpha`), so
+        // they read as the cells they extend.
+        if !padding_fills.is_empty() {
+            let a = if background_opacity_cells { background_opacity } else { 1.0 };
+            let a8 = (a * 255.0).round() as u8;
+            for (rect, c) in &padding_fills {
+                ui.painter().rect_filled(
+                    *rect,
+                    0.0,
+                    egui::Color32::from_rgba_unmultiplied(c.r, c.g, c.b, a8),
+                );
+            }
+        }
 
         // Paint the split gutters.
         //
@@ -5581,6 +6007,83 @@ impl Window {
                 .galley(bar.left_top() + egui::vec2(12.0, 6.0), galley, text);
         }
 
+        // Link-hover banner (macOS `URLHoverBanner`): the URL under the
+        // pointer along the pane's bottom-left edge. It hops to the right when
+        // the pointer is over it, as upstream's does, so it never hides the
+        // text you are pointing at. Painter-only: it must not eat the click
+        // that opens the link.
+        if let Some((rect, url)) = &link_preview {
+            let font = egui::FontId::proportional(12.0);
+            let max_w = (rect.width() * 0.6).max(80.0);
+            let galley = ui.painter().layout(url.clone(), font, self.chrome.text, max_w);
+            let inset = egui::vec2(8.0, -8.0);
+            let left = egui::Align2::LEFT_BOTTOM.anchor_size(rect.left_bottom() + inset, galley.size());
+            let text_rect = if ptr_pos.is_some_and(|p| left.expand2(egui::vec2(12.0, 8.0)).contains(p)) {
+                let anchor = rect.right_bottom() + egui::vec2(-(SCROLLBAR_HOT_W + 8.0), -8.0);
+                egui::Align2::RIGHT_BOTTOM.anchor_size(anchor, galley.size())
+            } else {
+                left
+            };
+            let pill = text_rect.expand2(egui::vec2(7.0, 3.0));
+            let r = egui::CornerRadius::same(theme::RADIUS_MD);
+            ui.painter().rect_filled(pill, r, self.chrome.window_fill);
+            ui.painter().rect_stroke(
+                pill,
+                r,
+                egui::Stroke::new(stroke_w(1.0), self.chrome.divider),
+                egui::StrokeKind::Inside,
+            );
+            ui.painter().galley(text_rect.min, galley, self.chrome.text);
+        }
+
+        // Key-sequence / key-table indicator (macOS `KeyStateIndicator`):
+        // bottom-centre of the terminal area while a leader is pending or a
+        // key table is active — otherwise a half-typed `ctrl+a >` sequence is
+        // invisible and the next key looks like it vanished.
+        if let Some(label) = &key_state {
+            let font = egui::FontId::proportional(13.0);
+            let galley = ui.painter().layout_no_wrap(label.clone(), font, self.chrome.text);
+            let anchor = full_area.center_bottom() + egui::vec2(0.0, -10.0);
+            let text_rect = egui::Align2::CENTER_BOTTOM.anchor_size(anchor, galley.size());
+            let pill = text_rect.expand2(egui::vec2(10.0, 4.0));
+            let r = egui::CornerRadius::same(theme::RADIUS_MD);
+            ui.painter().rect_filled(pill, r, self.chrome.window_fill);
+            ui.painter().rect_stroke(
+                pill,
+                r,
+                egui::Stroke::new(stroke_w(1.0), self.chrome.accent),
+                egui::StrokeKind::Inside,
+            );
+            ui.painter().galley(text_rect.min, galley, self.chrome.text);
+        }
+
+        // Renderer-error view: if the GPU device was lost, say so over the
+        // terminal area (best-effort — see the native box in `App::ui` for why
+        // this may not be visible) instead of showing a frozen grid.
+        if let Some(msg) = crate::render::device_lost() {
+            let font = egui::FontId::proportional(14.0);
+            let galley = ui.painter().layout(
+                msg,
+                font,
+                self.chrome.on_accent,
+                (full_area.width() - 64.0).clamp(120.0, 560.0),
+            );
+            let text_rect = egui::Align2::CENTER_CENTER.anchor_size(full_area.center(), galley.size());
+            let r = egui::CornerRadius::same(theme::RADIUS_MD);
+            ui.painter().rect_filled(text_rect.expand(14.0), r, self.chrome.danger);
+            ui.painter().galley(text_rect.min, galley, self.chrome.on_accent);
+        }
+
+        // Where a file drag would land.
+        if let Some(rect) = drop_target {
+            ui.painter().rect_stroke(
+                rect,
+                0.0,
+                egui::Stroke::new(stroke_w(2.0), self.chrome.accent),
+                egui::StrokeKind::Inside,
+            );
+        }
+
         // Read-only badge: persistent (the state is), painter-only (a widget
         // here would eat clicks meant for the terminal), and bottom-right so it
         // doesn't collide with the resize overlay's default centre or the
@@ -5681,8 +6184,8 @@ impl Window {
         // Apply a deferred right-click "Split" now that `leaves`/`tab` are no
         // longer borrowing `self.tabs`. `split` inherits the pane's cwd and
         // focuses the new pane.
-        if let Some(vertical) = want_split {
-            self.split(vertical);
+        if let Some(action) = want_action {
+            self.execute_action(ctx, None, action);
         }
     }
 }
@@ -5700,11 +6203,15 @@ impl Window {
         let mut rang = false;
         let mut finished: Vec<session::CommandFinish> = Vec::new();
         let mut progress_changed = false;
-        for tab in &mut self.tabs {
+        let active_tab = self.active_tab;
+        for (ti, tab) in self.tabs.iter_mut().enumerate() {
+            let mut tab_rang = false;
             tab.root.for_each_mut(&mut |pane| {
                 pane.pump_pty();
                 pane.idle_work();
-                rang |= pane.take_bell_effect(now);
+                let r = pane.take_bell_effect(now);
+                tab_rang |= r;
+                rang |= r;
                 let focused = was_focused;
                 notifications.extend(pane.take_notifications().into_iter().filter(|n| {
                     // Kitty `o=unfocused` / `o=invisible`: nothing to tell a user who
@@ -5714,8 +6221,16 @@ impl Window {
                 finished.append(&mut pane.take_command_finishes());
                 progress_changed |= pane.take_progress().is_some();
             });
+            // Marked only where nobody is looking: a background tab, or any
+            // tab of a background window.
+            if tab_rang && (ti != active_tab || !was_focused) {
+                tab.bell = true;
+            }
         }
         self.pending_bell |= rang;
+        if rang && !was_focused {
+            self.unseen_bell = true;
+        }
         if progress_changed {
             self.progress_dirty = true;
         }
@@ -5849,11 +6364,17 @@ impl Window {
         let focused = ctx.input(|i| i.focused);
         if focused && !self.was_focused {
             self.bell_title = false;
+            self.unseen_bell = false;
             if let Some(hwnd) = self.hwnd {
                 crate::bell::clear_attention(hwnd);
             }
         }
         self.was_focused = focused;
+        // The per-tab bell marker clears once that tab is actually on screen in
+        // a focused window -- switching to it counts as seeing it.
+        if focused && let Some(t) = self.tabs.get_mut(self.active_tab) {
+            t.bell = false;
+        }
 
         // Window title from the active tab's focused pane, with the bell marker.
         // `last_window_title` holds the **decorated** string: comparing against
@@ -5915,6 +6436,8 @@ impl Window {
         // Config errors: modal but merely informational, so *under* the
         // dialogs that are waiting on a decision.
         self.render_config_errors(&ctx, render_state);
+        self.render_about(&ctx);
+        self.render_title_prompt(&ctx);
         // The close confirmation draws over everything else.
         self.render_confirm_close(&ctx);
         // …and the clipboard permission prompt over that: it's the one dialog
@@ -6121,6 +6644,21 @@ impl App {
         }
     }
 
+    /// Badge each window's taskbar button while it holds an unseen bell, and
+    /// clear the badge once it is focused. Pushed only on a change. Secondary
+    /// windows have no `HWND` recorded (the same limit as the progress bar), so
+    /// only the first window can carry the badge.
+    fn update_overlays(&mut self) {
+        for w in &mut self.windows {
+            if w.unseen_bell != w.overlay_shown
+                && let Some(hwnd) = w.hwnd
+            {
+                crate::taskbar::set_overlay(hwnd, w.unseen_bell);
+                w.overlay_shown = w.unseen_bell;
+            }
+        }
+    }
+
     /// Push the aggregate `OSC 9;4` progress onto the taskbar button.
     ///
     /// There is **one** button for the process but any number of panes, so the
@@ -6247,8 +6785,18 @@ impl App {
             self.undo.begin_undo(now)
         };
         if let Some(op) = op {
+            let (kind, window) = op.describe();
             if let Some(inverse) = self.apply_undo_op(ctx, op) {
                 self.undo.record(now, inverse);
+                // Say what came back (or went away). The toast belongs to the
+                // window the op touched; a window that was just closed again
+                // has nowhere to show it, so the focused one does.
+                let target = if self.windows.iter().any(|w| w.window_id == window) {
+                    window
+                } else {
+                    self.windows.get(self.focused).map_or(window, |w| w.window_id)
+                };
+                push_toast(ctx, target, &crate::indicators::undo_toast(kind, redo));
             }
             ctx.request_repaint();
         }
@@ -6533,6 +7081,19 @@ impl eframe::App for App {
         }
         self.raise_notifications(notifications);
         self.update_progress();
+        self.update_overlays();
+        // A lost GPU device: egui draws through that same device, so an
+        // in-window message may never reach the screen. Say it natively,
+        // once per process (the device is shared by every window).
+        static DEVICE_LOST_SHOWN: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
+        if let Some(msg) = crate::render::device_lost()
+            && !DEVICE_LOST_SHOWN.swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            eprintln!("giest: {msg}");
+            let hwnd = self.windows.first().and_then(|w| w.hwnd).unwrap_or(0);
+            crate::notify::error_box(hwnd, "giest: renderer error", &msg);
+        }
 
         let mut requests: Vec<(u64, AppRequest)> = Vec::new();
         // The root window draws into the `Ui` eframe handed us.
@@ -7329,6 +7890,7 @@ mod tests {
             name: None,
             color: None,
             zoomed: Some(2),
+            bell: false,
         }];
         let (survivors, _active) = reap_tabs(tabs, 0, &mut |p: &u32| *p == 0);
         assert_eq!(survivors.len(), 1);
@@ -7345,9 +7907,20 @@ mod tests {
             name: None,
             color: None,
             zoomed: Some(1),
+            bell: false,
         }];
         let (survivors, _active) = reap_tabs(tabs, 0, &mut |p: &u32| *p == 0);
         assert_eq!(survivors[0].zoomed, Some(1));
+    }
+
+    #[test]
+    fn split_left_and_up_put_the_new_pane_first() {
+        let mut root = leaf(1, 1);
+        assert!(root.split_leaf_at(1, true, true, 2, 1));
+        assert_eq!(root.first_leaf_id(), 2, "new_split:left lands before the old pane");
+        let mut root = leaf(1, 1);
+        assert!(root.split_leaf_at(1, false, false, 2, 1));
+        assert_eq!(root.first_leaf_id(), 1, "new_split:down keeps the old pane first");
     }
 
     #[test]
@@ -7834,6 +8407,7 @@ mod tests {
             name: None,
             color: None,
             zoomed: None,
+            bell: false,
         }];
         let (survivors, _active) = reap_tabs(tabs, 0, &mut |p: &u32| *p == 0);
         assert_eq!(survivors.len(), 1);
