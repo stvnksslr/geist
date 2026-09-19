@@ -8,36 +8,151 @@ the terminal data already exists and just needs wiring).
 
 **Headline finding.** giest has a strong, correct *spine* — real VT engine, splits, tabs, ligatures,
 emoji, smooth scroll, command palette — but it covered a fraction of Ghostty's config surface and
-~90 keybind actions, with little of the macOS app's UX breadth. *(Measured since: **109 of Ghostty's
-193 config keys** (upstream `main`, 2026-09-19) are now supported — see the config-surface ledger
-and the upstream re-audit below.)* The encouraging part: **much of the gap
+~90 keybind actions, with little of the macOS app's UX breadth. *(Measured since: **116 of Ghostty's
+208 config keys** (upstream `main`, 2026-09-19) are now supported — see the config-surface ledger
+and the full parity plan below.)* The encouraging part: **much of the gap
 is plumbing, not greenfield.** libghostty-vt already surfaces underline styles, faint/overline, OSC 8
 hyperlinks, OSC 133 semantic-prompt marks, kitty graphics, the bell, and a rich selection model — data
 giest's single per-cell chokepoint (`engine/ghostty_vt.rs::copy_cell`) historically discarded.
 
 ---
 
-## Upstream re-audit against `ghostty-org/ghostty` `main` (2026-09-19)
+## Full parity plan against Ghostty `main` (re-audited 2026-09-19)
 
-Every ledger below was measured against the Ghostty source *pinned by the vendored binding*
-(`target/.../out/ghostty-src/`). Upstream has moved on (1.4.0 development), so `Config.zig` and
-`Binding.zig` were fetched from GitHub `main` and diffed against the pinned copy with the same
-key/action extraction the config-surface ledger uses. Result: **+7 / −1 config keys (187 → 193)
-and +3 actions (85 → 88)**; nothing else was removed.
+**Baseline.** giest now builds on Ghostty `main` itself (@b32f20f, via libghostty-rs @5988a0b, Zig
+0.16.0), so the plan and the engine describe the same Ghostty. Three sources were diffed:
+(1) **config keys** in `Config.zig`, (2) **keybind actions** in `Binding.zig`, (3) **app-level
+features** that are neither — surveyed from `macos/Sources` and from the 673 user-facing commits
+between the old pin (b869a6e) and `main`. Key/action extraction is the config-surface ledger's
+method, re-run against the `main` checkout the build fetches.
 
-| Upstream addition | giest | Notes |
+Scoreboard: **116 of 208** public config keys · **70 of 88** actions · app features in §C.
+Effort: **S** <1d · **M** 1–3d · **L** ~1wk · **XL** multi-week.
+
+### A. Config keys still unsupported (92)
+
+**A1. Real work, cross-platform.** Ordered roughly by value.
+
+| Key(s) | What it takes | Effort |
 |---|---|---|
-| `scrollback-limit-bytes` (replaces `scrollback-limit`) | ✅ | Same unit (bytes); adds `unlimited`. The old spelling stays accepted. |
-| `scrollback-limit-lines` | ⬜ blocked | libghostty-vt's `Screen.init` takes a byte budget only; a line cap needs an upstream C-API field. |
-| `scrollback-compression` | ⬜ N/A for now | Page compression lives in the full app's page allocator, not the VT library the binding exposes. |
-| `clipboard-write-limit-bytes` | ✅ | Default 64 MiB, `unlimited`, `0` rejects every non-empty write; applied in `Session::handle_osc52` before the permission policy. |
-| `link-osc8` | ✅ | Gates OSC 8 in `Session::url_at`. |
-| `link-url` *(pre-existing upstream, newly supported)* | ✅ | Gates bare-URL detection in the same place. |
-| `drag-handle` | ⬜ | Split drag-rearrange doesn't exist in giest yet; the key comes with that feature. |
-| `gtk-horizontal-tab-scroll` | N/A | GTK-only. |
-| `set_window_title:` | ✅ | A per-window override that wins over the focused pane's title; empty clears it. |
-| `prompt_window_title` | ⬜ | Needs a rename box like `prompt_tab_title`'s; next up. |
-| `move_tab_to_new_window` | ⬜ | Needs `Tab` to move between `Window`s (undo already detaches tabs losslessly, so the plumbing exists). |
+| `shell-integration`, `shell-integration-features` | Off switch + feature flags for the prompt hooks `profiles.rs` injects. **Also the WSL story**: ship Ghostty's bash/zsh/fish scripts into WSL. | M |
+| `scrollback-compression` | Engine now exposes `Terminal::compress` + `compression_activity`; needs a per-session idle timer (compress after N s without an activity-token change). | S |
+| `cursor-click-to-move` | OSC 133 `click_events` (engine support landed, 3263ce5): turn a click on the prompt line into arrow keys. | M |
+| `link`, `link-previews` | Regex link table (the `link-url` matcher becomes its lowest entry) + hover label (§C). | M |
+| `env`, `input`, `initial-command`, `wait-after-command`, `abnormal-command-exit-runtime` | Spawn-time options on `Pty::spawn`; the last two need the child-exited bar (§C). | M |
+| `key-remap` | Modifier swap ahead of `decide_key`. | S |
+| `font-codepoint-map`, `clipboard-codepoint-map` | Per-range face override in `atlas.rs`; a replace table on copy. | M / S |
+| `font-shaping-break` | Run-splitting options in the shaper. | S |
+| `grapheme-width-method` | Engine already has mode 2027; expose the option. | S |
+| `cursor-text` | Text color under the cursor (incl. `cell-foreground`). | S |
+| `window-padding-color` | `background` / `extend` / `extend-always`: renderer extends edge cells into the padding. | M |
+| `window-show-tab-bar`, `maximize`, `fullscreen`, `title`, `initial-window`, `quit-after-last-window-closed` (+`-delay`) | Window lifecycle; `initial-window = false` needs a tray/background mode. | S each |
+| `split-preserve-zoom` | Keep zoom across focus/layout changes. | S |
+| `mouse-shift-capture`, `click-repeat-interval` | Mouse options (`0` → `GetDoubleClickTime`). | S |
+| `title-report`, `vt-kam-allowed` | Engine options. Title reports are now **off by default** upstream — a behavior change the bump brought in. | S |
+| `palette-generate`, `palette-harmonious` | Generate the 256-color cube from the 16 base colors. | S |
+| `command-palette-entry` | Custom palette rows (title/description/action). | S |
+| `window-subtitle`, `window-title-font-family` | Tab-strip text; subtitle = cwd. | S |
+| `app-notifications` | In-app toasts ("copied", "config reloaded"). | S |
+| `language` | Only meaningful once the UI is localized — deferred. | — |
+
+**A2. Windows analogues of platform keys.** `window-decoration` (native vs client-drawn caption),
+`window-titlebar-background` / `-foreground` (Win11 `DWMWA_CAPTION_COLOR` makes this S),
+`window-colorspace` (display-p3 → HDR swapchain, L), `window-vsync` (present mode, S),
+`window-step-resize` (`WM_SIZING` snapping to cells, S), `font-thicken` + `-strength` (stroke
+dilation in the rasterizer, S), `drag-handle` (comes with pane drag, §C), `auto-update` /
+`auto-update-channel` (§C), `quick-terminal-animation-duration` (S).
+
+**A3. Blocked.** `enquiry-response` — ConPTY strips ENQ (probed; see the config-surface ledger).
+
+**A4. N/A on Windows.** Every `gtk-*`, `linux-*`, `x11-*`, `class`, `async-backend`, most `macos-*`
+(`macos-icon*` map to the runtime-icon row in §C), `quick-terminal-keyboard-interactivity` /
+`-space-behavior`, `config-default-files` (CLI-only), `term` (ConPTY sets its own),
+`freetype-load-flags`, and the private `_`-prefixed fields.
+
+### B. Keybind actions still missing (18)
+
+| Action | Plan | Effort |
+|---|---|---|
+| `resize_split`, and `equalize_splits` (a no-op today) | **Split ratios** on `Node::Split` + divider drag + persisted in `state.rs`. The biggest structural gap left. | M |
+| `prompt_window_title`, `prompt_surface_title` | Reuse the tab-rename box. | S |
+| `move_tab_to_new_window` | Detach a `Tab` (undo already does this losslessly) into `spawn_window`. | S |
+| `goto_window`, `toggle_visibility` | Window cycling; hide/show all windows. | S |
+| `reset_window_size` | Re-apply `window-width` / `-height`. | S |
+| `copy_url_to_clipboard` | `url_at` under the pointer → clipboard. | S |
+| `scroll_to_selection`, `paste_from_selection` | Scroll to the selection's tracked ref; emulate a primary-selection buffer. | S |
+| `end_key_sequence` | Flush a pending leader as literal keys. | S |
+| `toggle_window_decorations` | With `window-decoration`. | S |
+| `check_for_updates` | With auto-update. | — |
+| `toggle_tab_overview` | Thumbnail-grid overlay. | M–L |
+| `show_on_screen_keyboard` | Touch keyboard (`IFrameworkInputPane`). | S |
+| `crash`, `cursor_key`, `show_gtk_inspector` | Debug-only / internal / GTK — N/A. | — |
+
+### C. App-level features (no key, no action)
+
+| Feature | giest | Windows shape | Effort |
+|---|---|---|---|
+| **IME / preedit** (CJK, dead keys, Win+. emoji panel) | ⬜ | `IMEAllowed` + `IMERect` at the cursor, `Event::Ime` preedit/commit, draw the preedit | M |
+| **Split divider drag** | ⬜ | see §B | M |
+| **Pane drag-to-rearrange, drag out to tab/window** | ⬜ | drop-zone overlay, detach-then-insert (one process, no IPC) | L |
+| **File drag-and-drop** → shell-quoted path | ⬜ | `dropped_files`, per-shell quoting, through `Session::paste_str` | S |
+| **Accessibility** (Narrator/NVDA) | ⬜ | AccessKit via egui; grid as a text node | L |
+| **Child-exited bar** (exit code, abnormal exit, press-any-key) | ⬜ | keep the pane after `reap_dead` when configured | S–M |
+| Renderer-error / spawn-error views | ⬜ | message instead of a blank or vanished pane | S |
+| **Config-errors dialog** | ⬜ | list unknown keys / bad values; Reload / Ignore | S |
+| Right-click menu completeness | ◐ | add Copy, Split Left/Up, Inspector, Read-only, title prompts, Copy URL | S |
+| Key-sequence / key-table indicator | ⬜ | draw the pending leader + active table | S |
+| Link hover preview | ⬜ | label at the pane bottom | S |
+| Per-tab bell + progress indicators | ◐ | 🔔 and a thin bar on the tab, not only window title / taskbar | S |
+| Taskbar overlay badge (Dock badge analogue) | ⬜ | `ITaskbarList3::SetOverlayIcon` (add the vtable slot in `taskbar.rs`) | S |
+| Notification click → focus pane (+ highlight flash) | ⬜ | `NIN_BALLOONUSERCLICK` → session; suppress while focused | M |
+| Undo feedback ("Undo Close Tab") | ◐ | toast / palette label | S |
+| Search bar match count, drag-to-corner | ◐ | | S |
+| About box | ⬜ | modal (both modal gates!) with version / commit / links | S |
+| **CLI arguments** (`giest <dir>`, `-e`, `+new-window`) | ⬜ | `main.rs` reads none today | S |
+| **Single-instance IPC** (App Intents / AppleScript / Services analogue) | ⬜ | JSON over a named pipe: new window/tab, focus, input text, run action | L |
+| Explorer "Open giest here" | ⬜ | `Directory\Background\shell`; the new-tab form needs IPC | S / M |
+| Taskbar Jump List (Dock menu) | ⬜ | `ICustomDestinationList` tasks via IPC | M |
+| Restart restore (`RegisterApplicationRestart`), window frames in `state.rs` | ◐ | | S |
+| Custom caption / tabs-in-titlebar | ⬜ | `WM_NCCALCSIZE` client-drawn caption | L |
+| Runtime custom app icon | ⬜ | tinted icon via `icongen` + `ViewportCommand::Icon` | M |
+| Auto-update | ⬜ | winget manifest (S) → MSIX App Installer (M) → self-updater with a pill (L) | S–L |
+| Default-terminal handoff | ⬜ | `IConsoleHandoff` COM server, as Windows Terminal does | XL |
+| Tab overview | ⬜ | see §B | M–L |
+
+### D. Protocols and engine features new on `main`
+
+| Item | State | Work |
+|---|---|---|
+| No scrollback pull on resize under ConPTY (c55f213) | ✅ | done (`0458c1c`) |
+| `scrollback-limit-bytes` / `-lines` | ✅ | done |
+| OSC 99 (kitty notifications) | ⬜ | engine parses; route to `notify.rs` alongside 9/777 — S |
+| OSC 5522 kitty clipboard + paste-events mode 5522 | ⬜ | effects → clipboard + existing permission prompts — M |
+| OSC 52 / pwd **effects in lib-vt** | ◐ | could retire the `osc52.rs` / `osc7.rs` side-scanners (pwd callback 002fd41) — M |
+| `ghostty_terminal_paste` | ⬜ | route the paste encoder through it, gate unchanged — S |
+| Native search API (`ghostty_search_*`) | ⬜ | back the search bar; unlocks regex search — M |
+| Dirty-row iteration | ⬜ | skip unchanged rows in the snapshot copy — M |
+| Selection gesture engine | ⬜ | optional replacement for giest's click-count logic — M |
+| Default cursor style/blink engine options | ⬜ | set from `cursor-style*` — S |
+| OSC 72 kitty drag-and-drop | ⬜ | after file drop — M |
+| Kitty animation / relative placements / glyph protocol | ◐ blocked | all APC; **ConPTY strips APC** — needs the passthrough-mode portable-pty patch first — L–XL |
+| New `middle-click-action` / `copy-on-select` values, `~` in theme paths | ⬜ | config parser — S |
+| Free with the bump | ✅ | XTGETTCAP, ANSI DECRQM, DECECM report, mode 2048 size-on-enable, C0/C1 fixes, CSI 2K wrap reset, color-reset fix, RIS clears progress, MOK2 + F13–F25 key encoding, kitty graphics spec fixes |
+
+### E. Order of attack
+
+1. **Windows correctness:** IME (M) · child-exited bar + config-errors dialog (S) ·
+   `scrollback-compression` idle timer (S) · OSC 99 (S).
+2. **Split model:** ratios + divider drag + `resize_split` / `equalize_splits` (M); then pane
+   drag-rearrange + `drag-handle` + `move_tab_to_new_window` (L).
+3. **The S-sized sweep:** A1's window/mouse/cursor options, §B's small actions, §C's right-click
+   menu, indicators, link preview, file drop, About box.
+4. **Shell integration:** `shell-integration(-features)`, WSL scripts, `cursor-click-to-move` (M).
+5. **Automation:** CLI args → named-pipe IPC → Explorer entry → Jump List (L).
+6. **Protocols:** OSC 5522; move side-scanners onto lib-vt effects; native search + regex (M each).
+7. **Chrome:** custom caption + `window-decoration` + titlebar colors; runtime icon (L).
+8. **Long tail:** accessibility (L), auto-update, tab overview, default-terminal handoff (XL), and
+   the ConPTY passthrough patch that unblocks every kitty APC feature (L–XL).
 
 ---
 
@@ -438,10 +553,9 @@ With Phase 0 done, the remaining Tier-1 items are mostly small, registry-backed 
 37. ✅ **The diagonal legacy-computing families** — smooth mosaics, edge triangles, shaded corner
     triangles and the corner diagonal lines. See the ledger below.
 38. ✅ **The `font-style` family** — named styles and style disabling. See the ledger below.
-39. ✅ **Upstream re-audit** against Ghostty `main` — four new keys and `set_window_title:`. See the
-    re-audit table at the top.
-40. Next: `prompt_window_title`, `move_tab_to_new_window`, then Tier 3 — `shell-integration` / `-features` (giest's prompt hooks have no off switch
-    today), COLRv1 emoji, window decorations/titlebar, a settings UI.
+39. ✅ **Upstream re-audit + libghostty bump to Ghostty `main`** — see the full parity plan at the top.
+40. Next: follow §E of the full parity plan at the top (IME, child-exited bar, config-errors
+    dialog, OSC 99), then the split model.
 
 ### `font-style` and its three siblings — ✅ divergences
 
