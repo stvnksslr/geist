@@ -4836,7 +4836,12 @@ impl Window {
         // Keyboard goes to the focused pane — unless the command palette is open
         // (it's modal and owns the keyboard; see `render_palette`). `tracking` is
         // also used by the mouse block below, so compute it regardless.
-        let tracking = leaves[focus_idx].payload.is_mouse_tracking();
+        // A held Shift takes the mouse back from a tracking program for
+        // selection, unless `mouse-shift-capture` gives Shift to the program.
+        let shift_held = ctx.input(|i| i.modifiers.shift);
+        let tracking = leaves[focus_idx]
+            .payload
+            .mouse_reports_now(shift_held, self.config.mouse_shift_capture);
         if !palette_open && !search_open {
             leaves[focus_idx]
                 .payload
@@ -5807,6 +5812,14 @@ impl Window {
         if !self.config.key_remap.is_empty() {
             let set = self.config.key_remap.clone();
             ctx.input_mut(|i| crate::keyremap::apply(&set, i));
+        }
+
+        // `click-repeat-interval` drives egui's double/triple-click window
+        // (egui allows twice this for the third click, as Ghostty's own
+        // per-click interval effectively does).
+        let repeat = click_repeat_secs(self.config.click_repeat_interval);
+        if ctx.options(|o| o.input_options.max_double_click_delay) != repeat {
+            ctx.options_mut(|o| o.input_options.max_double_click_delay = repeat);
         }
 
         // A window `undo` just re-opened: put it back where it was. Sent as
@@ -6823,6 +6836,36 @@ fn font_spec(config: &Config) -> render::FontSpec {
         adjust: config.adjust,
         synthetic: config.font_synthetic_style,
     }
+}
+
+/// `click-repeat-interval` in seconds: the configured ms, or — for `0`, the
+/// default — the user's Windows double-click time (upstream uses the OS setting
+/// on macOS and 500 ms elsewhere; Windows has an OS setting, so it is used).
+fn click_repeat_secs(configured_ms: u32) -> f64 {
+    let ms = if configured_ms == 0 {
+        os_double_click_ms()
+    } else {
+        configured_ms
+    };
+    f64::from(ms) / 1000.0
+}
+
+#[cfg(windows)]
+fn os_double_click_ms() -> u32 {
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn GetDoubleClickTime() -> u32;
+    }
+    // SAFETY: no arguments, no preconditions; returns the setting in ms.
+    match unsafe { GetDoubleClickTime() } {
+        0 => 500,
+        ms => ms,
+    }
+}
+
+#[cfg(not(windows))]
+fn os_double_click_ms() -> u32 {
+    500
 }
 
 /// Reveal the config file in Explorer (palette "Open Config"). Falls back to the
@@ -8084,5 +8127,13 @@ mod tests {
             assert!(text.is_char_boundary(s.byte_range.start));
             assert!(text.is_char_boundary(s.byte_range.end));
         }
+    }
+
+    #[test]
+    fn click_repeat_interval_zero_uses_the_os_setting() {
+        assert_eq!(crate::app::click_repeat_secs(250), 0.25);
+        let os = crate::app::click_repeat_secs(0);
+        assert!(os > 0.0 && os <= 5.0, "{os}");
+        assert_eq!(os, f64::from(crate::app::os_double_click_ms()) / 1000.0);
     }
 }

@@ -46,3 +46,4 @@ pub mod taskbar;
 pub mod theme;
 pub mod undo;
 pub mod writefile;
+pub mod xtshiftescape;

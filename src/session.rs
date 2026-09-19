@@ -85,6 +85,8 @@ pub struct Session {
     /// Side parser tracking DECSCUSR, so the configured default cursor style is
     /// substituted only while the program hasn't picked its own shape.
     decscusr: DecscusrScanner,
+    /// The program's `XTSHIFTESCAPE` request, for `mouse-shift-capture`.
+    shift_escape: crate::xtshiftescape::ShiftEscapeScanner,
     /// Side parser for OSC color *queries*, which the VT engine drops.
     osc_color: OscColorScanner,
     /// Side parser for OSC 9 / OSC 777 desktop-notification requests.
@@ -307,6 +309,7 @@ impl Session {
             osc52: Osc52Scanner::new(),
             osc7: Osc7Scanner::new(),
             decscusr: DecscusrScanner::new(),
+            shift_escape: crate::xtshiftescape::ShiftEscapeScanner::new(),
             osc_color: OscColorScanner::new(),
             osc_notify: OscNotifyScanner::new(),
             osc133: Osc133Scanner::new(),
@@ -398,6 +401,7 @@ impl Session {
                     self.osc52.feed(&chunk, &mut clipboard_requests);
                     self.osc7.feed(&chunk);
                     self.decscusr.feed(&chunk);
+                    self.shift_escape.feed(&chunk);
                     self.osc_color.feed(&chunk, &mut color_queries);
                     self.osc_notify.feed(&chunk, &mut osc9);
                     self.osc133.feed(&chunk, &mut marks);
@@ -694,6 +698,20 @@ impl Session {
     /// escape a full-screen app that has captured the pointer.
     pub fn is_mouse_tracking(&self) -> bool {
         self.mouse_reporting && self.engine.is_mouse_tracking()
+    }
+
+    /// Whether mouse events should go to the program *this frame*: it tracks
+    /// the mouse, and Shift isn't being held to take the click back for
+    /// selection. Kitty's rule, which Ghostty adopts: a held Shift overrides the
+    /// program's grab unless `mouse-shift-capture` (or the program's
+    /// `XTSHIFTESCAPE`) says Shift belongs to the program.
+    pub fn mouse_reports_now(
+        &self,
+        shift_held: bool,
+        policy: config::MouseShiftCapture,
+    ) -> bool {
+        self.is_mouse_tracking()
+            && !(shift_held && !policy.captured(self.shift_escape.capture()))
     }
 
     /// Toggle `mouse-reporting` for this pane (Ghostty's
