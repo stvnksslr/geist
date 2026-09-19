@@ -74,7 +74,7 @@ dilation in the rasterizer, S), `drag-handle` (comes with pane drag, §C), `auto
 
 | Action | Plan | Effort |
 |---|---|---|
-| `resize_split`, and `equalize_splits` (a no-op today) | **Split ratios** on `Node::Split` + divider drag + persisted in `state.rs`. The biggest structural gap left. | M |
+| ~~`resize_split`, `equalize_splits`~~ ✅ | Done: `Node::Split::ratio`, nearest-ancestor resize (10–90% + 2-cell clamp), leaf-weighted equalize, ratios persisted (`S v 0.3`; old files read 0.5). Upstream's non-macOS `super+ctrl+shift+arrow` defaults are not bound — giest sees no Win-key modifier. | M |
 | `prompt_window_title`, `prompt_surface_title` | Reuse the tab-rename box. | S |
 | `move_tab_to_new_window` | Detach a `Tab` (undo already does this losslessly) into `spawn_window`. | S |
 | `goto_window`, `toggle_visibility` | Window cycling; hide/show all windows. | S |
@@ -93,7 +93,7 @@ dilation in the rasterizer, S), `drag-handle` (comes with pane drag, §C), `auto
 | Feature | giest | Windows shape | Effort |
 |---|---|---|---|
 | **IME / preedit** (CJK, dead keys, Win+. emoji panel) | ◐ | Done: `PlatformOutput::ime` at the cursor cell (candidate window placement), `Event::Ime` preedit/commit (`ime.rs`, commit/Text dedupe, keys held back while composing), preedit drawn underlined at the cursor. Missing: preedit caret/segment styling (egui drops winit's cursor range), overlong preedit doesn't wrap; needs a human check with a real CJK IME | M |
-| **Split divider drag** | ⬜ | see §B | M |
+| **Split divider drag** | ✅ | Grab band ±3pt around the gutter, resize cursor, clamped to 2 cells a side; double-click equalizes (upstream). Needs human visual confirmation. | M |
 | **Pane drag-to-rearrange, drag out to tab/window** | ⬜ | drop-zone overlay, detach-then-insert (one process, no IPC) | L |
 | **File drag-and-drop** → shell-quoted path | ⬜ | `dropped_files`, per-shell quoting, through `Session::paste_str` | S |
 | **Accessibility** (Narrator/NVDA) | ⬜ | AccessKit via egui; grid as a text node | L |
@@ -143,7 +143,7 @@ dilation in the rasterizer, S), `drag-handle` (comes with pane drag, §C), `auto
 
 1. **Windows correctness:** IME (M) · child-exited bar + config-errors dialog (S) ·
    `scrollback-compression` idle timer (S) · OSC 99 (S).
-2. **Split model:** ratios + divider drag + `resize_split` / `equalize_splits` (M); then pane
+2. **Split model:** ✅ ratios + divider drag + `resize_split` / `equalize_splits`; then pane
    drag-rearrange + `drag-handle` + `move_tab_to_new_window` (L).
 3. **The S-sized sweep:** A1's window/mouse/cursor options, §B's small actions, §C's right-click
    menu, indicators, link preview, file drop, About box.
@@ -413,7 +413,7 @@ Effort: **S** <1d · **M** 1–3d · **L** ~1wk · **XL** multi-wk. Status: ✅ 
 | **background-opacity** (+ `-cells`) | `main.rs`, `render/mod.rs`, `config.rs` | — | M | ✅ |
 | faint-opacity | `config.rs`, `render/mod.rs` | ✅ | S | ✅ |
 | Fullscreen toggle | `app.rs`, `command.rs` | — | S | ✅ |
-| Split zoom + equalize | `app.rs`, `command.rs` | — | M | ◐ (zoom done; splits are always 50/50, so equalize is a no-op) |
+| Split zoom + equalize | `app.rs`, `command.rs` | — | M | ✅ (zoom; ratios + `equalize_splits` weighted by leaf count like `SplitTree.equalize`) |
 | Tab reorder / drag | `app.rs` | — | M | ✅ |
 | tab/split inherit working-directory | `app.rs`, `session.rs` | ✅ | S | ✅ |
 | unfocused-split dimming (`-opacity`/`-fill`) | `app.rs` | — | S | ✅ (egui overlay, like Ghostty's apprt) |
@@ -1750,10 +1750,9 @@ guessed at, and the ones needing no new subsystem are now wired: `clear_screen`,
 - **`move_tab:N` clamps rather than wraps** (Ghostty clamps too), and delegates to the existing
   drag-reorder path, which already clears the stale `renaming` index.
 - **`scroll_page_fractional` is stored ×100** so `Action` stays `Copy + Eq` without carrying a float.
-- **`equalize_splits` is accepted as a no-op.** giest's splits are always 50/50 so there is nothing
-  to equalize, but binding it must not log an "unknown action" a user cannot act on. *(It was
-  mapped onto `ClearSelection` — a real action — so it silently dropped the selection; there is now
-  an `Action::Noop`. See the selection-migration ledger.)*
+- **`equalize_splits` is now real** (split ratios landed). It was once a no-op, and before that
+  mapped onto `ClearSelection` — a real action that silently dropped the selection. *(Historical;
+  see the selection-migration ledger.)*
 - **`text:`, `csi:`, `esc:`, `set_tab_title:`, `set_surface_title:` are now done.** They needed
   `Action` to own strings, which it does — `Arc<str>` payloads, `Clone` instead of `Copy`. See their
   own ledger; the refactor cost 16 mechanical errors, measured rather than estimated.

@@ -1362,9 +1362,10 @@ mod tests {
         }
         // Ghostty's alias for quit-by-closing-everything.
         assert_eq!(Action::from_name("close_all_windows"), Some(Action::Quit));
-        // giest's splits are always 50/50, so this is accepted as a no-op —
-        // binding it must not log "unknown action" at a user who can't act on it.
-        assert!(Action::from_name("equalize_splits").is_some());
+        assert_eq!(
+            Action::from_name("equalize_splits"),
+            Some(Action::EqualizeSplits)
+        );
     }
 
     #[test]

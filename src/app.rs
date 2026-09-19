@@ -78,10 +78,37 @@ enum Node<T> {
     },
     Split {
         vertical: bool,
+        /// The first child's share of the split's length along its axis, in
+        /// `(0, 1)`. Ghostty's `Split.ratio`: a new split starts at 0.5, the
+        /// divider drag and `resize_split` move it, `equalize_splits` resets it.
+        ratio: f32,
         first: Box<Node<T>>,
         second: Box<Node<T>>,
     },
     Empty,
+}
+
+/// Ghostty's clamp for `resize_split` (`SplitTree.resizing`): a keyboard resize
+/// never pushes a divider past 10% of its split.
+const RESIZE_RATIO_MIN: f32 = 0.1;
+
+/// The smallest a pane may be dragged, in cells along the split's axis. Ghostty
+/// clamps its divider drag to 10pt, which leaves a pane nothing can be read in;
+/// a cell count is the same idea measured in the unit a terminal cares about.
+const MIN_SPLIT_CELLS: f32 = 2.0;
+
+/// Clamp `ratio` so that neither side of a split `len` long is shorter than
+/// `min` (both in the same unit). A split too small to honour that for both
+/// sides can only be even.
+fn clamp_ratio(ratio: f32, len: f32, min: f32) -> f32 {
+    if !ratio.is_finite() {
+        return 0.5;
+    }
+    if len <= 0.0 || min * 2.0 >= len {
+        return 0.5;
+    }
+    let lo = min / len;
+    ratio.clamp(lo, 1.0 - lo)
 }
 
 impl<T> Node<T> {
@@ -178,6 +205,7 @@ impl<T> Node<T> {
                 let old = std::mem::replace(self, Node::Empty);
                 *self = Node::Split {
                     vertical,
+                    ratio: 0.5,
                     first: Box::new(old),
                     second: Box::new(Node::Leaf {
                         id: new_id,
@@ -214,6 +242,7 @@ impl<T> Node<T> {
     fn detach_leaf(self, target: u64) -> (Option<Node<T>>, Detached<T>) {
         let Node::Split {
             vertical,
+            ratio,
             first,
             second,
         } = self
@@ -231,6 +260,7 @@ impl<T> Node<T> {
             let slot = PaneSlot {
                 path: Vec::new(),
                 vertical,
+                ratio,
                 first: in_first,
             };
             return (Some(sibling), Some((slot, child)));
@@ -246,6 +276,7 @@ impl<T> Node<T> {
                 let (f, s) = if in_first { (c, sibling) } else { (sibling, c) };
                 Node::Split {
                     vertical,
+                    ratio,
                     first: Box::new(f),
                     second: Box::new(s),
                 }
@@ -279,6 +310,7 @@ impl<T> Node<T> {
         };
         *cur = Node::Split {
             vertical: slot.vertical,
+            ratio: slot.ratio,
             first: Box::new(first),
             second: Box::new(second),
         };
@@ -292,11 +324,13 @@ impl<T> Node<T> {
             Node::Leaf { ref payload, .. } if dead(payload) => None,
             Node::Split {
                 vertical,
+                ratio,
                 first,
                 second,
             } => match (first.prune(&mut *dead), second.prune(&mut *dead)) {
                 (Some(a), Some(b)) => Some(Node::Split {
                     vertical,
+                    ratio,
                     first: Box::new(a),
                     second: Box::new(b),
                 }),
@@ -331,14 +365,150 @@ impl<T> Node<T> {
             }),
             Node::Split {
                 vertical,
+                ratio,
                 first,
                 second,
             } => {
-                let (a, _, b) = split_rect(area, *vertical, ppp);
+                let (a, _, b) = split_rect(area, *vertical, *ratio, ppp);
                 first.collect(a, ppp, out);
                 second.collect(b, ppp, out);
             }
             Node::Empty => {}
+        }
+    }
+
+    /// Append every split's divider — its gutter, the parent rect it divides and
+    /// its root-downwards path — using the same division as
+    /// [`collect`](Self::collect). What the divider drag hit-tests against.
+    fn dividers(&self, area: egui::Rect, ppp: f32, path: &mut Vec<bool>, out: &mut Vec<Divider>) {
+        if let Node::Split {
+            vertical,
+            ratio,
+            first,
+            second,
+        } = self
+        {
+            let (a, g, b) = split_rect(area, *vertical, *ratio, ppp);
+            out.push(Divider {
+                path: path.clone(),
+                vertical: *vertical,
+                area,
+                gutter: g,
+            });
+            path.push(true);
+            first.dividers(a, ppp, path, out);
+            path.pop();
+            path.push(false);
+            second.dividers(b, ppp, path, out);
+            path.pop();
+        }
+    }
+
+    /// The split at root-downwards `path`, if the path still names one.
+    fn split_at_mut(&mut self, path: &[bool]) -> Option<(&mut f32, bool)> {
+        let mut cur = self;
+        for step in path {
+            let Node::Split { first, second, .. } = cur else {
+                return None;
+            };
+            cur = if *step { first } else { second };
+        }
+        match cur {
+            Node::Split {
+                vertical, ratio, ..
+            } => Some((ratio, *vertical)),
+            _ => None,
+        }
+    }
+
+    /// Ghostty's `resize_split`: move the divider of the **nearest ancestor**
+    /// split of `target` on the matching axis by `points` (Left/Up shrink the
+    /// first side, Right/Down grow it). `area` is the tree's laid-out rect, needed
+    /// to turn a length into a ratio exactly as upstream does with its spatial
+    /// slot. The result is clamped to upstream's 10–90% *and* to
+    /// [`MIN_SPLIT_CELLS`] of `min` each side. Returns whether a split moved —
+    /// false when no ancestor runs on that axis (upstream's `viewNotFound`).
+    fn resize_split(
+        &mut self,
+        target: u64,
+        dir: Dir,
+        points: f32,
+        area: egui::Rect,
+        ppp: f32,
+        min: egui::Vec2,
+    ) -> bool {
+        let Node::Split {
+            vertical,
+            ratio,
+            first,
+            second,
+        } = self
+        else {
+            return false;
+        };
+        let (a, _, b) = split_rect(area, *vertical, *ratio, ppp);
+        // Deepest first: the nearest ancestor is the one closest to the leaf.
+        let handled = if first.contains(target) {
+            first.resize_split(target, dir, points, a, ppp, min)
+        } else if second.contains(target) {
+            second.resize_split(target, dir, points, b, ppp, min)
+        } else {
+            return false;
+        };
+        if handled {
+            return true;
+        }
+        // `vertical` = a vertical divider between columns, which is what
+        // left/right moves (upstream calls that axis `horizontal`).
+        let horizontal_move = matches!(dir, Dir::Left | Dir::Right);
+        if *vertical != horizontal_move {
+            return false;
+        }
+        let (len, min_len) = if *vertical {
+            (area.width(), min.x)
+        } else {
+            (area.height(), min.y)
+        };
+        if len <= 0.0 {
+            return false;
+        }
+        let sign = if matches!(dir, Dir::Left | Dir::Up) { -1.0 } else { 1.0 };
+        let r = (*ratio + sign * points / len).clamp(RESIZE_RATIO_MIN, 1.0 - RESIZE_RATIO_MIN);
+        *ratio = clamp_ratio(r, len, min_len);
+        true
+    }
+
+    /// Ghostty's `equalize_splits` (`SplitTree.Node.equalize`): each split's
+    /// ratio becomes its first child's share of the *leaf weight* along the
+    /// split's axis. A child running the same way counts all its leaves; one
+    /// running across counts as a single column/row. So three panes made by
+    /// splitting right twice end up a third each, not a half and two quarters.
+    fn equalize(&mut self) {
+        if let Node::Split {
+            vertical,
+            ratio,
+            first,
+            second,
+        } = self
+        {
+            let l = first.axis_weight(*vertical);
+            let r = second.axis_weight(*vertical);
+            *ratio = l as f32 / (l + r) as f32;
+            first.equalize();
+            second.equalize();
+        }
+    }
+
+    /// The equalize weight of this subtree along a split on `vertical`.
+    fn axis_weight(&self, vertical: bool) -> usize {
+        match self {
+            Node::Split {
+                vertical: v,
+                first,
+                second,
+                ..
+            } if *v == vertical => first.axis_weight(vertical) + second.axis_weight(vertical),
+            _ => 1,
         }
     }
 
@@ -351,11 +521,12 @@ impl<T> Node<T> {
     fn gutters(&self, area: egui::Rect, ppp: f32, out: &mut Vec<egui::Rect>) {
         if let Node::Split {
             vertical,
+            ratio,
             first,
             second,
         } = self
         {
-            let (a, g, b) = split_rect(area, *vertical, ppp);
+            let (a, g, b) = split_rect(area, *vertical, *ratio, ppp);
             out.push(g);
             first.gutters(a, ppp, out);
             second.gutters(b, ppp, out);
@@ -544,10 +715,12 @@ fn capture_node_with<T>(
     match node {
         Node::Split {
             vertical,
+            ratio,
             first,
             second,
         } => crate::state::SavedNode::Split {
             vertical: *vertical,
+            ratio: *ratio,
             first: Box::new(capture_node_with(first, focus, pwd)),
             second: Box::new(capture_node_with(second, focus, pwd)),
         },
@@ -576,14 +749,61 @@ fn capture_node(node: &Node<Session>, focus: u64) -> crate::state::SavedNode {
 /// A *path plus an axis and a side*, rather than a neighbour's id: the sibling a
 /// removed pane collapsed into may itself be a whole subtree, and naming one of
 /// its leaves would not say which ancestor to wrap.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 struct PaneSlot {
     /// Root-downwards steps to the parent split's position, `true` = first child.
     path: Vec<bool>,
     /// The axis that split was on.
     vertical: bool,
+    /// Its ratio, so an undone close puts the divider back where it was.
+    ratio: f32,
     /// Whether the removed pane was that split's *first* child.
     first: bool,
+}
+
+/// One split's divider as laid out this frame (see [`Node::dividers`]).
+///
+/// Addressed by **path**, not by a pane id: a divider belongs to a split, and a
+/// split has no id of its own. A path held across frames can go stale if the
+/// tree is reshaped mid-drag, so every use re-resolves it through
+/// [`Node::split_at_mut`] and checks the axis still matches.
+#[derive(Clone, Debug, PartialEq)]
+struct Divider {
+    path: Vec<bool>,
+    vertical: bool,
+    /// The whole rect the split divides — what a pointer position is a
+    /// fraction *of* while dragging.
+    area: egui::Rect,
+    gutter: egui::Rect,
+}
+
+/// Half-width of a divider's grab band, in points. The painted gutter is one
+/// pixel; nobody can hit that, so the band extends into both panes (Ghostty's
+/// `splitterInvisibleSize` does the same).
+const DIVIDER_GRAB_PT: f32 = 3.0;
+
+/// A divider drag in progress: which tab, and which split in it.
+#[derive(Clone, Debug, PartialEq)]
+struct DividerDrag {
+    tab: u64,
+    path: Vec<bool>,
+    vertical: bool,
+    /// Where on the gutter the pointer grabbed it, along the axis, so a press
+    /// that doesn't move leaves the divider exactly where it was.
+    grab: f32,
+}
+
+/// The ratio that puts a divider's leading edge at `edge` in a split over
+/// `area` whose gutter is `gap` long — the inverse of [`split_rect`]'s
+/// `mid = min + (len - gap) * ratio`, clamped to [`clamp_ratio`]'s `min`.
+fn drag_ratio(area: egui::Rect, vertical: bool, gap: f32, edge: f32, min: egui::Vec2) -> f32 {
+    let (start, len, min) = if vertical {
+        (area.min.x, area.width(), min.x)
+    } else {
+        (area.min.y, area.height(), min.y)
+    };
+    let usable = (len - gap).max(1.0);
+    clamp_ratio((edge - start) / usable, len, min)
 }
 
 /// A pane taken out of a split tree: where it was, and the subtree itself.
@@ -663,6 +883,13 @@ pub struct Window {
     /// by `render_active` so `handle_shortcuts` (which runs before layout) can
     /// resolve directional split-focus navigation geometrically.
     last_layout: Vec<(u64, egui::Rect)>,
+    /// The rect the active tab's split tree was laid out in last frame, for
+    /// `resize_split` (which, like upstream, converts a length to a ratio of the
+    /// split's current on-screen size). Same previous-frame idiom as above.
+    last_split_area: Option<egui::Rect>,
+    /// The split divider being dragged, if any. Held by tab id + path rather
+    /// than by index, and re-resolved every frame (see [`Divider`]).
+    divider_drag: Option<DividerDrag>,
     /// When a tab is being renamed inline ("Rename Tab…"), its index and the
     /// in-progress edit text; `None` when no rename is active.
     renaming: Option<(usize, String)>,
@@ -1302,6 +1529,8 @@ impl Window {
             last_window_title: None,
             title_override: None,
             last_layout: Vec::new(),
+            last_split_area: None,
+            divider_drag: None,
             renaming: None,
             palette: None,
             keymap,
@@ -1683,6 +1912,8 @@ impl Window {
             last_window_title: None,
             title_override: None,
             last_layout: Vec::new(),
+            last_split_area: None,
+            divider_drag: None,
             renaming: None,
             palette: None,
             keymap: self.keymap.clone(),
@@ -1817,6 +2048,7 @@ impl Window {
             }
             crate::state::SavedNode::Split {
                 vertical,
+                ratio,
                 first,
                 second,
             } => {
@@ -1825,6 +2057,7 @@ impl Window {
                 match (first, second) {
                     (Some(a), Some(b)) => Some(Node::Split {
                         vertical: *vertical,
+                        ratio: *ratio,
                         first: Box::new(a),
                         second: Box::new(b),
                     }),
@@ -2001,6 +2234,32 @@ impl Window {
     /// Toggle "split zoom": the focused pane fills the whole tab area, hiding the
     /// other splits; toggling again restores the split layout (Ghostty's
     /// `toggle_split_zoom`). A no-op in a tab with a single pane.
+    /// Ghostty `resize_split`: move the focused pane's nearest divider on the
+    /// matching axis. Like upstream it always drops the zoom — a hidden layout
+    /// being resized is otherwise invisible — and is a no-op with no such split.
+    fn resize_split(&mut self, dir: crate::command::SplitDir, amount: u16) {
+        use crate::command::SplitDir;
+        let Some(area) = self.last_split_area else {
+            return;
+        };
+        let ppp = self.egui_ctx.pixels_per_point().max(1.0);
+        let dir = match dir {
+            SplitDir::Up => Dir::Up,
+            SplitDir::Down => Dir::Down,
+            SplitDir::Left => Dir::Left,
+            SplitDir::Right => Dir::Right,
+        };
+        // The minimum pane, in points: cells are stored in physical pixels.
+        let min = egui::vec2(self.cell_w, self.cell_h) * MIN_SPLIT_CELLS / ppp;
+        let tab = &mut self.tabs[self.active_tab];
+        tab.zoomed = None;
+        // Upstream's amount is in its surface's pixels; on Windows that is
+        // physical pixels, so it is divided back to the points layout uses.
+        let points = f32::from(amount) / ppp;
+        tab.root
+            .resize_split(tab.focus, dir, points, area, ppp, min);
+    }
+
     fn toggle_split_zoom(&mut self) {
         let tab = &mut self.tabs[self.active_tab];
         if tab.leaf_count() <= 1 {
@@ -2940,6 +3199,8 @@ impl Window {
             Action::SplitRight => self.split(true),
             Action::SplitDown => self.split(false),
             Action::ToggleSplitZoom => self.toggle_split_zoom(),
+            Action::ResizeSplit(dir, amount) => self.resize_split(dir, amount),
+            Action::EqualizeSplits => self.tabs[self.active_tab].root.equalize(),
             Action::ClosePane => self.request_close(PendingClose::Pane),
             Action::ToggleFullscreen => self.toggle_fullscreen(ctx),
             // App-level: there is one quick terminal for the process, and it may
@@ -4361,6 +4622,92 @@ impl Window {
         // A zoom on a pane that no longer exists (closed/reaped) is stale; drop it.
         tab.zoomed = tab.zoomed.filter(|id| tab.root.contains(*id));
         let zoomed = tab.zoomed;
+
+        // Divider drag (Ghostty's `SplitView` drag gesture), resolved *before*
+        // layout so this frame already lays out at the new ratio. Raw pointer
+        // state rather than an egui widget: the panes read raw events too, so a
+        // widget's hit-test priority would not stop them — `over_divider` below
+        // withholds the pointer from them explicitly, like the inspector does.
+        self.last_split_area = Some(full_area);
+        let mut dividers: Vec<Divider> = Vec::new();
+        if zoomed.is_none() {
+            tab.root.dividers(full_area, ppp, &mut Vec::new(), &mut dividers);
+        }
+        let min_pane = egui::vec2(cw, ch) * MIN_SPLIT_CELLS / ppp;
+        let (ptr_pos, ptr_pressed, ptr_down, ptr_double) = ctx.input(|i| {
+            (
+                i.pointer.latest_pos(),
+                i.pointer.primary_pressed(),
+                i.pointer.primary_down(),
+                i.pointer
+                    .button_double_clicked(egui::PointerButton::Primary),
+            )
+        });
+        let hovered_divider = if palette_open || over_inspector {
+            None
+        } else {
+            ptr_pos.and_then(|p| {
+                dividers
+                    .iter()
+                    .find(|d| d.gutter.expand(DIVIDER_GRAB_PT).contains(p))
+            })
+        };
+        let divider_axis = |d: &Divider, p: egui::Pos2| {
+            if d.vertical {
+                p.x - d.gutter.min.x
+            } else {
+                p.y - d.gutter.min.y
+            }
+        };
+        if !ptr_down || self.divider_drag.as_ref().is_some_and(|d| d.tab != tab.id) {
+            self.divider_drag = None;
+        }
+        if ptr_double && hovered_divider.is_some() {
+            // Upstream: double-clicking a divider equalizes the whole tree.
+            tab.root.equalize();
+            self.divider_drag = None;
+        } else if ptr_pressed
+            && self.divider_drag.is_none()
+            && let (Some(d), Some(p)) = (hovered_divider, ptr_pos)
+        {
+            self.divider_drag = Some(DividerDrag {
+                tab: tab.id,
+                path: d.path.clone(),
+                vertical: d.vertical,
+                grab: divider_axis(d, p),
+            });
+        }
+        let mut divider_cursor = hovered_divider.map(|d| d.vertical);
+        if let Some(drag) = &self.divider_drag {
+            let live = dividers
+                .iter()
+                .find(|d| d.path == drag.path && d.vertical == drag.vertical);
+            match (live, ptr_pos) {
+                (Some(d), Some(p)) => {
+                    let (edge, gap) = if d.vertical {
+                        (p.x - drag.grab, d.gutter.width())
+                    } else {
+                        (p.y - drag.grab, d.gutter.height())
+                    };
+                    let r = drag_ratio(d.area, d.vertical, gap, edge, min_pane);
+                    if let Some((ratio, v)) = tab.root.split_at_mut(&drag.path)
+                        && v == drag.vertical
+                    {
+                        *ratio = r;
+                    }
+                    divider_cursor = Some(drag.vertical);
+                }
+                // The split went away under the drag (a pane closed or was
+                // reaped mid-gesture): nothing left to move.
+                _ => self.divider_drag = None,
+            }
+        }
+        // The pointer belongs to the divider while one is dragged, and while it
+        // hovers one *unless* a button is already held — a text selection
+        // dragged across a divider must keep going.
+        let over_divider = self.divider_drag.is_some()
+            || (hovered_divider.is_some() && (!ptr_down || ptr_pressed));
+
         // Lay the split tree out across the full area; each leaf gets its rect
         // (padding is applied per-leaf below). When a split is zoomed, that one
         // leaf takes the whole area and the rest are hidden.
@@ -4405,7 +4752,7 @@ impl Window {
         let cur_idx = leaves.iter().position(|l| l.id == focus_id).unwrap();
         let search_open = leaves[cur_idx].payload.search_active();
         // Suppress the click-focus while search is modal (`None` = don't move).
-        let click_pos = if search_open { None } else { press_pos };
+        let click_pos = if search_open || over_divider { None } else { press_pos };
         if let Some(pos) = click_pos {
             if let Some(l) = leaves.iter().find(|l| l.rect.contains(pos)) {
                 focus_id = l.id;
@@ -4416,7 +4763,7 @@ impl Window {
         // Gated on the pointer having actually *moved* — otherwise a parked
         // cursor would drag focus back every frame and make `focus_split_*`
         // keybinds impossible to use.
-        if self.config.focus_follows_mouse && !search_open {
+        if self.config.focus_follows_mouse && !search_open && !over_divider {
             let moved = ctx.input(|i| i.pointer.velocity() != egui::Vec2::ZERO);
             if moved
                 && let Some(pos) = ctx.input(|i| i.pointer.latest_pos())
@@ -4561,7 +4908,7 @@ impl Window {
 
             // Mouse / selection interaction only for the focused pane, and not
             // while a modal overlay (palette or search) owns input/focus.
-            if is_focus && !palette_open && !search_open && !over_inspector {
+            if is_focus && !palette_open && !search_open && !over_inspector && !over_divider {
                 // Hold keyboard focus on the terminal and lock the navigation keys
                 // to it. Otherwise egui's built-in focus traversal swallows Tab
                 // (which the shell wants for completion) to cycle focus through the
@@ -4840,7 +5187,7 @@ impl Window {
             // the search overlay is a plain `Area` and does not — so without
             // this, a click meant for the search box could reach a bar behind it.
             // Still painted, so a search jump visibly moves the thumb.
-            if palette_open || search_open || over_inspector {
+            if palette_open || search_open || over_inspector || over_divider {
                 if let Some(a) = alpha {
                     scrollbars.push((track, thumb, a, false));
                 }
@@ -5063,6 +5410,15 @@ impl Window {
         // is opaque, and the gutter rects are disjoint from every pane rect.
         for rect in &gutters {
             ui.painter().rect_filled(*rect, 0.0, self.chrome.divider);
+        }
+        // Set after the panes, which set their own (I-beam, link hand) cursor
+        // and would otherwise override it — the last one set in a pass wins.
+        if let Some(vertical) = divider_cursor {
+            ctx.set_cursor_icon(if vertical {
+                egui::CursorIcon::ResizeHorizontal
+            } else {
+                egui::CursorIcon::ResizeVertical
+            });
         }
 
         // Dim the unfocused splits by painting a semi-transparent rectangle over
@@ -6497,12 +6853,24 @@ fn snap(v: f32, ppp: f32) -> f32 {
 /// parent's edge. Sizing both halves independently (as this used to) leaves a
 /// sub-pixel sliver at the far edge whenever the arithmetic doesn't divide
 /// evenly — and once the boundary is snapped, it never does.
-fn split_rect(area: egui::Rect, vertical: bool, ppp: f32) -> (egui::Rect, egui::Rect, egui::Rect) {
+fn split_rect(
+    area: egui::Rect,
+    vertical: bool,
+    ratio: f32,
+    ppp: f32,
+) -> (egui::Rect, egui::Rect, egui::Rect) {
     let ppp = ppp.max(1.0);
+    // `ratio` is the first child's share (Ghostty's `Split.ratio`). Guard it
+    // here too, so a hand-edited state file can never lay out a negative pane.
+    let ratio = if ratio.is_finite() {
+        ratio.clamp(0.0, 1.0)
+    } else {
+        0.5
+    };
     // At least one whole device pixel, so the gutter is always visible.
     let gap = ((SPLIT_GUTTER_PT * ppp).round().max(1.0)) / ppp;
     if vertical {
-        let mid = snap(area.min.x + ((area.width() - gap) * 0.5).max(1.0), ppp)
+        let mid = snap(area.min.x + ((area.width() - gap) * ratio).max(1.0), ppp)
             .clamp(area.min.x, (area.max.x - gap).max(area.min.x));
         (
             egui::Rect::from_min_max(area.min, egui::pos2(mid, area.max.y)),
@@ -6513,7 +6881,7 @@ fn split_rect(area: egui::Rect, vertical: bool, ppp: f32) -> (egui::Rect, egui::
             egui::Rect::from_min_max(egui::pos2(mid + gap, area.min.y), area.max),
         )
     } else {
-        let mid = snap(area.min.y + ((area.height() - gap) * 0.5).max(1.0), ppp)
+        let mid = snap(area.min.y + ((area.height() - gap) * ratio).max(1.0), ppp)
             .clamp(area.min.y, (area.max.y - gap).max(area.min.y));
         (
             egui::Rect::from_min_max(area.min, egui::pos2(area.max.x, mid)),
@@ -6796,6 +7164,7 @@ mod tests {
                 vertical,
                 first,
                 second,
+                ..
             } => format!(
                 "({}{}{})",
                 shape(first),
@@ -6809,9 +7178,15 @@ mod tests {
     fn split(vertical: bool, first: Node<u32>, second: Node<u32>) -> Node<u32> {
         Node::Split {
             vertical,
+            ratio: 0.5,
             first: Box::new(first),
             second: Box::new(second),
         }
+    }
+
+    /// The ratio of the split at `path`, for asserting on resize/equalize.
+    fn ratio_at(n: &mut Node<u32>, path: &[bool]) -> f32 {
+        *n.split_at_mut(path).expect("a split at that path").0
     }
 
     #[test]
@@ -6825,6 +7200,7 @@ mod tests {
             vertical,
             first,
             second,
+            ..
         } = got
         else {
             panic!("root must stay a split");
@@ -6841,6 +7217,7 @@ mod tests {
             vertical,
             first: inner,
             second: last,
+            ..
         } = *second
         else {
             panic!("nested split must survive");
@@ -6983,6 +7360,187 @@ mod tests {
         other.attach_at(&slot, node);
         assert_eq!(other.leaf_count(), 3);
         assert!(other.contains(2));
+    }
+
+    #[test]
+    fn undoing_a_close_restores_the_split_ratio() {
+        let mut root = split(true, leaf(1, 1), leaf(2, 1));
+        *root.split_at_mut(&[]).unwrap().0 = 0.3;
+        let (after, taken) = root.detach_leaf(2);
+        let (slot, node) = taken.expect("the closed pane");
+        let mut after = after.unwrap();
+        after.attach_at(&slot, node);
+        assert_eq!(ratio_at(&mut after, &[]), 0.3);
+    }
+
+    #[test]
+    fn prune_keeps_the_surviving_splits_ratios() {
+        // [1 | (2 / 3)] with custom ratios; pane 3 dies, [1 | 2] keeps 0.3.
+        let mut root = split(true, leaf(1, 1), split(false, leaf(2, 1), leaf(3, 0)));
+        *root.split_at_mut(&[]).unwrap().0 = 0.3;
+        let mut root = root.prune(&mut |p| *p == 0).unwrap();
+        assert_eq!(shape(&root), "(1|2)");
+        assert_eq!(ratio_at(&mut root, &[]), 0.3);
+    }
+
+    #[test]
+    fn split_rect_honours_the_ratio() {
+        let area = rect(0.0, 0.0, 101.0, 50.0);
+        // 1pt gutter at ppp 1: (101 - 1) * 0.25 = 25.
+        let (a, g, b) = split_rect(area, true, 0.25, 1.0);
+        assert_eq!(a.width(), 25.0);
+        assert_eq!(g.min.x, 25.0);
+        assert_eq!(b.min.x, 26.0);
+        assert_eq!(b.max.x, 101.0);
+        let (a, _, b) = split_rect(area, false, 0.8, 1.0);
+        assert_eq!(a.height(), 39.0); // snap(49 * 0.8 = 39.2)
+        assert_eq!(b.max.y, 50.0);
+        // A hostile ratio (a hand-edited state file) still lays out sanely.
+        let (a, _, b) = split_rect(area, true, f32::NAN, 1.0);
+        assert_eq!(a.width(), 50.0);
+        assert!(b.width() > 0.0);
+    }
+
+    #[test]
+    fn collect_and_dividers_follow_the_ratio() {
+        let mut root = split(true, leaf(1, 1), split(false, leaf(2, 1), leaf(3, 1)));
+        *root.split_at_mut(&[]).unwrap().0 = 0.25;
+        *root.split_at_mut(&[false]).unwrap().0 = 0.75;
+        let area = rect(0.0, 0.0, 101.0, 101.0);
+        let mut divs = Vec::new();
+        root.dividers(area, 1.0, &mut Vec::new(), &mut divs);
+        assert_eq!(divs.len(), 2);
+        assert_eq!(divs[0].path, Vec::<bool>::new());
+        assert_eq!(divs[1].path, vec![false]);
+        assert_eq!(divs[1].area, rect(26.0, 0.0, 75.0, 101.0));
+        let mut leaves = Vec::new();
+        root.collect(area, 1.0, &mut leaves);
+        assert_eq!(leaves[0].rect, rect(0.0, 0.0, 25.0, 101.0));
+        assert_eq!(leaves[1].rect, rect(26.0, 0.0, 75.0, 75.0));
+        assert_eq!(leaves[2].rect.min.y, 76.0);
+        // The gutters `dividers` reports are the ones painted.
+        let mut gutters = Vec::new();
+        root.gutters(area, 1.0, &mut gutters);
+        assert_eq!(gutters, divs.iter().map(|d| d.gutter).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn resize_split_moves_the_nearest_ancestor_on_that_axis() {
+        // [1 | (2 / (3 | 4))]: from 4, left/right hits the innermost columns
+        // split; up/down skips it and hits the rows split above.
+        let mut root = split(
+            true,
+            leaf(1, 1),
+            split(false, leaf(2, 1), split(true, leaf(3, 1), leaf(4, 1))),
+        );
+        let area = rect(0.0, 0.0, 200.0, 200.0);
+        let min = egui::vec2(1.0, 1.0);
+        assert!(root.resize_split(4, Dir::Left, 10.0, area, 1.0, min));
+        assert_eq!(ratio_at(&mut root, &[]), 0.5, "outer columns untouched");
+        assert_eq!(ratio_at(&mut root, &[false]), 0.5, "rows untouched");
+        // The inner split is 100 wide (minus the outer gutter): 10/99.5.
+        let inner = ratio_at(&mut root, &[false, false]);
+        assert!(inner < 0.5 && inner > 0.39, "{inner}");
+
+        assert!(root.resize_split(4, Dir::Down, 20.0, area, 1.0, min));
+        assert!((ratio_at(&mut root, &[false]) - 0.6).abs() < 1e-6);
+        assert_eq!(ratio_at(&mut root, &[false, false]), inner);
+
+        // From 1 there is no rows split above it: upstream's `viewNotFound`.
+        assert!(!root.resize_split(1, Dir::Up, 20.0, area, 1.0, min));
+        assert!(!root.resize_split(99, Dir::Left, 20.0, area, 1.0, min));
+    }
+
+    #[test]
+    fn resize_split_clamps_to_upstream_bounds_and_minimum_cells() {
+        let mut root = split(true, leaf(1, 1), leaf(2, 1));
+        let area = rect(0.0, 0.0, 100.0, 100.0);
+        root.resize_split(1, Dir::Left, 1000.0, area, 1.0, egui::vec2(1.0, 1.0));
+        assert_eq!(ratio_at(&mut root, &[]), 0.1, "upstream's 10% floor");
+        root.resize_split(1, Dir::Right, 1000.0, area, 1.0, egui::vec2(1.0, 1.0));
+        assert_eq!(ratio_at(&mut root, &[]), 0.9, "and 90% ceiling");
+        // A minimum pane of 20pt beats the 10% floor on a 100pt split.
+        root.resize_split(1, Dir::Right, 1000.0, area, 1.0, egui::vec2(20.0, 20.0));
+        assert_eq!(ratio_at(&mut root, &[]), 0.8);
+    }
+
+    #[test]
+    fn clamp_ratio_keeps_both_sides_at_the_minimum() {
+        assert_eq!(super::clamp_ratio(0.01, 100.0, 10.0), 0.1);
+        assert_eq!(super::clamp_ratio(0.99, 100.0, 10.0), 0.9);
+        assert_eq!(super::clamp_ratio(0.4, 100.0, 10.0), 0.4);
+        // Too small for two minimum panes: the only fair split is even.
+        assert_eq!(super::clamp_ratio(0.2, 15.0, 10.0), 0.5);
+        assert_eq!(super::clamp_ratio(f32::NAN, 100.0, 10.0), 0.5);
+    }
+
+    #[test]
+    fn drag_ratio_inverts_split_rect() {
+        // Dragging the divider's leading edge to where it already is must give
+        // back the same ratio, or a click without motion would nudge it.
+        let area = rect(10.0, 0.0, 301.0, 80.0);
+        for r in [0.2_f32, 0.5, 0.7] {
+            let (_, g, _) = split_rect(area, true, r, 1.0);
+            let back = super::drag_ratio(area, true, g.width(), g.min.x, egui::vec2(1.0, 1.0));
+            let (_, g2, _) = split_rect(area, true, back, 1.0);
+            assert_eq!(g2, g, "ratio {r} -> {back}");
+        }
+        // And it is clamped like everything else.
+        let r = super::drag_ratio(area, true, 1.0, -500.0, egui::vec2(30.0, 30.0));
+        assert!((r - 30.0 / 301.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn equalize_weights_by_leaves_along_the_axis() {
+        // Split right twice from the right pane: [1 | (2 | 3)] → thirds.
+        let mut root = split(true, leaf(1, 1), split(true, leaf(2, 1), leaf(3, 1)));
+        *root.split_at_mut(&[]).unwrap().0 = 0.8;
+        *root.split_at_mut(&[false]).unwrap().0 = 0.1;
+        root.equalize();
+        assert!((ratio_at(&mut root, &[]) - 1.0 / 3.0).abs() < 1e-6);
+        assert_eq!(ratio_at(&mut root, &[false]), 0.5);
+
+        // A child running *across* the axis counts as one: [1 | (2 / 3)] is
+        // two columns, so 0.5 — not 1/3.
+        let mut root = split(true, leaf(1, 1), split(false, leaf(2, 1), leaf(3, 1)));
+        *root.split_at_mut(&[]).unwrap().0 = 0.2;
+        root.equalize();
+        assert_eq!(ratio_at(&mut root, &[]), 0.5);
+
+        // Mixed: [(1 | 2) | ((3 / 4) | 5)] has 4 columns: 2 left, 2 right.
+        let mut root = split(
+            true,
+            split(true, leaf(1, 1), leaf(2, 1)),
+            split(true, split(false, leaf(3, 1), leaf(4, 1)), leaf(5, 1)),
+        );
+        *root.split_at_mut(&[]).unwrap().0 = 0.9;
+        root.equalize();
+        assert_eq!(ratio_at(&mut root, &[]), 0.5);
+    }
+
+    #[test]
+    fn capture_and_restore_carry_the_ratio() {
+        let mut tree = split(true, leaf(3, 0), split(false, leaf(7, 1), leaf(9, 0)));
+        *tree.split_at_mut(&[false]).unwrap().0 = 0.7;
+        let saved = capture_node_with(&tree, 7, &|_: &u32| None);
+        let text = crate::state::serialize(&crate::state::SavedState {
+            windows: vec![crate::state::SavedWindow {
+                tabs: vec![crate::state::SavedTab {
+                    name: None,
+                    tree: saved.clone(),
+                }],
+                active_tab: 0,
+            }],
+        });
+        let back = crate::state::parse(&text);
+        assert_eq!(back.windows[0].tabs[0].tree, saved);
+        let crate::state::SavedNode::Split { second, .. } = saved else {
+            panic!("split");
+        };
+        let crate::state::SavedNode::Split { ratio, .. } = *second else {
+            panic!("nested split");
+        };
+        assert_eq!(ratio, 0.7);
     }
 
     #[test]
@@ -7160,12 +7718,12 @@ mod tests {
     #[test]
     fn split_rect_halves_each_axis() {
         let area = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(101.0, 51.0));
-        let (a, g, b) = split_rect(area, true, 1.0); // columns
+        let (a, g, b) = split_rect(area, true, 0.5, 1.0); // columns
         assert!((a.width() - 50.0).abs() < 0.01);
         assert!((b.width() - 50.0).abs() < 0.01);
         assert_eq!(a.height(), 51.0);
         assert_eq!(g.width(), 1.0);
-        let (c, _, _) = split_rect(area, false, 1.0); // rows
+        let (c, _, _) = split_rect(area, false, 0.5, 1.0); // rows
         assert!((c.height() - 25.0).abs() < 0.01);
         assert_eq!(c.width(), 101.0);
     }
@@ -7180,13 +7738,13 @@ mod tests {
             for extent in [100.0, 101.0, 137.5, 401.0] {
                 let area =
                     egui::Rect::from_min_size(egui::pos2(3.0, 7.0), egui::vec2(extent, extent));
-                let (a, g, b) = split_rect(area, true, ppp);
+                let (a, g, b) = split_rect(area, true, 0.5, ppp);
                 assert_eq!(a.left(), area.left());
                 assert_eq!(b.right(), area.right());
                 assert_eq!(a.right(), g.left());
                 assert_eq!(g.right(), b.left());
 
-                let (a, g, b) = split_rect(area, false, ppp);
+                let (a, g, b) = split_rect(area, false, 0.5, ppp);
                 assert_eq!(a.top(), area.top());
                 assert_eq!(b.bottom(), area.bottom());
                 assert_eq!(a.bottom(), g.top());
