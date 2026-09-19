@@ -1041,6 +1041,9 @@ pub struct Command {
     pub title: String,
     pub keybind: Option<String>,
     pub action: Action,
+    /// A `command-palette-entry` description, shown in place of the action
+    /// name on the row's second line.
+    pub description: Option<String>,
 }
 
 impl Command {
@@ -1049,8 +1052,36 @@ impl Command {
             title: action.title().to_string(),
             keybind: action.keybind().map(str::to_string),
             action,
+            description: None,
         }
     }
+}
+
+/// The palette catalog after `command-palette-entry`: the built-in rows unless
+/// a `clear` removed them, then each custom row whose action parses (keybind
+/// action syntax). A row with an unparseable action is dropped rather than
+/// shown doing nothing.
+pub fn catalog_with_entries(
+    profile_names: &[String],
+    defaults: bool,
+    entries: &[crate::config::PaletteEntry],
+) -> Vec<Command> {
+    let mut catalog = if defaults {
+        build_catalog(profile_names)
+    } else {
+        Vec::new()
+    };
+    for e in entries {
+        if let Some(action) = Action::from_name(&e.action) {
+            catalog.push(Command {
+                title: e.title.clone(),
+                keybind: None,
+                action,
+                description: e.description.clone(),
+            });
+        }
+    }
+    catalog
 }
 
 /// The fixed command set (no per-profile rows). See [`build_catalog`] for the
@@ -1068,6 +1099,7 @@ pub fn build_catalog(profile_names: &[String]) -> Vec<Command> {
             title: format!("New Tab with {name}"),
             keybind: None,
             action: Action::NewTabWithProfile(i),
+            description: None,
         });
     }
     catalog
@@ -1466,5 +1498,30 @@ mod tests {
             && c.action == Action::NewTabWithProfile(0)));
         assert!(cat.iter().any(|c| c.title == "New Tab with Command Prompt"
             && c.action == Action::NewTabWithProfile(1)));
+    }
+
+    fn entry(title: &str, action: &str, description: Option<&str>) -> crate::config::PaletteEntry {
+        crate::config::PaletteEntry {
+            title: title.into(),
+            action: action.into(),
+            description: description.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn custom_palette_rows_append_after_defaults_and_bad_actions_drop() {
+        let base = build_catalog(&[]).len();
+        let entries = [
+            entry("Reset Style", "csi:0m", Some("SGR reset")),
+            entry("Broken", "not_an_action", None),
+        ];
+        let cat = catalog_with_entries(&[], true, &entries);
+        assert_eq!(cat.len(), base + 1);
+        let last = cat.last().unwrap();
+        assert_eq!(last.title, "Reset Style");
+        assert_eq!(last.description.as_deref(), Some("SGR reset"));
+        assert!(matches!(last.action, Action::SendCsi(_)));
+        // `clear` drops the built-ins.
+        assert_eq!(catalog_with_entries(&[], false, &entries[..1]).len(), 1);
     }
 }

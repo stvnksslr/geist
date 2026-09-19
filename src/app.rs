@@ -2767,7 +2767,11 @@ impl Window {
     /// Build the command-palette catalog for the current shell profiles.
     fn build_catalog(&self) -> Vec<command::Command> {
         let names: Vec<String> = self.profiles.iter().map(|p| p.name.clone()).collect();
-        command::build_catalog(&names)
+        command::catalog_with_entries(
+            &names,
+            self.config.palette_defaults,
+            &self.config.palette_entries,
+        )
     }
 
     /// Whether the focused pane's scrollback-search overlay is open. While it is,
@@ -3532,11 +3536,12 @@ impl Window {
                                         ink,
                                     );
 
-                                    // The action key, monospace and dim.
+                                    // The action key, monospace and dim — or a
+                                    // custom entry's description.
                                     ui.painter().text(
                                         egui::pos2(rect.left() + 12.0, rect.bottom() - 8.0),
                                         egui::Align2::LEFT_BOTTOM,
-                                        cmd.action.name(),
+                                        cmd.description.clone().unwrap_or_else(|| cmd.action.name()),
                                         sub_font.clone(),
                                         dim,
                                     );
