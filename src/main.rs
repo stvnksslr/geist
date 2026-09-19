@@ -3,9 +3,145 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use giest::app::App;
+use giest::cli::{self, Plan, Verb};
 use giest::config::Config;
+use giest::ipc::{self, SendError};
+
+/// A release build is a GUI-subsystem exe, so it has no console: `--help` and
+/// `+list` would print into the void. Attach to the invoking terminal's
+/// console, if there is one, before writing anything. (std looks the standard
+/// handles up on every write, so attaching late still works.)
+fn attach_console() {
+    #[cfg(windows)]
+    {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn AttachConsole(pid: u32) -> i32;
+        }
+        // SAFETY: ATTACH_PARENT_PROCESS; failing (no parent console, or one
+        // already attached in a debug build) is fine.
+        unsafe {
+            AttachConsole(u32::MAX);
+        }
+    }
+}
+
+/// Handle everything that doesn't open a window in this process. Returns an
+/// exit code to stop with, or `None` to go on and start the terminal.
+fn run_cli(cli: &cli::Cli) -> Option<i32> {
+    if !cli.errors.is_empty() {
+        attach_console();
+        for e in &cli.errors {
+            eprintln!("giest: {e}");
+        }
+        eprintln!("Run 'giest --help' for usage.");
+        return Some(2);
+    }
+    match cli.verb {
+        Verb::Help => {
+            attach_console();
+            println!("{}", cli::HELP);
+            return Some(0);
+        }
+        Verb::Version => {
+            attach_console();
+            println!("{}", cli::version_string());
+            return Some(0);
+        }
+        Verb::RegisterShellIntegration | Verb::UnregisterShellIntegration => {
+            attach_console();
+            let register = cli.verb == Verb::RegisterShellIntegration;
+            let r = if register {
+                giest::shellreg::register()
+            } else {
+                giest::shellreg::unregister()
+            };
+            return Some(match r {
+                Ok(()) => {
+                    println!(
+                        "giest: Explorer \"{}\" {}",
+                        giest::shellreg::LABEL,
+                        if register { "registered" } else { "removed" }
+                    );
+                    0
+                }
+                Err(e) => {
+                    eprintln!("giest: {e}");
+                    1
+                }
+            });
+        }
+        _ => {}
+    }
+
+    // The command line's overrides must be in place before the first load, so
+    // `single-instance` can itself be overridden (`--single-instance=false`).
+    giest::config::set_cli_overrides(cli.override_body());
+    let single = Config::load().single_instance;
+    match cli.plan(single) {
+        Plan::ForwardOnly(req) => {
+            attach_console();
+            match ipc::send(&ipc::pipe_name(), &req) {
+                Ok(resp) => {
+                    println!("{}", serde_json::to_string_pretty(&resp).unwrap_or_default());
+                    Some(if resp.ok { 0 } else { 1 })
+                }
+                Err(SendError::NoServer) => {
+                    eprintln!("giest: no running giest instance");
+                    Some(1)
+                }
+                Err(SendError::Failed(e)) => {
+                    eprintln!("giest: {e}");
+                    Some(1)
+                }
+            }
+        }
+        Plan::Forward(req) => {
+            // Try the running instance; a second attempt covers the race where
+            // two launches both found no server and the other one won.
+            for attempt in 0..2 {
+                match ipc::send(&ipc::pipe_name(), &req) {
+                    Ok(resp) if resp.ok => return Some(0),
+                    Ok(resp) => {
+                        attach_console();
+                        eprintln!("giest: {}", resp.error.unwrap_or_else(|| "request failed".into()));
+                        return Some(1);
+                    }
+                    Err(SendError::NoServer) if attempt == 0 => {
+                        if ipc::start_server() {
+                            return None;
+                        }
+                    }
+                    Err(SendError::NoServer) => break,
+                    Err(SendError::Failed(e)) => {
+                        attach_console();
+                        eprintln!("giest: {e}; starting a separate instance");
+                        break;
+                    }
+                }
+            }
+            None
+        }
+        Plan::Local { serve } => {
+            if serve {
+                ipc::start_server();
+            }
+            None
+        }
+    }
+}
 
 fn main() -> eframe::Result {
+    let cli = cli::from_env();
+    if let Some(code) = run_cli(&cli) {
+        std::process::exit(code);
+    }
+    if let Some(argv) = cli.initial_argv() {
+        cli::set_initial_argv(argv.to_vec());
+    }
+    cli::set_restore_session(cli.restore_session);
+    cli::set_explicit_start(cli.cwd.is_some() || cli.command.is_some());
+
     // Whether the window can be transparent at all is fixed when the surface is
     // created, so it has to be decided before eframe starts — hence loading the
     // config here as well as in `App::new` (one small file read). Ghostty has the

@@ -176,6 +176,11 @@ pub struct Session {
     bell_pending: bool,
     /// egui-time deadline of the active visual bell flash, or `None` when idle.
     bell_flash_until: Option<f64>,
+    /// One-shot request for the "here I am" highlight (a notification click
+    /// or an IPC `focus` landed on this pane), consumed by `highlight_alpha`.
+    highlight_pending: bool,
+    /// egui-time deadline of the active highlight, or `None` when idle.
+    highlight_until: Option<f64>,
     /// One-shot flag for the out-of-band bell effects (audible / attention /
     /// title), consumed by `take_bell_effect`.
     bell_effect_pending: bool,
@@ -404,6 +409,8 @@ impl Session {
             title_override: None,
             bell_pending: false,
             bell_flash_until: None,
+            highlight_pending: false,
+            highlight_until: None,
             bell_effect_pending: false,
             bell_effect_last: None,
             saw_prompt_mark: false,
@@ -571,6 +578,21 @@ impl Session {
             return None;
         }
         Some((((until - now) / FLASH_SECS) as f32).clamp(0.0, 1.0))
+    }
+
+    /// Ask for a brief highlight of this pane — Ghostty's `highlight()` when a
+    /// notification click focuses a surface, so the eye finds it among splits.
+    pub fn request_highlight(&mut self) {
+        self.highlight_pending = true;
+    }
+
+    /// Highlight intensity for the frame at `now`, or `None` when idle. Starts
+    /// on a pending request (0.6 s, fading over the last 0.3 s); self-clearing.
+    pub fn highlight_alpha(&mut self, now: f64) -> Option<f32> {
+        if std::mem::take(&mut self.highlight_pending) {
+            self.highlight_until = Some(now + 0.6);
+        }
+        transient_alpha(&mut self.highlight_until, now, 0.3)
     }
 
     /// The current grid size in cells — the resize overlay's label.

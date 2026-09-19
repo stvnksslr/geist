@@ -54,6 +54,11 @@ jpeg-decoder = "0.3"
 # than handing wgpu a `naga::Module` directly: the text output keeps us
 # independent of whatever naga version a future wgpu pins. See src/shader.rs.
 naga = { version = "29", features = ["glsl-in", "wgsl-out"] }
+# JSON-lines wire format for the single-instance IPC pipe (src/ipc.rs). Both
+# are already in the dependency graph; the derive keeps the protocol types
+# declarative instead of a hand-rolled parser free to drift from the docs.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 # DWM window-composition APIs for `background-blur` (the Windows acrylic/mica
 # backdrop; see src/blur.rs). Already in the tree via winit/wgpu, so this unifies
 # with the existing pin rather than adding a build.

@@ -89,6 +89,17 @@ fallback engine without app changes:
 - **`bgimage.rs`** — `background-image`: PNG/JPEG decode (format sniffed from magic bytes) plus the
   pure fit/position geometry. Ghostty computes that geometry per vertex in its shader; giest does it
   on the CPU so it can be table-tested, and the shader (`render` mode 4) just samples.
+- **Automation.** **`cli.rs`** parses the command line (`-e` swallows the rest; `--key=value` is
+  replayed after the config files on every load via `config::set_cli_overrides`). **`ipc.rs`** is
+  the single-instance pipe (`\\.\pipe\giest-<SID>-<session>`, JSON lines, `$GIEST_IPC_PIPE`
+  overrides the name — use it for any live test so you never talk to the user's running giest);
+  its threads hand requests to the UI over a channel and wake **ROOT**, and `App::answer_ipc`
+  addresses windows/tabs/panes by **id**. `input_text` is a paste and goes through
+  `Session::paste_str`. **`shellreg.rs`** (Explorer verb, HKCU, explicit CLI only),
+  **`jumplist.rs`** (hand-declared COM vtables; ignored host test), **`restart.rs`**
+  (`RegisterApplicationRestart` + a root-window subclass that writes a layout snapshot on
+  `WM_ENDSESSION`, because `on_exit` never runs when Windows ends the session). Clean up after
+  live tests: `+unregister-shell-integration`, and run with `jump-list = false`.
 - **`config.rs`** — Ghostty-format config (`key = value` lines, kebab-case keys, unquoted
   colors, repeatable `palette`) from `%APPDATA%\giest\config` (override with `GIEST_CONFIG`);
   defines the full ANSI 16 + 256-color palette. **`profiles.rs`** — shell profiles (pwsh/powershell/cmd/wsl).

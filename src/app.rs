@@ -17,6 +17,29 @@ use crate::scrollbar;
 use crate::session::{self, Session};
 use crate::theme;
 
+/// The profile for an explicit argv (`giest -e prog args…`, an IPC `command`
+/// array): the program with its arguments, run verbatim.
+fn profile_for_argv(argv: &[String]) -> Option<Profile> {
+    let (prog, args) = argv.split_first()?;
+    (!prog.trim().is_empty()).then(|| Profile {
+        name: prog.clone(),
+        program: prog.clone(),
+        args: args.to_vec(),
+    })
+}
+
+/// Resolve an IPC/CLI command: a string is looked up like the `command` key
+/// (a profile name keeps its prompt hooks), an array is an argv.
+fn profile_for_spec(profiles: &[Profile], spec: &crate::ipc::CommandSpec) -> Option<Profile> {
+    match spec {
+        crate::ipc::CommandSpec::Line(c) if !c.trim().is_empty() => {
+            Some(profiles::for_command(profiles, c.trim()))
+        }
+        crate::ipc::CommandSpec::Line(_) => None,
+        crate::ipc::CommandSpec::Argv(v) => profile_for_argv(v),
+    }
+}
+
 /// A tab: a binary tree of panes (`Node`) with one focused leaf (by id). Each
 /// split divides only the focused pane, so splits nest (like Ghostty) instead of
 /// re-flowing every pane onto a single shared axis. Generic over the leaf
@@ -192,11 +215,17 @@ impl<T> Node<T> {
     }
 
     fn for_each_mut(&mut self, f: &mut impl FnMut(&mut T)) {
+        self.for_each_leaf_mut(&mut |_, p| f(p));
+    }
+
+    /// [`Self::for_each_mut`], with each leaf's id — for anything that has to
+    /// remember *which* pane it saw (a notification's origin).
+    fn for_each_leaf_mut(&mut self, f: &mut impl FnMut(u64, &mut T)) {
         match self {
-            Node::Leaf { payload, .. } => f(payload),
+            Node::Leaf { id, payload } => f(*id, payload),
             Node::Split { first, second, .. } => {
-                first.for_each_mut(f);
-                second.for_each_mut(f);
+                first.for_each_leaf_mut(f);
+                second.for_each_leaf_mut(f);
             }
             Node::Empty => {}
         }
@@ -1084,6 +1113,12 @@ pub struct Window {
     /// is rebuilt and compared every pass, so a position in it would either be
     /// re-sent forever or fight the user's next drag.
     place_geom: Option<(egui::Pos2, egui::Vec2)>,
+    /// Whether the OS reported this window maximized on its last pass — saved
+    /// with its frame (`state.rs`), since `maximized` above only tracks
+    /// `toggle_maximize` and misses the caption button.
+    seen_maximized: bool,
+    /// Maximize on the next pass: a restored frame that was maximized.
+    restore_maximized: bool,
     /// The open `prompt_surface_title` / `prompt_window_title` dialog and its
     /// in-progress text. Modal: listed in **both** input gates.
     title_prompt: Option<(TitlePrompt, String)>,
@@ -1347,6 +1382,21 @@ pub struct App {
     /// The window count and titlebar colors last pushed to DWM, so the
     /// `EnumThreadWindows` sweep runs only when one of them changes.
     titlebar_applied: Option<(usize, Option<crate::engine::Rgb>, Option<crate::engine::Rgb>)>,
+    /// Requests from other `giest` processes (`ipc.rs`), when this process is
+    /// the single instance.
+    ipc_rx: Option<std::sync::mpsc::Receiver<crate::ipc::Incoming>>,
+    /// `(window id, pane id)` of the last notification shown — where a click on
+    /// it leads. Ids, never slots: the click can come many frames later.
+    notify_origin: Option<(u64, u64)>,
+    /// egui time the restart snapshot (`restart.rs`) was last refreshed.
+    restart_snapshot_at: f64,
+}
+
+/// A desktop notification plus the pane that raised it.
+pub struct PendingNotification {
+    note: crate::osc_notify::Notification,
+    window: u64,
+    pane: u64,
 }
 
 /// The kind of surface being created, for the working-directory inheritance
@@ -1619,11 +1669,16 @@ impl Window {
         // `working-directory` directly (nothing can be inherited yet). It is
         // also the one surface `initial-command` applies to (upstream's
         // `app.first`); every later pane uses `command`.
-        let initial = config
-            .initial_command
-            .as_deref()
-            .filter(|c| !c.trim().is_empty())
-            .map(|c| profiles::for_command(&profiles, c));
+        // `giest -e prog args…` outranks it: an explicit argv, run verbatim.
+        let initial = crate::cli::initial_argv()
+            .and_then(profile_for_argv)
+            .or_else(|| {
+                config
+                    .initial_command
+                    .as_deref()
+                    .filter(|c| !c.trim().is_empty())
+                    .map(|c| profiles::for_command(&profiles, c))
+            });
         let first = open_session(
             &cc.egui_ctx,
             &config,
@@ -1728,6 +1783,8 @@ impl Window {
             unseen_bell: false,
             overlay_shown: false,
             place_geom: None,
+            seen_maximized: false,
+            restore_maximized: false,
         };
         app.apply_backdrop();
         Ok(app)
@@ -2169,7 +2226,21 @@ impl Window {
     /// Returns `None` if the shell couldn't be spawned — a window with no tabs
     /// would panic in `render_active`, which indexes `tabs[active_tab]`.
     fn sibling(&self, window_id: u64, cwd: Option<&std::path::Path>) -> Option<Self> {
-        let session = self.spawn_session(self.default_profile, cwd)?;
+        self.sibling_running(window_id, None, cwd)
+    }
+
+    /// [`Self::sibling`] whose first pane runs `profile` (the default when
+    /// `None`) — an IPC `new_window` with a command.
+    fn sibling_running(
+        &self,
+        window_id: u64,
+        profile: Option<&Profile>,
+        cwd: Option<&std::path::Path>,
+    ) -> Option<Self> {
+        let session = match profile {
+            Some(p) => self.spawn_profile(p, cwd)?,
+            None => self.spawn_session(self.default_profile, cwd)?,
+        };
         Some(self.sibling_with(window_id, vec![Tab::leaf(1, session)], 2))
     }
 
@@ -2252,6 +2323,8 @@ impl Window {
             unseen_bell: false,
             overlay_shown: false,
             place_geom: None,
+            seen_maximized: false,
+            restore_maximized: false,
         }
     }
 
@@ -2270,6 +2343,13 @@ impl Window {
                 })
                 .collect(),
             active_tab: self.active_tab,
+            frame: self.geom.map(|(pos, size)| crate::state::WindowFrame {
+                x: pos.x,
+                y: pos.y,
+                w: size.x,
+                h: size.y,
+                maximized: self.seen_maximized,
+            }),
         }
     }
 
@@ -2311,6 +2391,14 @@ impl Window {
         self.active_tab = saved.active_tab.min(tabs.len() - 1);
         self.tabs = tabs;
         self.next_id = next;
+        // Put the window back where it was. Through the same one-shot
+        // commands `undo` uses, and instead of `window-width`/`-position-*`,
+        // which would otherwise fight the restored frame on the first pass.
+        if let Some(f) = saved.frame {
+            self.place_geom = Some((egui::pos2(f.x, f.y), egui::vec2(f.w, f.h)));
+            self.restore_maximized = f.maximized;
+            self.geometry_applied = true;
+        }
     }
 
     /// Spawn the sessions for one saved subtree. `next` is a plain counter
@@ -2502,6 +2590,12 @@ impl Window {
         // Kept here rather than at each call site so the three inherit paths and
         // the state-restore path can't drift — a restored directory that no
         // longer exists now lands on `working-directory` too.
+        self.spawn_profile(profile, cwd)
+    }
+
+    /// Spawn a session running exactly `profile`, in `cwd` or else
+    /// `working-directory`.
+    fn spawn_profile(&self, profile: &Profile, cwd: Option<&std::path::Path>) -> Option<Session> {
         let cwd = cwd.or(self.config.working_directory.as_deref());
         open_session(&self.egui_ctx, &self.config, profile, cwd)
     }
@@ -2524,28 +2618,137 @@ impl Window {
             .then(|| self.focused_pwd())
             .flatten();
         if let Some(s) = self.spawn_session(idx, cwd.as_deref()) {
-            let id = self.alloc_id();
-            let at = new_tab_index(
-                self.config.new_tab_position,
-                self.active_tab,
-                self.tabs.len(),
-            );
-            self.tabs.insert(at, Tab::leaf(id, s));
-            self.active_tab = at;
-            // Ghostty registers an undo for `new_tab` too: the reverse of making
-            // a tab is closing it. It goes through the same `RemoveTabs` path a
-            // redo would, so "close this tab" has one implementation.
-            self.requests.push(AppRequest::Record(UndoOp::RemoveTabs {
-                window: self.window_id,
-                ids: vec![id],
-            }));
-            // An insert *before* the end shifts every later tab, so anything
-            // holding a tab index is now pointing at the wrong tab. Every other
-            // mutation point in this file clears these for the same reason; a
-            // mid-list insert is a new one, introduced by
-            // `window-new-tab-position = current`.
-            self.renaming = None;
-            self.tab_drag = None;
+            self.insert_tab(s);
+        }
+    }
+
+    /// Add a one-pane tab around `s` at the `window-new-tab-position` slot and
+    /// select it. Returns the tab's id (which is also its pane's id).
+    fn insert_tab(&mut self, s: Session) -> u64 {
+        let id = self.alloc_id();
+        let at = new_tab_index(
+            self.config.new_tab_position,
+            self.active_tab,
+            self.tabs.len(),
+        );
+        self.tabs.insert(at, Tab::leaf(id, s));
+        self.active_tab = at;
+        // Ghostty registers an undo for `new_tab` too: the reverse of making
+        // a tab is closing it. It goes through the same `RemoveTabs` path a
+        // redo would, so "close this tab" has one implementation.
+        self.requests.push(AppRequest::Record(UndoOp::RemoveTabs {
+            window: self.window_id,
+            ids: vec![id],
+        }));
+        // An insert *before* the end shifts every later tab, so anything
+        // holding a tab index is now pointing at the wrong tab. Every other
+        // mutation point in this file clears these for the same reason; a
+        // mid-list insert is a new one, introduced by
+        // `window-new-tab-position = current`.
+        self.renaming = None;
+        self.tab_drag = None;
+        id
+    }
+
+    /// IPC `new_tab`: a tab running `profile` (else the default) in exactly
+    /// `cwd` — an explicit request, so nothing is inherited.
+    fn open_tab(&mut self, profile: Option<&Profile>, cwd: Option<&std::path::Path>) -> Option<u64> {
+        let s = match profile {
+            Some(p) => self.spawn_profile(p, cwd)?,
+            None => self.spawn_session(self.default_profile, cwd)?,
+        };
+        Some(self.insert_tab(s))
+    }
+
+    /// Select the tab holding `pane` (or the tab `tab`), focus the pane, and
+    /// flash it. Returns the resolved `(tab id, pane id)`, or `None` when
+    /// neither id names anything in this window. A zoom on another pane is
+    /// dropped, or the focused pane would stay hidden behind it.
+    fn focus_ids(&mut self, tab: Option<u64>, pane: Option<u64>) -> Option<(u64, u64)> {
+        let ti = match (tab, pane) {
+            (_, Some(p)) => self.tabs.iter().position(|t| t.root.contains(p))?,
+            (Some(t), None) => self.tabs.iter().position(|x| x.id == t)?,
+            (None, None) => self.active_tab.min(self.tabs.len().checked_sub(1)?),
+        };
+        if tab.is_some_and(|t| self.tabs[ti].id != t) {
+            return None;
+        }
+        self.active_tab = ti;
+        let t = &mut self.tabs[ti];
+        if let Some(p) = pane {
+            t.focus = p;
+        }
+        if t.zoomed.is_some_and(|z| z != t.focus) {
+            t.zoomed = None;
+        }
+        let (tid, pid) = (t.id, t.focus);
+        if let Some(s) = t.root.payload_mut(pid) {
+            s.request_highlight();
+        }
+        Some((tid, pid))
+    }
+
+    /// IPC `input_text`: paste into `pane` (else the focused pane) through the
+    /// one gated entry point, so `clipboard-paste-protection` applies.
+    fn paste_ipc(&mut self, pane: Option<u64>, text: &str) -> bool {
+        let session = match pane {
+            Some(p) => self
+                .tabs
+                .iter_mut()
+                .find(|t| t.root.contains(p))
+                .and_then(|t| t.root.payload_mut(p)),
+            None => self.focused_session_mut(),
+        };
+        match session {
+            Some(s) => {
+                s.paste_str(text);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// This window as an IPC `list` entry.
+    fn ipc_info(&self, focused: bool) -> crate::ipc::WindowInfo {
+        let tabs = self
+            .tabs
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                let mut ids = Vec::new();
+                t.root.leaf_ids(&mut ids);
+                let panes: Vec<crate::ipc::PaneInfo> = ids
+                    .iter()
+                    .filter_map(|&id| {
+                        let s = t.root.payload(id)?;
+                        Some(crate::ipc::PaneInfo {
+                            id,
+                            title: s.title().unwrap_or_default(),
+                            focused: id == t.focus,
+                            cwd: s.pwd().map(|p| p.display().to_string()),
+                        })
+                    })
+                    .collect();
+                let title = t.name.clone().unwrap_or_else(|| {
+                    panes
+                        .iter()
+                        .find(|p| p.focused)
+                        .map(|p| p.title.clone())
+                        .unwrap_or_default()
+                });
+                crate::ipc::TabInfo {
+                    id: t.id,
+                    title,
+                    active: i == self.active_tab,
+                    panes,
+                }
+            })
+            .collect();
+        crate::ipc::WindowInfo {
+            id: self.window_id,
+            title: self.last_window_title.clone().unwrap_or_else(|| "giest".into()),
+            focused,
+            tabs,
         }
     }
 
@@ -5392,6 +5595,7 @@ impl Window {
         let mut frames: Vec<PaneFrame> = Vec::with_capacity(leaves.len());
         // (pane rect, flash intensity) for any pane ringing its visual bell.
         let mut bell_flashes: Vec<(egui::Rect, f32)> = Vec::new();
+        let mut highlights: Vec<(egui::Rect, f32)> = Vec::new();
         // (pane rect, fill color) for each unfocused split to dim. Collected here
         // (where each leaf's own background is in scope) and painted over the
         // terminal after the callback below.
@@ -5438,6 +5642,9 @@ impl Window {
                 if let Some(a) = flash {
                     bell_flashes.push((leaf_rect, a));
                 }
+            }
+            if let Some(a) = session.highlight_alpha(now) {
+                highlights.push((leaf_rect, a));
             }
             // Dim every split except the focused one. Deliberately keyed on
             // `is_focus`, *not* on window focus: Ghostty leaves the last-focused
@@ -6215,6 +6422,24 @@ impl Window {
             }
         }
 
+        // "Here I am" highlight after a notification click / IPC focus: an
+        // accent wash plus border, fading out. Painter-only, like the bell.
+        if !highlights.is_empty() {
+            ctx.request_repaint();
+            for (rect, a) in &highlights {
+                let c = self.chrome.accent;
+                let wash = egui::Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), (a * 40.0) as u8);
+                let edge = egui::Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), (a * 230.0) as u8);
+                ui.painter().rect_filled(*rect, 0.0, wash);
+                ui.painter().rect_stroke(
+                    *rect,
+                    0.0,
+                    egui::Stroke::new(stroke_w(3.0), edge),
+                    egui::StrokeKind::Inside,
+                );
+            }
+        }
+
         // Grid-size overlay after a resize. Drawn last so it reads as a HUD above
         // the dim rects and the focus border; painter-only, so it never
         // intercepts clicks. Must keep requesting repaints or the fade freezes on
@@ -6471,27 +6696,39 @@ impl Window {
     ///
     /// The bell *effects* are only latched here: firing them needs this window's
     /// own focus state, which is only meaningful inside its own pass.
-    fn pump_all(&mut self, now: f64, notifications: &mut Vec<crate::osc_notify::Notification>) {
+    fn pump_all(&mut self, now: f64, notifications: &mut Vec<PendingNotification>) {
         let was_focused = self.was_focused;
-        let mut rang = false;
-        let mut finished: Vec<session::CommandFinish> = Vec::new();
-        let mut progress_changed = false;
+        let window = self.window_id;
         let active_tab = self.active_tab;
+        let mut rang = false;
+        let mut finished: Vec<(session::CommandFinish, u64)> = Vec::new();
+        let mut progress_changed = false;
         for (ti, tab) in self.tabs.iter_mut().enumerate() {
             let mut tab_rang = false;
-            tab.root.for_each_mut(&mut |pane| {
+            let focus = tab.focus;
+            tab.root.for_each_leaf_mut(&mut |pane_id, pane| {
                 pane.pump_pty();
                 pane.idle_work();
                 let r = pane.take_bell_effect(now);
                 tab_rang |= r;
                 rang |= r;
                 let focused = was_focused;
-                notifications.extend(pane.take_notifications().into_iter().filter(|n| {
-                    // Kitty `o=unfocused` / `o=invisible`: nothing to tell a user who
-                    // is already looking at this window.
-                    n.occasion == crate::osc_notify::Occasion::Always || !focused
-                }));
-                finished.append(&mut pane.take_command_finishes());
+                // Upstream's `shouldPresentNotification`: a program's
+                // notification is for a user who *can't see* the pane — not
+                // while its window is active and it is the focused pane there.
+                let pane_focused = ti == active_tab && pane_id == focus;
+                let present = crate::notify::should_present(true, focused, pane_focused);
+                notifications.extend(
+                    pane.take_notifications()
+                        .into_iter()
+                        .filter(|n| {
+                            // Kitty `o=unfocused` / `o=invisible`: nothing to
+                            // tell a user who is already looking at this window.
+                            present && (n.occasion == crate::osc_notify::Occasion::Always || !focused)
+                        })
+                        .map(|note| PendingNotification { note, window, pane: pane_id }),
+                );
+                finished.extend(pane.take_command_finishes().into_iter().map(|f| (f, pane_id)));
                 progress_changed |= pane.take_progress().is_some();
             });
             // Marked only where nobody is looking: a background tab, or any
@@ -6525,7 +6762,7 @@ impl Window {
         }
         let after = Duration::from_millis(self.config.notify_on_command_finish_after_ms);
         let action = self.config.notify_on_command_finish_action;
-        for f in finished.iter().filter(|f| f.duration >= after) {
+        for (f, pane) in finished.iter().filter(|(f, _)| f.duration >= after) {
             if action.bell {
                 // Reuses the whole `bell-features` path, so a user who has
                 // configured the bell to flash or flag the taskbar gets that
@@ -6533,10 +6770,16 @@ impl Window {
                 self.pending_bell = true;
             }
             if action.notify {
-                notifications.push(crate::osc_notify::Notification {
-                    title: f.title().to_string(),
-                    body: f.body(),
-                    ..Default::default()
+                // `requireFocus: false` upstream: the mode above already made
+                // the focus decision.
+                notifications.push(PendingNotification {
+                    note: crate::osc_notify::Notification {
+                        title: f.title().to_string(),
+                        body: f.body(),
+                        ..Default::default()
+                    },
+                    window,
+                    pane: *pane,
                 });
             }
         }
@@ -6606,11 +6849,21 @@ impl Window {
             }
         }
 
-        // Record where this window is, for the root-slot rehost on retire.
-        self.geom = ctx.input(|i| {
-            let vp = i.viewport();
-            Some((vp.outer_rect?.min, vp.inner_rect?.size()))
-        });
+        if std::mem::take(&mut self.restore_maximized) {
+            self.maximized = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
+        }
+
+        // Record where this window is, for the root-slot rehost on retire and
+        // for the saved frame. Not while minimized: Windows parks a minimized
+        // window at (-32000, -32000), and restoring *that* loses the window.
+        if !ctx.input(|i| i.viewport().minimized.unwrap_or(false)) {
+            self.geom = ctx.input(|i| {
+                let vp = i.viewport();
+                Some((vp.outer_rect?.min, vp.inner_rect?.size()))
+            });
+            self.seen_maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+        }
 
         // Close panes/tabs whose shell exited; bail if that closed the window.
         // NOTE: this path is deliberately never confirmed — the process is
@@ -6807,7 +7060,22 @@ impl App {
             quit_at: None,
             hidden: false,
             titlebar_applied: None,
+            ipc_rx: crate::ipc::take_receiver(),
+            notify_origin: None,
+            restart_snapshot_at: f64::NEG_INFINITY,
         };
+        // Both wake the root viewport from outside a pass: an IPC request
+        // (another thread) and a notification click (a window procedure).
+        crate::ipc::set_waker(&cc.egui_ctx);
+        crate::notify::set_waker(&cc.egui_ctx);
+        if let Some(hwnd) = app.windows[0].hwnd {
+            crate::restart::register(hwnd);
+        }
+        {
+            let w = &app.windows[0];
+            let names: Vec<&str> = w.profiles.iter().map(|p| p.name.as_str()).collect();
+            crate::jumplist::sync(w.config.jump_list, &names);
+        }
         // `initial-window = false`: start resident with no window. The first
         // window's shell is already running (building a `Window` spawns one),
         // so it is dropped along with the tabs.
@@ -6828,7 +7096,13 @@ impl App {
     /// a later crash that never got to write its own, which reads as giest
     /// ignoring everything the user has done since.
     fn restore_state(&mut self) {
-        if !self.windows[0].config.window_save_state.restores() {
+        // `--restore-session` (a `RegisterApplicationRestart` relaunch) restores
+        // whatever the config says. An explicit start — a directory or `-e`
+        // command on the command line — never does: the user asked for that
+        // one thing, and a restore would replace it with yesterday's layout.
+        let wanted =
+            self.windows[0].config.window_save_state.restores() || crate::cli::restore_session();
+        if !wanted || crate::cli::explicit_start() {
             return;
         }
         let saved = crate::state::load();
@@ -6895,35 +7169,44 @@ impl App {
             let Some(action) = self.global_actions.get(i).cloned() else {
                 continue;
             };
-            // Resident with no window: the only thing a hotkey can mean is
-            // "give me a window".
-            if self.windows.is_empty() {
-                if matches!(
-                    action,
-                    Action::NewWindow
-                        | Action::NewTab
-                        | Action::ToggleVisibility
-                        | Action::ToggleQuickTerminal
-                ) {
-                    self.wake(ctx, None);
-                }
-                continue;
+            self.run_app_action(ctx, render_state, action, None);
+        }
+    }
+
+    /// Run an action from outside any window's pass — a `global:` hotkey or an
+    /// IPC `run_action`. `target` is a window slot; `None` means the focused one.
+    fn run_app_action(
+        &mut self,
+        ctx: &egui::Context,
+        render_state: Option<&egui_wgpu::RenderState>,
+        action: Action,
+        target: Option<usize>,
+    ) {
+        // Resident with no window: the only thing an action can mean is "give
+        // me a window".
+        if self.windows.is_empty() {
+            if matches!(
+                action,
+                Action::NewWindow | Action::NewTab | Action::ToggleVisibility | Action::ToggleQuickTerminal
+            ) {
+                self.wake(ctx, None);
             }
-            if action == Action::ToggleQuickTerminal {
-                self.toggle_quick_terminal(ctx);
-                continue;
-            }
-            if action == Action::ToggleVisibility {
-                self.toggle_visibility(ctx);
-                continue;
-            }
-            // Everything else is a *window* action, and the focused window is
-            // the only sensible target — including when giest isn't focused at
-            // all, where "the window you last used" is what a user means.
-            let idx = self.focused.min(self.windows.len().saturating_sub(1));
-            if let Some(w) = self.windows.get_mut(idx) {
-                w.execute_action(ctx, render_state, action);
-            }
+            return;
+        }
+        if action == Action::ToggleQuickTerminal {
+            self.toggle_quick_terminal(ctx);
+            return;
+        }
+        if action == Action::ToggleVisibility {
+            self.toggle_visibility(ctx);
+            return;
+        }
+        // Everything else is a *window* action, and the focused window is the
+        // only sensible default target — including when giest isn't focused at
+        // all, where "the window you last used" is what a user means.
+        let idx = target.unwrap_or(self.focused).min(self.windows.len().saturating_sub(1));
+        if let Some(w) = self.windows.get_mut(idx) {
+            w.execute_action(ctx, render_state, action);
         }
     }
 
@@ -7097,11 +7380,12 @@ impl App {
     /// has a reachable one (a child viewport's is not exposed), so a per-window
     /// call would silently drop every notification from a secondary window.
     ///
-    /// Unlike the bell there is no rate limit and no focus gate: OSC 9 / OSC 777
-    /// are explicit requests from the program, and Ghostty shows them whatever
-    /// the focus state. `MAX_BURST` is only a runaway guard — a program looping
-    /// on OSC 9 could otherwise queue an unbounded stack of toasts.
-    fn raise_notifications(&mut self, notifications: Vec<crate::osc_notify::Notification>) {
+    /// The focus gate (upstream `shouldPresentNotification`) was applied in
+    /// `pump_all`, where each pane's focus is known. There is no rate limit;
+    /// `MAX_BURST` is only a runaway guard — a program looping on OSC 9 could
+    /// otherwise queue an unbounded stack of toasts. The last one shown is
+    /// remembered by id, so clicking it can focus its pane.
+    fn raise_notifications(&mut self, notifications: Vec<PendingNotification>) {
         /// Most notifications raised from a single pump. Windows coalesces
         /// balloons anyway, so beyond a handful they'd be invisible *and*
         /// expensive.
@@ -7113,8 +7397,9 @@ impl App {
         let Some(hwnd) = self.windows.first().and_then(|w| w.hwnd) else {
             return;
         };
-        for n in notifications.iter().filter(|n| !n.is_empty()).take(MAX_BURST) {
-            crate::notify::show(hwnd, &n.title, &n.body);
+        for n in notifications.iter().filter(|n| !n.note.is_empty()).take(MAX_BURST) {
+            crate::notify::show(hwnd, &n.note.title, &n.note.body);
+            self.notify_origin = Some((n.window, n.pane));
         }
     }
 
@@ -7328,11 +7613,20 @@ impl App {
     /// Leave the dormant state: open a window from the template into the root
     /// viewport and show it.
     fn wake(&mut self, ctx: &egui::Context, cwd: Option<&std::path::Path>) {
-        let Some(t) = self.dormant.take() else {
-            return;
-        };
+        self.wake_with(ctx, None, cwd);
+    }
+
+    /// [`Self::wake`] with the first pane running `profile`. Returns the new
+    /// window's id.
+    fn wake_with(
+        &mut self,
+        ctx: &egui::Context,
+        profile: Option<&Profile>,
+        cwd: Option<&std::path::Path>,
+    ) -> Option<u64> {
+        let t = self.dormant.take()?;
         let id = self.next_window_id;
-        match t.sibling(id, cwd) {
+        match t.sibling_running(id, profile, cwd) {
             Some(mut w) => {
                 self.next_window_id += 1;
                 w.is_root = true;
@@ -7344,8 +7638,12 @@ impl App {
                 ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Visible(true));
                 ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
                 ctx.request_repaint();
+                Some(id)
             }
-            None => self.dormant = Some(t),
+            None => {
+                self.dormant = Some(t);
+                None
+            }
         }
     }
 
@@ -7422,20 +7720,277 @@ impl App {
     /// Open a new window, cloned from the focused one (falling back to the root)
     /// so it inherits the live config, profiles and font metrics.
     fn spawn_window(&mut self, ctx: &egui::Context, now: f64, cwd: Option<&std::path::Path>) {
+        self.spawn_window_with(ctx, now, None, cwd);
+    }
+
+    /// [`Self::spawn_window`] with the first pane running `profile`. Returns
+    /// the new window's id.
+    fn spawn_window_with(
+        &mut self,
+        ctx: &egui::Context,
+        now: f64,
+        profile: Option<&Profile>,
+        cwd: Option<&std::path::Path>,
+    ) -> Option<u64> {
         let from = self.focused.min(self.windows.len().saturating_sub(1));
-        let Some(src) = self.windows.get(from) else {
-            return;
-        };
+        let src = self.windows.get(from)?;
         let id = self.next_window_id;
         // Only bump the counter on success, so a failed spawn doesn't burn an id.
-        if let Some(w) = src.sibling(id, cwd) {
-            self.next_window_id += 1;
-            self.windows.push(w);
-            // Upstream registers an undo for `new_window` too — undoing a
-            // creation closes it, through the same path a redo of a close uses.
-            self.undo.record(now, UndoOp::RemoveWindow { window: id });
-            ctx.request_repaint();
+        let w = src.sibling_running(id, profile, cwd)?;
+        self.next_window_id += 1;
+        self.windows.push(w);
+        // Upstream registers an undo for `new_window` too — undoing a
+        // creation closes it, through the same path a redo of a close uses.
+        self.undo.record(now, UndoOp::RemoveWindow { window: id });
+        ctx.request_repaint();
+        Some(id)
+    }
+
+    /// Answer every IPC request that arrived since the last pass.
+    fn handle_ipc(
+        &mut self,
+        ctx: &egui::Context,
+        now: f64,
+        render_state: Option<&egui_wgpu::RenderState>,
+    ) {
+        let Some(rx) = &self.ipc_rx else { return };
+        let incoming: Vec<crate::ipc::Incoming> = rx.try_iter().collect();
+        for inc in incoming {
+            let reply = self.answer_ipc(ctx, now, render_state, &inc.request);
+            inc.respond(reply);
         }
+    }
+
+    /// The profile list of any window (or the dormant template).
+    fn any_window(&self) -> Option<&Window> {
+        self.windows.first().or(self.dormant.as_ref())
+    }
+
+    /// Resolve an optional window id to a slot: the given window, else the
+    /// last-focused one.
+    fn window_slot(&self, id: Option<u64>) -> Result<usize, crate::ipc::Response> {
+        match id {
+            Some(id) => self
+                .windows
+                .iter()
+                .position(|w| w.window_id == id)
+                .ok_or_else(|| crate::ipc::Response::err(format!("no window with id {id}"))),
+            None if self.windows.is_empty() => Err(crate::ipc::Response::err("no window is open")),
+            None => Ok(self.focused.min(self.windows.len() - 1)),
+        }
+    }
+
+    /// Raise window slot `i`: un-hide, un-minimize, focus.
+    fn raise_window(&mut self, ctx: &egui::Context, i: usize) {
+        if self.hidden {
+            self.toggle_visibility(ctx);
+        }
+        let vp = self.viewport_of(i);
+        ctx.send_viewport_cmd_to(vp, egui::ViewportCommand::Minimized(false));
+        ctx.send_viewport_cmd_to(vp, egui::ViewportCommand::Focus);
+        self.focused = i;
+        ctx.request_repaint();
+    }
+
+    /// Focus a window / tab / pane by id (IPC `focus`, notification click).
+    fn focus_target(
+        &mut self,
+        ctx: &egui::Context,
+        window: Option<u64>,
+        tab: Option<u64>,
+        pane: Option<u64>,
+    ) -> crate::ipc::Response {
+        use crate::ipc::Response;
+        if self.windows.is_empty() {
+            return match self.wake_with(ctx, None, None) {
+                Some(id) => Response { window: Some(id), ..Response::ok() },
+                None => Response::err("could not open a window"),
+            };
+        }
+        let i = match self.window_slot(window) {
+            Ok(i) => i,
+            Err(r) => return r,
+        };
+        let w = &mut self.windows[i];
+        // A hidden quick terminal is shown through its own toggle.
+        if w.quick && !w.quick_shown() {
+            w.set_quick_shown(true, ctx.input(|i| i.time));
+        }
+        let wid = w.window_id;
+        let resolved = if tab.is_some() || pane.is_some() {
+            match w.focus_ids(tab, pane) {
+                Some(r) => Some(r),
+                None => return Response::err("no such tab or pane in that window"),
+            }
+        } else {
+            None
+        };
+        self.raise_window(ctx, i);
+        Response {
+            window: Some(wid),
+            tab: resolved.map(|r| r.0),
+            pane: resolved.map(|r| r.1),
+            ..Response::ok()
+        }
+    }
+
+    fn answer_ipc(
+        &mut self,
+        ctx: &egui::Context,
+        now: f64,
+        render_state: Option<&egui_wgpu::RenderState>,
+        req: &crate::ipc::Request,
+    ) -> crate::ipc::Response {
+        use crate::ipc::{Request, Response};
+        // Resolve a request's cwd + command against the live profile list. A
+        // cwd that isn't a directory is refused up front: the spawn would
+        // otherwise fail (or land somewhere else) with no word to the caller.
+        let resolve = |app: &Self,
+                       cwd: &Option<String>,
+                       command: &Option<crate::ipc::CommandSpec>|
+         -> Result<(Option<std::path::PathBuf>, Option<Profile>), Response> {
+            let cwd = cwd.as_ref().map(std::path::PathBuf::from);
+            if let Some(d) = &cwd
+                && !d.is_dir()
+            {
+                return Err(Response::err(format!("not a directory: {}", d.display())));
+            }
+            let profile = match command {
+                Some(c) => {
+                    let profiles = app.any_window().map(|w| w.profiles.as_slice()).unwrap_or(&[]);
+                    Some(profile_for_spec(profiles, c).ok_or_else(|| Response::err("empty command"))?)
+                }
+                None => None,
+            };
+            Ok((cwd, profile))
+        };
+        match req {
+            Request::NewWindow { cwd, command } => {
+                let (cwd, profile) = match resolve(self, cwd, command) {
+                    Ok(v) => v,
+                    Err(r) => return r,
+                };
+                let id = if self.windows.is_empty() {
+                    self.wake_with(ctx, profile.as_ref(), cwd.as_deref())
+                } else {
+                    self.spawn_window_with(ctx, now, profile.as_ref(), cwd.as_deref())
+                };
+                match id {
+                    Some(id) => {
+                        if self.hidden {
+                            self.toggle_visibility(ctx);
+                        }
+                        Response {
+                            window: Some(id),
+                            tab: Some(1),
+                            pane: Some(1),
+                            ..Response::ok()
+                        }
+                    }
+                    None => Response::err("could not start a shell"),
+                }
+            }
+            Request::NewTab { cwd, command, window } => {
+                let (cwd, profile) = match resolve(self, cwd, command) {
+                    Ok(v) => v,
+                    Err(r) => return r,
+                };
+                if self.windows.is_empty() && window.is_none() {
+                    // Resident with no window: the tab *is* the new window.
+                    return match self.wake_with(ctx, profile.as_ref(), cwd.as_deref()) {
+                        Some(id) => Response {
+                            window: Some(id),
+                            tab: Some(1),
+                            pane: Some(1),
+                            ..Response::ok()
+                        },
+                        None => Response::err("could not start a shell"),
+                    };
+                }
+                let i = match self.window_slot(*window) {
+                    Ok(i) => i,
+                    Err(r) => return r,
+                };
+                let w = &mut self.windows[i];
+                let wid = w.window_id;
+                match w.open_tab(profile.as_ref(), cwd.as_deref()) {
+                    Some(tab) => {
+                        // `new_tab`'s undo record rides the window's request
+                        // queue; hand it to the app now rather than a pass late.
+                        let reqs = std::mem::take(&mut w.requests);
+                        self.apply_requests(ctx, now, reqs.into_iter().map(|r| (wid, r)).collect());
+                        if let Some(i) = self.windows.iter().position(|w| w.window_id == wid) {
+                            self.raise_window(ctx, i);
+                        }
+                        Response {
+                            window: Some(wid),
+                            tab: Some(tab),
+                            pane: Some(tab),
+                            ..Response::ok()
+                        }
+                    }
+                    None => Response::err("could not start a shell"),
+                }
+            }
+            Request::Focus { window, tab, pane } => self.focus_target(ctx, *window, *tab, *pane),
+            Request::InputText { text, window, pane } => {
+                let i = match self.window_slot(*window) {
+                    Ok(i) => i,
+                    Err(r) => return r,
+                };
+                let wid = self.windows[i].window_id;
+                if self.windows[i].paste_ipc(*pane, text) {
+                    ctx.request_repaint();
+                    Response {
+                        window: Some(wid),
+                        pane: *pane,
+                        ..Response::ok()
+                    }
+                } else {
+                    Response::err("no such pane")
+                }
+            }
+            Request::RunAction { action, window } => {
+                let Some(a) = Action::from_name(action) else {
+                    return Response::err(format!("unknown action '{action}'"));
+                };
+                if window.is_some() && self.window_slot(*window).is_err() {
+                    return self.window_slot(*window).unwrap_err();
+                }
+                let target = window.and_then(|id| self.windows.iter().position(|w| w.window_id == id));
+                self.run_app_action(ctx, render_state, a, target);
+                ctx.request_repaint();
+                Response::ok()
+            }
+            Request::List => Response {
+                windows: Some(
+                    self.windows
+                        .iter()
+                        .enumerate()
+                        .map(|(i, w)| w.ipc_info(i == self.focused))
+                        .collect(),
+                ),
+                ..Response::ok()
+            },
+        }
+    }
+
+    /// Refresh the layout `restart.rs` writes if Windows ends the session.
+    /// Every two seconds is plenty: an update restart is announced, not sudden.
+    fn refresh_restart_snapshot(&mut self, now: f64) {
+        if now - self.restart_snapshot_at < 2.0 {
+            return;
+        }
+        self.restart_snapshot_at = now;
+        let state = crate::state::SavedState {
+            windows: self
+                .windows
+                .iter()
+                .filter(|w| !w.quick)
+                .map(Window::capture_state)
+                .collect(),
+        };
+        crate::restart::set_snapshot((!state.is_empty()).then(|| crate::state::serialize(&state)));
     }
 
     /// Close the window with `id`, quitting giest when it was the last one.
@@ -7610,6 +8165,18 @@ impl eframe::App for App {
             let hwnd = self.windows.first().and_then(|w| w.hwnd).unwrap_or(0);
             crate::notify::error_box(hwnd, "giest: renderer error", &msg);
         }
+
+        // Other `giest` processes' requests, answered before the window passes
+        // so a new window or tab is drawn this very frame.
+        self.handle_ipc(&ctx, now, render_state.as_ref());
+        // A click on the last notification: go to the pane that raised it (by
+        // id — it may have moved, or be gone, since).
+        if crate::notify::take_clicked()
+            && let Some((w, p)) = self.notify_origin
+        {
+            self.focus_target(&ctx, Some(w), None, Some(p));
+        }
+        self.refresh_restart_snapshot(now);
 
         let mut requests: Vec<(u64, AppRequest)> = Vec::new();
         // The root window draws into the `Ui` eframe handed us.
@@ -8799,6 +9366,7 @@ mod tests {
                     tree: saved.clone(),
                 }],
                 active_tab: 0,
+                frame: None,
             }],
         });
         let back = crate::state::parse(&text);
