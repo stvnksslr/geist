@@ -49,8 +49,8 @@ fallback engine without app changes:
   pane, so they nest like Ghostty rather than re-flowing onto a shared axis. Handles input →
   PTY bytes, grid sizing, repaint; all active panes are laid out and painted in a single GPU callback.
 - **`session.rs`** — one session = a `Pty` + a `GhosttyVtEngine` + per-pane interaction state
-  (selection anchor/head, held mouse button, alive flag, OSC 52 scanner). `pump_pty` drains PTY
-  output into the engine.
+  (selection anchor/head, held mouse button, alive flag, pending clipboard dialog). `pump_pty`
+  drains PTY output into the engine.
 - **`render/mod.rs`** — wgpu instanced-quad pipeline, per-row run shaping, instance builder, egui
   `CallbackTrait`. **`render/atlas.rs`** — rustybuzz shaping + ab_glyph rasterization (primary +
   system fallback faces) into an R8 atlas; COLR/CPAL color emoji composited into a separate RGBA atlas.
@@ -68,7 +68,7 @@ fallback engine without app changes:
   `DWMWA_SYSTEMBACKDROP_TYPE`, falling back to the undocumented `SetWindowCompositionAttribute` accent
   policy (resolved via `GetProcAddress`, never linked) on Win10, then to nothing.
 - **`osc_notify.rs`** — side-scanner for OSC 9 / OSC 777 desktop-notification requests (the engine
-  drops them, like OSC 7). **`notify.rs`** — shows them as Windows toasts via the notification-area
+  drops them on the read-only path; lib-vt now has an `on_desktop_notification` callback, unexplored). **`notify.rs`** — shows them as Windows toasts via the notification-area
   balloon API; WinRT toasts would need a registered AppUserModelID (i.e. a Start Menu shortcut).
   **`shader.rs`** — `custom-shader`: Shadertoy GLSL → naga IR → WGSL. **The prefix's oddities are
   all forced by naga, not style**: no combined `sampler2D` (Vulkan-style `texture2D`+`sampler`
@@ -92,8 +92,10 @@ fallback engine without app changes:
 - **`config.rs`** — Ghostty-format config (`key = value` lines, kebab-case keys, unquoted
   colors, repeatable `palette`) from `%APPDATA%\giest\config` (override with `GIEST_CONFIG`);
   defines the full ANSI 16 + 256-color palette. **`profiles.rs`** — shell profiles (pwsh/powershell/cmd/wsl).
-  **`osc52.rs`** — side-stream parser for OSC 52 clipboard set/query (parsing only; the
-  permission policy lives in `session.rs`).
+  **`clipboard.rs`** — policy for program clipboard access, OSC 52 *and* kitty OSC 5522 (+ paste
+  events, mode 5522). The engine parses both and calls `on_clipboard_write`/`on_clipboard_read`
+  (installed in `ghostty_vt::install_clipboard`); this module decides `clipboard-read`/`-write`/
+  `-write-limit-bytes` and MIME support. There is no OSC 52 or OSC 7 side-scanner any more.
 
 ## Non-obvious gotchas
 
@@ -102,7 +104,10 @@ fallback engine without app changes:
   @b32f20f (the binding pins 22d1317, 876 commits older). That bump carries three local deltas:
   `GHOSTTY_COMMIT` in `libghostty-vt-sys/build.rs`; a **regenerated** `bindings.rs`; and
   `render.rs::colors()` moved from the removed `ghostty_render_state_colors_get` onto
-  `ghostty_render_state_get(.., RenderStateData::COLORS, ..)`. The old Windows static-link patch
+  `ghostty_render_state_get(.., RenderStateData::COLORS, ..)`. Plus **giest-local** wrappers in
+  `terminal.rs`: `on_clipboard_write` fixed to the pinned reply-function ABI (upstream's still
+  *returned* the result, which the C side ignored — every write was silently denied),
+  `on_clipboard_read`, `Terminal::paste` (`ghostty_terminal_paste`), and `Mode::PASTE_EVENTS`. The old Windows static-link patch
   (`static=ghostty-vt-static`, without which the exe loads `ghostty-vt.dll` and crashes in
   `vt_write`) is now **upstream** (8272abe) — don't re-add it, but *do* check it survives a bump.
   **Regenerating `bindings.rs` on Windows has two traps:** bindgen needs `libclang.dll` (the
@@ -124,8 +129,17 @@ fallback engine without app changes:
   `is_copy_command` ignores Shift, so both Ctrl+C and Ctrl+Shift+C arrive as `Event::Copy`. Copy/paste
   logic must live in the `Event::Copy`/`Cut`/`Paste` arms, not the Key handler (that would be dead code).
   Windows-Terminal semantics: `Event::Copy` copies the selection if one exists, else sends `0x03` (SIGINT).
-  OSC 52 runs from `pump_pty` (no ctx) via `arboard`; `osc52.rs` only *parses*, and
-  `Session::handle_osc52` applies `clipboard-write`/`clipboard-read`.
+  OSC 52 / OSC 5522 run inside `engine.write` (no ctx) via `arboard`; see the clipboard-callback
+  gotcha below.
+- **Clipboard callbacks are synchronous; `ask` is built by cutting the engine's refusal back out.**
+  `on_clipboard_read/write` must answer before returning, and an unanswered request is refused *on
+  the spot* (OSC 52: empty reply; 5522: `EPERM`) straight into the response buffer. giest can't block
+  on a modal, so under `ask` the callback records the buffer's length and doesn't answer; after
+  `vt_write`, `collect_clipboard_deferrals` cuts the refusal at that offset out and holds it. Deny
+  sends it; allow writes + sends it flipped to `DONE`, or *replays* the read into the engine with a
+  one-shot grant. The offset is exact only because the stream is paused for the callback — do not
+  write responses from anywhere else inside it. A paste event's follow-up read (`granted`) bypasses
+  `clipboard-read` and is served the pasted text.
 - **Every paste must go through `Session::paste_str`.** It is the one gate that applies
   `clipboard-paste-protection`, and unsafe text becomes a pending `ClipboardRequest` instead of
   reaching the PTY. `encode_paste` therefore has exactly one caller (the private `write_paste`);
@@ -141,11 +155,11 @@ fallback engine without app changes:
 - **A new modal must be added to *two* gates, not one.** `App::modal_open` (shortcuts + font zoom)
   and the `palette_open` local in `render_active` (terminal keys, pane mouse, scrollbar) are
   separate lists, and missing either means the dialog is up while the terminal still takes input.
-- **OSC 7 (working dir) must be side-scanned — `Terminal::pwd()` is always empty.** libghostty-vt's
-  *read-only* stream parses OSC 7 but discards `report_pwd` (it never reaches the terminal's `pwd`), so
-  the binding's `pwd()` returns `None` even after a valid report (unlike `title()`, which works). So a new
-  split's "inherit the parent's cwd" is built by side-scanning the PTY bytes ourselves in `osc7.rs`
-  (`Osc7Scanner`, fed from `pump_pty` like `osc52.rs`) and feeding the URI to `Session::pwd`. PowerShell
+- **The working dir comes from the engine now (`GhosttyVtEngine::pwd` → `Terminal::pwd()`).** On the
+  old pin it was always empty, so `osc7.rs` side-scanned OSC 7; since the b32f20f bump `vt_write`
+  keeps OSC 7 (and OSC 9;9 / OSC 1337 CurrentDir), and `ghostty_vt::tests::pwd_comes_from_the_engine`
+  pins it — the scanner is gone. A new split's "inherit the parent's cwd" feeds that raw URI to
+  `osc7_to_path` in `Session::pwd`. PowerShell
   and cmd don't emit OSC 7 by default, so `Profile::launch_args` (`profiles.rs`) injects a prompt hook at
   spawn (`pwsh`/`powershell` via `-EncodedCommand`, `cmd` via `prompt $E]7;…`), and WSL runs Ghostty's own
   scripts (`assets/shell-integration/`, reporting Linux paths that `Pty::spawn` drops unless they map
@@ -166,7 +180,8 @@ fallback engine without app changes:
   `RESIZE_QUIRK | WIN32_INPUT_MODE`); using it means vendoring and patching portable-pty, and it
   changes stream handling globally. See GAP.md's kitty-graphics section.
   **`tests/conpty_passthrough.rs` is the probe, made permanent** — an ignored host test that spawns
-  a real shell and asserts which sequences survive (OSC 7/9/52/133/777 do; APC does not). Run it
+  a real shell and asserts which sequences survive (OSC 7/9/52/133/777/5522 and DECSET 5522 do;
+  APC does not). Run it
   *first* for any new escape-sequence work: `cargo test --test conpty_passthrough -- --ignored`.
   The APC case is asserted **inverted** — it fails if a future Windows build stops stripping APC,
   which is how we'd learn kitty graphics is unblocked.

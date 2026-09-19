@@ -301,6 +301,47 @@ fn already_shipped_osc_sequences_still_survive_conpty() {
 
 #[test]
 #[ignore = "spawns a real shell; run with --ignored --nocapture"]
+fn kitty_clipboard_protocol_survives_conpty() {
+    // OSC 5522 (kitty clipboard): a read request, a full write transaction
+    // (begin, one data chunk, commit), and the DECSET that turns on paste
+    // events (mode 5522). The DECSET matters as much as the OSCs: ConPTY
+    // re-renders private modes it knows and could drop one it doesn't.
+    let out = run(&emit(&cat(&[
+        ESC.into(),
+        lit("]5522;type=read:id=r1;dGV4dC9wbGFpbg=="),
+        st(),
+        ESC.into(),
+        lit("]5522;type=write:id=w1"),
+        st(),
+        ESC.into(),
+        lit("]5522;type=wdata:mime=dGV4dC9wbGFpbg==;aGk="),
+        st(),
+        ESC.into(),
+        lit("]5522;type=wdata"),
+        st(),
+        ESC.into(),
+        lit("[?5522h"),
+    ])));
+    let text = String::from_utf8_lossy(&out);
+    eprintln!("ConPTY emitted {} bytes: {:?}", out.len(), text);
+
+    for needle in [
+        &b"]5522;type=read:id=r1;dGV4dC9wbGFpbg=="[..],
+        b"]5522;type=write:id=w1",
+        b"]5522;type=wdata:mime=dGV4dC9wbGFpbg==;aGk=",
+        b"]5522;type=wdata\x1b",
+        b"\x1b[?5522h",
+    ] {
+        assert!(
+            contains(&out, needle),
+            "ConPTY dropped {:?}. Got: {text:?}",
+            String::from_utf8_lossy(needle)
+        );
+    }
+}
+
+#[test]
+#[ignore = "spawns a real shell; run with --ignored --nocapture"]
 fn the_cmd_prompt_sets_the_bar_cursor_and_title() {
     let profile = Profile {
         name: "Command Prompt".into(),

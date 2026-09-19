@@ -100,14 +100,13 @@ flowchart LR
 Windows-Terminal semantics: `Event::Copy` copies the selection if one exists,
 otherwise sends `0x03` (SIGINT). See [`session.rs`](components/session.md).
 
-## OSC 52 payload isn't exposed by the binding
+## Clipboard callbacks are synchronous; `ask` is not
 
-libghostty-vt parses OSC 52 but the Rust binding surfaces only the command
-*type*, not its base64 payload, and offers no callback. So giest runs its **own**
-side-stream parser ([`osc52.rs`](components/osc52.md)) over the same bytes it
-feeds the engine. OSC 52 *write* is supported this way; OSC 52 *read/query* is
-intentionally **not** answered, to avoid leaking the clipboard to terminal
-output.
+OSC 52 and OSC 5522 arrive through libghostty-vt's clipboard callbacks, which
+must answer before returning — an unanswered request is refused on the spot.
+`clipboard-read/write = ask` therefore cuts the engine's refusal back out of the
+response buffer and replays or releases it once the user answers. See
+[`clipboard.rs`](components/clipboard.md).
 
 ## `on_pty_write` must not re-enter the terminal
 

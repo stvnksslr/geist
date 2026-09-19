@@ -138,11 +138,9 @@ flowchart LR
 
 ## What giest deliberately does *not* use from libghostty
 
-- **OSC 52 payloads.** The binding surfaces only the OSC 52 *command type*, not
-  its base64 body, and offers no callback. So giest runs its **own** side-stream
-  parser ([`osc52.rs`](../components/osc52.md)) over the same bytes it feeds the
-  engine. This is the one place terminal-protocol parsing is duplicated outside
-  libghostty, and it exists purely because the binding doesn't expose the data.
+- *(OSC 52 and OSC 7 used to be side-scanned here; they now come from the
+  engine's clipboard callbacks and `Terminal::pwd()` — see
+  [`clipboard.rs`](../components/clipboard.md).)*
 - **OSC 8 hyperlinks.** Not yet surfaced per-cell by the binding; giest
   auto-detects URLs in the snapshot text instead (see
   [`session::find_url_at`](../components/session.md)).

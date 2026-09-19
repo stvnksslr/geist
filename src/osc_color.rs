@@ -8,7 +8,7 @@
 //! the same bytes we feed the engine and answer the query ourselves.
 //!
 //! **Answering is deliberate, and safe** — unlike the OSC 52 clipboard *read*,
-//! which `osc52.rs` intentionally leaves unanswered because it would let terminal
+//! which is gated behind `clipboard-read` because it would let terminal
 //! output exfiltrate the clipboard. A color report leaks nothing, and programs
 //! genuinely depend on it: vim, delta and bat query OSC 11 to decide whether the
 //! background is light or dark. Don't "fix" this by analogy with OSC 52.

@@ -11,7 +11,7 @@ flowchart LR
         prof["profiles.rs"]
         cfg["config.rs"]
         sess["session.rs"]
-        osc["osc52.rs"]
+        osc["clipboard.rs"]
         app["app.rs"]
         ren["render/*"]
         main["main.rs"]
@@ -101,7 +101,7 @@ Three distinct paths reach the Windows clipboard:
 ```mermaid
 flowchart TB
     sel["Selection copy<br/>(Ctrl+C / Ctrl+Shift+C / copy-on-select)"]
-    osc52["OSC 52 from a program<br/>(tmux / vim over SSH)"]
+    osc52["OSC 52 / OSC 5522 from a program<br/>(tmux / vim over SSH, kitty clients)"]
     paste["Paste<br/>(Ctrl+V / Ctrl+Shift+V)"]
 
     sel -->|"ctx.copy_text()"| clip["Windows clipboard"]

@@ -6,8 +6,8 @@
 //! shape and blink — but it gives us no way to set the *default* shape (Ghostty's
 //! `cursor-style`), it resets DECSCUSR-default (`Ps = 0`) to a hardcoded block
 //! rather than the configured default, and its mode-12 default is off whereas
-//! Ghostty's default cursor blinks. So, exactly like the OSC 7/52 scanners
-//! ([`crate::osc7`], [`crate::osc52`]), we run a tiny CSI parser over the same
+//! Ghostty's default cursor blinks. So, like the other side-scanners (e.g.
+//! [`crate::osc_notify`]), we run a tiny CSI parser over the same
 //! bytes we feed the engine and track:
 //!
 //! - whether the program is on its *default* cursor (initial, and after `Ps = 0`)

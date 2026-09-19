@@ -12,7 +12,7 @@ classDiagram
         cols, rows: u16
         mouse_down: Option~MouseButton~
         alive: bool
-        osc52: Osc52Scanner
+        clipboard: engine callbacks
     }
     Session --> Pty
     Session --> GhosttyVtEngine
@@ -28,7 +28,7 @@ Called for **every** pane each frame (so background panes keep flowing):
 flowchart TB
     drain["drain pty.output channel (try_recv loop)"]
     write["engine.write(chunk)"]
-    feed["osc52.feed(chunk) → collect clipboard sets"]
+    feed["engine clipboard callbacks → deferrals"]
     disc{"channel Disconnected?"}
     deadc["alive = false"]
     clip["last clipboard set wins → write_clipboard()"]
