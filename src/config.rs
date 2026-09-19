@@ -1227,6 +1227,10 @@ pub struct Config {
     /// `selection-clear-on-copy` (default false); never applies to
     /// `copy-on-select`, which upstream exempts by name.
     pub selection_clear_on_copy: bool,
+    /// Speak new terminal output through a polite UI Automation live region
+    /// while a screen reader is attached. giest-only (upstream's VoiceOver
+    /// support has no equivalent); default true.
+    pub accessibility_announce_output: bool,
     /// Highlight colors for scrollback-search matches. Ghostty `search-*`.
     pub search_bg: TerminalColor,
     pub search_fg: TerminalColor,
@@ -1651,6 +1655,7 @@ impl Default for Config {
             selection_word_chars: Vec::new(),
             selection_clear_on_typing: true,
             selection_clear_on_copy: false,
+            accessibility_announce_output: true,
             // Upstream's defaults: an amber match, a warmer current match, both
             // with black text.
             search_bg: TerminalColor::Color(Rgb::new(0xFF, 0xE0, 0x82)),
@@ -2044,6 +2049,9 @@ const SETTERS: &[(&str, Setter)] = &[
     }),
     ("selection-clear-on-copy", |c, v, d| {
         c.selection_clear_on_copy = parse_bool(v, d.selection_clear_on_copy)
+    }),
+    ("accessibility-announce-output", |c, v, d| {
+        c.accessibility_announce_output = parse_bool(v, d.accessibility_announce_output)
     }),
     ("search-background", |c, v, d| {
         c.search_bg = terminal_color(v, c.search_bg, d.search_bg)
@@ -4410,6 +4418,8 @@ mod tests {
         assert!(Config::default().selection_clear_on_typing);
         assert!(!Config::default().selection_clear_on_copy);
         assert!(parsed("selection-clear-on-copy = true").selection_clear_on_copy);
+        assert!(Config::default().accessibility_announce_output);
+        assert!(!parsed("accessibility-announce-output = false").accessibility_announce_output);
         assert!(!parsed("selection-clear-on-typing = false").selection_clear_on_typing);
     }
 
