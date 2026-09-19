@@ -143,7 +143,7 @@ macOS-only — needs eyeballing), ~~`drag-handle`~~ ✅ (see §C pane drag), `au
 | Selection gesture engine | ⬜ | optional replacement for giest's click-count logic — M |
 | Default cursor style/blink engine options | ✅ N/A | probed: equivalent to `decscusr.rs` for initial, `CSI 0 q`, RIS and mode 12 — except upstream ignores mode 12 when `cursor-style-blink` is set, which only the scanner does. The scanner stays. |
 | OSC 72 kitty drag-and-drop | ⬜ | after file drop — M |
-| Kitty animation / relative placements / glyph protocol | ◐ blocked | all APC; **ConPTY strips APC** — needs the passthrough-mode portable-pty patch first — L–XL |
+| Kitty animation / relative placements / glyph protocol | ◐ | unblocked by a **sideloaded ConPTY** (`conpty-passthrough`, `scripts/fetch-conpty.ps1`). Relative placements ✅, client-driven frames (`a=a,c=N`) ✅, transient ✅ (engine-side eviction); autoplay (`s=2/3`) ⬜ — `animationTick` isn't in the C API; glyph protocol ⬜ — no outline read-back in the C API, so it is **disabled** rather than advertised. See the kitty section |
 | New `middle-click-action` / `copy-on-select` values, `~` in theme paths | ✅ | `clipboard-paste`; `none/primary/clipboard/both` (`true` = clipboard, as off-Linux upstream); `primary-paste` reads the PRIMARY emulation, falling back to the clipboard while it is empty; `~`/`~\` → `%USERPROFILE%` for every theme name incl. light/dark pairs |
 | Free with the bump | ✅ | XTGETTCAP, ANSI DECRQM, DECECM report, mode 2048 size-on-enable, C0/C1 fixes, CSI 2K wrap reset, color-reset fix, RIS clears progress, MOK2 + F13–F25 key encoding, kitty graphics spec fixes |
 
@@ -160,7 +160,8 @@ macOS-only — needs eyeballing), ~~`drag-handle`~~ ✅ (see §C pane drag), `au
 6. **Protocols:** ✅ OSC 5522; ✅ OSC 52 / OSC 7 scanners moved onto lib-vt; ✅ regex search (native search API evaluated, not adopted — see the ledger).
 7. **Chrome:** custom caption + `window-decoration` + titlebar colors; runtime icon (L).
 8. **Long tail:** accessibility (L), auto-update, ~~tab overview~~ ✅, default-terminal handoff (XL), and
-   the ConPTY passthrough patch that unblocks every kitty APC feature (L–XL).
+   shipping the out-of-band ConPTY with release builds (today it is a manual
+   `scripts/fetch-conpty.ps1` step) so kitty graphics work out of the box.
 
 ---
 
@@ -435,7 +436,7 @@ Effort: **S** <1d · **M** 1–3d · **L** ~1wk · **XL** multi-wk. Status: ✅ 
 |---|---|---|---|---|
 | Full configurable keybinds (tables/sequences) | `keybind.rs`, `app.rs`, `session.rs` | ✅ | L | ◐ (chords + `>` sequences done; named key *tables* still open) |
 | Quick / dropdown terminal | `quickterm.rs`, `hotkey.rs`, `app.rs` | — | L | ✅ (+ `global:` keybinds — see the ledger) |
-| Kitty graphics (inline images) | `engine`, `GridSnapshot`, `render/mod.rs` | ✅ | L–XL | ◐ **blocked on ConPTY** — engine + geometry done, see below |
+| Kitty graphics (inline images) | `engine`, `GridSnapshot`, `render/mod.rs` | ✅ | L–XL | ✅ with a sideloaded ConPTY (rendering needs eyeballing); ⬜ over the inbox conhost, which strips APC — see below |
 | Scrollback search overlay | `search.rs`, `session.rs`, `app.rs`, `engine`, `render` | ✋ | M–L | ✅ (single-row matches; pins deferred) |
 | Custom shaders | `shader.rs`, `render/mod.rs`, `config.rs` | — | L | ✅ (Shadertoy GLSL→WGSL, offscreen chain, both keys; verified end to end) |
 | background-image / blur | `bgimage.rs`, `render/mod.rs`, `config.rs` | — | M–L | ✅ (blur via Windows DWM acrylic/mica, `blur.rs`; image via `bgimage.rs` + shader mode 4) |
@@ -507,8 +508,8 @@ With Phase 0 done, the remaining Tier-1 items are mostly small, registry-backed 
    resize overlay, confirm-close-surface (+ the previously-unhandled OS close), tab drag-reorder.
    **Tier 1 is now complete.**
 6. ✅ **P5 multi-window** — immediate viewports in one process, `new_window`/`close_window`.
-7. ◐ **Kitty graphics** — engine, decoding and renderer geometry built and tested; **blocked on
-   ConPTY**, see below.
+7. ✅ **Kitty graphics** — end to end over a sideloaded ConPTY (`conpty-passthrough`); the inbox
+   conhost still strips APC. *(Needs eyeballing.)* See below.
 8. ✅ **Real scrollbar** — `scrollbar = system | never`, auto-hiding overlay, draggable.
    *(Needs eyeballing.)* See the divergence ledger below.
 9. ✅ **Clipboard permissions + paste protection** — all five Ghostty keys, one gated paste path,
@@ -2019,8 +2020,10 @@ needs OSC 133 **C/D**, and giest's shell hooks currently inject only A/B (see be
 - **Verified against ConPTY**, which is not a formality here — ConPTY re-emits its own stream and
   silently drops what it doesn't understand, which is exactly what blocks kitty graphics.
   `tests/conpty_passthrough.rs` (ignored; needs a real shell) pins that OSC 9 and OSC 777 survive,
-  along with the already-shipped OSC 7 / 52 / 133, and that APC is still stripped — the last one
-  inverted, so it *fails* if a future Windows build unblocks kitty graphics.
+  along with the already-shipped OSC 7 / 52 / 133, and that APC is still stripped by the inbox
+  conhost — inverted, so it *fails* if a future Windows build unblocks kitty graphics. Run with
+  `GIEST_TEST_PASSTHROUGH=1` (after `scripts/fetch-conpty.ps1`) it asserts the opposite: over the
+  sideloaded ConPTY, APC and ENQ arrive.
 
 ### background-image — ✅ divergences
 
@@ -2103,10 +2106,51 @@ giest matches that. Notes where the implementation differs or is Windows-specifi
   `decide_key` rather than the keymap, so `keybind = shift+home=unbind` silently did nothing. They
   are now ordinary `default_binds` entries.
 
-### Kitty graphics — ◐ blocked on ConPTY
+### Kitty graphics — ✅ over a sideloaded ConPTY (inbox conhost still strips APC)
 
-**The blocker: ConPTY strips APC sequences, so no kitty graphics command ever reaches the VT
-engine.** ConPTY does not pipe a child's output through — it *re-renders* it and emits its own VT
+#### ConPTY passthrough research (measured on Windows 11 build 26200.9457)
+
+- **`PSEUDOCONSOLE_PASSTHROUGH_MODE` (`0x8`) does nothing we can use on any ConPTY we could
+  test.** It was an experimental flag in Windows Terminal's OpenConsole 1.17–1.21 (never
+  documented for the inbox API). On this machine the inbox `kernel32` ConPTY — whose host is
+  still `conhost.exe` **10.0.26100.1**, i.e. no newer than 24H2 — *accepts* it (`S_OK`) and
+  silently ignores it: APC and ENQ are still stripped, output byte-identical to the flagless run.
+  So "does `CreatePseudoConsole` reject it" is not a usable capability probe.
+- **What actually forwards APC is the rewritten ConPTY (OpenConsole 1.22+)**, shipped out-of-band
+  as the MIT-licensed `Microsoft.Windows.Console.ConPTY` NuGet package (`conpty.dll` +
+  `OpenConsole.exe`). Measured with 1.24.260710001: APC (`ESC _ G … ESC \`) and ENQ (`0x05`) arrive
+  verbatim **with or without** the flag — the rewrite forwards what it doesn't understand, which
+  makes a separate passthrough mode moot there. portable-pty already prefers a `conpty.dll` found
+  on the DLL search path; the vendored copy (`vendor/portable-pty`, `[patch.crates-io]`) loads it by
+  absolute path next to the exe instead (the search path includes the cwd — DLL planting) and makes
+  it vetoable.
+- **What changes with the sideloaded ConPTY** (all measured by `tests/conpty_passthrough.rs` in
+  both modes, `GIEST_TEST_PASSTHROUGH=1`):
+  - *Opening handshake.* Inbox: `ESC[6n ESC[?9001h ESC[?1004h ESC[m ESC]0;<exe path>BEL ESC[?25h`.
+    Sideloaded: `ESC[1t ESC[6n ESC[c ESC[?1004h ESC[?9001h ESC[1;1H`. It still blocks on the
+    `ESC[6n` answer (the harness rule in CLAUDE.md holds), and additionally asks DA1 (`ESC[c`),
+    which the engine answers (`ESC[?62;22c`). No synthetic title — tabs show giest's own name until
+    the shell sets one.
+  - *Stream shape.* Inbox re-renders; the rewrite forwards the child's own sequences (OSC
+    7/9/9;4/52/133/777, DECSCUSR and the cmd/pwsh/bash shell-integration tests all still pass).
+  - *win32-input-mode* (`?9001h`) is requested by both, so key input is unchanged.
+  - *Resize.* `set_resize_pull_scrollback(false)` stays right: both implementations keep their own
+    scrollback-less buffer and reflow on `ResizePseudoConsole`. Not separately re-verified by a
+    resize test — **needs a human** resizing a window with long wrapped lines under both modes.
+  - *ENQ* now arrives too, so `enquiry-response` becomes implementable (sideloaded only).
+- **Config:** `conpty-passthrough = auto | true | false` (**giest-specific**). `auto` (default) and
+  `true` use a `conpty.dll` beside `giest.exe` when there is one and also pass the flag (for 1.17–1.21
+  builds); `false` forces the inbox conhost. Startup-only (the library is loaded once). With no
+  `conpty.dll` present, `auto` behaves exactly as before, so the default changes nothing until the
+  pair is installed: `pwsh scripts/fetch-conpty.ps1` (debug + release target dirs).
+- **Risks of shipping it on by default:** a second, Microsoft-versioned console host to ship and
+  keep updated (it is what Windows Terminal runs, so it is well exercised); `OpenConsole.exe` must sit
+  beside `conpty.dll` or spawns fail; legacy console apps now run under OpenConsole's semantics rather
+  than conhost's (same as in Windows Terminal); programs that emit garbage APC/ENQ now reach the
+  engine instead of being filtered; and the glyph-protocol hole below, which had to be closed first.
+
+**The original blocker (inbox conhost): ConPTY strips APC sequences, so no kitty graphics command
+ever reaches the VT engine.** ConPTY does not pipe a child's output through — it *re-renders* it and emits its own VT
 stream, dropping sequences it doesn't understand. APC (`ESC _ G …`), which the kitty protocol uses,
 is one of them. Traced end to end: the shell emits correct bytes (`<27>_Ga=T,t=d,f=24,…<27>\`), and
 `TerminalEngine::write` never sees them.
@@ -2128,9 +2172,7 @@ is also why upstream Ghostty offers no Windows precedent here.
   snapshots rather than re-copied.
 - PNG decoding (`f=100`, what `icat` sends) via a `DecodePng` impl over the `png` crate.
 - Renderer geometry: `image_layer`, `image_rect`, `image_uv`, `image_visible`, `split_draws`, the
-  three z-layer emission points, and per-image draw splitting in `paint`. Each placement currently
-  emits a magenta placeholder quad carrying its real rect and real source-crop UV, so finishing this
-  is a change of `mode`/`color` plus the texture bind group.
+  three z-layer emission points, and per-image draw splitting in `paint`.
 
 **Corrections to earlier assumptions**, both now pinned by tests:
 - Kitty graphics were **not** disabled by default — libghostty's library default is a 10 MB storage
@@ -2139,9 +2181,40 @@ is also why upstream Ghostty offers no Windows precedent here.
 - The kitty storage's dirty flag is not part of the render state's, so placements are refreshed on
   every snapshot ahead of the dirty-skip; otherwise a deleted image would persist forever.
 
+**Finished once APC arrived** (verified live with a real sender — PowerShell emitting
+`ESC_Gf=100,a=T,c=20,r=10;<base64 png>ESC\` — and a DPI-aware `PrintWindow` capture as a sanity
+check: a 64² half-red/half-blue PNG lands as exactly 20×10 cells with equal red/blue halves):
+- **Rendering:** mode 5 in the instanced pipeline samples a per-image texture bound at a new
+  bind group 1 (placeholder bound for every other draw). Textures live in `GpuResources::img_cache`,
+  **never the glyph atlas**, keyed by the `Arc<ImageData>` address (kitty ids are per terminal, so two
+  panes can both have "image 1"); uploaded in `prepare` (the only hook with a device), evicted once
+  only the cache still holds the `Arc` — not on first absence, since every window runs `prepare`
+  against the one shared cache.
+- **Re-transmit and animation frames:** the engine's pixel cache now keys on the image's
+  **generation stamp**, which changes on every re-transmit *and* whenever an animated image's current
+  frame changes (`image.data()` is the current frame). Fixes the old "same-size re-transmit is
+  invisible" limitation and makes client-driven animation (`a=f` + `a=a,c=N`) work — verified live
+  (red root frame → green frame 2).
+- **Relative placements (`P=`/`Q=`/`H=`/`V=`):** resolved by the engine; verified by a unit test and
+  live (child drawn exactly 22 columns right of its parent).
+- **Transient images:** a usage hint the engine applies to its own eviction order; nothing to do
+  on the render side beyond evict-by-absence, which already exists.
+- **Autoplay (`a=a,s=2|3`) does not advance.** Upstream drives it from its *renderer*
+  (`ImageStorage.animationTick`, called in `renderer/generic.zig`), and that function is not in
+  the C API at this pin — so there is no clock to hand it. Needs an upstream C API (or a local patch
+  to the fetched source) before a redraw timer would have anything to redraw.
+- **Glyph protocol (APC `25a1`, upstream d3775d1 et seq.): evaluated, not implemented, and now
+  explicitly disabled.** The parser, glossary and responses are in the pinned engine and are **on by
+  default** — so the moment APC arrives, giest would answer `s` with `fmt=glyf` and accept `r`
+  registrations it cannot draw (apps then print PUA codepoints as tofu). The C API has only the
+  on/off switch: no way to read a registered glyf outline back for rasterizing, and upstream's
+  renderer half (4c34ccf) isn't in the pin. `GhosttyVtEngine::new` sets it off; a test pins that
+  nothing is answered. Implementing it needs an outline getter in the C API plus a glyf rasterizer
+  into the R8 atlas (upstream has one in `font/`), and the protocol itself is still experimental.
+
 **Deliberately out of scope even once unblocked:** unicode placeholders (`U=1`) — the binding
 exposes `is_virtual()` but not the diacritic decoding upstream does in its renderer, so virtual
-placements are skipped; animation (upstream doesn't implement it either); and the file / temp-file /
+placements are skipped; and the file / temp-file /
 shared-memory transmission mediums (`t=s` is unsupported on Windows upstream, and `t=f`/`t=t` resolve
 paths against a hardcoded `/tmp`).
 

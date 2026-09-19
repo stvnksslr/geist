@@ -82,6 +82,18 @@ const QUAD_CORNERS: [[f32; 2]; 4] = [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1
 const QUAD_INDICES: [u16; 6] = [0, 1, 2, 2, 1, 3];
 const INITIAL_INSTANCES: u64 = 8192;
 
+/// One uploaded kitty image.
+struct CachedImage {
+    _data: Arc<crate::engine::ImageData>,
+    _tex: wgpu::Texture,
+    group: wgpu::BindGroup,
+    last_used: u64,
+}
+
+/// Evict a kitty image texture after this many `prepare` calls unused (a few
+/// seconds at 60 fps per window).
+const IMAGE_EVICT_AFTER: u64 = 240;
+
 /// Persistent GPU resources, stored in egui's `callback_resources`.
 pub struct GpuResources {
     pipeline: wgpu::RenderPipeline,
@@ -136,6 +148,26 @@ pub struct GpuResources {
     /// allocation. `scratch_out` also holds the assembled instance list that
     /// `prepare` uploads after `build_instances` returns.
     scratch_out: Vec<Instance>,
+    /// Kitty images: one texture each, **never** in the glyph atlas (whose RGBA
+    /// shelf flushes wholesale on overflow). Bound at group 1 per image draw.
+    img_layout: wgpu::BindGroupLayout,
+    /// Group 1 for every non-image draw: the layout must always be satisfied.
+    img_placeholder: wgpu::BindGroup,
+    /// Keyed by the `Arc<ImageData>` address. Sound because the entry *holds*
+    /// that `Arc`, so the allocation cannot be freed and its address reused
+    /// while the key exists (same argument as `bg_source`). An address rather
+    /// than the kitty image id because ids are per terminal: two panes can both
+    /// have an image 1 with different pixels.
+    img_cache: std::collections::HashMap<usize, CachedImage>,
+    /// Per-frame: cache key of each image slot, and slot of each key. The slot
+    /// is what `draws` carries (`Option<u32>`).
+    img_slots: Vec<usize>,
+    img_slot_of: std::collections::HashMap<usize, u32>,
+    /// `prepare` counter, for evicting textures not used recently. Not evicted
+    /// on first absence: every window runs its own `prepare` against this one
+    /// shared cache, so "absent from this frame" is normal for another
+    /// window's images, and evicting on it would re-upload them every frame.
+    img_tick: u64,
     scratch_glyphs: Vec<Instance>,
     scratch_cursors: Vec<Instance>,
     scratch_runs: Vec<GlyphRun>,
@@ -589,9 +621,35 @@ pub fn build_resources(
     let bg_view = bg_image.create_view(&Default::default());
     let bind_group = build_bind_group(device, &bind_layout, &uniform, &atlas, &sampler, &bg_view);
 
+    // Group 1: the kitty image texture for an image draw (mode 5).
+    let img_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("term-kitty-image-layout"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        }],
+    });
+    let img_placeholder = {
+        let view = bg_image.create_view(&Default::default());
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("term-kitty-image-placeholder"),
+            layout: &img_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&view),
+            }],
+        })
+    };
+
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("term-pipeline-layout"),
-        bind_group_layouts: &[Some(&bind_layout)],
+        bind_group_layouts: &[Some(&bind_layout), Some(&img_layout)],
         immediate_size: 0,
     });
 
@@ -693,6 +751,12 @@ pub fn build_resources(
         pane_ranges: Vec::new(),
         draws: Vec::new(),
         scratch_out: Vec::new(),
+        img_layout,
+        img_placeholder,
+        img_cache: Default::default(),
+        img_slots: Vec::new(),
+        img_slot_of: Default::default(),
+        img_tick: 0,
         scratch_glyphs: Vec::new(),
         scratch_cursors: Vec::new(),
         scratch_runs: Vec::new(),
@@ -942,6 +1006,86 @@ impl GpuResources {
         self.scratch_out.len() as u32
     }
 
+    /// Upload any kitty image this frame references that has no texture yet,
+    /// assign this frame's image slots, and evict long-unused textures. Called
+    /// from `prepare` — the only hook with a device — before the instances are
+    /// built, since those carry the slot numbers.
+    fn sync_images(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, frame: &TermFrame) {
+        self.img_tick += 1;
+        let tick = self.img_tick;
+        self.img_slots.clear();
+        self.img_slot_of.clear();
+        let format = bg_image_format(self.is_srgb);
+        for pane in &frame.panes {
+            for p in &pane.snapshot.images {
+                let key = Arc::as_ptr(&p.data) as usize;
+                if self.img_slot_of.contains_key(&key) {
+                    continue;
+                }
+                let d = &p.data;
+                if d.width == 0 || d.height == 0 || d.rgba.len() < (d.width * d.height * 4) as usize {
+                    continue;
+                }
+                let entry = self.img_cache.entry(key).or_insert_with(|| {
+                    let size = wgpu::Extent3d {
+                        width: d.width,
+                        height: d.height,
+                        depth_or_array_layers: 1,
+                    };
+                    let tex = device.create_texture(&wgpu::TextureDescriptor {
+                        label: Some("term-kitty-image"),
+                        size,
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format,
+                        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                        view_formats: &[],
+                    });
+                    queue.write_texture(
+                        tex.as_image_copy(),
+                        &d.rgba[..(d.width * d.height * 4) as usize],
+                        wgpu::TexelCopyBufferLayout {
+                            offset: 0,
+                            bytes_per_row: Some(d.width * 4),
+                            rows_per_image: Some(d.height),
+                        },
+                        size,
+                    );
+                    let view = tex.create_view(&Default::default());
+                    let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("term-kitty-image"),
+                        layout: &self.img_layout,
+                        entries: &[wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&view),
+                        }],
+                    });
+                    CachedImage {
+                        _data: d.clone(),
+                        _tex: tex,
+                        group,
+                        last_used: tick,
+                    }
+                });
+                entry.last_used = tick;
+                self.img_slot_of.insert(key, self.img_slots.len() as u32);
+                self.img_slots.push(key);
+            }
+        }
+        // Evict once nothing but this cache holds the pixels: the engine drops
+        // its `Arc` when an image is deleted, re-transmitted or advances an
+        // animation frame, and a snapshot still on screen in *another* window
+        // keeps the count above one — so this neither re-uploads the other
+        // window's images every frame nor lets animation frames pile up.
+        // The age bound is a backstop for anything held elsewhere by mistake.
+        self.img_cache.retain(|_, e| {
+            e.last_used == tick
+                || (Arc::strong_count(&e._data) > 1
+                    && tick.saturating_sub(e.last_used) <= IMAGE_EVICT_AFTER)
+        });
+    }
+
     /// (Re)upload the `background-image` texture and rebuild the bind group.
     ///
     /// Called from `prepare` only when the image actually changes, so a
@@ -1189,6 +1333,7 @@ impl GpuResources {
         // (instance index, image id) for this pane's image quads, in emission
         // order — `split_draws` turns it into the pane's draw list.
         let mut pane_images: Vec<(u32, u32)> = Vec::new();
+        let img_slot_of = std::mem::take(&mut self.img_slot_of);
 
         // `background-image` first, so every pane draws over it. It is a single
         // quad covering the whole terminal area and it paints the *background
@@ -1257,16 +1402,17 @@ impl GpuResources {
                     if !image_visible(p.row, p.grid_rows, snap.rows, has_over) {
                         continue;
                     }
-                    pane_images.push((out.len() as u32, p.image_id));
-                    // Placeholder geometry proving the placement math. The `uv`
-                    // is already the real source crop (mode 0 ignores it), so
-                    // adding image textures is a change of `mode` and `color`
-                    // only — the geometry below is what ships.
+                    // The slot `sync_images` assigned this frame; none means
+                    // the image had no usable pixels, so there is nothing to draw.
+                    let Some(&slot) = img_slot_of.get(&(Arc::as_ptr(&p.data) as usize)) else {
+                        continue;
+                    };
+                    pane_images.push((out.len() as u32, slot));
                     out.push(Instance {
                         rect: image_rect([ox, oy], (cw, ch), p, shift),
                         uv: image_uv(p),
-                        color: [1.0, 0.0, 1.0, 0.5],
-                        mode: 0,
+                        color: [1.0, 1.0, 1.0, 1.0],
+                        mode: 5,
                         param: 0,
                         extra: [0.0; 2],
                     });
@@ -1680,6 +1826,7 @@ impl GpuResources {
         self.scratch_shaped = shaped;
         self.pane_ranges = ranges;
         self.draws = draws;
+        self.img_slot_of = img_slot_of;
     }
 }
 
@@ -1727,6 +1874,7 @@ impl CallbackTrait for TermFrame {
             res.set_bg_image(device, queue, want);
         }
 
+        res.sync_images(device, queue, self);
         res.build_instances(self, queue);
         let needed = res.scratch_out.len() as u64;
         res.num_instances = needed as u32;
@@ -1878,6 +2026,7 @@ impl GpuResources {
         }
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
+        pass.set_bind_group(1, &self.img_placeholder, &[]);
         pass.set_vertex_buffer(0, self.corners.slice(..));
         pass.set_vertex_buffer(1, self.instances.slice(..));
         pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint16);
@@ -1918,8 +2067,20 @@ impl GpuResources {
             // own single-instance draw so its texture can be bound for it alone;
             // everything else batches as before. The scissor is what crops an
             // image at the pane edge, for free and at pixel precision.
-            for (range, _image) in &res.draws[span.clone()] {
-                render_pass.draw_indexed(0..QUAD_INDICES.len() as u32, 0, range.clone());
+            for (range, image) in &res.draws[span.clone()] {
+                let Some(slot) = image else {
+                    render_pass.draw_indexed(0..QUAD_INDICES.len() as u32, 0, range.clone());
+                    continue;
+                };
+                let group = res
+                    .img_slots
+                    .get(*slot as usize)
+                    .and_then(|k| res.img_cache.get(k));
+                if let Some(img) = group {
+                    render_pass.set_bind_group(1, &img.group, &[]);
+                    render_pass.draw_indexed(0..QUAD_INDICES.len() as u32, 0, range.clone());
+                    render_pass.set_bind_group(1, &res.img_placeholder, &[]);
+                }
             }
         }
     }
@@ -1932,6 +2093,7 @@ struct U { screen: vec2<f32>, gamma_inv: f32, pad: f32 };
 @group(0) @binding(2) var atlas_smp: sampler;
 @group(0) @binding(3) var color_tex: texture_2d<f32>;
 @group(0) @binding(4) var bg_image_tex: texture_2d<f32>;
+@group(1) @binding(0) var kitty_tex: texture_2d<f32>;
 
 const TAU: f32 = 6.2831853;
 
@@ -1993,6 +2155,12 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       cov = 1.0 - smoothstep(0.20, 0.26, abs(in.uv.y - center));
     }
     return vec4<f32>(in.color.rgb, in.color.a * cov);
+  }
+  if (in.mode == 5u) {
+    // Kitty graphics image: straight-alpha RGBA from its own texture (group 1),
+    // uv = the placement's source crop in image-normalized units.
+    let c = textureSample(kitty_tex, atlas_smp, in.uv);
+    return vec4<f32>(c.rgb, c.a * in.color.a);
   }
   if (in.mode == 4u) {
     // `background-image`. uv is in image-normalized units across the whole

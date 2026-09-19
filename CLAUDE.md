@@ -185,17 +185,31 @@ fallback engine without app changes:
   feature does nothing" with no error anywhere. Before debugging any new escape-sequence support,
   **confirm the bytes actually arrive**. That probe is now permanent: `Ctrl+Shift+I` opens the
   inspector, whose Terminal IO log records every PTY read with each control byte rendered
-  distinctly, taken *before* `engine.write` sees it. The fix is
-  `PSEUDOCONSOLE_PASSTHROUGH_MODE` (`0x8`), which portable-pty declares at
-  `src/win/psuedocon.rs:31` under `#[allow(dead_code)]` and never passes (`:83-90` sends only
-  `RESIZE_QUIRK | WIN32_INPUT_MODE`); using it means vendoring and patching portable-pty, and it
-  changes stream handling globally. See GAP.md's kitty-graphics section.
+  distinctly, taken *before* `engine.write` sees it. **That is the *inbox* ConPTY.**
+  `PSEUDOCONSOLE_PASSTHROUGH_MODE` (`0x8`) is **not** the fix, whatever older notes say: the inbox
+  conhost (10.0.26100 even on build 26200) returns `S_OK` for it and still strips APC — measured.
+  The fix is the *out-of-band* ConPTY (`conpty.dll` + `OpenConsole.exe`, 1.22+, from the
+  `Microsoft.Windows.Console.ConPTY` NuGet; `scripts/fetch-conpty.ps1` installs it beside the exe),
+  which forwards APC and ENQ with or without the flag. Third vendored crate: **`vendor/portable-pty`**
+  (`[patch.crates-io]`) loads that `conpty.dll` by absolute path beside the exe, lets
+  `conpty-passthrough = false` veto it, and passes the flag for 1.17–1.21 builds. The choice is
+  **latched on the first PTY** (`ConptyPassthrough::apply` runs in `main` before any window) — and
+  it is process-global, so tests select it by environment, never per test. Re-apply on a
+  portable-pty bump. See GAP.md's kitty-graphics section.
   **`tests/conpty_passthrough.rs` is the probe, made permanent** — an ignored host test that spawns
-  a real shell and asserts which sequences survive (OSC 7/9/52/133/777/5522 and DECSET 5522 do;
-  APC does not). Run it
-  *first* for any new escape-sequence work: `cargo test --test conpty_passthrough -- --ignored`.
-  The APC case is asserted **inverted** — it fails if a future Windows build stops stripping APC,
-  which is how we'd learn kitty graphics is unblocked.
+  a real shell and asserts which sequences survive (OSC 7/9/52/133/777/5522 and DECSET 5522 do; APC does not). Run it
+  *first* for any new escape-sequence work: `cargo test --test conpty_passthrough -- --ignored`,
+  and again with `GIEST_TEST_PASSTHROUGH=1` for the sideloaded ConPTY (where APC/ENQ must arrive).
+  In the default mode the APC case is asserted **inverted** — it fails if a future Windows build
+  stops stripping APC, which is how we'd learn kitty graphics works without the sideload.
+- **Anything newly forwarded by the sideloaded ConPTY is newly *live* in the engine.** libghostty
+  enables some APC features by default — the glyph protocol (`25a1`) would answer support queries
+  giest can't render — so `GhosttyVtEngine::new` switches it off. Check engine defaults for any
+  sequence family that starts arriving.
+- **Kitty image textures are keyed by `Arc<ImageData>` address, not image id** (ids are per
+  terminal), and the engine's pixel copy is keyed by the image's **generation** stamp (changes on
+  re-transmit and on every animation frame change). Autoplaying animations don't advance: upstream
+  ticks them from its renderer and `animationTick` isn't in the C API.
 - **A PTY harness with no VT engine must answer `ESC[6n` itself, or it gets nothing.** ConPTY opens
   by requesting a cursor-position report and withholds the child's output until it is answered; the
   child then blocks on the full pipe and never exits either. The app never notices because the

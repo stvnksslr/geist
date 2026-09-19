@@ -1148,6 +1148,24 @@ pub enum OscColorReportFormat {
 }
 
 /// User-facing configuration applied at startup.
+/// giest `conpty-passthrough` (see [`Config::conpty_passthrough`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConptyPassthrough {
+    Auto,
+    On,
+    Off,
+}
+
+impl ConptyPassthrough {
+    /// Apply before the first PTY is spawned; later calls cannot change which
+    /// ConPTY library is loaded.
+    pub fn apply(self) {
+        let on = self != ConptyPassthrough::Off;
+        portable_pty::set_allow_sideload(on);
+        portable_pty::set_passthrough(on);
+    }
+}
+
 /// Ghostty `window-decoration`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WindowDecoration {
@@ -1378,6 +1396,14 @@ pub struct Config {
     /// this is applied. The limit is per screen, so the effective budget per
     /// pane is double (primary + alternate).
     pub image_storage_limit: u32,
+    /// **giest-specific** `conpty-passthrough = auto | true | false`: which
+    /// ConPTY carries the shell. The inbox conhost re-renders output and strips
+    /// APC (kitty graphics) and ENQ; a `conpty.dll` + `OpenConsole.exe` pair
+    /// (1.22+) placed next to `giest.exe` forwards them. `auto`/`true` use that
+    /// pair when present (and request `PSEUDOCONSOLE_PASSTHROUGH_MODE`, which
+    /// only 1.17–1.21 OpenConsole builds honour); `false` forces the inbox
+    /// conhost. Startup-only: the ConPTY library is loaded once per process.
+    pub conpty_passthrough: ConptyPassthrough,
     /// Background color of selected cells. Ghostty `selection-background`.
     pub selection_bg: Rgb,
     /// Text color over a selection; `None` keeps each cell's own foreground.
@@ -1682,6 +1708,7 @@ impl Default for Config {
             grapheme_unicode: true,
             // Ghostty's default: 320 MB (decimal), per screen.
             image_storage_limit: 320 * 1000 * 1000,
+            conpty_passthrough: ConptyPassthrough::Auto,
             selection_bg: Rgb::new(0x38, 0x5a, 0x9c),
             selection_fg: None,
             copy_on_select: CopyOnSelect::None,
@@ -2344,6 +2371,14 @@ const SETTERS: &[(&str, Setter)] = &[
             c.image_storage_limit = d.image_storage_limit;
         } else if let Ok(n) = v.parse() {
             c.image_storage_limit = n;
+        }
+    }),
+    ("conpty-passthrough", |c, v, d| {
+        c.conpty_passthrough = match v.to_ascii_lowercase().as_str() {
+            "auto" => ConptyPassthrough::Auto,
+            "1" | "t" | "true" => ConptyPassthrough::On,
+            "0" | "f" | "false" => ConptyPassthrough::Off,
+            _ => d.conpty_passthrough,
         }
     }),
     ("selection-background", |c, v, d| {
@@ -3888,6 +3923,17 @@ mod tests {
         assert!(!c.link_osc8 && !c.link_url);
         assert_eq!(c.clipboard.write_limit, None);
         assert_eq!(parsed("clipboard-write-limit-bytes = 0").clipboard.write_limit, Some(0));
+    }
+
+    #[test]
+    fn conpty_passthrough_parses_auto_true_false() {
+        assert_eq!(Config::default().conpty_passthrough, ConptyPassthrough::Auto);
+        assert_eq!(parsed("conpty-passthrough = true").conpty_passthrough, ConptyPassthrough::On);
+        assert_eq!(parsed("conpty-passthrough = false").conpty_passthrough, ConptyPassthrough::Off);
+        assert_eq!(
+            parsed("conpty-passthrough = false\nconpty-passthrough = bogus").conpty_passthrough,
+            ConptyPassthrough::Auto
+        );
     }
 
     #[test]

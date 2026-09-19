@@ -85,6 +85,10 @@ raw-window-handle = "0.6"
 # above; don't "simplify" it away. Re-apply on every egui upgrade.
 [patch.crates-io]
 egui-winit = { path = "vendor/egui-winit" }
+# Vendored only to expose PSEUDOCONSOLE_PASSTHROUGH_MODE (declared, never
+# passed upstream); the delta is `set_passthrough`/`passthrough_active` and the
+# flag + fallback in `src/win/psuedocon.rs`. Re-apply on a portable-pty bump.
+portable-pty = { path = "vendor/portable-pty" }
 
 # Writes the RT_GROUP_ICON resource into the exe so Explorer/Start/pinned
 # shortcuts show the icon without running the process (see build.rs). Windows
