@@ -1506,6 +1506,15 @@ pub struct Config {
     /// giest-specific `jump-list` (default `true`): publish the taskbar Jump
     /// List tasks (`jumplist.rs`). `false` removes a previously published one.
     pub jump_list: bool,
+    /// Ghostty `auto-update` (`off` / `check` / `download`). Unset upstream
+    /// defers to Sparkle's stored preference; giest's default is `check` in a
+    /// release build and `off` in a debug build (see `update.rs`).
+    pub auto_update: crate::update::AutoUpdate,
+    /// Ghostty `auto-update-channel`; `None` = the running build's channel.
+    pub auto_update_channel: Option<crate::update::Channel>,
+    /// giest-specific `auto-update-feed`: the GitHub `/releases` API URL to
+    /// check (default: the compile-time `update::DEFAULT_FEED`).
+    pub auto_update_feed: String,
     /// Ghostty `initial-window`.
     pub initial_window: bool,
     /// Ghostty `split-preserve-zoom = navigation`.
@@ -1758,6 +1767,9 @@ impl Default for Config {
             quit_after_last_window_closed_delay_ms: None,
             single_instance: true,
             jump_list: true,
+            auto_update: crate::update::AutoUpdate::default_for_build(),
+            auto_update_channel: None,
+            auto_update_feed: crate::update::DEFAULT_FEED.to_string(),
             initial_window: true,
             split_preserve_zoom_navigation: false,
             resize_overlay: ResizeOverlay::AfterFirst,
@@ -3027,6 +3039,29 @@ const SETTERS: &[(&str, Setter)] = &[
     }),
     ("single-instance", |c, v, d| c.single_instance = parse_bool(v, d.single_instance)),
     ("jump-list", |c, v, d| c.jump_list = parse_bool(v, d.jump_list)),
+    ("auto-update", |c, v, d| {
+        c.auto_update = if v.is_empty() {
+            d.auto_update
+        } else {
+            crate::update::AutoUpdate::parse(v).unwrap_or_else(|| {
+                diag!("giest: invalid auto-update {v:?} (off, check, download)");
+                c.auto_update
+            })
+        }
+    }),
+    ("auto-update-channel", |c, v, _d| {
+        c.auto_update_channel = if v.is_empty() {
+            None
+        } else {
+            crate::update::Channel::parse(v).or_else(|| {
+                diag!("giest: invalid auto-update-channel {v:?} (stable, tip)");
+                c.auto_update_channel
+            })
+        }
+    }),
+    ("auto-update-feed", |c, v, d| {
+        c.auto_update_feed = if v.is_empty() { d.auto_update_feed.clone() } else { v.to_string() }
+    }),
     ("quit-after-last-window-closed-delay", |c, v, d| {
         c.quit_after_last_window_closed_delay_ms = if v.is_empty() {
             d.quit_after_last_window_closed_delay_ms

@@ -1683,6 +1683,8 @@ enum AppRequest {
     DragHover(Grab, egui::Pos2),
     /// …and was released there.
     Drop(Grab, egui::Pos2),
+    /// The update pill's "Restart to Complete Update" (`update.rs`).
+    RestartForUpdate,
 }
 
 /// The whole application: every open window, plus the little state that has to
@@ -4088,6 +4090,9 @@ impl Window {
             }
             Action::ToggleVisibility => self.requests.push(AppRequest::ToggleVisibility),
             Action::ShowOnScreenKeyboard => crate::winchrome::show_on_screen_keyboard(),
+            Action::CheckForUpdates => {
+                crate::update::global().check(crate::update::Settings::from_config(&self.config), true)
+            }
             Action::ToggleWindowDecorations => self.decorated = !self.decorated,
             Action::GotoWindowNext => self.requests.push(AppRequest::FocusWindow(1)),
             Action::GotoWindowPrev => self.requests.push(AppRequest::FocusWindow(-1)),
@@ -5335,7 +5340,21 @@ impl Window {
         // hit-tests against `rect ∩ clip_rect`, the overflowed tabs *and the
         // trailing new-tab button* became invisible and unclickable at once,
         // with no way to open a tab from the strip at all.
-        let ctl_w = 30.0 + 26.0 + theme::TAB_GAP;
+        // The update pill (`update.rs`, macOS `UpdatePill`) sits with them.
+        let update_state = crate::update::global().state();
+        let pill_text = update_state.text();
+        let pill_w = if pill_text.is_empty() {
+            0.0
+        } else {
+            ui.fonts_mut(|f| {
+                f.layout_no_wrap(pill_text.clone(), egui::FontId::proportional(12.0), egui::Color32::WHITE)
+                    .size()
+                    .x
+            }) + 20.0
+                + theme::TAB_GAP
+        };
+        let mut want_update_click = false;
+        let ctl_w = 30.0 + 26.0 + theme::TAB_GAP + pill_w;
 
         let row = ui.horizontal(|ui| {
             let avail = (ui.available_width() - ctl_w).max(theme::TAB_MIN_W);
@@ -5701,9 +5720,25 @@ impl Window {
             })
             .response
             .on_hover_text("New tab (pick a shell)");
+            if !pill_text.is_empty() {
+                let pill = egui::Button::new(egui::RichText::new(&pill_text).size(12.0))
+                    .corner_radius(theme::TAB_H / 2.0)
+                    .fill(chrome.accent.gamma_multiply(0.35));
+                let mut r = ui.add_sized([pill_w - theme::TAB_GAP, theme::TAB_H - 4.0], pill);
+                let tip = update_state.tooltip();
+                if !tip.is_empty() {
+                    r = r.on_hover_text(tip);
+                }
+                if r.clicked() {
+                    want_update_click = true;
+                }
+            }
         });
         if want_about {
             self.about_open = true;
+        }
+        if want_update_click && crate::update::global().activate() {
+            self.requests.push(AppRequest::RestartForUpdate);
         }
 
         // Measured from the laid-out row, not from `ui.max_rect()`: a top panel
@@ -8050,6 +8085,34 @@ impl App {
     /// Write the saved layout on the way out. A no-op unless
     /// `window-save-state = always`, and an empty layout deletes the file rather
     /// than leaving a stale one.
+    /// "Restart to Complete Update": confirm (a native message box, so no
+    /// egui input gate is involved), save the layout, launch the old exe told
+    /// to wait for us, and exit. The launched process installs the staged
+    /// update in `update::startup_apply` and hands over to the new exe, which
+    /// restores the layout (`--restore-session`). Shells do not survive it,
+    /// the same as a Sparkle relaunch.
+    fn restart_for_update(&mut self) {
+        let crate::update::State::Ready { version } = crate::update::global().state() else {
+            return;
+        };
+        if !crate::update::confirm_restart(&version) {
+            return;
+        }
+        if !self.windows.is_empty() {
+            self.snapshot_state();
+        }
+        self.save_state();
+        match crate::update::spawn_restart() {
+            Ok(()) => {
+                if let Some(hwnd) = self.windows.first().or(self.dormant.as_ref()).and_then(|w| w.hwnd) {
+                    crate::notify::shutdown(hwnd);
+                }
+                std::process::exit(0);
+            }
+            Err(e) => eprintln!("giest: restart for update failed: {e}"),
+        }
+    }
+
     fn save_state(&self) {
         if !self.last_state.is_empty() {
             crate::state::save(&self.last_state);
@@ -8174,6 +8237,7 @@ impl App {
                 AppRequest::Record(op) => self.undo.record(now, op),
                 AppRequest::Undo => self.undo_or_redo(ctx, now, false),
                 AppRequest::Redo => self.undo_or_redo(ctx, now, true),
+                AppRequest::RestartForUpdate => self.restart_for_update(),
                 AppRequest::FocusWindow(delta) => {
                     let n = self.windows.len() as isize;
                     if let Some(i) = self.windows.iter().position(|w| w.window_id == id) {
@@ -9153,6 +9217,16 @@ impl eframe::App for App {
         // only: children repaint via the root anyway, so a per-window timer would
         // just multiply into N root repaints.
         ctx.request_repaint_after(Duration::from_millis(500));
+
+        // `auto-update`: the scheduled check (and the daily re-check). Read
+        // from the first window's config, like the undo timeout below.
+        if let Some(w) = self.windows.first() {
+            let wake = ctx.clone();
+            crate::update::global().tick(
+                move || wake.request_repaint_of(egui::ViewportId::ROOT),
+                &crate::update::Settings::from_config(&w.config),
+            );
+        }
 
         // Pump every window's PTYs before drawing any of them, so background
         // windows keep flowing and their shell exits are noticed.
