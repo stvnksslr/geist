@@ -31,7 +31,7 @@ fn conpty_read_drain_throughput() {
         cmd,
     ];
 
-    let mut pty = Pty::spawn("powershell.exe", &args, None, 80, 24, || {}).expect("spawn shell");
+    let mut pty = Pty::spawn("powershell.exe", &args, None, &[], 80, 24, || {}).expect("spawn shell");
     let mut eng = GhosttyVtEngine::new(80, 24, 10_000).expect("engine");
 
     let start = Instant::now();

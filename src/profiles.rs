@@ -150,8 +150,28 @@ pub fn detect(config_shell: Option<&str>) -> (Vec<Profile>, usize) {
     (profiles, default)
 }
 
+/// The profile a `command`-style value names: a detected profile when it
+/// matches one (so `initial-command = cmd` still gets cmd's prompt hooks, as
+/// `command = cmd` does), else a custom profile running it verbatim.
+pub fn for_command(profiles: &[Profile], cmd: &str) -> Profile {
+    profiles
+        .iter()
+        .find(|p| p.matches(cmd))
+        .cloned()
+        .unwrap_or_else(|| Profile::new(cmd, cmd))
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn for_command_prefers_a_detected_profile() {
+        let (profiles, _) = detect(None);
+        assert_eq!(for_command(&profiles, "cmd").program, "cmd.exe");
+        let custom = for_command(&profiles, r"C:\tools\x.exe");
+        assert_eq!(custom.program, r"C:\tools\x.exe");
+        assert!(custom.args.is_empty());
+    }
+
     use super::*;
 
     #[test]

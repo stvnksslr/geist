@@ -48,7 +48,7 @@ const WARMUP: Duration = Duration::from_secs(3);
 /// no diagnostic at all — the prompt marks simply never appear and every feature
 /// built on them quietly does nothing.
 fn drive(program: &str, args: &[String], steps: &[(&str, &str)]) -> Vec<u8> {
-    let mut pty = Pty::spawn(program, args, None, 80, 24, || {}).expect("spawn shell");
+    let mut pty = Pty::spawn(program, args, None, &[], 80, 24, || {}).expect("spawn shell");
     let mut out = Vec::new();
     let started = Instant::now();
     let mut step = 0usize;
@@ -106,7 +106,7 @@ fn run(command: &str) -> Vec<u8> {
         "-Command".into(),
         command.into(),
     ];
-    let mut pty = Pty::spawn("powershell.exe", &args, None, 80, 24, || {}).expect("spawn shell");
+    let mut pty = Pty::spawn("powershell.exe", &args, None, &[], 80, 24, || {}).expect("spawn shell");
 
     let mut out = Vec::new();
     let started = Instant::now();

@@ -39,7 +39,7 @@ Effort: **S** <1d · **M** 1–3d · **L** ~1wk · **XL** multi-week.
 | `scrollback-compression` | Engine now exposes `Terminal::compress` + `compression_activity`; needs a per-session idle timer (compress after N s without an activity-token change). | S |
 | `cursor-click-to-move` | OSC 133 `click_events` (engine support landed, 3263ce5): turn a click on the prompt line into arrow keys. | M |
 | `link`, `link-previews` | Regex link table (the `link-url` matcher becomes its lowest entry) + hover label (§C). | M |
-| `env`, `input`, `initial-command`, `wait-after-command`, `abnormal-command-exit-runtime` | Spawn-time options on `Pty::spawn`; the last two need the child-exited bar (§C). | M |
+| ~~`env`, `input`, `initial-command`, `wait-after-command`, `abnormal-command-exit-runtime`~~ | ✅ Done. `env` is an ordered map (empty resets, `KEY=` removes) passed to `CommandBuilder::env`; `input` decodes Zig escapes for `raw:`/`path:`/untagged, 10MB cap, all-or-nothing; `initial-command` resolves like `command` (a profile name keeps its prompt hooks) for the startup surface only — a `window-save-state` restore replaces it. The abnormal check needs a non-zero code (upstream waives that only on macOS) and measures runtime from `GetProcessTimes`, not from when the 500 ms idle poll noticed. | — |
 | `key-remap` | Modifier swap ahead of `decide_key`. | S |
 | `font-codepoint-map`, `clipboard-codepoint-map` | Per-range face override in `atlas.rs`; a replace table on copy. | M / S |
 | `font-shaping-break` | Run-splitting options in the shaper. | S |
@@ -97,7 +97,7 @@ dilation in the rasterizer, S), `drag-handle` (comes with pane drag, §C), `auto
 | **Pane drag-to-rearrange, drag out to tab/window** | ⬜ | drop-zone overlay, detach-then-insert (one process, no IPC) | L |
 | **File drag-and-drop** → shell-quoted path | ⬜ | `dropped_files`, per-shell quoting, through `Session::paste_str` | S |
 | **Accessibility** (Narrator/NVDA) | ⬜ | AccessKit via egui; grid as a text node | L |
-| **Child-exited bar** (exit code, abnormal exit, press-any-key) | ⬜ | keep the pane after `reap_dead` when configured | S–M |
+| **Child-exited bar** (exit code, abnormal exit, press-any-key) | ✅ | Painter-only strip at the pane bottom (red on failure); any key dismisses and `reap_dead` closes the pane. A held pane is not alive, so it never counts as busy for quit confirmation. **Needs human visual confirmation.** Divergence: upstream prints its non-GUI fallback into the terminal and also shows it on a normal close for undo; giest shows the bar only while held. | S–M |
 | Renderer-error / spawn-error views | ⬜ | message instead of a blank or vanished pane | S |
 | **Config-errors dialog** | ⬜ | list unknown keys / bad values; Reload / Ignore | S |
 | Right-click menu completeness | ◐ | add Copy, Split Left/Up, Inspector, Read-only, title prompts, Copy URL | S |

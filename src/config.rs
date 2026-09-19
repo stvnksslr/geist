@@ -1152,6 +1152,22 @@ pub struct Config {
     /// documented meaning rather than a giest shortcut — and it matters here
     /// because an undo entry holds a live shell open until it expires.
     pub undo_timeout_ms: u64,
+    /// Keep a pane open after its shell exits, until a key is pressed.
+    /// Ghostty `wait-after-command`.
+    pub wait_after_command: bool,
+    /// A non-zero exit at or under this many ms is "abnormal": the pane stays
+    /// open with an error bar even without `wait_after_command`, so a bad
+    /// `command` is visible instead of a pane flashing shut. Ghostty
+    /// `abnormal-command-exit-runtime`.
+    pub abnormal_command_exit_runtime_ms: u32,
+    /// Extra environment for spawned shells, in insertion order (a re-set key
+    /// keeps its slot). Ghostty `env`.
+    pub env: Vec<(String, String)>,
+    /// Data written to each new shell at startup, concatenated. Ghostty `input`.
+    pub input: Vec<InputSource>,
+    /// Like `command` (`shell` here), but only for the first surface created at
+    /// startup. Ghostty `initial-command`.
+    pub initial_command: Option<String>,
     /// Which bell effects fire on BEL. Ghostty `bell-features`.
     pub bell: BellFeatures,
     /// Sound file played when `bell-features` includes `audio`. Ghostty
@@ -1295,6 +1311,11 @@ impl Default for Config {
             notify_on_command_finish_action: NotifyOnCommandFinishAction::default(),
             notify_on_command_finish_after_ms: 5_000,
             undo_timeout_ms: 5_000,
+            wait_after_command: false,
+            abnormal_command_exit_runtime_ms: 250,
+            env: Vec::new(),
+            input: Vec::new(),
+            initial_command: None,
             bell: BellFeatures::default(),
             bell_audio_path: None,
             bell_audio_volume: 0.5,
@@ -1842,6 +1863,58 @@ const SETTERS: &[(&str, Setter)] = &[
             "primary-paste" => MiddleClickAction::PrimaryPaste,
             "ignore" => MiddleClickAction::Ignore,
             _ => c.middle_click_action,
+        }
+    }),
+    ("initial-command", |c, v, d| {
+        c.initial_command = if v.is_empty() {
+            d.initial_command.clone()
+        } else {
+            Some(v.to_string())
+        }
+    }),
+    ("wait-after-command", |c, v, d| {
+        c.wait_after_command = if v.is_empty() {
+            d.wait_after_command
+        } else {
+            parse_bool(v, c.wait_after_command)
+        }
+    }),
+    ("abnormal-command-exit-runtime", |c, v, d| {
+        // A plain `u32` of milliseconds upstream, not a `Duration`.
+        c.abnormal_command_exit_runtime_ms = if v.is_empty() {
+            d.abnormal_command_exit_runtime_ms
+        } else {
+            v.parse().unwrap_or(c.abnormal_command_exit_runtime_ms)
+        }
+    }),
+    ("env", |c, v, d| {
+        // Upstream `RepeatableStringMap`: empty resets the map, `KEY=` removes
+        // that key, and re-setting a key overwrites it.
+        if v.is_empty() {
+            c.env = d.env.clone();
+        } else if let Some((key, val)) = v.split_once('=') {
+            let key = key.trim();
+            if key.is_empty() {
+                return;
+            }
+            if val.is_empty() {
+                c.env.retain(|(k, _)| k != key);
+            } else if let Some(slot) = c.env.iter_mut().find(|(k, _)| k == key) {
+                slot.1 = val.to_string();
+            } else {
+                c.env.push((key.to_string(), val.to_string()));
+            }
+        }
+    }),
+    ("input", |c, v, d| {
+        // Repeatable; empty resets. An invalid escape rejects the value, as
+        // upstream validates the string at config time.
+        if v.is_empty() {
+            c.input = d.input.clone();
+        } else if let Some(src) = InputSource::parse(v) {
+            c.input.push(src);
+        } else {
+            eprintln!("giest: ignoring invalid input value '{v}'");
         }
     }),
     ("command", |c, v, d| {
@@ -2560,6 +2633,107 @@ fn parse_font_variation(s: &str) -> Option<FontVariation> {
 ///
 /// Sub-millisecond components are parsed and contribute 0 ms rather than being
 /// rejected, so a valid Ghostty config doesn't warn.
+/// One `input` source. Ghostty `RepeatableReadableIO` (`config/io.zig`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum InputSource {
+    /// Bytes to send as-is, with Zig string-literal escapes already decoded.
+    Raw(Vec<u8>),
+    /// A file whose contents are sent; read at spawn, not at config time.
+    Path(PathBuf),
+}
+
+/// Upstream caps a `path:` input at 10MB so a runaway file can't stall startup.
+pub const INPUT_PATH_MAX_BYTES: u64 = 10 * 1024 * 1024;
+
+impl InputSource {
+    /// `raw:<text>`, `path:<file>`, or an untagged value (which is `raw`).
+    /// Escapes are decoded for **both** forms, as upstream does (its
+    /// `cloneParsed` runs the Zig string parser over either variant).
+    pub fn parse(v: &str) -> Option<Self> {
+        if let Some(p) = v.strip_prefix("path:") {
+            let bytes = parse_zig_string(p)?;
+            return Some(Self::Path(PathBuf::from(String::from_utf8(bytes).ok()?)));
+        }
+        let raw = v.strip_prefix("raw:").unwrap_or(v);
+        parse_zig_string(raw).map(Self::Raw)
+    }
+
+    /// The bytes to write, or `None` if a path can't be read (or is over the
+    /// cap).
+    fn read(&self) -> Option<Vec<u8>> {
+        match self {
+            Self::Raw(b) => Some(b.clone()),
+            Self::Path(p) => {
+                let meta = std::fs::metadata(p).ok()?;
+                if !meta.is_file() || meta.len() > INPUT_PATH_MAX_BYTES {
+                    return None;
+                }
+                std::fs::read(p).ok()
+            }
+        }
+    }
+}
+
+/// Concatenate every `input` source with no separator, or `None` (send
+/// nothing at all) if any one of them fails — upstream's all-or-nothing rule.
+pub fn resolve_input(sources: &[InputSource]) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    for s in sources {
+        out.extend(s.read()?);
+    }
+    Some(out)
+}
+
+/// Decode Zig string-literal escapes (Ghostty `config/string.zig`): `\n \r \t
+/// \\ \' \"`, `\xNN` (one raw byte), and `\u{N..}` (a codepoint, UTF-8
+/// encoded). Any other escape invalidates the whole value.
+pub fn parse_zig_string(s: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            let mut buf = [0u8; 4];
+            out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+            continue;
+        }
+        match chars.next()? {
+            'n' => out.push(b'\n'),
+            'r' => out.push(b'\r'),
+            't' => out.push(b'\t'),
+            '\\' => out.push(b'\\'),
+            '\'' => out.push(b'\''),
+            '"' => out.push(b'"'),
+            'x' => {
+                let hi = chars.next()?.to_digit(16)?;
+                let lo = chars.next()?.to_digit(16)?;
+                out.push((hi * 16 + lo) as u8);
+            }
+            'u' => {
+                if chars.next()? != '{' {
+                    return None;
+                }
+                let mut n: u32 = 0;
+                let mut digits = 0;
+                loop {
+                    let d = chars.next()?;
+                    if d == '}' {
+                        break;
+                    }
+                    n = n.checked_mul(16)?.checked_add(d.to_digit(16)?)?;
+                    digits += 1;
+                }
+                if digits == 0 {
+                    return None;
+                }
+                let mut buf = [0u8; 4];
+                out.extend_from_slice(char::from_u32(n)?.encode_utf8(&mut buf).as_bytes());
+            }
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
 fn parse_duration_ms(s: &str) -> Option<u64> {
     let s = s.trim();
     if s.is_empty() {
@@ -3382,6 +3556,82 @@ mod tests {
         assert!(WindowSaveState::Always.restores());
         assert!(!WindowSaveState::Default.restores());
         assert!(!WindowSaveState::Never.restores());
+    }
+
+    #[test]
+    fn child_exit_keys_parse_with_upstream_defaults() {
+        let d = Config::default();
+        assert!(!d.wait_after_command);
+        assert_eq!(d.abnormal_command_exit_runtime_ms, 250);
+        assert!(parsed("wait-after-command = true").wait_after_command);
+        assert!(!parsed("wait-after-command = true\nwait-after-command =").wait_after_command);
+        assert_eq!(
+            parsed("abnormal-command-exit-runtime = 1000").abnormal_command_exit_runtime_ms,
+            1000
+        );
+        // Garbage keeps the current value; empty resets.
+        assert_eq!(
+            parsed("abnormal-command-exit-runtime = 9\nabnormal-command-exit-runtime = x")
+                .abnormal_command_exit_runtime_ms,
+            9
+        );
+        assert_eq!(
+            parsed("abnormal-command-exit-runtime = 9\nabnormal-command-exit-runtime =")
+                .abnormal_command_exit_runtime_ms,
+            250
+        );
+        assert_eq!(parsed("initial-command = cmd.exe").initial_command.as_deref(), Some("cmd.exe"));
+        assert_eq!(parsed("initial-command = x\ninitial-command =").initial_command, None);
+    }
+
+    #[test]
+    fn env_is_an_ordered_map_with_reset_and_removal() {
+        let kv = |s: &[(&str, &str)]| {
+            s.iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(parsed("env = A=1\nenv = B=x=y").env, kv(&[("A", "1"), ("B", "x=y")]));
+        // Re-setting overwrites in place; `KEY=` removes; empty resets all.
+        assert_eq!(parsed("env = A=1\nenv = B=2\nenv = A=3").env, kv(&[("A", "3"), ("B", "2")]));
+        assert_eq!(parsed("env = A=1\nenv = B=2\nenv = A=").env, kv(&[("B", "2")]));
+        assert!(parsed("env = A=1\nenv =").env.is_empty());
+        // No `=` at all is not a pair.
+        assert!(parsed("env = A").env.is_empty());
+    }
+
+    #[test]
+    fn input_parses_raw_and_path_with_zig_escapes() {
+        let c = parsed("input = raw:echo hi\\r\ninput = plain\\x1b[A\ninput = path:C:\\\\x.txt");
+        assert_eq!(
+            c.input,
+            vec![
+                InputSource::Raw(b"echo hi\r".to_vec()),
+                InputSource::Raw(b"plain\x1b[A".to_vec()),
+                InputSource::Path(PathBuf::from("C:\\x.txt")),
+            ]
+        );
+        // Quoted values are unquoted first; `\u{..}` is UTF-8 encoded.
+        assert_eq!(
+            parsed("input = \"a\\u{e9}\\n\"").input,
+            vec![InputSource::Raw("a\u{e9}\n".as_bytes().to_vec())]
+        );
+        // An invalid escape rejects that value only; empty resets.
+        assert_eq!(parsed("input = a\ninput = bad\\q").input.len(), 1);
+        assert!(parsed("input = a\ninput =").input.is_empty());
+    }
+
+    #[test]
+    fn input_resolution_is_all_or_nothing() {
+        let dir = std::env::temp_dir().join(format!("giest-input-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("in.txt");
+        std::fs::write(&f, b"FILE").unwrap();
+        let ok = [InputSource::Raw(b"a".to_vec()), InputSource::Path(f.clone()), InputSource::Raw(b"b".to_vec())];
+        assert_eq!(resolve_input(&ok).as_deref(), Some(&b"aFILEb"[..]));
+        let bad = [InputSource::Raw(b"a".to_vec()), InputSource::Path(dir.join("missing"))];
+        assert_eq!(resolve_input(&bad), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
