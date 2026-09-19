@@ -27,6 +27,11 @@ use super::{
 type ResponseSink = Rc<RefCell<Vec<u8>>>;
 
 pub struct GhosttyVtEngine {
+    /// Per-row "has a blinking cell", so a partial snapshot can recompute
+    /// `has_blink` without revisiting the clean rows.
+    row_blink: Vec<bool>,
+    /// Palette the cells were last resolved against; see `recolored`.
+    last_palette: Option<Vec<Rgb>>,
     /// `vt-kam-allowed`; when false a program setting KAM is undone after each write.
     kam_allowed: bool,
     /// Scrollback-compression idle tracking: the last activity token seen and
@@ -202,6 +207,8 @@ impl GhosttyVtEngine {
             compress_since: std::time::Instant::now(),
             compress_done: false,
             kam_allowed: false,
+            row_blink: Vec::new(),
+            last_palette: None,
             placements: PlacementIterator::new()?,
             image_cache: HashMap::new(),
             image_ids_seen: Vec::new(),
@@ -1063,6 +1070,62 @@ mod tests {
     }
 
     #[test]
+    fn a_cursor_only_move_reaches_the_snapshot() {
+        let mut eng = GhosttyVtEngine::new(20, 6, 100_000).unwrap();
+        let mut s = GridSnapshot::default();
+        eng.write(b"hello");
+        eng.snapshot(&mut s).unwrap();
+        eng.snapshot(&mut s).unwrap(); // settle: next one may take the clean path
+        eng.write(b"\x1b[4;7H");
+        eng.snapshot(&mut s).unwrap();
+        assert_eq!((s.cursor_x, s.cursor_y), (6, 3));
+        eng.write(b"\x1b[?25l");
+        eng.snapshot(&mut s).unwrap();
+        assert!(!s.cursor_visible, "cursor hide must reach the snapshot");
+        // Palette text is stored resolved, so an OSC 4 with no cell edit must
+        // still re-resolve it.
+        eng.write(b"\x1b[1;1H\x1b[31mX\x1b[0m");
+        eng.snapshot(&mut s).unwrap();
+        eng.snapshot(&mut s).unwrap();
+        eng.write(b"\x1b]4;1;#00ff00\x07");
+        eng.snapshot(&mut s).unwrap();
+        assert_eq!(s.cells[0].fg, Rgb::new(0, 0xff, 0));
+    }
+
+    #[test]
+    fn partial_snapshots_match_a_full_one() {
+        // Snapshot after every step, so the dirty-row path is taken; then the
+        // result must equal a fresh engine's full snapshot of the same bytes.
+        let steps: &[&[u8]] = &[
+            b"row0 \x1b[1mbold\x1b[0m\r\nrow1\r\nrow2 \x1b[5mblink\x1b[0m\r\nrow3",
+            b"\x1b[2;1Hchanged",           // one row
+            b"\x1b[3;1H\x1b[2K",           // erase the blink row
+            b"\x1b[5;3H\x1b[41mred\x1b[0m", // colour on another row
+            b"\x1b[1;1H\x1b[K",            // erase row 0
+        ];
+        let cell_key = |c: &crate::engine::Cell| {
+            (c.text.to_string(), c.fg, c.bg, c.bg_explicit, c.bold, c.blink, c.underline)
+        };
+        let mut inc = GhosttyVtEngine::new(20, 6, 100_000).unwrap();
+        let mut s_inc = GridSnapshot::default();
+        inc.snapshot(&mut s_inc).unwrap();
+        let mut all = Vec::new();
+        for step in steps {
+            inc.write(step);
+            inc.snapshot(&mut s_inc).unwrap();
+            all.extend_from_slice(step);
+            let mut fresh = GhosttyVtEngine::new(20, 6, 100_000).unwrap();
+            fresh.write(&all);
+            let mut s_full = GridSnapshot::default();
+            fresh.snapshot(&mut s_full).unwrap();
+            let a: Vec<_> = s_inc.cells.iter().map(cell_key).collect();
+            let b: Vec<_> = s_full.cells.iter().map(cell_key).collect();
+            assert_eq!(a, b, "diverged after {:?}", String::from_utf8_lossy(step));
+            assert_eq!(s_inc.has_blink, s_full.has_blink);
+        }
+    }
+
+    #[test]
     fn compression_waits_for_idle_and_keeps_contents() {
         use std::time::{Duration, Instant};
         let mut eng = GhosttyVtEngine::new(40, 5, 10_000_000).unwrap();
@@ -1819,6 +1882,27 @@ fn is_graphics_element(text: &str) -> bool {
 /// (applying `inverse`) against the given defaults and reusing `dst`'s inline
 /// string buffer. Shared by the full-grid snapshot and the smooth-scroll
 /// over-row read.
+/// Reset a cell to a blank default-colored cell, keeping its string buffer.
+fn blank_cell(cell: &mut Cell) {
+    cell.text.clear();
+    cell.fg = Rgb::default();
+    cell.bg = Rgb::default();
+    cell.bold = false;
+    cell.italic = false;
+    cell.underline = UnderlineStyle::None;
+    cell.underline_color = None;
+    cell.strikethrough = false;
+    cell.overline = false;
+    cell.faint = false;
+    cell.blink = false;
+    cell.invisible = false;
+    // `bg` above is a placeholder the renderer never paints: a blank cell
+    // has no explicit background, so it emits no background quad at all.
+    cell.bg_explicit = false;
+    cell.inverse = false;
+    cell.selected = false;
+}
+
 fn copy_cell(
     cell: &CellIteration<'_, '_>,
     default_fg: Rgb,
@@ -2040,6 +2124,8 @@ impl TerminalEngine for GhosttyVtEngine {
 
     fn set_bold_color(&mut self, bold: BoldColor) -> Result<()> {
         self.bold_color = bold;
+        // Resolved into every cell: re-copy the grid (rows stay clean otherwise).
+        self.viewport_moved = true;
         Ok(())
     }
 
@@ -2059,6 +2145,7 @@ impl TerminalEngine for GhosttyVtEngine {
 
     fn set_min_contrast(&mut self, ratio: f32) -> Result<()> {
         self.min_contrast = ratio;
+        self.viewport_moved = true;
         Ok(())
     }
 
@@ -2571,19 +2658,37 @@ impl TerminalEngine for GhosttyVtEngine {
         // the previously-filled cells and skip the O(rows*cols) per-cell FFI
         // walk. (`update` consumed the dirty state; writes re-dirty it, and a
         // viewport scroll sets `moved`, so only idle/cursor-blink frames skip.)
-        if !moved
+        // Cells store colours already resolved (defaults, palette, bold-is-
+        // bright), so a colour change with no cell edit still needs a full copy;
+        // the render state leaves those rows clean.
+        let colors = snapshot.colors()?;
+        let palette_now = colors.palette.map(rgb);
+        let recolored = rgb(colors.foreground) != out.default_fg
+            || rgb(colors.background) != out.default_bg
+            || self.last_palette.as_deref() != Some(&palette_now[..]);
+        if recolored {
+            self.last_palette = Some(palette_now.to_vec());
+        }
+        let moved = moved || recolored;
+        let clean = !moved
             && matches!(snapshot.dirty()?, Dirty::Clean)
             && !out.cells.is_empty()
             && out.cols == cols
+            && out.rows == rows;
+
+        // `Partial`: only some rows changed. Keep the others as filled last time
+        // and re-copy just the dirty ones. Anything that could move content
+        // between rows (scroll, a selection change, a resize) takes the full path.
+        let partial = !moved
+            && matches!(snapshot.dirty()?, Dirty::Partial)
+            && out.cols == cols
             && out.rows == rows
-        {
-            return Ok(());
-        }
+            && out.cells.len() == cols as usize * rows as usize
+            && self.row_blink.len() == rows as usize;
 
-        let colors = snapshot.colors()?;
-
-        out.cols = cols;
-        out.rows = rows;
+        // Cursor and colours are read on every snapshot, *before* the clean skip:
+        // they are cheap, and a cursor-only change (a move, `?25l`) can leave
+        // every row clean.
         out.default_fg = rgb(colors.foreground);
         out.default_bg = rgb(colors.background);
         out.cursor_color = colors.cursor.map(rgb).unwrap_or(out.default_fg);
@@ -2601,31 +2706,21 @@ impl TerminalEngine for GhosttyVtEngine {
             out.cursor_x = cur.x;
             out.cursor_y = cur.y;
         }
+        if clean {
+            return Ok(());
+        }
+        out.cols = cols;
+        out.rows = rows;
 
         // Resize to the grid and blank every cell up front (reusing each cell's
         // inline-string buffer via `clear()` rather than reallocating). Cells the
         // iterators don't yield therefore read back blank, matching a fresh grid.
         let total = cols as usize * rows as usize;
         out.cells.resize(total, Cell::default());
-        for cell in out.cells.iter_mut() {
-            cell.text.clear();
-            cell.fg = Rgb::default();
-            cell.bg = Rgb::default();
-            cell.bold = false;
-            cell.italic = false;
-            cell.underline = UnderlineStyle::None;
-            cell.underline_color = None;
-            cell.strikethrough = false;
-            cell.overline = false;
-            cell.faint = false;
-            cell.blink = false;
-            cell.invisible = false;
-            // `bg` above is a placeholder the renderer never paints: a blank cell
-            // has no explicit background, so it emits no background quad at all.
-            cell.bg_explicit = false;
-            cell.inverse = false;
-            cell.selected = false;
+        if !partial {
+            out.cells.iter_mut().for_each(blank_cell);
         }
+        self.row_blink.resize(rows as usize, false);
 
         let default_fg = out.default_fg;
         let default_bg = out.default_bg;
@@ -2647,6 +2742,16 @@ impl TerminalEngine for GhosttyVtEngine {
             // cell — which is what the C API recommends for a renderer that can
             // work in spans, and it is where a soft-wrapped, scrollback-spanning
             // or reflowed selection resolves to actual columns.
+            if partial && !row.dirty().unwrap_or(true) {
+                has_blink |= self.row_blink[y];
+                y += 1;
+                continue;
+            }
+            let row_start = y * cols as usize;
+            if partial {
+                out.cells[row_start..row_start + cols as usize].iter_mut().for_each(blank_cell);
+            }
+            let mut row_has_blink = false;
             let sel = row.selection().ok().flatten();
             let mut x: usize = 0;
             let mut cells_iter = self.cells_buf.update(row)?;
@@ -2667,12 +2772,18 @@ impl TerminalEngine for GhosttyVtEngine {
                 )?;
                 out.cells[idx].selected = sel
                     .is_some_and(|s| x >= s.start_x as usize && x <= s.end_x as usize);
-                has_blink |= out.cells[idx].blink;
+                row_has_blink |= out.cells[idx].blink;
                 x += 1;
             }
+            self.row_blink[y] = row_has_blink;
+            has_blink |= row_has_blink;
+            let _ = row.set_dirty(false);
             y += 1;
         }
         out.has_blink = has_blink;
+        // Acknowledge the frame, as upstream's renderer does: without this the
+        // render state reports `Full` forever and every change re-copies the grid.
+        snapshot.set_dirty(Dirty::Clean)?;
 
         Ok(())
     }
