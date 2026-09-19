@@ -80,7 +80,6 @@ fn term_frame(snap: GridSnapshot) -> TermFrame {
         panes: vec![PaneFrame {
             snapshot: Arc::new(snap),
             origin_px: [0.0, 0.0],
-            selection: None,
             cursor_hollow: false,
             cursor_blink_hidden: false,
             blink_hidden: false,
@@ -89,6 +88,11 @@ fn term_frame(snap: GridSnapshot) -> TermFrame {
         }],
         selection_bg: Rgb::new(40, 60, 90),
         selection_fg: None,
+        search_bg: giest::config::TerminalColor::CellBackground,
+        search_fg: giest::config::TerminalColor::CellForeground,
+        search_selected_bg: giest::config::TerminalColor::CellBackground,
+        search_selected_fg: giest::config::TerminalColor::CellForeground,
+        cursor_text: None,
         // Fully opaque: the bench measures the default (no-transparency) path.
         background_opacity: 1.0,
         background_opacity_cells: false,
