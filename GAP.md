@@ -37,21 +37,21 @@ Effort: **S** <1d · **M** 1–3d · **L** ~1wk · **XL** multi-week.
 |---|---|---|
 | `shell-integration`, `shell-integration-features` | Off switch + feature flags for the prompt hooks `profiles.rs` injects. **Also the WSL story**: ship Ghostty's bash/zsh/fish scripts into WSL. | M |
 | `scrollback-compression` | Engine now exposes `Terminal::compress` + `compression_activity`; needs a per-session idle timer (compress after N s without an activity-token change). | S |
-| `cursor-click-to-move` | OSC 133 `click_events` (engine support landed, 3263ce5): turn a click on the prompt line into arrow keys. | M |
+| ~~`cursor-click-to-move`~~ | ✅ Port of `maybePromptClick`/`promptClickLine` (`prompt_click.rs`). `osc133.rs` side-scans `cl=`/`click_events=` off `A` (the C API exposes neither); the engine reports per-cell OSC 133 *input* content (`prompt_rows`). `cl` → arrows via the engine encoder (DECCKM-aware), `click_events=1|2` → SGR click. The pwsh/cmd hooks now send `A;cl=line`. Needs a live check that ConPTY keeps the typed text's input marking. | — |
 | `link`, `link-previews` | Regex link table (the `link-url` matcher becomes its lowest entry) + hover label (§C). | M |
 | ~~`env`, `input`, `initial-command`, `wait-after-command`, `abnormal-command-exit-runtime`~~ | ✅ Done. `env` is an ordered map (empty resets, `KEY=` removes) passed to `CommandBuilder::env`; `input` decodes Zig escapes for `raw:`/`path:`/untagged, 10MB cap, all-or-nothing; `initial-command` resolves like `command` (a profile name keeps its prompt hooks) for the startup surface only — a `window-save-state` restore replaces it. The abnormal check needs a non-zero code (upstream waives that only on macOS) and measures runtime from `GetProcessTimes`, not from when the 500 ms idle poll noticed. | — |
-| `key-remap` | Modifier swap ahead of `decide_key`. | S |
-| `font-codepoint-map`, `clipboard-codepoint-map` | Per-range face override in `atlas.rs`; a replace table on copy. | M / S |
-| `font-shaping-break` | Run-splitting options in the shaper. | S |
+| ~~`key-remap`~~ | ✅ `keyremap.rs`, applied to the pass's input in `Window::run_pass` (before bindings, `decide_key`, encoding, mouse). Divergence: egui has no sided modifiers (sided names act on both sides) and never reports the Win key, so `super` works only as a *target*. | — |
+| ~~`font-codepoint-map`, `clipboard-codepoint-map`~~ | ✅ Mapped faces resolve like `font-family` and win after sprites, before the primary font (a face lacking the glyph falls through). `Session::copy_text` applies the clipboard map to every copy (not search / `write_selection_file`). | — |
+| ~~`font-shaping-break`~~ | ✅ `cursor` (default on): the cursor cell is its own run; keyed on the snapshot's visibility, not the blink phase. | — |
 | `grapheme-width-method` | Engine already has mode 2027; expose the option. | S |
 | `cursor-text` | Text color under the cursor (incl. `cell-foreground`). | S |
 | `window-padding-color` | `background` / `extend` / `extend-always`: renderer extends edge cells into the padding. | M |
 | `window-show-tab-bar`, `maximize`, `fullscreen`, `title`, `initial-window`, `quit-after-last-window-closed` (+`-delay`) | Window lifecycle; `initial-window = false` needs a tray/background mode. | S each |
 | `split-preserve-zoom` | Keep zoom across focus/layout changes. | S |
-| `mouse-shift-capture`, `click-repeat-interval` | Mouse options (`0` → `GetDoubleClickTime`). | S |
+| ~~`mouse-shift-capture`, `click-repeat-interval`~~ | ✅ Held Shift takes the mouse back from a tracking program unless captured; `true`/`false` defer to `XTSHIFTESCAPE`, side-scanned (`xtshiftescape.rs`) — whether ConPTY forwards it is unprobed. `click-repeat-interval` sets egui's double-click window; `0` → `GetDoubleClickTime`. | — |
 | `title-report`, `vt-kam-allowed` | Engine options. Title reports are now **off by default** upstream — a behavior change the bump brought in. | S |
 | `palette-generate`, `palette-harmonious` | Generate the 256-color cube from the 16 base colors. | S |
-| `command-palette-entry` | Custom palette rows (title/description/action). | S |
+| ~~`command-palette-entry`~~ | ✅ Upstream grammar incl. Zig-literal quoting; `clear` drops the built-ins, empty restores them; unparseable actions are dropped. | — |
 | `window-subtitle`, `window-title-font-family` | Tab-strip text; subtitle = cwd. | S |
 | ~~`app-notifications`~~ | ✅ In-app toasts ("Copied to clipboard", "Reloaded the configuration"); `Window::render_toast`, per-window egui temp data. | S |
 | `language` | Only meaningful once the UI is localized — deferred. | — |
@@ -59,8 +59,8 @@ Effort: **S** <1d · **M** 1–3d · **L** ~1wk · **XL** multi-week.
 **A2. Windows analogues of platform keys.** `window-decoration` (native vs client-drawn caption),
 `window-titlebar-background` / `-foreground` (Win11 `DWMWA_CAPTION_COLOR` makes this S),
 `window-colorspace` (display-p3 → HDR swapchain, L), `window-vsync` (present mode, S),
-`window-step-resize` (`WM_SIZING` snapping to cells, S), `font-thicken` + `-strength` (stroke
-dilation in the rasterizer, S), `drag-handle` (comes with pane drag, §C), `auto-update` /
+`window-step-resize` (`WM_SIZING` snapping to cells, S), ~~`font-thicken` + `-strength`~~ ✅ (1px
+coverage dilation weighted by strength; upstream is macOS-only — needs eyeballing), `drag-handle` (comes with pane drag, §C), `auto-update` /
 `auto-update-channel` (§C), `quick-terminal-animation-duration` (S).
 
 **A3. Blocked.** `enquiry-response` — ConPTY strips ENQ (probed; see the config-surface ledger).
@@ -80,7 +80,7 @@ dilation in the rasterizer, S), `drag-handle` (comes with pane drag, §C), `auto
 | `goto_window`, `toggle_visibility` | Window cycling; hide/show all windows. | S |
 | `reset_window_size` | Re-apply `window-width` / `-height`. | S |
 | `copy_url_to_clipboard` | `url_at` under the pointer → clipboard. | S |
-| `scroll_to_selection`, `paste_from_selection` | Scroll to the selection's tracked ref; emulate a primary-selection buffer. | S |
+| `scroll_to_selection`, ~~`paste_from_selection`~~ | `paste_from_selection` ✅: pastes the in-process PRIMARY emulation (`primary.rs`) through `paste_str`. | S |
 | `end_key_sequence` | Flush a pending leader as literal keys. | S |
 | `toggle_window_decorations` | With `window-decoration`. | S |
 | `check_for_updates` | With auto-update. | — |
@@ -136,7 +136,7 @@ dilation in the rasterizer, S), `drag-handle` (comes with pane drag, §C), `auto
 | Default cursor style/blink engine options | ⬜ | set from `cursor-style*` — S |
 | OSC 72 kitty drag-and-drop | ⬜ | after file drop — M |
 | Kitty animation / relative placements / glyph protocol | ◐ blocked | all APC; **ConPTY strips APC** — needs the passthrough-mode portable-pty patch first — L–XL |
-| New `middle-click-action` / `copy-on-select` values, `~` in theme paths | ⬜ | config parser — S |
+| New `middle-click-action` / `copy-on-select` values, `~` in theme paths | ✅ | `clipboard-paste`; `none/primary/clipboard/both` (`true` = clipboard, as off-Linux upstream); `primary-paste` reads the PRIMARY emulation, falling back to the clipboard while it is empty; `~`/`~\` → `%USERPROFILE%` for every theme name incl. light/dark pairs |
 | Free with the bump | ✅ | XTGETTCAP, ANSI DECRQM, DECECM report, mode 2048 size-on-enable, C0/C1 fixes, CSI 2K wrap reset, color-reset fix, RIS clears progress, MOK2 + F13–F25 key encoding, kitty graphics spec fixes |
 
 ### E. Order of attack
