@@ -146,6 +146,7 @@ impl Action {
             | Action::ReloadConfig
             | Action::Quit
             | Action::ToggleQuickTerminal
+            | Action::ToggleVisibility
             | Action::Undo
             | Action::Redo
             // App, but special-cased in a surface context upstream.
@@ -458,6 +459,19 @@ pub enum Action {
     /// Send the pending leader keys to the shell and end the sequence
     /// (Ghostty `end_key_sequence`).
     EndKeySequence,
+    /// Ghostty `prompt_surface_title` / `prompt_window_title`: ask for a title
+    /// in a small dialog.
+    PromptSurfaceTitle,
+    PromptWindowTitle,
+    /// Ghostty `move_tab_to_new_window`: detach the active tab (shells and all)
+    /// into a new window.
+    MoveTabToNewWindow,
+    /// Ghostty `toggle_visibility`: hide or show every window.
+    ToggleVisibility,
+    /// Ghostty `show_on_screen_keyboard`: the Windows touch keyboard.
+    ShowOnScreenKeyboard,
+    /// Ghostty `toggle_window_decorations`.
+    ToggleWindowDecorations,
     IncreaseFontSize,
     DecreaseFontSize,
     ResetFontSize,
@@ -567,6 +581,12 @@ impl Action {
             Action::CopyUrlToClipboard => "Copy URL",
             Action::ScrollToSelection => "Scroll to Selection",
             Action::EndKeySequence => "End Key Sequence",
+            Action::PromptSurfaceTitle => "Change Terminal Title...",
+            Action::PromptWindowTitle => "Change Window Title...",
+            Action::MoveTabToNewWindow => "Move Tab to New Window",
+            Action::ToggleVisibility => "Toggle Visibility",
+            Action::ShowOnScreenKeyboard => "Show On-Screen Keyboard",
+            Action::ToggleWindowDecorations => "Toggle Window Decorations",
             Action::FocusSplitNext => "Focus Split: Next",
             Action::FocusSplitPrev => "Focus Split: Previous",
             Action::IncreaseFontSize => "Increase Font Size",
@@ -609,7 +629,13 @@ impl Action {
             | Action::ResetWindowSize
             | Action::CopyUrlToClipboard
             | Action::ScrollToSelection
-            | Action::EndKeySequence => return None,
+            | Action::EndKeySequence
+            | Action::PromptSurfaceTitle
+            | Action::PromptWindowTitle
+            | Action::MoveTabToNewWindow
+            | Action::ToggleVisibility
+            | Action::ShowOnScreenKeyboard
+            | Action::ToggleWindowDecorations => return None,
             Action::NewTab => "Ctrl+Shift+T",
             Action::NewWindow => "Ctrl+Shift+N",
             Action::Inspector(_) => "Ctrl+Shift+I",
@@ -727,6 +753,12 @@ impl Action {
             Action::CopyUrlToClipboard => "copy_url_to_clipboard".into(),
             Action::ScrollToSelection => "scroll_to_selection".into(),
             Action::EndKeySequence => "end_key_sequence".into(),
+            Action::PromptSurfaceTitle => "prompt_surface_title".into(),
+            Action::PromptWindowTitle => "prompt_window_title".into(),
+            Action::MoveTabToNewWindow => "move_tab_to_new_window".into(),
+            Action::ToggleVisibility => "toggle_visibility".into(),
+            Action::ShowOnScreenKeyboard => "show_on_screen_keyboard".into(),
+            Action::ToggleWindowDecorations => "toggle_window_decorations".into(),
             Action::ToggleQuickTerminal => "toggle_quick_terminal".into(),
             Action::FocusSplitLeft => "goto_split:left".into(),
             Action::FocusSplitRight => "goto_split:right".into(),
@@ -901,6 +933,12 @@ impl Action {
             "copy_url_to_clipboard" => Action::CopyUrlToClipboard,
             "scroll_to_selection" => Action::ScrollToSelection,
             "end_key_sequence" => Action::EndKeySequence,
+            "prompt_surface_title" => Action::PromptSurfaceTitle,
+            "prompt_window_title" => Action::PromptWindowTitle,
+            "move_tab_to_new_window" => Action::MoveTabToNewWindow,
+            "toggle_visibility" => Action::ToggleVisibility,
+            "show_on_screen_keyboard" => Action::ShowOnScreenKeyboard,
+            "toggle_window_decorations" => Action::ToggleWindowDecorations,
             "toggle_quick_terminal" => Action::ToggleQuickTerminal,
             "increase_font_size" => Action::IncreaseFontSize,
             "decrease_font_size" => Action::DecreaseFontSize,
@@ -1019,6 +1057,12 @@ const BASE_ACTIONS: &[Action] = &[
     Action::ToggleSearch,
     Action::ToggleMouseReporting,
     Action::ToggleMaximize,
+    Action::ToggleWindowDecorations,
+    Action::ToggleVisibility,
+    Action::PromptSurfaceTitle,
+    Action::PromptWindowTitle,
+    Action::MoveTabToNewWindow,
+    Action::ShowOnScreenKeyboard,
     Action::ToggleFloatOnTop,
     Action::ToggleBackgroundOpacity,
     Action::OpenConfig,
@@ -1218,6 +1262,12 @@ mod tests {
             "copy_url_to_clipboard",
             "scroll_to_selection",
             "end_key_sequence",
+            "prompt_surface_title",
+            "prompt_window_title",
+            "move_tab_to_new_window",
+            "toggle_visibility",
+            "show_on_screen_keyboard",
+            "toggle_window_decorations",
         ] {
             let a = Action::from_name(raw).unwrap_or_else(|| panic!("parsing {raw:?}"));
             assert_eq!(a.name(), raw, "round-trip {raw:?}");

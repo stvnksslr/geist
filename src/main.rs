@@ -14,7 +14,13 @@ fn main() -> eframe::Result {
     let want_transparent = cfg.background_opacity < 1.0 || cfg.background_blur.enabled();
 
     let mut wgpu_options = eframe::egui_wgpu::WgpuConfiguration {
-        present_mode: eframe::wgpu::PresentMode::AutoVsync,
+        // `window-vsync`. Startup-only: the swapchain is built before the app
+        // exists, and eframe offers no way to rebuild it with a new mode.
+        present_mode: if cfg.window_vsync {
+            eframe::wgpu::PresentMode::AutoVsync
+        } else {
+            eframe::wgpu::PresentMode::AutoNoVsync
+        },
         // Keep vsync (no tearing) but cap the swapchain to a single in-flight
         // frame instead of wgpu's default 2 — the content tracks the window
         // border tightly on resize and input feels ~1 frame snappier.
@@ -64,8 +70,17 @@ fn main() -> eframe::Result {
             eframe::egui::ViewportBuilder::default()
                 .with_inner_size([960.0, 600.0])
                 .with_title("giest")
-                .with_transparent(want_transparent),
+                .with_transparent(want_transparent)
+                // Set here as well as commanded on the first pass, so the
+                // window is *created* in its configured state instead of
+                // flashing a frame of the default one.
+                .with_decorations(cfg.window_decoration.decorated())
+                .with_maximized(cfg.maximize && !cfg.fullscreen)
+                .with_fullscreen(cfg.fullscreen)
+                // `initial-window = false` starts resident with the root hidden.
+                .with_visible(cfg.initial_window),
         ),
+        vsync: cfg.window_vsync,
         wgpu_options,
         ..Default::default()
     };

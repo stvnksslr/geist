@@ -377,6 +377,27 @@ impl<T> Node<T> {
         }
     }
 
+    /// Every leaf's rect under the *unzoomed* layout, without borrowing the
+    /// payloads mutably — the same division as [`collect`](Self::collect). What
+    /// directional navigation needs while a split is zoomed, when the drawn
+    /// layout holds only the zoomed pane.
+    fn leaf_rects(&self, area: egui::Rect, ppp: f32, out: &mut Vec<(u64, egui::Rect)>) {
+        match self {
+            Node::Leaf { id, .. } => out.push((*id, area)),
+            Node::Split {
+                vertical,
+                ratio,
+                first,
+                second,
+            } => {
+                let (a, _, b) = split_rect(area, *vertical, *ratio, ppp);
+                first.leaf_rects(a, ppp, out);
+                second.leaf_rects(b, ppp, out);
+            }
+            Node::Empty => {}
+        }
+    }
+
     /// Append every split's divider — its gutter, the parent rect it divides and
     /// its root-downwards path — using the same division as
     /// [`collect`](Self::collect). What the divider drag hit-tests against.
@@ -1028,6 +1049,40 @@ pub struct Window {
     /// is rebuilt and compared every pass, so a position in it would either be
     /// re-sent forever or fight the user's next drag.
     place_geom: Option<(egui::Pos2, egui::Vec2)>,
+    /// The open `prompt_surface_title` / `prompt_window_title` dialog and its
+    /// in-progress text. Modal: listed in **both** input gates.
+    title_prompt: Option<(TitlePrompt, String)>,
+    /// Whether this window wants its native caption and border
+    /// (`window-decoration`, flipped per window by `toggle_window_decorations`),
+    /// and the value last commanded, so the command is sent on change only.
+    decorated: bool,
+    applied_decorated: Option<bool>,
+    /// Whether `maximize` / `fullscreen` have been applied to this (new)
+    /// window. Once, like the initial geometry — a window `undo` re-opens keeps
+    /// `true` and so isn't re-maximized.
+    startup_state_applied: bool,
+    /// The quick terminal's slide in or out, while one is running.
+    quick_anim: Option<QuickAnim>,
+    /// The `window-step-resize` geometry last handed to the `WM_SIZING` hook.
+    step_geom: Option<crate::winchrome::StepGeometry>,
+}
+
+/// Which title a `prompt_*_title` dialog edits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TitlePrompt {
+    /// The focused pane's (`prompt_surface_title`).
+    Surface,
+    /// The window's (`prompt_window_title`).
+    Window,
+}
+
+/// A quick-terminal slide (`quick-terminal-animation-duration`).
+#[derive(Clone, Copy, Debug)]
+struct QuickAnim {
+    /// `egui` input time the slide began.
+    start: f64,
+    /// Sliding in (`true`) or out.
+    showing: bool,
 }
 
 
@@ -1172,6 +1227,11 @@ enum AppRequest {
     Redo,
     /// Ghostty `goto_window:next|previous`: focus the window `delta` slots away.
     FocusWindow(isize),
+    /// `move_tab_to_new_window`: open a window around this tab, already
+    /// detached from the raising window with its shells still running.
+    AdoptTab(Box<Tab<Session>>),
+    /// `toggle_visibility`: hide or show every window.
+    ToggleVisibility,
 }
 
 /// The whole application: every open window, plus the little state that has to
@@ -1203,6 +1263,19 @@ pub struct App {
     /// closed would go with it. Its entries own the removed panes, tabs and
     /// windows, shells still running, until they expire.
     undo: crate::undo::UndoStack<UndoOp>,
+    /// With every window closed and `quit-after-last-window-closed = false`
+    /// (or a `-delay` still running, or `initial-window = false`): the last
+    /// window, emptied of its tabs, kept as the template the next window is
+    /// cloned from. The root viewport stays alive but hidden meanwhile —
+    /// closing it is what ends an eframe process.
+    dormant: Option<Window>,
+    /// When a `quit-after-last-window-closed-delay` expires (egui input time).
+    quit_at: Option<f64>,
+    /// `toggle_visibility` has every window hidden.
+    hidden: bool,
+    /// The window count and titlebar colors last pushed to DWM, so the
+    /// `EnumThreadWindows` sweep runs only when one of them changes.
+    titlebar_applied: Option<(usize, Option<crate::engine::Rgb>, Option<crate::engine::Rgb>)>,
 }
 
 /// The kind of surface being created, for the working-directory inheritance
@@ -1459,7 +1532,7 @@ impl Window {
         // re-fitting the grid. Leaving both enabled makes them fight: the chrome
         // scales up while the text appears to stay the same size.
         cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
-        install_ui_fallback_font(&cc.egui_ctx);
+        install_ui_fallback_font(&cc.egui_ctx, config.window_title_font_family.as_deref());
         // Pin the chrome to the terminal's own theme. egui otherwise follows the
         // *OS* preference, which renders a light tab strip and light dialogs
         // over a dark terminal. `Style` lives in egui's process-global
@@ -1526,6 +1599,12 @@ impl Window {
             cell_h,
             font_points: config.font_points,
             chrome: theme::chrome(&config),
+            title_prompt: None,
+            decorated: config.window_decoration.decorated(),
+            applied_decorated: None,
+            startup_state_applied: false,
+            quick_anim: None,
+            step_geom: None,
             config,
             profiles,
             default_profile,
@@ -1664,6 +1743,74 @@ impl Window {
             }
             Some(false) => self.confirm = None,
             None => {}
+        }
+    }
+
+    /// Draw the `prompt_surface_title` / `prompt_window_title` dialog.
+    ///
+    /// The tab-rename box's semantics in a modal (a pane or a window has no
+    /// strip slot to edit in place): Enter or OK commits, Esc / Cancel / a
+    /// backdrop click abandons, and an **empty** title clears the override so
+    /// the program's own title comes back — upstream's rule for both prompts.
+    fn render_title_prompt(&mut self, ctx: &egui::Context) {
+        let Some((what, mut text)) = self.title_prompt.take() else {
+            return;
+        };
+        let chrome = self.chrome;
+        let mut decision: Option<bool> = None;
+        let edit_id = self.id("title-prompt-edit");
+        let modal = egui::Modal::new(self.id("title-prompt")).show(ctx, |ui| {
+            ui.set_width(360.0);
+            ui.heading(match what {
+                TitlePrompt::Surface => "Change Terminal Title",
+                TitlePrompt::Window => "Change Window Title",
+            });
+            ui.add_space(8.0);
+            ui.label(
+                egui::RichText::new("Leave blank to restore the default title.")
+                    .color(chrome.weak_text),
+            );
+            ui.add_space(8.0);
+            let te = ui.add(
+                egui::TextEdit::singleline(&mut text)
+                    .id(edit_id)
+                    .desired_width(f32::INFINITY),
+            );
+            if !te.has_focus() {
+                te.request_focus();
+            }
+            ui.add_space(16.0);
+            let (yes, no) = dialog_buttons(ui, &chrome, "OK", false, "Cancel");
+            if yes {
+                decision = Some(true);
+            }
+            if no {
+                decision = Some(false);
+            }
+        });
+        if modal.should_close() {
+            decision = Some(false);
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+            decision = Some(true);
+        }
+        match decision {
+            Some(true) => {
+                let val = text.trim();
+                match what {
+                    TitlePrompt::Window => {
+                        self.title_override = (!val.is_empty()).then(|| text.clone());
+                    }
+                    TitlePrompt::Surface => {
+                        let t = if val.is_empty() { String::new() } else { text.clone() };
+                        if let Some(s) = self.focused_session_mut() {
+                            s.set_title_override(&t);
+                        }
+                    }
+                }
+            }
+            Some(false) => {}
+            None => self.title_prompt = Some((what, text)),
         }
     }
 
@@ -1902,14 +2049,27 @@ impl Window {
     /// would panic in `render_active`, which indexes `tabs[active_tab]`.
     fn sibling(&self, window_id: u64, cwd: Option<&std::path::Path>) -> Option<Self> {
         let session = self.spawn_session(self.default_profile, cwd)?;
-        Some(Self {
-            tabs: vec![Tab::leaf(1, session)],
+        Some(self.sibling_with(window_id, vec![Tab::leaf(1, session)], 2))
+    }
+
+    /// A new window around existing `tabs` (`move_tab_to_new_window`), cloned
+    /// from this one's config, profiles and font metrics like [`Self::sibling`].
+    /// `next_id` must exceed every leaf id in `tabs`: pane ids are per window.
+    fn sibling_with(&self, window_id: u64, tabs: Vec<Tab<Session>>, next_id: u64) -> Self {
+        Self {
+            tabs,
             active_tab: 0,
-            next_id: 2,
+            next_id,
             cell_w: self.cell_w,
             cell_h: self.cell_h,
             font_points: self.font_points,
             chrome: self.chrome,
+            title_prompt: None,
+            decorated: self.config.window_decoration.decorated(),
+            applied_decorated: None,
+            startup_state_applied: false,
+            quick_anim: None,
+            step_geom: None,
             config: self.config.clone(),
             profiles: self.profiles.clone(),
             default_profile: self.default_profile,
@@ -1966,7 +2126,7 @@ impl Window {
             undo_state: crate::command::UndoState::default(),
             inspector_rect: None,
             place_geom: None,
-        })
+        }
     }
 
     /// Snapshot this window's layout for `window-save-state`.
@@ -2137,6 +2297,58 @@ impl Window {
             .with_position([f.x / ppp, f.y / ppp])
     }
 
+    /// Whether the quick terminal is showing or sliding in (not sliding out).
+    fn quick_shown(&self) -> bool {
+        self.quick_visible && !self.quick_anim.is_some_and(|a| !a.showing)
+    }
+
+    /// Show or hide the quick terminal, sliding when
+    /// `quick-terminal-animation-duration` > 0. A hide only *starts* the
+    /// slide; [`Window::step_quick_anim`] stops drawing the viewport at its end.
+    fn set_quick_shown(&mut self, show: bool, now: f64) {
+        let animate = self.config.quick_terminal_animation_duration > 0.0
+            && self.config.quick_terminal_position != crate::quickterm::Position::Center;
+        if show {
+            self.quick_visible = true;
+            self.quick_anim = animate.then_some(QuickAnim { start: now, showing: true });
+        } else if animate && self.quick_visible {
+            self.quick_anim = Some(QuickAnim { start: now, showing: false });
+        } else {
+            self.quick_visible = false;
+            self.quick_anim = None;
+        }
+    }
+
+    /// Advance a running quick-terminal slide by one frame.
+    fn step_quick_anim(&mut self, ctx: &egui::Context) {
+        let Some(a) = self.quick_anim else {
+            return;
+        };
+        let now = ctx.input(|i| i.time);
+        let dur = self.config.quick_terminal_animation_duration.max(1e-3);
+        let t = ((now - a.start) / dur).clamp(0.0, 1.0) as f32;
+        let eased = 1.0 - (1.0 - t).powi(3);
+        let shown = if a.showing { eased } else { 1.0 - eased };
+        if let Some(work) = crate::quickterm::work_area() {
+            let pos = self.config.quick_terminal_position;
+            let f = crate::quickterm::frame(pos, &self.config.quick_terminal_size, work);
+            let (dx, dy) = crate::quickterm::slide_offset(pos, f.w, f.h, shown);
+            let ppp = ctx.pixels_per_point().max(1.0);
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
+                (f.x + dx) / ppp,
+                (f.y + dy) / ppp,
+            )));
+        }
+        if t >= 1.0 {
+            self.quick_anim = None;
+            if !a.showing {
+                self.quick_visible = false;
+            }
+        } else {
+            ctx.request_repaint();
+        }
+    }
+
     /// This window's child viewport id. Derived from the stable `window_id`, not
     /// the slot, so a window keeps its native window across a list reshuffle.
     fn viewport_id(&self) -> egui::ViewportId {
@@ -2300,6 +2512,7 @@ impl Window {
             || self.focused_search_open()
             || self.clipboard_prompt().is_some()
             || self.config_errors_open()
+            || self.title_prompt.is_some()
     }
 
     /// Whether the config-errors dialog is up: the loaded config had problems
@@ -2461,13 +2674,23 @@ impl Window {
     /// Move focus to the spatially adjacent pane (`Ctrl+Alt+arrow`), using the
     /// previous frame's cached layout. A no-op if there is no neighbor that way.
     fn focus_dir(&mut self, dir: Dir) {
-        // While a split is zoomed the siblings are hidden; don't navigate to one.
-        if self.tabs[self.active_tab].zoomed.is_some() {
-            return;
-        }
-        let focus = self.tabs[self.active_tab].focus;
-        if let Some(id) = nav_dir(&self.last_layout, focus, dir) {
-            self.tabs[self.active_tab].focus = id;
+        let ppp = self.egui_ctx.pixels_per_point().max(1.0);
+        let preserve = self.config.split_preserve_zoom_navigation;
+        let area = self.last_split_area;
+        let tab = &mut self.tabs[self.active_tab];
+        // While zoomed the drawn layout holds only the zoomed pane, so the
+        // neighbours are found in the layout the tree *would* have unzoomed.
+        let layout = match (tab.zoomed, area) {
+            (Some(_), Some(area)) => {
+                let mut v = Vec::new();
+                tab.root.leaf_rects(area, ppp, &mut v);
+                v
+            }
+            _ => self.last_layout.clone(),
+        };
+        if let Some(id) = nav_dir(&layout, tab.focus, dir) {
+            tab.focus = id;
+            tab.zoomed = zoom_after_nav(tab.zoomed, id, preserve);
         }
     }
 
@@ -2475,16 +2698,14 @@ impl Window {
     /// `Ctrl+Shift+[`), wrapping around. Leaf ids are monotonic, so sorting them
     /// ascending recovers creation order (matching Ghostty's `goto_split:next`).
     fn focus_cycle(&mut self, forward: bool) {
+        let preserve = self.config.split_preserve_zoom_navigation;
         let tab = &mut self.tabs[self.active_tab];
-        // While a split is zoomed the siblings are hidden; don't cycle into one.
-        if tab.zoomed.is_some() {
-            return;
-        }
         let mut ids = Vec::new();
         tab.root.leaf_ids(&mut ids);
         ids.sort_unstable();
         if let Some(id) = cycle_pick(&ids, tab.focus, forward) {
             tab.focus = id;
+            tab.zoomed = zoom_after_nav(tab.zoomed, id, preserve);
         }
     }
 
@@ -2907,6 +3128,8 @@ impl Window {
         // `load_bg_image` caches by path), so editing the key applies live like
         // the colors do. Only the *surface's* transparency is startup-only.
         self.config = cfg;
+        // A reload re-reads `window-decoration`, replacing any per-window toggle.
+        self.decorated = self.config.window_decoration.decorated();
         if self.config.app_notifications.config_reload {
             push_toast(&self.egui_ctx, self.window_id, "Reloaded the configuration");
         }
@@ -2940,6 +3163,28 @@ impl Window {
         match action {
             // Bound, and deliberately does nothing (see `Action::Noop`).
             Action::Noop(_) => {}
+            Action::PromptSurfaceTitle => {
+                let cur = self.focused_session().and_then(|s| s.title()).unwrap_or_default();
+                self.title_prompt = Some((TitlePrompt::Surface, cur));
+            }
+            Action::PromptWindowTitle => {
+                let cur = self.title_override.clone().unwrap_or_default();
+                self.title_prompt = Some((TitlePrompt::Window, cur));
+            }
+            // Upstream is a no-op for a window's only tab: there is nothing to
+            // leave behind, and the new window would be the same window.
+            Action::MoveTabToNewWindow => {
+                if let Some((tab, active)) = take_active_tab(&mut self.tabs, self.active_tab) {
+                    self.active_tab = active;
+                    // Index-holding state is stale after a removal.
+                    self.renaming = None;
+                    self.tab_drag = None;
+                    self.requests.push(AppRequest::AdoptTab(Box::new(tab)));
+                }
+            }
+            Action::ToggleVisibility => self.requests.push(AppRequest::ToggleVisibility),
+            Action::ShowOnScreenKeyboard => crate::winchrome::show_on_screen_keyboard(),
+            Action::ToggleWindowDecorations => self.decorated = !self.decorated,
             Action::GotoWindowNext => self.requests.push(AppRequest::FocusWindow(1)),
             Action::GotoWindowPrev => self.requests.push(AppRequest::FocusWindow(-1)),
             // Geometry is applied once, on the first frame with cell metrics;
@@ -4247,7 +4492,10 @@ impl Window {
                                 // hover.
                                 let text_max =
                                     (rect.width() - 8.0 - theme::TAB_CLOSE_COL).max(8.0);
-                                let font = egui::TextStyle::Button.resolve(ui.style());
+                                let font = egui::FontId::new(
+                                    egui::TextStyle::Button.resolve(ui.style()).size,
+                                    egui::FontFamily::Name(TITLE_FONT.into()),
+                                );
                                 let ink = if is_active { chrome.text } else { chrome.weak_text };
                                 let label = {
                                     let p = ui.painter();
@@ -4598,7 +4846,8 @@ impl Window {
             self.palette.is_some()
                 || self.confirm.is_some()
                 || self.clipboard_prompt().is_some()
-                || self.config_errors_open();
+                || self.config_errors_open()
+                || self.title_prompt.is_some();
 
         // The inspector is deliberately **not** in that list — it must never
         // take the keyboard, or its own keyboard log would have nothing to
@@ -5322,7 +5571,9 @@ impl Window {
         if !self.geometry_applied {
             self.geometry_applied = true;
             let cfg = &self.config;
-            if cfg.window_width > 0 || cfg.window_height > 0 {
+            // A size would un-maximize the window `maximize` just maximized.
+            let sized = !self.maximized && !self.fullscreen;
+            if sized && (cfg.window_width > 0 || cfg.window_height > 0) {
                 let chrome_h = ctx.content_rect().height() - full_area.height();
                 let cur = full_area.size();
                 let w = if cfg.window_width > 0 {
@@ -5349,6 +5600,29 @@ impl Window {
                     x as f32 / ppp,
                     y as f32 / ppp,
                 )));
+            }
+        }
+
+        // `window-step-resize`: hand the `WM_SIZING` hook this frame's cell
+        // geometry. `extra` is everything in the client area that isn't whole
+        // cells — tab strip, padding, the sub-cell remainder — so a snapped
+        // size keeps exactly that and changes the grid by whole cells. Root
+        // window only: it is the one whose HWND giest can reach.
+        if let Some(hwnd) = self.hwnd.filter(|_| self.is_root) {
+            let g = self.config.window_step_resize.then(|| {
+                let client = ctx.content_rect().size() * ppp;
+                let gw = (full_area.width() - 2.0 * self.config.padding_x) * ppp;
+                let gh = (full_area.height() - 2.0 * self.config.padding_y) * ppp;
+                crate::winchrome::StepGeometry {
+                    cell_w: cw,
+                    cell_h: ch,
+                    extra_w: client.x - gw + gw.rem_euclid(cw),
+                    extra_h: client.y - gh + gh.rem_euclid(ch),
+                }
+            });
+            if g != self.step_geom {
+                crate::winchrome::set_step_resize(hwnd, g);
+                self.step_geom = g;
             }
         }
 
@@ -5776,6 +6050,31 @@ impl Window {
             ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
         }
+        if self.quick {
+            self.step_quick_anim(&ctx);
+        }
+
+        // `window-decoration` / `toggle_window_decorations`. A command, not a
+        // builder field: the child builder is cloned verbatim every pass, and a
+        // patched recreate-class field would clear every viewport (CLAUDE.md).
+        // The quick terminal is always undecorated.
+        if !self.quick && self.applied_decorated != Some(self.decorated) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(self.decorated));
+            self.applied_decorated = Some(self.decorated);
+        }
+        // `maximize` / `fullscreen`, once per new window. Fullscreen wins, as a
+        // fullscreen window is not also maximized.
+        if !std::mem::replace(&mut self.startup_state_applied, true) && !self.quick {
+            if self.config.fullscreen {
+                // Commanded outright, not toggled: the root was already
+                // *built* fullscreen (main.rs), so a toggle would undo it.
+                self.fullscreen = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
+            } else if self.config.maximize {
+                self.maximized = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
+            }
+        }
 
         // Record where this window is, for the root-slot rehost on retire.
         self.geom = ctx.input(|i| {
@@ -5828,6 +6127,16 @@ impl Window {
                 // No confirmation wanted: close now. For the root this is the
                 // path eframe would have taken anyway; for a child it's what
                 // actually retires the window.
+                //
+                // The root still cancels eframe's own close: the retire decides
+                // whether the process ends (it closes the root itself when it
+                // does), and it may not — another window may inherit the root
+                // viewport, or `quit-after-last-window-closed = false` keeps
+                // giest resident.
+                if self.is_root() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                }
+                self.closing = true;
                 self.requests.push(AppRequest::CloseWindow { undoable: true });
             }
         }
@@ -5860,11 +6169,21 @@ impl Window {
         // the undecorated one would make clearing the 🔔 look like "no change"
         // and never re-send the title.
         let shown = {
+            // A runtime override (`set_window_title:` / `prompt_window_title`)
+            // is the user's latest word, so it outranks the configured `title`,
+            // which in turn outranks anything the program sets.
             let base = self
                 .title_override
                 .clone()
+                .or_else(|| self.config.title.clone())
                 .or_else(|| self.tabs.get(self.active_tab).and_then(|t| t.focused_payload().title()))
                 .unwrap_or_else(|| "giest".to_string());
+            // `window-subtitle = working-directory`. A Windows caption has one
+            // line, so the subtitle rides after the title.
+            let base = match self.config.window_subtitle.then(|| self.focused_pwd()).flatten() {
+                Some(dir) => format!("{base} \u{2014} {}", dir.display()),
+                None => base,
+            };
             if self.bell_title { format!("🔔 {base}") } else { base }
         };
         if Some(&shown) != self.last_window_title.as_ref() {
@@ -5880,6 +6199,11 @@ impl Window {
         // window-background fill.
         let strip = ctx.global_style().visuals.panel_fill;
         let a8 = (self.config.background_opacity * 255.0).round() as u8;
+        // `window-show-tab-bar`. An inline rename lives in the strip, so it
+        // forces the strip on while it's open.
+        let show_strip =
+            self.config.window_show_tab_bar.visible(self.tabs.len()) || self.renaming.is_some();
+        if show_strip {
         egui::Panel::top(self.id("tabs"))
             .frame(
                 egui::Frame::side_top_panel(&ctx.global_style())
@@ -5894,6 +6218,7 @@ impl Window {
                     )),
             )
             .show_inside(ui, |ui| self.tab_bar(ui));
+        }
 
         // No fill here: `render_active` paints the window background across this
         // whole area itself. Filling it here too would double-composite the
@@ -5917,6 +6242,7 @@ impl Window {
         self.render_config_errors(&ctx, render_state);
         // The close confirmation draws over everything else.
         self.render_confirm_close(&ctx);
+        self.render_title_prompt(&ctx);
         // …and the clipboard permission prompt over that: it's the one dialog
         // whose answer can leak data or run a command, so nothing may sit on
         // top of it and take the click meant for "Deny".
@@ -5940,8 +6266,20 @@ impl App {
             global_actions: Vec::new(),
             global_chords: Vec::new(),
             undo,
+            dormant: None,
+            quit_at: None,
+            hidden: false,
+            titlebar_applied: None,
         };
-        app.restore_state();
+        // `initial-window = false`: start resident with no window. The first
+        // window's shell is already running (building a `Window` spawns one),
+        // so it is dropped along with the tabs.
+        if !app.windows[0].config.initial_window {
+            let now = cc.egui_ctx.input(|i| i.time);
+            app.go_dormant(&cc.egui_ctx, now, 0);
+        } else {
+            app.restore_state();
+        }
         app.sync_global_binds(&cc.egui_ctx);
         Ok(app)
     }
@@ -5981,7 +6319,9 @@ impl App {
     /// global binding is a *process*-wide OS registration, so it needs one
     /// authority rather than the last window to be drawn.
     fn sync_global_binds(&mut self, ctx: &egui::Context) {
-        let Some(w) = self.windows.first() else {
+        // The dormant template keeps the hotkeys armed with no window open —
+        // they are the only way back.
+        let Some(w) = self.windows.first().or(self.dormant.as_ref()) else {
             return;
         };
         let globals = w.keymap.globals();
@@ -6018,8 +6358,26 @@ impl App {
             let Some(action) = self.global_actions.get(i).cloned() else {
                 continue;
             };
+            // Resident with no window: the only thing a hotkey can mean is
+            // "give me a window".
+            if self.windows.is_empty() {
+                if matches!(
+                    action,
+                    Action::NewWindow
+                        | Action::NewTab
+                        | Action::ToggleVisibility
+                        | Action::ToggleQuickTerminal
+                ) {
+                    self.wake(ctx, None);
+                }
+                continue;
+            }
             if action == Action::ToggleQuickTerminal {
                 self.toggle_quick_terminal(ctx);
+                continue;
+            }
+            if action == Action::ToggleVisibility {
+                self.toggle_visibility(ctx);
                 continue;
             }
             // Everything else is a *window* action, and the focused window is
@@ -6041,10 +6399,12 @@ impl App {
     /// `Window` (and every shell inside it) stays in the list, so reopening is
     /// instant and nothing in the terminal has moved.
     fn toggle_quick_terminal(&mut self, ctx: &egui::Context) {
+        let now = ctx.input(|i| i.time);
         if let Some(i) = self.windows.iter().position(|w| w.quick) {
             let w = &mut self.windows[i];
-            w.quick_visible = !w.quick_visible;
-            if w.quick_visible {
+            let show = !w.quick_shown();
+            w.set_quick_shown(show, now);
+            if show {
                 self.focused = i;
             }
             ctx.request_repaint();
@@ -6062,7 +6422,7 @@ impl App {
         };
         self.next_window_id += 1;
         w.quick = true;
-        w.quick_visible = true;
+        w.set_quick_shown(true, now);
         self.windows.push(w);
         self.focused = self.windows.len() - 1;
         ctx.request_repaint();
@@ -6073,10 +6433,10 @@ impl App {
     /// Read from the window's *last observed* focus rather than this pass's
     /// input: `ui` runs from the root pass, where `i.focused` answers for the
     /// root viewport, not for the quick terminal's.
-    fn autohide_quick_terminal(&mut self) {
+    fn autohide_quick_terminal(&mut self, now: f64) {
         for w in &mut self.windows {
-            if w.quick && w.quick_visible && w.config.quick_terminal_autohide && !w.was_focused {
-                w.quick_visible = false;
+            if w.quick && w.quick_shown() && w.config.quick_terminal_autohide && !w.was_focused {
+                w.set_quick_shown(false, now);
             }
         }
     }
@@ -6226,9 +6586,11 @@ impl App {
                     let n = self.windows.len() as isize;
                     if let Some(i) = self.windows.iter().position(|w| w.window_id == id) {
                         let j = (i as isize + delta).rem_euclid(n) as usize;
-                        ctx.send_viewport_cmd_to(self.windows[j].viewport_id(), egui::ViewportCommand::Focus);
+                        ctx.send_viewport_cmd_to(self.viewport_of(j), egui::ViewportCommand::Focus);
                     }
                 }
+                AppRequest::AdoptTab(tab) => self.adopt_tab(ctx, id, *tab),
+                AppRequest::ToggleVisibility => self.toggle_visibility(ctx),
             }
         }
     }
@@ -6373,6 +6735,128 @@ impl App {
         }
     }
 
+    /// The viewport window slot `i` draws into: slot 0 is always the root.
+    fn viewport_of(&self, i: usize) -> egui::ViewportId {
+        if i == 0 {
+            egui::ViewportId::ROOT
+        } else {
+            self.windows[i].viewport_id()
+        }
+    }
+
+    /// Put window slot `idx` away as the dormant template and hide the root
+    /// viewport (see [`App::dormant`]). Arms the quit delay when configured.
+    fn go_dormant(&mut self, ctx: &egui::Context, now: f64, idx: usize) {
+        let mut w = self.windows.remove(idx);
+        w.tabs.clear();
+        w.closing = false;
+        w.confirm = None;
+        w.title_prompt = None;
+        let cfg = &w.config;
+        self.quit_at = cfg
+            .quit_after_last_window_closed
+            .then_some(cfg.quit_after_last_window_closed_delay_ms)
+            .flatten()
+            .map(|ms| now + ms as f64 / 1000.0);
+        self.dormant = Some(w);
+        self.focused = 0;
+        ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Visible(false));
+    }
+
+    /// Leave the dormant state: open a window from the template into the root
+    /// viewport and show it.
+    fn wake(&mut self, ctx: &egui::Context, cwd: Option<&std::path::Path>) {
+        let Some(t) = self.dormant.take() else {
+            return;
+        };
+        let id = self.next_window_id;
+        match t.sibling(id, cwd) {
+            Some(mut w) => {
+                self.next_window_id += 1;
+                w.is_root = true;
+                w.hwnd = t.hwnd;
+                self.windows.insert(0, w);
+                self.focused = 0;
+                self.quit_at = None;
+                self.hidden = false;
+                ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Visible(true));
+                ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
+                ctx.request_repaint();
+            }
+            None => self.dormant = Some(t),
+        }
+    }
+
+    /// `move_tab_to_new_window`: open a window around `tab`, which the window
+    /// `from` has already detached — shells, scrollback and splits intact, the
+    /// same move `undo` makes when it holds a closed tab.
+    fn adopt_tab(&mut self, ctx: &egui::Context, from: u64, tab: Tab<Session>) {
+        let Some(src) = self
+            .windows
+            .iter()
+            .find(|w| w.window_id == from)
+            .or_else(|| self.windows.first())
+        else {
+            return;
+        };
+        let mut ids = Vec::new();
+        tab.root.leaf_ids(&mut ids);
+        let next = ids.iter().copied().max().unwrap_or(0) + 1;
+        let id = self.next_window_id;
+        self.next_window_id += 1;
+        let w = src.sibling_with(id, vec![tab], next);
+        self.windows.push(w);
+        self.focused = self.windows.len() - 1;
+        ctx.request_repaint();
+    }
+
+    /// `toggle_visibility`: hide every window, or show them all and focus the
+    /// one used last. Upstream does nothing while the focused window is
+    /// fullscreen. The quick terminal has its own toggle and is left alone.
+    fn toggle_visibility(&mut self, ctx: &egui::Context) {
+        if self.windows.is_empty() {
+            self.wake(ctx, None);
+            return;
+        }
+        if !self.hidden && self.windows.get(self.focused).is_some_and(|w| w.fullscreen) {
+            return;
+        }
+        self.hidden = !self.hidden;
+        for i in 0..self.windows.len() {
+            if self.windows[i].quick {
+                continue;
+            }
+            ctx.send_viewport_cmd_to(self.viewport_of(i), egui::ViewportCommand::Visible(!self.hidden));
+        }
+        if !self.hidden {
+            let f = self.focused.min(self.windows.len() - 1);
+            ctx.send_viewport_cmd_to(self.viewport_of(f), egui::ViewportCommand::Focus);
+        }
+        ctx.request_repaint();
+    }
+
+    /// Push `window-titlebar-background` / `-foreground` to DWM for every
+    /// window, when the colors or the set of windows changed.
+    fn sync_titlebar_colors(&mut self) {
+        let Some(cfg) = self.windows.first().map(|w| &w.config) else {
+            return;
+        };
+        let key = (
+            self.windows.len(),
+            cfg.window_titlebar_background,
+            cfg.window_titlebar_foreground,
+        );
+        if self.titlebar_applied == Some(key) {
+            return;
+        }
+        // Nothing configured and nothing previously set: leave DWM alone.
+        let was_set = self.titlebar_applied.is_some_and(|k| k.1.is_some() || k.2.is_some());
+        if key.1.is_some() || key.2.is_some() || was_set {
+            crate::winchrome::apply_titlebar_colors(key.1, key.2);
+        }
+        self.titlebar_applied = Some(key);
+    }
+
     /// Open a new window, cloned from the focused one (falling back to the root)
     /// so it inherits the live config, profiles and font metrics.
     fn spawn_window(&mut self, ctx: &egui::Context, now: f64, cwd: Option<&std::path::Path>) {
@@ -6434,9 +6918,22 @@ impl App {
         self.focused = focused;
 
         if self.windows.is_empty() {
-            // The last window went: closing the root viewport ends the process.
-            ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Close);
-            return removed;
+            let Some(mut last) = removed else {
+                return None;
+            };
+            let cfg = &last.config;
+            if cfg.quit_after_last_window_closed && cfg.quit_after_last_window_closed_delay_ms.is_none() {
+                // The last window went: closing the root viewport ends the process.
+                ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Close);
+                return Some(last);
+            }
+            // Stay resident. The shells go now — only the window's settings
+            // are kept, as the template for the next one.
+            last.tabs.clear();
+            self.windows.push(last);
+            let now = ctx.input(|i| i.time);
+            self.go_dormant(ctx, now, 0);
+            return None;
         }
         // Slot 0 is by definition the root viewport. If the old root was the one
         // retired, a survivor has just slid into that slot — move the native root
@@ -6444,6 +6941,11 @@ impl App {
         // window the user actually closed is the one that disappears.
         if idx == 0 {
             self.windows[0].is_root = true;
+            // The root *native* window survives the rehost, and with it the
+            // only reachable HWND (backdrop, step resize, notifications).
+            if let Some(h) = removed.as_ref().and_then(|w| w.hwnd) {
+                self.windows[0].hwnd = Some(h);
+            }
             if let Some(g) = rehost_to {
                 ctx.send_viewport_cmd_to(
                     egui::ViewportId::ROOT,
@@ -6491,7 +6993,7 @@ impl eframe::App for App {
             self.snapshot_state();
         }
         self.save_state();
-        if let Some(hwnd) = self.windows.first().and_then(|w| w.hwnd) {
+        if let Some(hwnd) = self.windows.first().or(self.dormant.as_ref()).and_then(|w| w.hwnd) {
             crate::notify::shutdown(hwnd);
         }
     }
@@ -6584,8 +7086,37 @@ impl eframe::App for App {
         // produced rather than the previous one's.
         self.sync_global_binds(&ctx);
         self.dispatch_global_binds(&ctx, render_state.as_ref());
-        self.autohide_quick_terminal();
+        self.autohide_quick_terminal(now);
+        self.sync_titlebar_colors();
+        // `quit-after-last-window-closed-delay`: nothing reopened in time.
+        if self.windows.is_empty()
+            && let Some(t) = self.quit_at
+        {
+            if now >= t {
+                ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Close);
+            } else {
+                ctx.request_repaint_after(Duration::from_secs_f64(t - now));
+            }
+        }
     }
+}
+
+/// The zoom after `goto_split` lands on `target`: upstream unzooms on any
+/// focus change, unless `split-preserve-zoom = navigation`, in which case the
+/// zoom follows focus to the new pane. An unzoomed tab stays unzoomed.
+fn zoom_after_nav(zoomed: Option<u64>, target: u64, preserve: bool) -> Option<u64> {
+    zoomed.and(preserve.then_some(target))
+}
+
+/// Detach the active tab for `move_tab_to_new_window`, returning it and the
+/// index to select afterwards. `None` for a window's only tab (upstream's
+/// no-op) or an out-of-range index.
+fn take_active_tab<T>(tabs: &mut Vec<T>, active: usize) -> Option<(T, usize)> {
+    if tabs.len() < 2 || active >= tabs.len() {
+        return None;
+    }
+    let tab = tabs.remove(active);
+    Some((tab, active.min(tabs.len() - 1)))
 }
 
 /// Drop window `idx`, returning the surviving list and the remapped focused
@@ -6750,7 +7281,13 @@ fn open_url(url: &str) {
 /// symbols — arrows, `×`, box/powerline glyphs — so chrome like the search bar's
 /// prev/next/close buttons would otherwise render as tofu boxes. As a *fallback*
 /// it only supplies glyphs the primary UI fonts are missing.
-fn install_ui_fallback_font(ctx: &egui::Context) {
+///
+/// Also defines the [`TITLE_FONT`] family the tab strip draws titles in:
+/// `window-title-font-family` (resolved like `font-family`, through the
+/// renderer's system-font scan) ahead of the proportional chain, or just that
+/// chain when the key is unset or names nothing installed. Startup-only, like
+/// the terminal font.
+fn install_ui_fallback_font(ctx: &egui::Context, title_family: Option<&str>) {
     use std::sync::Arc;
     let mut fonts = egui::FontDefinitions::default();
     fonts.font_data.insert(
@@ -6764,8 +7301,30 @@ fn install_ui_fallback_font(ctx: &egui::Context) {
             .or_default()
             .push("giest-nerd".to_owned());
     }
+    let mut title = fonts
+        .families
+        .get(&egui::FontFamily::Proportional)
+        .cloned()
+        .unwrap_or_default();
+    if let Some(name) = title_family {
+        match render::find_ui_font(name) {
+            Some((bytes, index)) => {
+                let mut data = egui::FontData::from_static(bytes);
+                data.index = index;
+                fonts.font_data.insert("giest-title".to_owned(), Arc::new(data));
+                title.insert(0, "giest-title".to_owned());
+            }
+            None => eprintln!("giest: window-title-font-family '{name}' not found; using the default"),
+        }
+    }
+    fonts
+        .families
+        .insert(egui::FontFamily::Name(TITLE_FONT.into()), title);
     ctx.set_fonts(fonts);
 }
+
+/// The egui font family tab titles are drawn in (`window-title-font-family`).
+const TITLE_FONT: &str = "giest-title";
 
 /// Build the renderer's neutral font selection from config. Cloned at atlas
 /// construction (startup); `font-family`/`font-feature` are not re-applied on
@@ -6983,7 +7542,7 @@ mod tests {
         Dir, Node, Tab, capture_node_with, cycle_pick, dim_alpha, drop_index, highlight_job,
         keep_only_tab, nav_dir, new_tab_index,
         overlay_anchor, preview_text, reap_tabs, reinsert_tabs, remove_tabs_by_id, reorder_tabs,
-        retire_window, split_rect,
+        retire_window, split_rect, take_active_tab, zoom_after_nav,
         truncate_tabs_to_right, truncate_to_width,
     };
     use crate::config::ResizeOverlayPosition as P;
@@ -7023,6 +7582,47 @@ mod tests {
         assert!(v.is_empty());
         assert_eq!(f, 0);
         assert_eq!(out, Some(10));
+    }
+
+    #[test]
+    fn goto_split_unzooms_unless_preserve_zoom_navigation() {
+        // Upstream: navigating out of a zoomed split unzooms it...
+        assert_eq!(zoom_after_nav(Some(1), 2, false), None);
+        // ...unless `split-preserve-zoom = navigation`: the zoom follows focus.
+        assert_eq!(zoom_after_nav(Some(1), 2, true), Some(2));
+        // An unzoomed tab never becomes zoomed by navigating.
+        assert_eq!(zoom_after_nav(None, 2, true), None);
+    }
+
+    #[test]
+    fn move_tab_to_new_window_detaches_the_active_tab() {
+        let mut tabs = vec!['a', 'b', 'c'];
+        assert_eq!(take_active_tab(&mut tabs, 1), Some(('b', 1)));
+        assert_eq!(tabs, ['a', 'c']);
+        // The last tab: selection falls back to the new last one.
+        assert_eq!(take_active_tab(&mut tabs, 1), Some(('c', 0)));
+        // A window's only tab stays put (upstream no-op).
+        assert_eq!(take_active_tab(&mut tabs, 0), None);
+        assert_eq!(tabs, ['a']);
+        assert_eq!(take_active_tab(&mut vec!['a', 'b'], 5), None);
+    }
+
+    #[test]
+    fn leaf_rects_matches_the_unzoomed_layout() {
+        let mut tree = Node::Split {
+            vertical: true,
+            ratio: 0.5,
+            first: Box::new(leaf(1, 0)),
+            second: Box::new(leaf(2, 0)),
+        };
+        let area = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(200.0, 100.0));
+        let mut rects = Vec::new();
+        tree.leaf_rects(area, 1.0, &mut rects);
+        let mut leaves = Vec::new();
+        tree.collect(area, 1.0, &mut leaves);
+        let collected: Vec<_> = leaves.iter().map(|l| (l.id, l.rect)).collect();
+        assert_eq!(rects, collected);
+        assert_eq!(rects.len(), 2);
     }
 
     #[test]

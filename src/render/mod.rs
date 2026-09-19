@@ -2193,3 +2193,10 @@ mod tests {
         assert_eq!(m, vec![0, 0, 2]);
     }
 }
+
+/// Resolve an installed font family (or a font file path) to its bytes and
+/// face index — the lookup `font-family` uses. For UI fonts such as
+/// `window-title-font-family`.
+pub fn find_ui_font(family: &str) -> Option<(&'static [u8], u32)> {
+    atlas::find_regular_font(family)
+}
