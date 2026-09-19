@@ -21,6 +21,50 @@ use super::{
     MouseAction, MouseButton, MouseInput, Rgb, SelectKind, TerminalEngine, UnderlineStyle,
 };
 
+/// Intern an `enquiry-response` string as `&'static`. The binding's
+/// `on_enquiry` callback returns `Option<&'t str>` tied to the terminal borrow,
+/// so a closure cannot hand out a borrow of a `String` it owns. The distinct
+/// values are whatever the user configured during this process (a handful of
+/// short strings), so leaking one copy of each is bounded.
+fn intern_enquiry(s: &str) -> &'static str {
+    use std::sync::Mutex;
+    static SEEN: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
+    if s.is_empty() {
+        return "";
+    }
+    let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(hit) = seen.iter().find(|x| **x == s) {
+        return hit;
+    }
+    let leaked: &'static str = Box::leak(s.to_owned().into_boxed_str());
+    seen.push(leaked);
+    leaked
+}
+
+/// Remove every kitty drag-and-drop reply (`ESC ] 72 ; … BEL|ST`) from the
+/// response buffer. See the call site in `write` for why.
+fn strip_osc72(buf: &mut Vec<u8>) {
+    const HEAD: &[u8] = b"\x1b]72;";
+    let mut i = 0;
+    while let Some(off) = buf[i..].windows(HEAD.len()).position(|w| w == HEAD) {
+        let start = i + off;
+        let mut end = start + HEAD.len();
+        while end < buf.len() {
+            if buf[end] == 0x07 {
+                end += 1;
+                break;
+            }
+            if buf[end] == 0x1b && buf.get(end + 1) == Some(&b'\\') {
+                end += 2;
+                break;
+            }
+            end += 1;
+        }
+        buf.drain(start..end);
+        i = start;
+    }
+}
+
 /// Shared sink for bytes libghostty wants written back to the PTY. The
 /// `on_pty_write` callback must not call back into the terminal, so it only
 /// pushes bytes here; we drain them after each `write`.
@@ -52,6 +96,9 @@ pub struct GhosttyVtEngine {
     /// drained one-shot by [`Self::take_bell`] so the app can flash a visual bell.
     /// (Fully qualified to avoid clashing with the grid [`Cell`].)
     bell: Rc<std::cell::Cell<bool>>,
+    /// `enquiry-response`: what the `on_enquiry` callback answers ENQ (0x05)
+    /// with; interned by [`intern_enquiry`].
+    enquiry: Rc<std::cell::Cell<&'static str>>,
     /// Set when the viewport is scrolled, forcing the next [`Self::snapshot`] to
     /// do a full rebuild even if libghostty reports the frame clean — insurance
     /// for the dirty-skip fast path against any case where a pure viewport move
@@ -203,6 +250,14 @@ impl GhosttyVtEngine {
             bell_sink.set(true);
         })?;
 
+        // `enquiry-response`. Empty (the default) sends nothing — libghostty
+        // skips an empty answer, and one of 256+ bytes too. Only reachable under
+        // the sideloaded ConPTY (`conpty-passthrough`): the inbox conhost strips
+        // ENQ before it reaches us (`tests/conpty_passthrough.rs`).
+        let enquiry = Rc::new(std::cell::Cell::new(""));
+        let enquiry_src = enquiry.clone();
+        term.on_enquiry(move |_term| Some(enquiry_src.get()))?;
+
         // Refuse everything until the session applies the configured policy.
         let clip = Rc::new(RefCell::new(ClipState {
             read: crate::config::ClipboardAccess::Deny,
@@ -226,6 +281,7 @@ impl GhosttyVtEngine {
             mouse_event: mouse::Event::new()?,
             responses,
             bell,
+            enquiry,
             viewport_moved: false,
             bold_color: BoldColor::None,
             min_contrast: 1.0,
@@ -695,7 +751,10 @@ fn map_key(code: KeyCode) -> Key {
 
 #[cfg(test)]
 mod tests {
-    use super::{Compression, GhosttyVtEngine, ImageFormat, to_rgba};
+    use super::{
+        Compression, GhosttyVtEngine, ImageFormat, RefCell, Rc, Terminal, intern_enquiry,
+        strip_osc72, to_rgba,
+    };
     use crate::engine::{
         GridSnapshot, KeyCode, KeyInput, KeyMods, MouseAction, MouseButton, MouseInput, Rgb,
         SelectKind, TerminalEngine, UnderlineStyle,
@@ -968,6 +1027,45 @@ mod tests {
         eng.set_image_storage_limit(64 * 1024 * 1024).unwrap();
         eng.write(b"\x1b_Ga=T,t=d,f=24,i=3,p=1,s=1,v=2,c=4,r=2;////////\x1b\\");
         assert_eq!(snap(&mut eng).images.len(), 1, "re-enabled by a new limit");
+    }
+
+    #[test]
+    fn enquiry_response_answers_enq() {
+        let mut eng = GhosttyVtEngine::new(80, 24, 0).unwrap();
+        eng.write(b"\x05");
+        assert!(eng.take_responses().is_empty(), "default is empty: ENQ goes unanswered");
+        eng.set_enquiry_response("giest-answerback");
+        eng.write(b"a\x05b");
+        assert_eq!(eng.take_responses(), b"giest-answerback");
+        eng.set_enquiry_response("");
+        eng.write(b"\x05");
+        assert!(eng.take_responses().is_empty(), "reload back to empty stops answering");
+        assert!(std::ptr::eq(intern_enquiry("x1"), intern_enquiry("x1")), "interned once");
+    }
+
+    #[test]
+    fn kitty_dnd_is_not_advertised() {
+        let mut eng = GhosttyVtEngine::new(80, 24, 0).unwrap();
+        // Tripwire half: the engine itself does answer the query...
+        let mut raw = Terminal::new(80, 24).unwrap();
+        let got = Rc::new(RefCell::new(Vec::new()));
+        let sink = got.clone();
+        raw.on_pty_write(move |_t, d| sink.borrow_mut().extend_from_slice(d)).unwrap();
+        raw.vt_write(b"\x1b]72;t=q:i=3\x1b\\");
+        assert_eq!(&*got.borrow(), b"\x1b]72;t=q:i=3\x1b\\", "engine answers OSC 72 queries");
+        // ...and giest withholds it, since it can't deliver a drop.
+        eng.write(b"\x1b]72;t=q:i=3\x1b\\\x1b[5n\x1b]72;t=q\x07");
+        assert_eq!(eng.take_responses(), b"\x1b[0n", "only the non-OSC-72 reply survives");
+    }
+
+    #[test]
+    fn strip_osc72_handles_both_terminators_and_neighbours() {
+        let mut b = b"a\x1b]72;x\x07b\x1b]72;y\x1b\\c\x1b]52;c;?\x07".to_vec();
+        strip_osc72(&mut b);
+        assert_eq!(b, b"abc\x1b]52;c;?\x07");
+        let mut unterminated = b"z\x1b]72;t=q".to_vec();
+        strip_osc72(&mut unterminated);
+        assert_eq!(unterminated, b"z");
     }
 
     #[test]
@@ -2487,6 +2585,13 @@ impl TerminalEngine for GhosttyVtEngine {
     fn write(&mut self, bytes: &[u8]) {
         self.term.vt_write(bytes);
         self.collect_clipboard_deferrals();
+        // Kitty drag-and-drop (OSC 72): the engine answers `t=q` and tracks
+        // registrations, but the C API has no way to *deliver* a drop
+        // (upstream drives `kitty.dnd.State.dragDrop` from Zig). Advertising a
+        // protocol giest can't complete would make a program wait for drops
+        // that never come, so its replies are withheld — the program sees no
+        // support and file drops keep pasting paths.
+        strip_osc72(&mut self.responses.borrow_mut());
         // Upstream ignores KAM in termio unless `vt-kam-allowed`; lib-vt has no
         // such switch, so undo it: a locked keyboard is a denial of service.
         if !self.kam_allowed && self.term.mode(Mode::KAM).unwrap_or(false) {
@@ -2714,6 +2819,10 @@ impl TerminalEngine for GhosttyVtEngine {
         self.term.set_default_mode(Mode::GRAPHEME_CLUSTER, grapheme_unicode)?;
         self.term.set_mode(Mode::GRAPHEME_CLUSTER, grapheme_unicode)?;
         Ok(())
+    }
+
+    fn set_enquiry_response(&mut self, response: &str) {
+        self.enquiry.set(intern_enquiry(response));
     }
 
     fn set_scrollback_lines(&mut self, lines: Option<usize>) -> Result<()> {

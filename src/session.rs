@@ -332,6 +332,7 @@ impl Session {
         engine.set_min_contrast(config.min_contrast)?;
         engine.set_scrollback_lines(config.scrollback_limit_lines)?;
         engine.set_vt_policy(config.title_report, config.vt_kam_allowed, config.grapheme_unicode)?;
+        engine.set_enquiry_response(&config.enquiry_response);
         // Kitty graphics start disabled in libghostty, so this is what turns
         // inline images on at all.
         engine.set_image_storage_limit(config.image_storage_limit as u64)?;
@@ -1132,6 +1133,7 @@ impl Session {
         let _ = self
             .engine
             .set_vt_policy(config.title_report, config.vt_kam_allowed, config.grapheme_unicode);
+        self.engine.set_enquiry_response(&config.enquiry_response);
         let _ = self
             .engine
             .set_image_storage_limit(config.image_storage_limit as u64);

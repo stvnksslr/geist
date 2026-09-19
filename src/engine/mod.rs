@@ -587,6 +587,11 @@ pub trait TerminalEngine {
     /// (mode 2027 on by default; `legacy` = off).
     fn set_vt_policy(&mut self, title_report: bool, kam_allowed: bool, grapheme_unicode: bool) -> Result<()>;
 
+    /// Ghostty `enquiry-response`: sent verbatim when the program emits ENQ
+    /// (0x05); empty sends nothing. Only reachable when the PTY forwards ENQ,
+    /// i.e. under the sideloaded ConPTY (`conpty-passthrough`).
+    fn set_enquiry_response(&mut self, response: &str);
+
     /// Whether the running app has enabled mouse reporting (any tracking mode).
     fn is_mouse_tracking(&self) -> bool;
 

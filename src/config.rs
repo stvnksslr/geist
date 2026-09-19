@@ -1385,6 +1385,10 @@ pub struct Config {
     pub title_report: bool,
     /// Ghostty `vt-kam-allowed`: honor ANSI mode 2 (keyboard lock).
     pub vt_kam_allowed: bool,
+    /// Ghostty `enquiry-response`: sent verbatim in reply to ENQ (0x05); empty
+    /// (the default) sends nothing. Needs `conpty-passthrough` — the inbox
+    /// ConPTY strips ENQ.
+    pub enquiry_response: String,
     /// Ghostty `grapheme-width-method`: `unicode` (true, default) or `legacy`.
     pub grapheme_unicode: bool,
     /// Total bytes of image data (kitty graphics) retained per terminal screen.
@@ -1705,6 +1709,7 @@ impl Default for Config {
             scrollback_compression: true,
             title_report: false,
             vt_kam_allowed: false,
+            enquiry_response: String::new(),
             grapheme_unicode: true,
             // Ghostty's default: 320 MB (decimal), per screen.
             image_storage_limit: 320 * 1000 * 1000,
@@ -3050,6 +3055,7 @@ const SETTERS: &[(&str, Setter)] = &[
     }),
     ("title-report", |c, v, d| c.title_report = parse_bool(v, d.title_report)),
     ("vt-kam-allowed", |c, v, d| c.vt_kam_allowed = parse_bool(v, d.vt_kam_allowed)),
+    ("enquiry-response", |c, v, _| c.enquiry_response = v.to_string()),
     ("grapheme-width-method", |c, v, d| {
         c.grapheme_unicode = match v {
             "unicode" => true,
@@ -3696,6 +3702,13 @@ mod tests {
     /// Parse a Ghostty-format config body over the defaults.
     fn parsed(body: &str) -> Config {
         Config::from_ghostty_config(body)
+    }
+
+    #[test]
+    fn enquiry_response_parses() {
+        assert_eq!(Config::default().enquiry_response, "");
+        assert_eq!(parsed("enquiry-response = vt100 ok").enquiry_response, "vt100 ok");
+        assert_eq!(parsed("enquiry-response = x\nenquiry-response =").enquiry_response, "");
     }
 
     #[test]
