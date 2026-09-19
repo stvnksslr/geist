@@ -127,6 +127,8 @@ pub struct GpuResources {
     /// makes comparing addresses sound (same trick as `bg_source`).
     shader_key: Option<usize>,
     is_srgb: bool,
+    /// `window-colorspace = display-p3`, latched from the frame in `prepare`.
+    display_p3: bool,
     /// The swapchain format. The custom-shader chain's offscreen targets must
     /// match it, or the blit changes the colour space midway.
     target_format: wgpu::TextureFormat,
@@ -232,6 +234,9 @@ pub struct TermFrame {
     /// The window background color — what a cell on the *default* background
     /// shows.
     pub background_color: Rgb,
+    /// `window-colorspace = display-p3`: terminal colours are P3 and are
+    /// mapped into the sRGB swapchain (`colorspace.rs`).
+    pub display_p3: bool,
     /// The terminal area in device pixels (`[x, y, w, h]`) — everything below
     /// the tab strip. Both the window fill and `background-image` cover exactly
     /// this.
@@ -745,6 +750,7 @@ pub fn build_resources(
         shaders: None,
         shader_key: None,
         is_srgb: format.is_srgb(),
+        display_p3: false,
         target_format: format,
         text_gamma,
         num_instances: 0,
@@ -973,6 +979,14 @@ fn srgb_to_linear(c: u8) -> f32 {
 
 impl GpuResources {
     fn color(&self, c: Rgb, alpha: f32) -> [f32; 4] {
+        if self.display_p3 {
+            if self.is_srgb {
+                let [r, g, b] = crate::colorspace::p3_to_linear_srgb(c);
+                return [r, g, b, alpha];
+            }
+            let s = crate::colorspace::p3_to_srgb(c);
+            return [s.r as f32 / 255.0, s.g as f32 / 255.0, s.b as f32 / 255.0, alpha];
+        }
         if self.is_srgb {
             [
                 srgb_to_linear(c.r),
@@ -1848,6 +1862,7 @@ impl CallbackTrait for TermFrame {
         // reason every instance coordinate below stays valid unchanged.
         let format = res.target_format;
         res.set_shaders(device, format, &self.custom_shaders, (sw, sh));
+        res.display_p3 = self.display_p3;
 
         // Pass the gamma reciprocal so the shader applies `pow(cov, gamma_inv)`
         // with a single op; >1 text_gamma → exponent <1 → thicker AA coverage.
