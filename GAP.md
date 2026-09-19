@@ -26,7 +26,7 @@ features** that are neither — surveyed from `macos/Sources` and from the 673 u
 between the old pin (b869a6e) and `main`. Key/action extraction is the config-surface ledger's
 method, re-run against the `main` checkout the build fetches.
 
-Scoreboard: **135 of 208** public config keys · **76 of 88** actions · app features in §C.
+Scoreboard: **137 of 208** public config keys · **77 of 88** actions · app features in §C.
 Effort: **S** <1d · **M** 1–3d · **L** ~1wk · **XL** multi-week.
 
 ### A. Config keys still unsupported (87)
@@ -69,7 +69,7 @@ pane area, not each pane), ✅ `quick-terminal-animation-duration` (slide in/out
 edge, ease-out cubic; `center` doesn't slide; a newly *created* quick terminal may show one frame at
 rest before the slide starts). Still open: `window-colorspace` (display-p3 → HDR swapchain, L),
 ~~`font-thicken` + `-strength`~~ ✅ (1px coverage dilation weighted by strength; upstream is
-macOS-only — needs eyeballing), ~~`drag-handle`~~ ✅ (see §C pane drag), `auto-update` / `auto-update-channel` (§C).
+macOS-only — needs eyeballing), ~~`drag-handle`~~ ✅ (see §C pane drag), ~~`auto-update` / `auto-update-channel`~~ ✅ (§C).
 
 **A3. Blocked.** `enquiry-response` — ConPTY strips ENQ (probed; see the config-surface ledger).
 
@@ -91,7 +91,7 @@ macOS-only — needs eyeballing), ~~`drag-handle`~~ ✅ (see §C pane drag), `au
 | `scroll_to_selection`, ~~`paste_from_selection`~~ | `paste_from_selection` ✅: pastes the in-process PRIMARY emulation (`primary.rs`) through `paste_str`. | S |
 | `end_key_sequence` | Flush a pending leader as literal keys. | S |
 | ~~`toggle_window_decorations`~~ ✅ | Per window, via `ViewportCommand::Decorations`. | S |
-| `check_for_updates` | With auto-update. | — |
+| ~~`check_for_updates`~~ ✅ | Manual check through `update.rs`; shows "Checking…", then the result, in the tab-strip pill. | — |
 | ~~`toggle_tab_overview`~~ ✅ | Modal grid of the window's tabs: title + a *text* thumbnail (bottom 12 non-blank rows of the focused pane's screen, captured when it opens — not a live render). Arrows/Home/End move, Enter or click switches, Esc, a backdrop click or the toggle's own binding (resolved by the modal) closes. In both input gates. Divergence: no rendered previews. Needs a human look. | M–L |
 | ~~`show_on_screen_keyboard`~~ ✅ | `ITipInvocation::Toggle` on the touch-keyboard broker (hand-declared vtable); starts `TabTip.exe` if the broker isn't running; silent without one. It *toggles* — Windows exposes no reliable "is it visible" query on Win11 — so a second press hides it. Needs a human check on a touch-keyboard machine. | S |
 | `crash`, `cursor_key`, `show_gtk_inspector` | Debug-only / internal / GTK — N/A. | — |
@@ -124,9 +124,72 @@ macOS-only — needs eyeballing), ~~`drag-handle`~~ ✅ (see §C pane drag), `au
 | Restart restore (`RegisterApplicationRestart`), window frames in `state.rs` | ✅ | `restart.rs`: registered with `--restore-session` (no crash/hang restarts); the root window's subclass writes a ≤2 s-old layout snapshot on `WM_ENDSESSION`, since `on_exit` never runs then (verified by sending the message). State files gain an optional `F x y w h max` record per window — old files parse unchanged and older giests skip it; restored exactly at 150% DPI (verified). A real update/reboot relaunch needs a human. | S |
 | Custom caption / tabs-in-titlebar | ⬜ | `WM_NCCALCSIZE` client-drawn caption | L |
 | Runtime custom app icon | ⬜ | tinted icon via `icongen` + `ViewportCommand::Icon` | M |
-| Auto-update | ⬜ | winget manifest (S) → MSIX App Installer (M) → self-updater with a pill (L) | S–L |
-| Default-terminal handoff | ⬜ | `IConsoleHandoff` COM server, as Windows Terminal does | XL |
+| **Release packaging** | ✅ | `mise package` (`scripts/package.ps1`) → `dist/<v>/`: portable zip (exe + `conpty.dll` + `OpenConsole.exe` + icon + `licenses/`: Ghostty MIT, ConPTY MIT, JetBrains Mono OFL, icon), an MSIX (`makeappx`; manifest template `packaging/AppxManifest.xml.in`, full trust, `giest.exe` execution alias), `giest.appinstaller` (24 h on-launch + background update checks; **not hosted**), and `giest-manifest.json` (per-package SHA-256 + size). Mtimes pinned to the HEAD commit for reproducible zips. **Needs a human:** a code-signing certificate (the MSIX is unsigned and Windows refuses to install an unsigned package; `-CertPath`/`-Publisher` sign it), hosting for the `.appinstaller`/`.msix`, and a giest `LICENSE` file (the repo has none; the script copies one if it appears). winget manifest not written. | M |
+| **Auto-update** | ✅ | `update.rs`: `auto-update = off\|check\|download` (default `check` in release builds, `off` in debug — upstream defers to Sparkle's stored preference), `auto-update-channel = stable\|tip` (default: the running version's channel, as upstream), giest-specific `auto-update-feed` (default: compile-time `GIEST_UPDATE_FEED` or the repo's GitHub `/releases` API). Checks 5 s after start and daily; `check_for_updates` checks now. A release is an update only if it carries `giest-manifest.json`; the zip is downloaded to `%LOCALAPPDATA%\giest\updates`, **SHA-256-verified before extraction** (a mismatch deletes it), extracted with `tar.exe`, and marked `pending.json`. Applied at the **next launch** (`startup_apply`, first thing in `main`): each replaced file is *renamed* to `*.old` (the running exe is never deleted or overwritten), the new ones copied in (rolled back on failure), the new exe relaunched with the same args; `*.old` swept on a later launch. The pill (tab strip, right of ⏷) has upstream's wording: `Update Available: X` (click downloads), `Downloading: N%`, `Restart to Complete Update` (click → native confirm → layout saved → relaunch with `--restore-session` + `GIEST_UPDATE_WAIT_PID`; shells end, as with Sparkle), `No Updates Available` / `Update Failed` (fade after 8 s). HTTP is `curl.exe` from System32 behind an `Http` trait; the tests use a mock and never touch the network. MSIX installs (`GetCurrentPackageFullName`) never self-update. Divergences: no release-notes popover (the tooltip carries the URL), no EdDSA signature like Sparkle's — the hash comes from the same release, so it catches corruption, not a compromised release; Authenticode is the real answer and needs a cert. Unverified live: nothing is published yet, so the end-to-end path ran only against the mock. | L |
+| Default-terminal handoff | ⬜ | Designed, not built — see "Default-terminal handoff: design" below | XL |
 | Tab overview | ✅ | see §B (text thumbnails, not rendered previews) | M–L |
+
+#### Default-terminal handoff: design (not implemented)
+
+What Windows 11's *Settings → Privacy & security → For developers → Terminal* ("Default terminal
+application") does, and what giest would need. Researched against microsoft/terminal
+(`src/host/srvinit.cpp`, `src/propslib/DelegationConfig.cpp`, `src/host/proxy/ITerminalHandoff.idl`,
+`IConsoleHandoff.idl`, the WT package manifest) from memory of that source, not re-read line by
+line — re-verify signatures against the IDLs before implementing. Nothing was registered on this machine;
+`HKCU\Console\%%Startup` still reads `{00000000-…}` for both values.
+
+**The chain.** A console app started outside any terminal (Win+R `cmd`, a double-clicked `.exe`)
+gets the *inbox* conhost. Before creating a window, conhost reads `HKCU\Console\%%Startup`
+`DelegationConsole` and `DelegationTerminal` (REG_SZ CLSIDs; `{0…0}` = "let Windows decide",
+`{B23D10C0-E52E-411E-9D5B-C09FDF709C7D}` = force conhost). If both name something else it
+`CoCreateInstance`s the **console** CLSID (`CLSCTX_LOCAL_SERVER`) and calls
+`IConsoleHandoff::EstablishHandoff(server handle, input event, CONSOLE_PORTABLE_ATTACH_MSG, signal
+pipe, inbox process, &process)` — that server is **OpenConsole.exe** running `-Embedding`, which
+takes over the console-server end and becomes a ConPTY host. OpenConsole then `CoCreateInstance`s
+the **terminal** CLSID and calls `ITerminalHandoff3::EstablishPtyHandoff(&in, &out, signal,
+reference, server, client, const TERMINAL_STARTUP_INFO*)` (IID `6F23DA90-15C5-4203-9DB0-64E73F1B1B00`;
+v1/v2 are older shapes WT still answers). The terminal returns the pipe ends and from then on
+treats them exactly like a ConPTY it created itself.
+
+**What giest would have to ship**, in dependency order:
+
+1. **A proxy/stub for `ITerminalHandoff3`.** The call is cross-process and its parameters are
+   `[system_handle(sh_pipe|sh_file|sh_process)]`, which only a MIDL-generated proxy marshals (there
+   is no typelib/oleautomation path for handles). WT ships `OpenConsoleProxy.dll` for this and
+   declares it as a packaged `ProxyStub`; the ConPTY NuGet does **not** include it. Needs: the two
+   IDLs vendored, `midl.exe` (present in the Windows SDK here) and a C compiler at build time
+   (`cc` crate + MSVC), producing `giestHandoffProxy.dll`. M.
+2. **An out-of-proc COM server in giest.exe.** `giest -Embedding` (COM's own launch flag):
+   `CoInitializeEx(MTA)`, `CoRegisterClassObject(CLSID_giestTerminalHandoff, factory,
+   CLSCTX_LOCAL_SERVER, REGCLS_MULTIPLEUSE)`, and an `ITerminalHandoff3` implementation whose
+   `EstablishPtyHandoff` creates the two pipes, hands back the far ends, and posts the near ends +
+   `TERMINAL_STARTUP_INFO` (title, icon, size, show-window) to the UI. With `single-instance` it
+   should forward to the running giest over `ipc.rs` — but pipe *handles* can't cross the JSON pipe,
+   so either the COM server lives in the long-running instance (register the class object at
+   normal startup too, the way WT does) or the handles are duplicated into it with
+   `DuplicateHandle` after an IPC handshake giving its PID. Hand-declared vtables, as in
+   `jumplist.rs`/`taskbar.rs`. M–L.
+3. **A PTY without a child.** `pty.rs` / the vendored portable-pty assume giest *spawned* the
+   process and owns an `HPCON`. A handed-off session has pipes, a signal pipe (resize is written to
+   it as `PTY_SIGNAL_RESIZE_WINDOW`, not `ResizePseudoConsole`), the *client* process handle for
+   exit detection (`Pty::is_running` must wait on it), and no command line. A second `Pty` backend. M.
+4. **Registration.** Settings only lists *packaged* apps: the MSIX must declare
+   `com:Extension Category="windows.comServer"` (ExeServer `giest.exe -Embedding` with our CLSID,
+   plus the ProxyStub DLL with the IID) and `uap3:AppExtension Name="com.microsoft.windows.terminal.host"`
+   (and `…console.host` pointing at a bundled OpenConsole's CLSID if we ship our own console side,
+   or reuse the inbox/WT one). An unpackaged install could write `HKCU\Software\Classes\CLSID\{…}\
+   LocalServer32` + `Interface\{IID}\ProxyStubClsid32` + the two `%%Startup` values itself;
+   whether conhost honours an unpackaged registration was **not tested** here, and the console-side CLSID
+   must be an OpenConsole that is registered too (the NuGet's `OpenConsole.exe` serves
+   `IConsoleHandoff` under `-Embedding`, but its compiled-in CLSID is the one WT registers, so two
+   installs would collide). Any `+register-default-terminal` verb must have an exact inverse that
+   restores the previous values. S–M.
+5. **A signed package** for (4), which is the certificate item under Release packaging.
+
+**Why not now.** Item 1 needs a native build step (MIDL + MSVC C) giest does not have, item 3 is
+a second PTY backend, and the only way to exercise any of it end to end is to redirect every
+console launch on the machine — which this task was not allowed to leave registered. Estimated XL
+in total; items 1 and 3 can land (and be unit-tested) before anything is registered.
 
 ### D. Protocols and engine features new on `main`
 
@@ -159,8 +222,8 @@ macOS-only — needs eyeballing), ~~`drag-handle`~~ ✅ (see §C pane drag), `au
 5. ✅ **Automation:** CLI args → named-pipe IPC → Explorer entry → Jump List → restart restore → notification click.
 6. **Protocols:** ✅ OSC 5522; ✅ OSC 52 / OSC 7 scanners moved onto lib-vt; ✅ regex search (native search API evaluated, not adopted — see the ledger).
 7. **Chrome:** custom caption + `window-decoration` + titlebar colors; runtime icon (L).
-8. **Long tail:** accessibility (L), auto-update, ~~tab overview~~ ✅, default-terminal handoff (XL), and
-   shipping the out-of-band ConPTY with release builds (today it is a manual
+8. **Long tail:** accessibility (L), ~~auto-update~~ ✅, ~~tab overview~~ ✅, default-terminal handoff (XL, design below), and
+   ~~shipping the out-of-band ConPTY with release builds~~ ✅ (`mise package` bundles it; the dev tree still uses the
    `scripts/fetch-conpty.ps1` step) so kitty graphics work out of the box.
 
 ---

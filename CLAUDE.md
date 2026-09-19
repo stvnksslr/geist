@@ -100,6 +100,12 @@ fallback engine without app changes:
   (`RegisterApplicationRestart` + a root-window subclass that writes a layout snapshot on
   `WM_ENDSESSION`, because `on_exit` never runs when Windows ends the session). Clean up after
   live tests: `+unregister-shell-integration`, and run with `jump-list = false`.
+- **Distribution.** `mise package` (`scripts/package.ps1`) builds `dist/<v>/`: zip, MSIX (unsigned
+  unless `-CertPath`), `giest.appinstaller`, `giest-manifest.json`. **`update.rs`** consumes that
+  manifest: SHA-256 is verified *before* extraction, and a staged update is applied only by
+  `startup_apply` at the top of `main` — replaced files are **renamed** to `*.old`, never deleted
+  while running. Its network goes through the `Http` trait; tests use a mock. Live-test the apply
+  path with a temp `LOCALAPPDATA` and a copied exe, never against `target\` or a real install.
 - **`config.rs`** — Ghostty-format config (`key = value` lines, kebab-case keys, unquoted
   colors, repeatable `palette`) from `%APPDATA%\giest\config` (override with `GIEST_CONFIG`);
   defines the full ANSI 16 + 256-color palette. **`profiles.rs`** — shell profiles (pwsh/powershell/cmd/wsl).
