@@ -1242,6 +1242,8 @@ impl Mode {
     pub const COLOR_SCHEME_REPORT: Self = Self::new(2031, ModeKind::Dec);
     pub const VISIBILITY_REPORT: Self = Self::new(2033, ModeKind::Dec);
     pub const IN_BAND_RESIZE: Self = Self::new(2048, ModeKind::Dec);
+    /// Kitty clipboard protocol paste events (giest-local).
+    pub const PASTE_EVENTS: Self = Self::new(5522, ModeKind::Dec);
 }
 
 /// The kind of a terminal mode.
@@ -1669,6 +1671,152 @@ pub enum ClipboardWriteError {
     IoError = ffi::ClipboardWriteResult::IO_ERROR,
 }
 
+impl ClipboardWrite<'_> {
+    /// True if the terminal already holds a session grant for this request
+    /// (a kitty clipboard password). giest-local.
+    pub fn granted(&self) -> bool {
+        // SAFETY: valid for the callback's duration.
+        unsafe { (*self.ptr).granted }
+    }
+}
+
+/// A synchronous request to read the clipboard (giest-local).
+#[derive(Clone, Debug)]
+pub struct ClipboardRead<'t> {
+    ptr: *const ffi::ClipboardRead,
+    _phan: PhantomData<&'t ()>,
+}
+
+impl<'t> ClipboardRead<'t> {
+    /// # Safety
+    ///
+    /// Caller must ensure that the given pointer has the correct lifetime.
+    unsafe fn from_raw(ptr: *const ffi::ClipboardRead) -> Self {
+        Self {
+            ptr,
+            _phan: PhantomData,
+        }
+    }
+
+    /// Clipboard to read.
+    pub fn location(&self) -> ClipboardLocation {
+        // SAFETY: valid for the callback's duration.
+        unsafe { *self.ptr }
+            .location
+            .try_into()
+            .unwrap_or(ClipboardLocation::Standard)
+    }
+
+    /// Requested MIME types in order of preference (`text/plain` for OSC 52).
+    pub fn mimes(&self) -> Vec<&'t str> {
+        // SAFETY: valid for the callback's duration.
+        let raw = unsafe { *self.ptr };
+        if raw.mimes.is_null() {
+            return Vec::new();
+        }
+        let s: &'t [ffi::String] = unsafe { std::slice::from_raw_parts(raw.mimes, raw.mimes_len) };
+        s.iter()
+            .filter_map(|m| std::str::from_utf8(unsafe { m.to_bytes() }).ok())
+            .collect()
+    }
+
+    /// Whether the program also wants the list of available MIME types.
+    pub fn list(&self) -> bool {
+        unsafe { (*self.ptr).list }
+    }
+
+    /// True if a session grant already covers this read: a remembered kitty
+    /// password, or the follow-up read of a paste event.
+    pub fn granted(&self) -> bool {
+        unsafe { (*self.ptr).granted }
+    }
+}
+
+/// The contents answering a [`ClipboardRead`] (giest-local).
+#[derive(Clone, Debug, Default)]
+pub struct ClipboardReadData {
+    /// `(mime, data)` pairs, one per requested MIME type the clipboard has.
+    pub contents: Vec<(String, Vec<u8>)>,
+    /// Every MIME type on the clipboard; used only when the request asked
+    /// for the listing.
+    pub available: Vec<String>,
+}
+
+/// Why a clipboard read was not served (giest-local).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, int_enum::IntEnum)]
+#[repr(u32)]
+pub enum ClipboardReadError {
+    /// Denied by policy or the user.
+    Denied = ffi::ClipboardReadResult::DENIED,
+    /// The embedder cannot read this clipboard.
+    Unsupported = ffi::ClipboardReadResult::UNSUPPORTED,
+    /// The clipboard is temporarily unavailable.
+    Busy = ffi::ClipboardReadResult::BUSY,
+    /// Reading failed with an I/O error.
+    IoError = ffi::ClipboardReadResult::IO_ERROR,
+}
+
+/// Where a paste came from, for [`Terminal::paste`] (giest-local).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PasteSource {
+    /// The user pasted from a clipboard; may become a kitty paste event.
+    Clipboard,
+    /// Text inserted some other way; always written as text.
+    Text,
+}
+
+/// Outcome of [`Terminal::paste`] (giest-local).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PasteOutcome {
+    /// Something was written (the encoded text or a paste event).
+    Written,
+    /// There was nothing to paste.
+    Empty,
+    /// The text could inject commands and `allow_unsafe` was false.
+    Rejected,
+}
+
+impl Terminal<'_, '_> {
+    /// Paste `text` according to the terminal's modes via
+    /// `ghostty_terminal_paste` (giest-local): a kitty paste event when mode
+    /// 5522 is on and a clipboard-read handler is installed, otherwise the
+    /// text framed per mode 2004. Output goes to the `on_pty_write` handler.
+    pub fn paste(&mut self, text: &str, source: PasteSource, allow_unsafe: bool) -> Result<PasteOutcome> {
+        unsafe extern "C" fn reader(ud: *mut std::ffi::c_void, _mime: ffi::String, w: ffi::Writer) -> bool {
+            // SAFETY: `ud` is the `&str` passed below, alive for the call.
+            let text = unsafe { &*ud.cast::<&str>() };
+            match w.write {
+                Some(f) => unsafe { f(w.userdata, text.as_ptr(), text.len()) },
+                None => false,
+            }
+        }
+        let mime: ffi::String = "text/plain".into();
+        let text_ref: &str = text;
+        let paste = ffi::Paste {
+            size: std::mem::size_of::<ffi::Paste>(),
+            location: ffi::ClipboardLocation::STANDARD,
+            source: match source {
+                PasteSource::Clipboard => ffi::PasteSource::CLIPBOARD,
+                PasteSource::Text => ffi::PasteSource::TEXT,
+            },
+            mimes: &mime,
+            mimes_len: 1,
+            reader: ffi::MimeReader {
+                read: Some(reader),
+                userdata: std::ptr::from_ref(&text_ref) as *mut std::ffi::c_void,
+            },
+            allow_unsafe,
+        };
+        let mut written = false;
+        let code = unsafe { ffi::ghostty_terminal_paste(self.inner.as_raw(), &paste, &mut written) };
+        if code == ffi::Result::REJECTED {
+            return Ok(PasteOutcome::Rejected);
+        }
+        from_result(code)?;
+        Ok(if written { PasteOutcome::Written } else { PasteOutcome::Empty })
+    }
+}
+
 /// A request to show a desktop notification.
 #[derive(Debug, Copy, Clone)]
 pub struct DesktopNotification<'t> {
@@ -2067,12 +2215,74 @@ handlers! {
         tag = CLIPBOARD_WRITE,
         from = GhosttyTerminalClipboardWriteFn(
             write: *const ffi::ClipboardWrite
-        ) -> ffi::ClipboardWriteResult::Type,
+        ),
         to = <'t>ClipboardWriteFn(ClipboardWrite<'t>) -> std::result::Result<(), ClipboardWriteError>,
     ) |term, func| {
-        match func(&term, unsafe { ClipboardWrite::from_raw(write) }) {
+        // giest-local: the pinned C API answers through `write->reply`, not a
+        // return value. The upstream wrapper still returned the result, which
+        // the C side never read — so every write was silently denied.
+        let result = match func(&term, unsafe { ClipboardWrite::from_raw(write) }) {
             Ok(_) => ffi::ClipboardWriteResult::SUCCESS,
-            Err(e) => e.into()
+            Err(e) => e.into(),
+        };
+        let reply = ffi::ClipboardWriteReply {
+            size: std::mem::size_of::<ffi::ClipboardWriteReply>(),
+            result,
+            remember: false,
+        };
+        // SAFETY: `write` is valid for the duration of the callback.
+        if let Some(f) = unsafe { (*write).reply } {
+            unsafe { f(write, &reply) };
+        }
+    }
+
+    /// Call the given function when the running program asks to read the
+    /// clipboard (OSC 52 `?` or a kitty OSC 5522 read). giest-local.
+    ///
+    /// Returning `None` leaves the request unanswered, which the terminal
+    /// turns into an empty clipboard (OSC 52) or `EPERM` (OSC 5522).
+    /// Installing this also enables kitty paste events (mode 5522) for
+    /// [`Terminal::paste`].
+    pub fn on_clipboard_read(
+        &mut self,
+        tag = CLIPBOARD_READ,
+        from = GhosttyTerminalClipboardReadFn(
+            read: *const ffi::ClipboardRead
+        ),
+        to = <'t>ClipboardReadFn(ClipboardRead<'t>) -> Option<std::result::Result<ClipboardReadData, ClipboardReadError>>,
+    ) |term, func| {
+        if let Some(answer) = func(&term, unsafe { ClipboardRead::from_raw(read) }) {
+            let (result, data) = match answer {
+                Ok(d) => (ffi::ClipboardReadResult::SUCCESS, d),
+                Err(e) => (e.into(), ClipboardReadData::default()),
+            };
+            let contents: Vec<ffi::ClipboardContent> = data
+                .contents
+                .iter()
+                .map(|(mime, bytes)| ffi::ClipboardContent {
+                    mime: ffi::String { ptr: mime.as_ptr(), len: mime.len() },
+                    data: ffi::String { ptr: bytes.as_ptr(), len: bytes.len() },
+                })
+                .collect();
+            let available: Vec<ffi::String> = data
+                .available
+                .iter()
+                .map(|m| ffi::String { ptr: m.as_ptr(), len: m.len() })
+                .collect();
+            let reply = ffi::ClipboardReadReply {
+                size: std::mem::size_of::<ffi::ClipboardReadReply>(),
+                result,
+                contents: if contents.is_empty() { std::ptr::null() } else { contents.as_ptr() },
+                contents_len: contents.len(),
+                available: if available.is_empty() { std::ptr::null() } else { available.as_ptr() },
+                available_len: available.len(),
+                remember: false,
+            };
+            // SAFETY: `read` is valid for the duration of the callback, and
+            // the arrays above outlive the reply call.
+            if let Some(f) = unsafe { (*read).reply } {
+                unsafe { f(read, &reply) };
+            }
         }
     }
 
