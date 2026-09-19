@@ -995,7 +995,33 @@ impl Session {
         self.autoscroll_accum = 0.0;
         self.gesture_held = true;
         self.gesture_clicks = self.engine.gesture_press(press, &self.selection_word_chars);
+        // Upstream (`Surface.zig`, click count 2): a double-click on a link
+        // selects the whole link instead of the gesture's word.
+        if self.gesture_clicks == 2
+            && let Some((l, r, y)) = self.link_span_at(self.pos_to_cell(pos, rect, ppp, cw, ch))
+        {
+            self.engine.selection_begin(l, y, false);
+            self.engine.selection_update(r, y, false);
+        }
         self.gesture_clicks
+    }
+
+    /// The on-row span `(l, r, y)` of the link under `cell`: an OSC 8
+    /// hyperlink (cells sharing its URI), else a bare URL.
+    fn link_span_at(&self, cell: (u16, u16)) -> Option<(u16, u16, u16)> {
+        let (x, y) = cell;
+        if let Some(uri) = self.engine.hyperlink_at(x, y) {
+            let same = |cx: u16| self.engine.hyperlink_at(cx, y).as_deref() == Some(uri.as_str());
+            let (mut l, mut r) = (x, x);
+            while l > 0 && same(l - 1) {
+                l -= 1;
+            }
+            while r + 1 < self.snapshot.cols && same(r + 1) {
+                r += 1;
+            }
+            return Some((l, r, y));
+        }
+        url_span_at(&self.snapshot, x, y).map(|(l, r)| (l, r, y))
     }
 
     /// Whether a gesture press is still held (its release not yet seen).
@@ -2718,6 +2744,33 @@ fn px_offset(rel: f32, ppp: f32) -> u32 {
 /// non-whitespace token under the cursor, strip trailing punctuation, and
 /// accept it only if it has a known scheme (or a leading `www.`, which gets an
 /// `https://` prefix). Returns the openable URL, else `None`.
+/// The columns `l..=r` on row `y` of the bare URL under `(x, y)`, trailing
+/// punctuation excluded — the same token and trim rules as [`find_url_at`].
+fn url_span_at(snap: &GridSnapshot, x: u16, y: u16) -> Option<(u16, u16)> {
+    find_url_at(snap, x, y)?;
+    let char_at = |cx: u16| {
+        snap.cell(cx, y)
+            .and_then(|c| c.text.chars().next())
+            .filter(|c| !c.is_whitespace())
+    };
+    let mut l = x;
+    while l > 0 && char_at(l - 1).is_some() {
+        l -= 1;
+    }
+    let mut r = x;
+    while r + 1 < snap.cols && char_at(r + 1).is_some() {
+        r += 1;
+    }
+    while r > l
+        && char_at(r).is_some_and(|c| {
+            matches!(c, '.' | ',' | ')' | ']' | '}' | '>' | '"' | '\'' | ';' | ':')
+        })
+    {
+        r -= 1;
+    }
+    (x <= r).then_some((l, r))
+}
+
 fn find_url_at(snap: &GridSnapshot, x: u16, y: u16) -> Option<String> {
     let cols = snap.cols;
     if cols == 0 || x >= cols {
@@ -3095,7 +3148,7 @@ mod exit_tests {
 mod tests {
     use super::{
         CommandFinish, CopyAction, KeyAction, bell_effect_due, cell_from_pos, copy_or_interrupt,
-        autoscroll_rows, find_url_at, produces_text, format_duration, grid_dims, notch_split, osc7_to_path,
+        autoscroll_rows, find_url_at, url_span_at, produces_text, format_duration, grid_dims, notch_split, osc7_to_path,
         px_offset, scroll_split, scrollbar_rows, transient_alpha,
     };
     use crate::engine::{Cell, GridSnapshot, KeyCode, KeyInput, KeyMods};
@@ -3424,6 +3477,16 @@ mod tests {
     // — are now engine tests in `engine/ghostty_vt.rs`, driving real escape
     // sequences. Keeping a grid-scanning copy here would be a second opinion
     // about what is selected, which is the failure this codebase keeps recording.
+
+    #[test]
+    fn url_span_covers_the_url_without_trailing_punctuation() {
+        let s = grid(&["see https://aka.ms/x, now"], 25);
+        // "https://aka.ms/x" is cols 4..=19; the comma at 20 is excluded.
+        assert_eq!(url_span_at(&s, 10, 0), Some((4, 19)));
+        assert_eq!(url_span_at(&s, 4, 0), Some((4, 19)));
+        assert_eq!(url_span_at(&s, 1, 0), None, "plain word");
+        assert_eq!(url_span_at(&s, 20, 0), None, "the trimmed comma itself");
+    }
 
     #[test]
     fn detects_url_under_cursor() {

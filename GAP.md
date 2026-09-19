@@ -399,8 +399,8 @@ binding, leader sequences, key tables, `catch_all`, `chain=`, all four trigger f
 gap against upstream's action union is **`show_gtk_inspector`**, which is GTK's own widget
 inspector and has no Windows counterpart. giest's `inspector:` is now done.)*
 
-**Selection / scroll / search** — double-click on a URL selecting the whole URL (upstream's
-`linkAtPin` override on click 2); deep press (no Windows pressure input). *(the **60%-of-cell
+**Selection / scroll / search** — deep press (no Windows pressure input). *(double-click on a link now selects the whole link, upstream
+`linkAtPin` override on click 2, OSC 8 or bare URL, one row; the **60%-of-cell
 threshold** and **double/triple-click-drag word/line snapping** are now done via the engine's
 selection gesture — see "Selection gesture engine"; **regex search** now done — see its ledger; scrollback search plus
 **upstream's five search actions** (`start_search` / `end_search` / `navigate_search:` /
@@ -1625,8 +1625,8 @@ drops the gesture when the screen switches. A port would have been a second copy
   as upstream — egui allows 2x for the third click, the gesture does not. Repeat distance is one
   cell width, as upstream.
 - **Unchanged:** Shift+click extend still uses `selection_begin/update` (upstream extends via its own
-  path); mouse-tracking mode resets the gesture. **Not done:** double-click on a URL selecting the
-  whole link (upstream overrides the click-2 selection with `linkAtPin`); deep press (no pressure
+  path); mouse-tracking mode resets the gesture. Double-click on a link selects the whole link (OSC 8 span or bare URL, one row; `Session::link_span_at`).
+  **Not done:** deep press (no pressure
   input on Windows).
 - **Tests (engine, real terminal):** single-click-drag threshold forward, backward and within one
   cell; double-click-drag word snapping forward and backward; `selection-word-chars` during a drag;
@@ -1665,7 +1665,7 @@ read off `Surface.zig` rather than guessed.
 - **Not done: the double-click-*drag* refinement.** The binding exposes `select_word_between` with a
   both-directions recipe (upstream uses it at `Surface.zig:4713`) so dragging from one word to
   another snaps to whole words; giest still extends by cell after the initial double-click.
-- **Not matched: upstream checks for a link under the cursor *before* word selection** on
+- **Superseded (now matched): upstream checks for a link under the cursor *before* word selection** on
   double-click, so double-clicking a URL selects the whole link. giest has `hyperlink_at` and could,
   but the double-click path doesn't consult it yet.
 - **Verified by engine tests driving real sequences** — word boundaries with and without a custom
