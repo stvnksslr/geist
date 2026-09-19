@@ -208,7 +208,7 @@ in total; items 1 and 3 can land (and be unit-tested) before anything is registe
 | `ghostty_terminal_paste` | ✅ | every paste now encodes through the engine (`encode_paste` → `Terminal::paste`, `allow_unsafe` since giest's own gate has decided), with the old encoder as fallback; byte-identical on plain, multi-line, bracketed and injected-`ESC[201~` input (pinned by test). |
 | Native search API (`ghostty_search_*`) | ✅ N/A | evaluated, not adopted: no case-sensitive mode and no regex, so it would lose the `Aa` toggle; regex search built on giest's own wrap-joined text instead — see the ledger "Regex search, and why not the native search API" |
 | Dirty-row iteration | ✅ | `f00c510`: only dirty rows are re-copied; the render state is now acknowledged each frame (it reported `Full` forever before). Needs an eyeball pass for stale cells while typing, scrolling and changing themes. |
-| Selection gesture engine | ⬜ | optional replacement for giest's click-count logic — M |
+| Selection gesture engine | ✅ | adopted: left-button selection now runs on `ghostty_selection_gesture_*` (press/drag/release) — click counting, the 60%-of-cell threshold, double/triple-click-*drag* word/line snapping, Ctrl+triple-click output, rectangle drag, and the autoscroll *decision*. giest keeps its 15 ms rate clock and smooth scroll instead of `AUTOSCROLL_TICK` (which scrolls the engine viewport behind `animate_scroll`'s back). See the ledger "Selection gesture engine" |
 | Default cursor style/blink engine options | ✅ N/A | probed: equivalent to `decscusr.rs` for initial, `CSI 0 q`, RIS and mode 12 — except upstream ignores mode 12 when `cursor-style-blink` is set, which only the scanner does. The scanner stays. |
 | OSC 72 kitty drag-and-drop | ⬜ blocked | bytes survive both ConPTYs (probed), and the engine parses OSC 72, answers `t=q` and tracks registrations — but the C API has **no way to deliver a drop** (upstream calls `kitty.dnd.State.dragDrop` from Zig; no C export, no `drag_and_drop` effect in the C wrapper). giest therefore **withholds the engine's OSC 72 replies** so no program is told drops will come; file drops keep pasting paths. See the ledger "Protocol leftovers" |
 | Kitty animation / relative placements / glyph protocol | ◐ | unblocked by a **sideloaded ConPTY** (`conpty-passthrough`, `scripts/fetch-conpty.ps1`). Relative placements ✅, client-driven frames (`a=a,c=N`) ✅, transient ✅ (engine-side eviction); autoplay (`s=2/3`) ⬜ — `animationTick` isn't in the C API, and the C API exposes no frame count or per-frame gap either, so giest can't drive frames itself (re-checked at b32f20f); glyph protocol ⬜ — no outline read-back in the C API, so it is **disabled** rather than advertised. See the kitty section |
@@ -399,8 +399,10 @@ binding, leader sequences, key tables, `catch_all`, `chain=`, all four trigger f
 gap against upstream's action union is **`show_gtk_inspector`**, which is GTK's own widget
 inspector and has no Windows counterpart. giest's `inspector:` is now done.)*
 
-**Selection / scroll / search** — upstream's 60%-of-cell threshold for including the clicked/dragged
-cell; the double-click-*drag* word-snapping refinement. *(**regex search** now done — see its ledger; scrollback search plus
+**Selection / scroll / search** — double-click on a URL selecting the whole URL (upstream's
+`linkAtPin` override on click 2); deep press (no Windows pressure input). *(the **60%-of-cell
+threshold** and **double/triple-click-drag word/line snapping** are now done via the engine's
+selection gesture — see "Selection gesture engine"; **regex search** now done — see its ledger; scrollback search plus
 **upstream's five search actions** (`start_search` / `end_search` / `navigate_search:` /
 `search_selection` / `search:`),
 **cross-wrap matches and drift-free tracking**, **semantic selection**, the **full binding-backed
@@ -1275,10 +1277,10 @@ needed.
   *Divergence:* the selection end is resolved against the frame's *current* viewport, so it trails
   the scroll by one frame and catches up on the next tick — structurally the same one-frame lag the
   scrollbar drag documents.
-- **Not done:** upstream's **60%-of-cell-width threshold** for whether the clicked and dragged cells
-  are included (`Surface.zig::mouseSelection`) — giest still includes on cell hit, so a drag can
-  grab one more cell than Ghostty would; and the double-click-*drag* word-snapping refinement
-  (`select_word_between`). Both remain from the migration ledger.
+- **Superseded:** the 60%-of-cell threshold and double-click-*drag* word snapping that were "not
+  done" here are now done by the engine's selection gesture — see "Selection gesture engine". The
+  drag path described above (`selection_begin`/`selection_update` + the app's own edge test) is
+  gone; `selection_begin`/`update` survive only for Shift+click extend.
 - Verified by engine tests driving real sequences: adjust moves the free end and leaves the anchor
   (read untrimmed, so the space it crosses is visible), adjust with no selection reports "not
   performed", a block selection takes three equal column spans where a linear one takes everything
@@ -1591,6 +1593,47 @@ Landed: `working-directory`, `window-new-tab-position`, `window-padding-balance`
   `window-save-state = always`, the state file written at quit records the cwd the shell *itself*
   reported via OSC 7, which came back as the configured directory. Search colors and padding balance
   are visual and want eyeballing.
+
+### Selection gesture engine — ✅ divergences
+
+Left-button mouse selection moved onto upstream's `SelectionGesture` through the binding's safe
+`selection::gesture` wrappers (no new vendored delta). **Why adopt rather than port:** the gesture
+*is* `Surface.zig`'s selection logic, extracted — the 60%-of-cell threshold (`dragSelection`, both
+directions, and the same-cell crossing that counts as a drag), word/line/output snapping while
+dragging after a double/triple click, repeat-click timing *and distance*, and a tracked anchor that
+drops the gesture when the screen switches. A port would have been a second copy free to drift.
+- **Flow:** `App` feeds raw primary press / held-move / release (not egui's click classification)
+  to `Session::gesture_press/drag/release`, which call `TerminalEngine::gesture_*`. Press clears
+  on a single click (upstream clears on press, not release); a drag that hasn't crossed the
+  threshold installs *no* selection (i.e. clears), as upstream's `setSelection(null)`. Copy-on-select
+  fires on release with a selection. Link-open and click-to-move are skipped when the gesture
+  dragged or the click was a double/triple (`left_click_dragged`, as upstream).
+- **Behaviour table set explicitly.** The binding's `Behaviors::default()` is the *zeroed* C struct —
+  cell/cell/cell, not upstream's cell/word/line — so a default table silently kills double-click.
+- **Empty `selection-word-chars` = "Ghostty's defaults" = the option *unset*.** The binding has no
+  unset for it, so the reused event object is replaced by a fresh one instead of being set to `[]`
+  (which would mean "no boundaries": the whole line is one word).
+- **Autoscroll divergence:** the gesture decides *when* (within 1 px of, or past, the grid's
+  top/bottom edge — upstream's rule, replacing giest's own outside-the-pane test), but giest does
+  **not** use `AUTOSCROLL_TICK`: that calls `scrollViewport` on the engine directly, which would
+  desync `Session::engine_pin_lines` from `animate_scroll`. The rate stays giest's 15 ms clock and
+  the scroll goes through the smooth-scroll target; the next frame's drag resolves against the
+  scrolled viewport — the same "scroll one row, then drag" as the tick, one frame later.
+- **Geometry:** pane-local device pixels; `padding_left = 0` because the pane rect already excludes
+  padding; `screen_height` is the grid height (`rows * cell_h`).
+- **Repeat interval** is `click-repeat-interval` (Windows double-click time by default), per click
+  as upstream — egui allows 2x for the third click, the gesture does not. Repeat distance is one
+  cell width, as upstream.
+- **Unchanged:** Shift+click extend still uses `selection_begin/update` (upstream extends via its own
+  path); mouse-tracking mode resets the gesture. **Not done:** double-click on a URL selecting the
+  whole link (upstream overrides the click-2 selection with `linkAtPin`); deep press (no pressure
+  input on Windows).
+- **Tests (engine, real terminal):** single-click-drag threshold forward, backward and within one
+  cell; double-click-drag word snapping forward and backward; `selection-word-chars` during a drag;
+  triple-click-drag line snapping; repeat reset on time and distance; rectangle drag; autoscroll
+  direction at/past each edge and none after release; single press clears, reset doesn't.
+- **Needs hands:** press/drag/release arbitration against the scrollbar thumb, split dividers and the
+  inspector; the click after focusing an unfocused pane; autoscroll feel at 60/144 Hz.
 
 ### Semantic selection — ✅ divergences
 

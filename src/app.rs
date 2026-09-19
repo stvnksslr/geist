@@ -6090,6 +6090,7 @@ impl Window {
         let pad = egui::vec2(self.config.padding_x, self.config.padding_y);
         let window_focused = ctx.input(|i| i.focused);
         let copy_on_select = self.config.copy_on_select;
+        let click_repeat = click_repeat_secs(self.config.click_repeat_interval);
         let right_click_action = self.config.right_click_action;
         let middle_click_action = self.config.middle_click_action;
         let cursor_click_to_move = self.config.cursor_click_to_move;
@@ -6714,65 +6715,63 @@ impl Window {
                     if !session.scrollbar_grabbed() {
                         session.handle_mouse(ctx, prect, ppp, cw, ch);
                     }
+                    session.gesture_reset();
                     session.clear_selection();
                 } else {
                     let cell_at = |p: egui::Pos2, s: &Session| s.pos_to_cell(p, prect, ppp, cw, ch);
-                    if resp.triple_clicked() {
-                        if let Some(p) = resp.interact_pointer_pos() {
-                            let c = cell_at(p, session);
+                    // Left-button selection is upstream's `SelectionGesture`,
+                    // fed raw press / move / release rather than egui's
+                    // click-and-drag classification: the engine counts the
+                    // clicks, applies the 60%-of-cell threshold, and snaps a
+                    // double/triple-click drag to words/lines. Shift+press is
+                    // left to the click branch below (extend).
+                    let (pressed, down, mods, latest, now, dt) = ctx.input(|i| {
+                        (
+                            i.pointer.primary_pressed(),
+                            i.pointer.primary_down(),
+                            i.modifiers,
+                            i.pointer.latest_pos(),
+                            i.time,
+                            i.stable_dt,
+                        )
+                    });
+                    let mut gesture_dragged = false;
+                    let mut gesture_released = false;
+                    if pressed && !mods.shift && resp.is_pointer_button_down_on() {
+                        if let Some(p) = ctx.input(|i| i.pointer.press_origin()) {
                             // Ctrl+triple-click selects the command's *output*
-                            // rather than the line, matching Ghostty's
-                            // `Surface.zig` click-count handling.
-                            if ctx.input(|i| i.modifiers.ctrl) {
-                                session.select_output(c);
-                            } else {
-                                session.select_line(c);
+                            // (upstream: ctrl-or-super).
+                            session.gesture_press(
+                                p,
+                                prect,
+                                ppp,
+                                cw,
+                                ch,
+                                now,
+                                click_repeat,
+                                mods.ctrl || mods.command,
+                            );
+                        }
+                    } else if session.gesture_held() {
+                        if down {
+                            if let Some(p) = latest {
+                                let rect = crate::session::is_rectangle_select(&mods);
+                                // Autoscroll keeps ticking with the pointer
+                                // parked past an edge; nothing else would
+                                // schedule those frames.
+                                if session.gesture_drag(p, prect, ppp, cw, ch, rect, dt) {
+                                    ctx.request_repaint();
+                                }
                             }
+                        } else {
+                            gesture_dragged = session.gesture_release(latest, prect, ppp, cw, ch);
+                            gesture_released = true;
                         }
-                    } else if resp.double_clicked() {
-                        if let Some(p) = resp.interact_pointer_pos() {
-                            let c = cell_at(p, session);
-                            session.select_word(c);
-                        }
-                    } else if resp.drag_started() {
-                        if let Some(p) = resp.interact_pointer_pos() {
-                            let c = cell_at(p, session);
-                            let rect = ctx.input(|i| crate::session::is_rectangle_select(&i.modifiers));
-                            session.begin_selection(c, rect);
-                        }
-                    } else if resp.dragged() {
-                        if let Some(p) = resp.interact_pointer_pos() {
-                            let c = cell_at(p, session);
-                            let rect = ctx.input(|i| crate::session::is_rectangle_select(&i.modifiers));
-                            // Dragging past the top or bottom edge scrolls, so a
-                            // selection can run into the scrollback without
-                            // letting go. Rate-limited to Ghostty's 15 ms per
-                            // row rather than one row per frame, which would run
-                            // at the display's refresh rate. The repaint request
-                            // is what keeps it ticking with the pointer parked —
-                            // egui reports the drag every frame, but nothing
-                            // else would schedule those frames.
-                            let dir = if p.y < prect.min.y {
-                                -1
-                            } else if p.y > prect.max.y {
-                                1
-                            } else {
-                                0
-                            };
-                            let dt = ctx.input(|i| i.stable_dt);
-                            let rows = session.autoscroll_step(dir, dt);
-                            if rows != 0 {
-                                session.scroll_lines(rows, ch);
-                            }
-                            if dir != 0 {
-                                ctx.request_repaint();
-                            }
-                            // The cell is resolved against *this* frame's
-                            // viewport, so the end trails the scroll by one
-                            // frame and catches up on the next tick — the same
-                            // ordering the scrollbar drag documents.
-                            session.update_selection(c, rect);
-                        }
+                    }
+                    if resp.clicked() && (gesture_dragged || session.gesture_clicks() > 1) && !mods.shift {
+                        // A double/triple click or a threshold-crossing drag
+                        // inside one cell: not a click (upstream skips links
+                        // and click-to-move when the gesture dragged).
                     } else if resp.clicked() {
                         let mods = ctx.input(|i| i.modifiers);
                         if mods.shift {
@@ -6809,12 +6808,12 @@ impl Window {
                             }
                         }
                     }
-                    // Copy as soon as a selection is completed, if enabled.
-                    // `primary`/`both` feed the emulated PRIMARY buffer that
-                    // middle-click and `paste_from_selection` read.
-                    if copy_on_select != CopyOnSelect::None
-                        && (resp.double_clicked() || resp.triple_clicked() || resp.drag_stopped())
-                    {
+                    // Copy when a selection gesture is released with a
+                    // selection, if enabled — upstream copies on release, not
+                    // on every drag step. `primary`/`both` feed the emulated
+                    // PRIMARY buffer that middle-click and
+                    // `paste_from_selection` read.
+                    if copy_on_select != CopyOnSelect::None && gesture_released {
                         if let Some(text) = session.copy_text() {
                             if copy_on_select.primary() {
                                 crate::primary::set(&text);
