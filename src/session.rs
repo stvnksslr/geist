@@ -85,6 +85,10 @@ pub struct Session {
     /// Side parser tracking DECSCUSR, so the configured default cursor style is
     /// substituted only while the program hasn't picked its own shape.
     decscusr: DecscusrScanner,
+    /// The prompt hook set a bar cursor (`shell-integration-features = cursor`)
+    /// and the shell has no pre-exec hook to undo it: restore the default
+    /// cursor when we submit a command line (see `note_command_submitted`).
+    reset_cursor_on_submit: bool,
     /// Side parser for OSC color *queries*, which the VT engine drops.
     osc_color: OscColorScanner,
     /// Side parser for OSC 9 / OSC 777 desktop-notification requests.
@@ -234,12 +238,16 @@ impl Session {
         cwd: Option<&Path>,
     ) -> Result<Self> {
         let wake_ctx = ctx.clone();
-        let args = profile.launch_args();
+        let launch = profile.launch(
+            &crate::profiles::Integration::from_config(config),
+            crate::profiles::shell_integration_dir().as_deref(),
+            &config.env,
+        );
         let mut pty = Pty::spawn(
             &profile.program,
-            &args,
+            &launch.args,
             cwd,
-            &config.env,
+            &launch.env,
             DEFAULT_COLS,
             DEFAULT_ROWS,
             // Wake the **root** viewport, explicitly.
@@ -305,6 +313,7 @@ impl Session {
             osc52: Osc52Scanner::new(),
             osc7: Osc7Scanner::new(),
             decscusr: DecscusrScanner::new(),
+            reset_cursor_on_submit: launch.reset_cursor_on_submit,
             osc_color: OscColorScanner::new(),
             osc_notify: OscNotifyScanner::new(),
             osc133: Osc133Scanner::new(),
@@ -1130,6 +1139,15 @@ impl Session {
         if self.engine.cursor_at_prompt() == Some(true) {
             self.saw_prompt_mark = true;
             self.command_started = Some(std::time::Instant::now());
+            // Upstream's scripts reset the bar cursor in their pre-exec hook;
+            // pwsh/cmd have none, so do it here, through the same path shell
+            // output takes (engine + DECSCUSR scanner), as if the shell had
+            // sent `CSI 0 SP q` itself.
+            if self.reset_cursor_on_submit {
+                const RESET: &[u8] = b"\x1b[0 q";
+                self.engine.write(RESET);
+                self.decscusr.feed(RESET);
+            }
         }
     }
 
@@ -2599,7 +2617,11 @@ fn osc7_to_path(raw: &str) -> Option<PathBuf> {
     }
     // Strip the scheme and host: after `file://` (or a bare `//`), everything up
     // to the first `/` is the host, which we drop, keeping the path from `/`.
-    let path = if let Some(rest) = raw.strip_prefix("file:") {
+    // Ghostty's bash script reports `kitty-shell-cwd://HOST/PATH` (unencoded).
+    let path = if let Some(rest) = raw
+        .strip_prefix("file:")
+        .or_else(|| raw.strip_prefix("kitty-shell-cwd:"))
+    {
         let rest = rest.strip_prefix("//").unwrap_or(rest);
         match rest.find('/') {
             Some(i) => &rest[i..],
@@ -2626,6 +2648,18 @@ fn osc7_to_path(raw: &str) -> Option<PathBuf> {
     };
     if trimmed.is_empty() {
         return None;
+    }
+    // A WSL shell on a Windows drive (`/mnt/c/Users`) maps back to `C:/Users`,
+    // so a split of a WSL pane opens where it was. Other Linux paths stay as
+    // they are; `Pty::spawn` ignores a cwd that isn't a Windows directory.
+    let t = trimmed.as_bytes();
+    if t.len() >= 6
+        && trimmed.starts_with("/mnt/")
+        && t[5].is_ascii_alphabetic()
+        && (t.len() == 6 || t[6] == b'/')
+    {
+        let rest = if t.len() > 6 { &trimmed[6..] } else { "/" };
+        return Some(PathBuf::from(format!("{}:{rest}", (t[5] as char).to_ascii_uppercase())));
     }
     Some(PathBuf::from(trimmed))
 }
@@ -3050,6 +3084,14 @@ mod tests {
             p("file://HOST/C:\\Users\\foo"),
             Some(PathBuf::from("C:\\Users\\foo"))
         );
+        // Ghostty's bash script (under WSL): kitty scheme, /mnt/<drive> mapped.
+        assert_eq!(
+            p("kitty-shell-cwd://box/mnt/c/Users/foo"),
+            Some(PathBuf::from("C:/Users/foo"))
+        );
+        assert_eq!(p("file://box/mnt/d"), Some(PathBuf::from("D:/")));
+        assert_eq!(p("file://box/home/me"), Some(PathBuf::from("/home/me")));
+        assert_eq!(p("file://box/mnt/data/x"), Some(PathBuf::from("/mnt/data/x")));
         // Percent-encoded spaces are decoded.
         assert_eq!(
             p("file://HOST/C:/Program%20Files"),

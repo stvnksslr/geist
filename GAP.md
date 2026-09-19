@@ -29,13 +29,13 @@ method, re-run against the `main` checkout the build fetches.
 Scoreboard: **132 of 208** public config keys · **76 of 88** actions · app features in §C.
 Effort: **S** <1d · **M** 1–3d · **L** ~1wk · **XL** multi-week.
 
-### A. Config keys still unsupported (92)
+### A. Config keys still unsupported (90)
 
 **A1. Real work, cross-platform.** Ordered roughly by value.
 
 | Key(s) | What it takes | Effort |
 |---|---|---|
-| `shell-integration`, `shell-integration-features` | Off switch + feature flags for the prompt hooks `profiles.rs` injects. **Also the WSL story**: ship Ghostty's bash/zsh/fish scripts into WSL. | M |
+| ✅ `shell-integration`, `shell-integration-features` | Done. `none` disables every injected hook (pwsh/cmd prompt hooks + WSL). Features per shell: **pwsh/powershell/cmd** — `cursor` (bar at the prompt, `5`/`6` by `cursor-style-blink`; reset to default by the *session* on Enter, since these shells have no pre-exec hook) and `title` (cwd at the prompt; never the running command, same reason); `sudo`/`ssh-env`/`ssh-terminfo`/`path` N/A (no terminfo on Windows, no `ghostty` CLI). **WSL** — Ghostty's own bash/zsh/fish/elvish/nushell scripts, vendored in `assets/shell-integration/` (embedded, extracted to `%LOCALAPPDATA%\giest\shell-integration`), reached via WSLENV `/p` and injected by `giest-wsl.sh` with upstream's per-shell mechanism (bash `ENV`+`--posix`, zsh `ZDOTDIR`, fish/elvish/nushell `XDG_DATA_DIRS`); `cursor`/`title`/`sudo`/`path` pass through, `ssh-*` are **withheld** (upstream wraps `ssh` in `ghostty +ssh`, which doesn't exist in WSL). `detect` on WSL reads `$SHELL`; a forced `bash`/`zsh`/… only changes the WSL scheme (Ghostty has none for pwsh/cmd). Native Windows bash/zsh (`command = …bash.exe`) are not injected. Verified: pwsh/cmd features and Ghostty's bash script via the bootstrap (Git for Windows bash) in `tests/conpty_passthrough.rs`; zsh/fish/WSL itself unverified (no distro on the dev box). | ✅ |
 | `scrollback-compression` | Engine now exposes `Terminal::compress` + `compression_activity`; needs a per-session idle timer (compress after N s without an activity-token change). | S |
 | `cursor-click-to-move` | OSC 133 `click_events` (engine support landed, 3263ce5): turn a click on the prompt line into arrow keys. | M |
 | `link`, `link-previews` | Regex link table (the `link-url` matcher becomes its lowest entry) + hover label (§C). | M |
@@ -155,7 +155,7 @@ drag, §C), `auto-update` / `auto-update-channel` (§C).
    drag-rearrange + `drag-handle` + `move_tab_to_new_window` (L).
 3. **The S-sized sweep:** A1's window/mouse/cursor options, §B's small actions, §C's right-click
    menu, indicators, link preview, file drop, About box.
-4. **Shell integration:** `shell-integration(-features)`, WSL scripts, `cursor-click-to-move` (M).
+4. **Shell integration:** ✅ `shell-integration(-features)`, ✅ WSL scripts; `cursor-click-to-move` (M).
 5. **Automation:** CLI args → named-pipe IPC → Explorer entry → Jump List (L).
 6. **Protocols:** OSC 5522; move side-scanners onto lib-vt effects; native search + regex (M each).
 7. **Chrome:** custom caption + `window-decoration` + titlebar colors; runtime icon (L).

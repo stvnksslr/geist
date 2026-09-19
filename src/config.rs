@@ -1298,6 +1298,11 @@ pub struct Config {
     /// Keep a pane open after its shell exits, until a key is pressed.
     /// Ghostty `wait-after-command`.
     pub wait_after_command: bool,
+    /// Ghostty `shell-integration`: which injection scheme; `none` disables every
+    /// hook giest injects (pwsh/cmd prompt hooks and the WSL scripts).
+    pub shell_integration: crate::profiles::ShellIntegration,
+    /// Ghostty `shell-integration-features`.
+    pub shell_integration_features: crate::profiles::ShellFeatures,
     /// A non-zero exit at or under this many ms is "abnormal": the pane stays
     /// open with an error bar even without `wait_after_command`, so a bad
     /// `command` is visible instead of a pane flashing shut. Ghostty
@@ -1482,6 +1487,8 @@ impl Default for Config {
             notify_on_command_finish_after_ms: 5_000,
             undo_timeout_ms: 5_000,
             wait_after_command: false,
+            shell_integration: crate::profiles::ShellIntegration::Detect,
+            shell_integration_features: crate::profiles::ShellFeatures::default(),
             abnormal_command_exit_runtime_ms: 250,
             env: Vec::new(),
             input: Vec::new(),
@@ -2058,6 +2065,26 @@ const SETTERS: &[(&str, Setter)] = &[
             d.wait_after_command
         } else {
             parse_bool(v, c.wait_after_command)
+        }
+    }),
+    ("shell-integration", |c, v, d| {
+        c.shell_integration = if v.is_empty() {
+            d.shell_integration
+        } else {
+            crate::profiles::ShellIntegration::parse(v).unwrap_or_else(|| {
+                eprintln!("giest: ignoring invalid shell-integration value '{v}'");
+                c.shell_integration
+            })
+        }
+    }),
+    ("shell-integration-features", |c, v, d| {
+        c.shell_integration_features = if v.is_empty() {
+            d.shell_integration_features
+        } else {
+            crate::profiles::ShellFeatures::parse(v).unwrap_or_else(|| {
+                eprintln!("giest: ignoring invalid shell-integration-features value '{v}'");
+                c.shell_integration_features
+            })
         }
     }),
     ("abnormal-command-exit-runtime", |c, v, d| {
@@ -3902,6 +3929,55 @@ mod tests {
         assert!(WindowSaveState::Always.restores());
         assert!(!WindowSaveState::Default.restores());
         assert!(!WindowSaveState::Never.restores());
+    }
+
+    #[test]
+    fn shell_integration_keys_parse_with_upstream_defaults() {
+        use crate::profiles::{ShellFeatures, ShellIntegration};
+        let d = Config::default();
+        assert_eq!(d.shell_integration, ShellIntegration::Detect);
+        let f = d.shell_integration_features;
+        assert!(f.cursor && f.title && f.path);
+        assert!(!f.sudo && !f.ssh_env && !f.ssh_terminfo);
+
+        assert_eq!(parsed("shell-integration = none").shell_integration, ShellIntegration::None);
+        assert_eq!(parsed("shell-integration = zsh").shell_integration, ShellIntegration::Zsh);
+        assert_eq!(
+            parsed("shell-integration = nushell").shell_integration,
+            ShellIntegration::Nushell
+        );
+        // Invalid keeps the prior value; empty resets.
+        assert_eq!(
+            parsed("shell-integration = fish\nshell-integration = wat").shell_integration,
+            ShellIntegration::Fish
+        );
+        assert_eq!(
+            parsed("shell-integration = fish\nshell-integration =").shell_integration,
+            ShellIntegration::Detect
+        );
+
+        let f = parsed("shell-integration-features = no-cursor,sudo").shell_integration_features;
+        assert!(!f.cursor && f.sudo && f.title && f.path);
+        // Omitted features take their *default*, not the previous line's value.
+        let f = parsed("shell-integration-features = no-title\nshell-integration-features = sudo")
+            .shell_integration_features;
+        assert!(f.title && f.sudo);
+        let f = parsed("shell-integration-features = false").shell_integration_features;
+        assert_eq!(
+            f,
+            ShellFeatures {
+                cursor: false,
+                sudo: false,
+                title: false,
+                ssh_env: false,
+                ssh_terminfo: false,
+                path: false
+            }
+        );
+        assert!(parsed("shell-integration-features = true").shell_integration_features.ssh_terminfo);
+        // An unknown feature rejects the whole value.
+        let f = parsed("shell-integration-features = no-cursor,bogus").shell_integration_features;
+        assert!(f.cursor);
     }
 
     #[test]
