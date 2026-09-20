@@ -215,7 +215,9 @@ impl OscNotifyScanner {
             }
         }
         let text = if b64 {
-            let bytes = base64::engine::general_purpose::STANDARD.decode(payload).ok()?;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(payload)
+                .ok()?;
             String::from_utf8(bytes).ok()?
         } else {
             payload.to_string()
@@ -223,7 +225,11 @@ impl OscNotifyScanner {
         // Bound the assembly table: a program opening ids it never finishes
         // must not grow it without limit.
         const MAX_PENDING: usize = 16;
-        let slot = match self.kitty.iter().position(|(k, _)| !id.is_empty() && k == id) {
+        let slot = match self
+            .kitty
+            .iter()
+            .position(|(k, _)| !id.is_empty() && k == id)
+        {
             Some(i) => i,
             None => {
                 if self.kitty.len() >= MAX_PENDING {
@@ -325,7 +331,9 @@ fn parse_osc9(data: &str) -> Option<Osc9> {
             // 9;1;<ms> sleep
             Some(b';') => true,
             // 9;10 xterm emulation, optionally `;0`..`;3`
-            Some(b'0') => b.len() == 2 || (at(2) == Some(b';') && matches!(at(3), Some(b'0'..=b'3'))),
+            Some(b'0') => {
+                b.len() == 2 || (at(2) == Some(b';') && matches!(at(3), Some(b'0'..=b'3')))
+            }
             // 9;11;<text> comment
             Some(b'1') => at(2) == Some(b';'),
             // 9;12 mark prompt start — accepted with no further checks upstream,
@@ -435,7 +443,10 @@ mod tests {
         assert_eq!(scan(&[b"\x1b]99;;Hello\x1b\\"]), vec![note("Hello", "")]);
         // Chunked by id: title, then body, then done.
         assert_eq!(
-            scan(&[b"\x1b]99;i=1:d=0;Build\x07", b"\x1b]99;i=1:p=body;finished\x07"]),
+            scan(&[
+                b"\x1b]99;i=1:d=0;Build\x07",
+                b"\x1b]99;i=1:p=body;finished\x07"
+            ]),
             vec![note("Build", "finished")]
         );
         // Unfinished chunks produce nothing yet.
@@ -452,22 +463,34 @@ mod tests {
     #[test]
     fn osc9_is_a_body_only_notification() {
         // Ghostty's own test case, verbatim.
-        assert_eq!(scan(&[b"\x1b]9;Hello world\x07"]), vec![note("", "Hello world")]);
+        assert_eq!(
+            scan(&[b"\x1b]9;Hello world\x07"]),
+            vec![note("", "Hello world")]
+        );
         // ST-terminated too.
-        assert_eq!(scan(&[b"\x1b]9;Build done\x1b\\"]), vec![note("", "Build done")]);
+        assert_eq!(
+            scan(&[b"\x1b]9;Build done\x1b\\"]),
+            vec![note("", "Build done")]
+        );
     }
 
     #[test]
     fn osc777_carries_a_title_and_a_body() {
         // Ghostty's own test case, verbatim.
-        assert_eq!(scan(&[b"\x1b]777;notify;Title;Body\x07"]), vec![note("Title", "Body")]);
+        assert_eq!(
+            scan(&[b"\x1b]777;notify;Title;Body\x07"]),
+            vec![note("Title", "Body")]
+        );
         // A body may contain semicolons; only the first two split.
         assert_eq!(
             scan(&[b"\x1b]777;notify;make;done; exit 0; 3m12s\x07"]),
             vec![note("make", "done; exit 0; 3m12s")]
         );
         // An empty title is legal.
-        assert_eq!(scan(&[b"\x1b]777;notify;;body\x07"]), vec![note("", "body")]);
+        assert_eq!(
+            scan(&[b"\x1b]777;notify;;body\x07"]),
+            vec![note("", "body")]
+        );
     }
 
     #[test]
@@ -483,20 +506,20 @@ mod tests {
     #[test]
     fn conemu_osc9_commands_are_not_notifications() {
         for seq in [
-            &b"\x1b]9;1;500\x07"[..],       // sleep
-            b"\x1b]9;10\x07",               // xterm emulation, bare
-            b"\x1b]9;10;2\x07",             // xterm emulation, with a mode
-            b"\x1b]9;11;a comment\x07",     // comment
-            b"\x1b]9;12\x07",               // mark prompt start
-            b"\x1b]9;2;a message box\x07",  // message box
-            b"\x1b]9;3;tab title\x07",      // change tab title
-            b"\x1b]9;4;1;40\x07",           // progress report
-            b"\x1b]9;4;0\x07",              // progress: remove
-            b"\x1b]9;5\x07",                // wait for input
-            b"\x1b]9;6;macro\x07",          // guimacro
-            b"\x1b]9;7;proc\x07",           // run process
-            b"\x1b]9;8;VAR\x07",            // output env var
-            b"\x1b]9;9;C:/Users/foo\x07",   // working directory
+            &b"\x1b]9;1;500\x07"[..],      // sleep
+            b"\x1b]9;10\x07",              // xterm emulation, bare
+            b"\x1b]9;10;2\x07",            // xterm emulation, with a mode
+            b"\x1b]9;11;a comment\x07",    // comment
+            b"\x1b]9;12\x07",              // mark prompt start
+            b"\x1b]9;2;a message box\x07", // message box
+            b"\x1b]9;3;tab title\x07",     // change tab title
+            b"\x1b]9;4;1;40\x07",          // progress report
+            b"\x1b]9;4;0\x07",             // progress: remove
+            b"\x1b]9;5\x07",               // wait for input
+            b"\x1b]9;6;macro\x07",         // guimacro
+            b"\x1b]9;7;proc\x07",          // run process
+            b"\x1b]9;8;VAR\x07",           // output env var
+            b"\x1b]9;9;C:/Users/foo\x07",  // working directory
         ] {
             assert!(
                 scan(&[seq]).is_empty(),
@@ -512,10 +535,22 @@ mod tests {
         let r = |state, value| ProgressReport { state, value };
 
         assert_eq!(p(b"\x1b]9;4;0\x1b\\"), vec![r(ProgressState::Remove, None)]);
-        assert_eq!(p(b"\x1b]9;4;1;50\x1b\\"), vec![r(ProgressState::Set, Some(50))]);
-        assert_eq!(p(b"\x1b]9;4;2;80\x1b\\"), vec![r(ProgressState::Error, Some(80))]);
-        assert_eq!(p(b"\x1b]9;4;3\x1b\\"), vec![r(ProgressState::Indeterminate, None)]);
-        assert_eq!(p(b"\x1b]9;4;4;10\x1b\\"), vec![r(ProgressState::Pause, Some(10))]);
+        assert_eq!(
+            p(b"\x1b]9;4;1;50\x1b\\"),
+            vec![r(ProgressState::Set, Some(50))]
+        );
+        assert_eq!(
+            p(b"\x1b]9;4;2;80\x1b\\"),
+            vec![r(ProgressState::Error, Some(80))]
+        );
+        assert_eq!(
+            p(b"\x1b]9;4;3\x1b\\"),
+            vec![r(ProgressState::Indeterminate, None)]
+        );
+        assert_eq!(
+            p(b"\x1b]9;4;4;10\x1b\\"),
+            vec![r(ProgressState::Pause, Some(10))]
+        );
 
         // Ghostty seeds `set` with 0 but leaves the others absent, so a bare
         // `9;4;1` is "0%" while a bare `9;4;2` is "failed, percentage unknown".
@@ -524,10 +559,19 @@ mod tests {
         assert_eq!(p(b"\x1b]9;4;4\x1b\\"), vec![r(ProgressState::Pause, None)]);
 
         // Out of range clamps; unparseable keeps the state and drops the value.
-        assert_eq!(p(b"\x1b]9;4;1;250\x1b\\"), vec![r(ProgressState::Set, Some(100))]);
-        assert_eq!(p(b"\x1b]9;4;1;abc\x1b\\"), vec![r(ProgressState::Set, Some(0))]);
+        assert_eq!(
+            p(b"\x1b]9;4;1;250\x1b\\"),
+            vec![r(ProgressState::Set, Some(100))]
+        );
+        assert_eq!(
+            p(b"\x1b]9;4;1;abc\x1b\\"),
+            vec![r(ProgressState::Set, Some(0))]
+        );
         // States that carry no percentage ignore one that's sent anyway.
-        assert_eq!(p(b"\x1b]9;4;3;40\x1b\\"), vec![r(ProgressState::Indeterminate, None)]);
+        assert_eq!(
+            p(b"\x1b]9;4;3;40\x1b\\"),
+            vec![r(ProgressState::Indeterminate, None)]
+        );
     }
 
     #[test]
@@ -549,13 +593,20 @@ mod tests {
         // notification path. So a body that merely *starts* like a ConEmu
         // command is still shown.
         assert_eq!(scan(&[b"\x1b]9;4\x07"]), vec![note("", "4")]);
-        assert_eq!(scan(&[b"\x1b]9;4;9\x07"]), vec![note("", "4;9")], "state digit out of range");
+        assert_eq!(
+            scan(&[b"\x1b]9;4;9\x07"]),
+            vec![note("", "4;9")],
+            "state digit out of range"
+        );
         assert_eq!(scan(&[b"\x1b]9;1\x07"]), vec![note("", "1")]);
         assert_eq!(scan(&[b"\x1b]9;13\x07"]), vec![note("", "13")]);
         assert_eq!(scan(&[b"\x1b]9;2x\x07"]), vec![note("", "2x")]);
         // A digit ConEmu never claims.
         assert_eq!(scan(&[b"\x1b]9;0;zero\x07"]), vec![note("", "0;zero")]);
-        assert_eq!(scan(&[b"\x1b]9;42 tests failed\x1b\\"]), vec![note("", "42 tests failed")]);
+        assert_eq!(
+            scan(&[b"\x1b]9;42 tests failed\x1b\\"]),
+            vec![note("", "42 tests failed")]
+        );
         // …but `9;5` is ConEmu's "wait for input" with *no* payload and no
         // further checks, so a message starting with a bare `5` is swallowed.
         // That's upstream's behaviour too — a real overload collision in the
@@ -632,7 +683,8 @@ mod tests {
         let mut term = libghostty_vt::Terminal::new(80, 24).unwrap();
         let s1 = seen.clone();
         term.on_desktop_notification(move |_t, n| {
-            s1.borrow_mut().push(format!("N|{}|{}", n.title(), n.body()));
+            s1.borrow_mut()
+                .push(format!("N|{}|{}", n.title(), n.body()));
         })
         .unwrap();
         let s2 = seen.clone();
@@ -646,7 +698,8 @@ mod tests {
                 Ok(E::Pause) => "Pause",
                 _ => "?",
             };
-            s2.borrow_mut().push(format!("P|{state}|{:?}", p.progress()));
+            s2.borrow_mut()
+                .push(format!("P|{state}|{:?}", p.progress()));
         })
         .unwrap();
         term.vt_write(bytes);
@@ -678,7 +731,12 @@ mod tests {
         ];
         for case in shared {
             let ours: Vec<String> = scan_all(&[case]).iter().map(describe).collect();
-            assert_eq!(engine_events(case), ours, "case {:?}", String::from_utf8_lossy(case));
+            assert_eq!(
+                engine_events(case),
+                ours,
+                "case {:?}",
+                String::from_utf8_lossy(case)
+            );
         }
 
         let kitty: &[u8] = b"\x1b]99;;Hello from kitty\x1b\\";

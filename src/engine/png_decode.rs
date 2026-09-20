@@ -51,7 +51,9 @@ impl DecodePng for PngDecoder {
         if info.color_type != png::ColorType::Rgba || info.bit_depth != png::BitDepth::Eight {
             return None;
         }
-        let len = (info.width as usize).checked_mul(info.height as usize)?.checked_mul(4)?;
+        let len = (info.width as usize)
+            .checked_mul(info.height as usize)?
+            .checked_mul(4)?;
         if info.buffer_size() != len || self.buf.len() < len {
             return None;
         }

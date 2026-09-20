@@ -407,26 +407,59 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
             ("iFrameRate", offset_of!(super::Globals, frame_rate)),
             ("iFrame", offset_of!(super::Globals, frame)),
             ("iChannelTime", offset_of!(super::Globals, channel_time)),
-            ("iChannelResolution", offset_of!(super::Globals, channel_resolution)),
+            (
+                "iChannelResolution",
+                offset_of!(super::Globals, channel_resolution),
+            ),
             ("iMouse", offset_of!(super::Globals, mouse)),
             ("iDate", offset_of!(super::Globals, date)),
             ("iSampleRate", offset_of!(super::Globals, sample_rate)),
             ("iCurrentCursor", offset_of!(super::Globals, current_cursor)),
-            ("iPreviousCursor", offset_of!(super::Globals, previous_cursor)),
-            ("iCurrentCursorColor", offset_of!(super::Globals, current_cursor_color)),
-            ("iPreviousCursorColor", offset_of!(super::Globals, previous_cursor_color)),
-            ("iCurrentCursorStyle", offset_of!(super::Globals, current_cursor_style)),
-            ("iPreviousCursorStyle", offset_of!(super::Globals, previous_cursor_style)),
+            (
+                "iPreviousCursor",
+                offset_of!(super::Globals, previous_cursor),
+            ),
+            (
+                "iCurrentCursorColor",
+                offset_of!(super::Globals, current_cursor_color),
+            ),
+            (
+                "iPreviousCursorColor",
+                offset_of!(super::Globals, previous_cursor_color),
+            ),
+            (
+                "iCurrentCursorStyle",
+                offset_of!(super::Globals, current_cursor_style),
+            ),
+            (
+                "iPreviousCursorStyle",
+                offset_of!(super::Globals, previous_cursor_style),
+            ),
             ("iCursorVisible", offset_of!(super::Globals, cursor_visible)),
-            ("iTimeCursorChange", offset_of!(super::Globals, time_cursor_change)),
+            (
+                "iTimeCursorChange",
+                offset_of!(super::Globals, time_cursor_change),
+            ),
             ("iTimeFocus", offset_of!(super::Globals, time_focus)),
             ("iFocus", offset_of!(super::Globals, focus)),
-            ("iBackgroundColor", offset_of!(super::Globals, background_color)),
-            ("iForegroundColor", offset_of!(super::Globals, foreground_color)),
+            (
+                "iBackgroundColor",
+                offset_of!(super::Globals, background_color),
+            ),
+            (
+                "iForegroundColor",
+                offset_of!(super::Globals, foreground_color),
+            ),
             ("iCursorColor", offset_of!(super::Globals, cursor_color)),
             ("iCursorText", offset_of!(super::Globals, cursor_text)),
-            ("iSelectionForegroundColor", offset_of!(super::Globals, selection_foreground_color)),
-            ("iSelectionBackgroundColor", offset_of!(super::Globals, selection_background_color)),
+            (
+                "iSelectionForegroundColor",
+                offset_of!(super::Globals, selection_foreground_color),
+            ),
+            (
+                "iSelectionBackgroundColor",
+                offset_of!(super::Globals, selection_background_color),
+            ),
         ];
 
         assert_eq!(

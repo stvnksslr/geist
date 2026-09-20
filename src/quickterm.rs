@@ -197,8 +197,12 @@ pub fn work_area() -> Option<Rect> {
 
     #[link(name = "user32")]
     unsafe extern "system" {
-        fn SystemParametersInfoW(action: u32, param: u32, pv: *mut std::ffi::c_void, ini: u32)
-        -> i32;
+        fn SystemParametersInfoW(
+            action: u32,
+            param: u32,
+            pv: *mut std::ffi::c_void,
+            ini: u32,
+        ) -> i32;
     }
 
     let mut r = WinRect {
@@ -270,13 +274,25 @@ mod tests {
     fn unset_axes_use_ghosttys_defaults() {
         let none = QuickSize::default();
         // Top/bottom: full screen wide, 400 tall.
-        assert_eq!(none.calculate(Position::Top, 1920.0, 1040.0), (1920.0, 400.0));
+        assert_eq!(
+            none.calculate(Position::Top, 1920.0, 1040.0),
+            (1920.0, 400.0)
+        );
         // Left/right: 400 wide, full height.
-        assert_eq!(none.calculate(Position::Left, 1920.0, 1040.0), (400.0, 1040.0));
+        assert_eq!(
+            none.calculate(Position::Left, 1920.0, 1040.0),
+            (400.0, 1040.0)
+        );
         // Center on a landscape screen: 800×400…
-        assert_eq!(none.calculate(Position::Center, 1920.0, 1040.0), (800.0, 400.0));
+        assert_eq!(
+            none.calculate(Position::Center, 1920.0, 1040.0),
+            (800.0, 400.0)
+        );
         // …and the axes swap on a portrait one.
-        assert_eq!(none.calculate(Position::Center, 1080.0, 1920.0), (400.0, 800.0));
+        assert_eq!(
+            none.calculate(Position::Center, 1080.0, 1920.0),
+            (400.0, 800.0)
+        );
     }
 
     #[test]
@@ -294,7 +310,11 @@ mod tests {
         let top = frame(Position::Top, &s, SCREEN);
         assert_eq!((top.x, top.y), (0.0, 0.0));
         let bottom = frame(Position::Bottom, &s, SCREEN);
-        assert_eq!(bottom.y + bottom.h, SCREEN.h, "bottom must sit on the bottom edge");
+        assert_eq!(
+            bottom.y + bottom.h,
+            SCREEN.h,
+            "bottom must sit on the bottom edge"
+        );
         let left = frame(Position::Left, &s, SCREEN);
         assert_eq!(left.x, 0.0);
         let right = frame(Position::Right, &s, SCREEN);
@@ -325,7 +345,10 @@ mod tests {
         let s = QuickSize::parse("200%,300%").unwrap();
         let f = frame(Position::Center, &s, SCREEN);
         assert_eq!((f.w, f.h), (SCREEN.w, SCREEN.h));
-        assert!(f.x >= 0.0 && f.y >= 0.0, "a clamped window still starts on screen");
+        assert!(
+            f.x >= 0.0 && f.y >= 0.0,
+            "a clamped window still starts on screen"
+        );
     }
 
     #[test]
@@ -344,11 +367,26 @@ mod tests {
 
     #[test]
     fn slide_offset_moves_toward_the_anchored_edge() {
-        assert_eq!(slide_offset(Position::Top, 800.0, 300.0, 0.0), (0.0, -300.0));
+        assert_eq!(
+            slide_offset(Position::Top, 800.0, 300.0, 0.0),
+            (0.0, -300.0)
+        );
         assert_eq!(slide_offset(Position::Top, 800.0, 300.0, 1.0), (0.0, 0.0));
-        assert_eq!(slide_offset(Position::Bottom, 800.0, 300.0, 0.5), (0.0, 150.0));
-        assert_eq!(slide_offset(Position::Left, 400.0, 900.0, 0.0), (-400.0, 0.0));
-        assert_eq!(slide_offset(Position::Right, 400.0, 900.0, 0.25), (300.0, 0.0));
-        assert_eq!(slide_offset(Position::Center, 400.0, 900.0, 0.0), (0.0, 0.0));
+        assert_eq!(
+            slide_offset(Position::Bottom, 800.0, 300.0, 0.5),
+            (0.0, 150.0)
+        );
+        assert_eq!(
+            slide_offset(Position::Left, 400.0, 900.0, 0.0),
+            (-400.0, 0.0)
+        );
+        assert_eq!(
+            slide_offset(Position::Right, 400.0, 900.0, 0.25),
+            (300.0, 0.0)
+        );
+        assert_eq!(
+            slide_offset(Position::Center, 400.0, 900.0, 0.0),
+            (0.0, 0.0)
+        );
     }
 }

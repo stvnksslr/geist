@@ -172,7 +172,12 @@ fn absolutize(p: PathBuf, cwd: &Path) -> PathBuf {
 /// `home` expands `~`; `is_file` decides whether a positional path names a file
 /// (whose folder is used) — injected so the parser has no filesystem access
 /// and the tests don't need real files.
-pub fn parse(args: &[String], cwd: &Path, home: Option<&Path>, is_file: &dyn Fn(&Path) -> bool) -> Cli {
+pub fn parse(
+    args: &[String],
+    cwd: &Path,
+    home: Option<&Path>,
+    is_file: &dyn Fn(&Path) -> bool,
+) -> Cli {
     let mut cli = Cli::default();
     let mut it = args.iter().peekable();
 
@@ -197,7 +202,8 @@ pub fn parse(args: &[String], cwd: &Path, home: Option<&Path>, is_file: &dyn Fn(
                 ("register-default-terminal", None) => Verb::RegisterDefaultTerminal,
                 ("unregister-default-terminal", None) => Verb::UnregisterDefaultTerminal,
                 _ => {
-                    cli.errors.push(format!("unknown or malformed action '{first}'"));
+                    cli.errors
+                        .push(format!("unknown or malformed action '{first}'"));
                     Verb::Help
                 }
             };
@@ -238,7 +244,8 @@ pub fn parse(args: &[String], cwd: &Path, home: Option<&Path>, is_file: &dyn Fn(
                 continue;
             }
             if value.contains(['\r', '\n']) {
-                cli.errors.push(format!("--{key}: value must be a single line"));
+                cli.errors
+                    .push(format!("--{key}: value must be a single line"));
                 continue;
             }
             match key {
@@ -262,7 +269,8 @@ pub fn parse(args: &[String], cwd: &Path, home: Option<&Path>, is_file: &dyn Fn(
                         None => ("", value.as_str()),
                     };
                     let p = absolutize(expand_home(&clean_path_arg(p), home), cwd);
-                    cli.overrides.push((key.into(), format!("{opt}{}", p.display())));
+                    cli.overrides
+                        .push((key.into(), format!("{opt}{}", p.display())));
                 }
                 "command" if forwarding => {
                     if !value.trim().is_empty() {
@@ -364,7 +372,8 @@ impl Cli {
                     || self.restore_session;
                 if !single_instance || standalone {
                     return Plan::Local {
-                        serve: single_instance && !matches!(self.command, Some(CommandSpec::Argv(_))),
+                        serve: single_instance
+                            && !matches!(self.command, Some(CommandSpec::Argv(_))),
                     };
                 }
                 // Explorer's "Open giest here" (a positional dir) is a new tab
@@ -385,9 +394,7 @@ impl Cli {
             | Verb::RegisterShellIntegration
             | Verb::UnregisterShellIntegration
             | Verb::RegisterDefaultTerminal
-            | Verb::UnregisterDefaultTerminal => {
-                Plan::Local { serve: false }
-            }
+            | Verb::UnregisterDefaultTerminal => Plan::Local { serve: false },
         }
     }
 
@@ -474,7 +481,14 @@ mod tests {
 
     #[test]
     fn dash_e_swallows_everything_after_it_including_flags() {
-        let c = p(&["--font-size=14", "-e", "pwsh", "-NoLogo", "--version", "+new-tab"]);
+        let c = p(&[
+            "--font-size=14",
+            "-e",
+            "pwsh",
+            "-NoLogo",
+            "--version",
+            "+new-tab",
+        ]);
         assert_eq!(
             c.command,
             Some(CommandSpec::Argv(vec![
@@ -505,7 +519,10 @@ mod tests {
                 ("title".into(), "a = b".into()),
             ]
         );
-        assert_eq!(c.override_body(), "background = #000\nmaximize = true\ntitle = a = b\n");
+        assert_eq!(
+            c.override_body(),
+            "background = #000\nmaximize = true\ntitle = a = b\n"
+        );
     }
 
     #[test]
@@ -517,12 +534,21 @@ mod tests {
 
     #[test]
     fn working_directory_is_made_absolute_and_expands_home() {
-        assert_eq!(p(&["--working-directory=src"]).cwd, Some(PathBuf::from(r"C:\work\src")));
-        assert_eq!(p(&["--working-directory=~/x"]).cwd, Some(PathBuf::from(r"C:\Users\me\x")));
+        assert_eq!(
+            p(&["--working-directory=src"]).cwd,
+            Some(PathBuf::from(r"C:\work\src"))
+        );
+        assert_eq!(
+            p(&["--working-directory=~/x"]).cwd,
+            Some(PathBuf::from(r"C:\Users\me\x"))
+        );
         // Keywords stay config values.
         let c = p(&["--working-directory=home"]);
         assert_eq!(c.cwd, None);
-        assert_eq!(c.overrides, vec![("working-directory".into(), "home".into())]);
+        assert_eq!(
+            c.overrides,
+            vec![("working-directory".into(), "home".into())]
+        );
     }
 
     #[test]
@@ -542,8 +568,14 @@ mod tests {
         let c = p(&["proj"]);
         assert_eq!(c.cwd, Some(PathBuf::from(r"C:\work\proj")));
         assert!(c.positional_dir);
-        assert_eq!(p(&[r"D:\notes\a.txt"]).cwd, Some(PathBuf::from(r"D:\notes")));
-        assert!(!p(&["a", "b"]).errors.is_empty(), "two directories is an error");
+        assert_eq!(
+            p(&[r"D:\notes\a.txt"]).cwd,
+            Some(PathBuf::from(r"D:\notes"))
+        );
+        assert!(
+            !p(&["a", "b"]).errors.is_empty(),
+            "two directories is an error"
+        );
     }
 
     #[test]
@@ -558,11 +590,23 @@ mod tests {
     fn plus_verbs_are_recognised_only_first() {
         assert_eq!(p(&["+new-window"]).verb, Verb::NewWindow);
         assert_eq!(p(&["+new-tab"]).verb, Verb::NewTab);
-        assert_eq!(p(&["+action=new_split:right"]).verb, Verb::Action("new_split:right".into()));
+        assert_eq!(
+            p(&["+action=new_split:right"]).verb,
+            Verb::Action("new_split:right".into())
+        );
         assert_eq!(p(&["+input=ls"]).verb, Verb::Input("ls".into()));
-        assert_eq!(p(&["+register-shell-integration"]).verb, Verb::RegisterShellIntegration);
-        assert_eq!(p(&["+register-default-terminal"]).verb, Verb::RegisterDefaultTerminal);
-        assert_eq!(p(&["+unregister-default-terminal"]).verb, Verb::UnregisterDefaultTerminal);
+        assert_eq!(
+            p(&["+register-shell-integration"]).verb,
+            Verb::RegisterShellIntegration
+        );
+        assert_eq!(
+            p(&["+register-default-terminal"]).verb,
+            Verb::RegisterDefaultTerminal
+        );
+        assert_eq!(
+            p(&["+unregister-default-terminal"]).verb,
+            Verb::UnregisterDefaultTerminal
+        );
         // Not first: a positional path.
         assert_eq!(p(&["x", "+new-tab"]).verb, Verb::Launch);
         let bad = p(&["+frobnicate"]);
@@ -591,13 +635,25 @@ mod tests {
             })
         );
         // On a plain launch, `--command` is the ordinary config key.
-        assert_eq!(p(&["--command=cmd"]).overrides, vec![("command".into(), "cmd".into())]);
+        assert_eq!(
+            p(&["--command=cmd"]).overrides,
+            vec![("command".into(), "cmd".into())]
+        );
     }
 
     #[test]
     fn a_plain_launch_forwards_as_a_window_and_explorer_as_a_tab() {
-        assert_eq!(p(&[]).plan(true), Plan::Forward(Request::NewWindow { cwd: None, command: None }));
-        assert!(matches!(p(&["proj"]).plan(true), Plan::Forward(Request::NewTab { .. })));
+        assert_eq!(
+            p(&[]).plan(true),
+            Plan::Forward(Request::NewWindow {
+                cwd: None,
+                command: None
+            })
+        );
+        assert!(matches!(
+            p(&["proj"]).plan(true),
+            Plan::Forward(Request::NewTab { .. })
+        ));
         // `macos-dock-drop-behavior = new-window`: the same positional dir opens
         // a window instead of a tab.
         assert!(matches!(
@@ -610,13 +666,22 @@ mod tests {
     #[test]
     fn dash_e_and_overrides_never_forward_and_dash_e_never_serves() {
         assert_eq!(p(&["-e", "cmd"]).plan(true), Plan::Local { serve: false });
-        assert_eq!(p(&["--font-size=9"]).plan(true), Plan::Local { serve: true });
-        assert_eq!(p(&["--restore-session"]).plan(true), Plan::Local { serve: true });
+        assert_eq!(
+            p(&["--font-size=9"]).plan(true),
+            Plan::Local { serve: true }
+        );
+        assert_eq!(
+            p(&["--restore-session"]).plan(true),
+            Plan::Local { serve: true }
+        );
     }
 
     #[test]
     fn a_local_start_folds_cwd_and_command_into_the_override_body() {
         let c = p(&["+new-window", "--command=cmd", "--working-directory=x"]);
-        assert_eq!(c.override_body(), "working-directory = C:\\work\\x\ninitial-command = cmd\n");
+        assert_eq!(
+            c.override_body(),
+            "working-directory = C:\\work\\x\ninitial-command = cmd\n"
+        );
     }
 }

@@ -413,7 +413,10 @@ fn thicken(src: &Raster, strength: u8) -> Raster {
         for x in 0..w as i64 {
             let (sx, sy) = (x - 1, y - 1);
             let own = at(sx, sy);
-            let n = at(sx - 1, sy).max(at(sx + 1, sy)).max(at(sx, sy - 1)).max(at(sx, sy + 1));
+            let n = at(sx - 1, sy)
+                .max(at(sx + 1, sy))
+                .max(at(sx, sy - 1))
+                .max(at(sx, sy + 1));
             let grown = (f32::from(n) * weight).round() as u8;
             bitmap[(y as u32 * w + x as u32) as usize] = own.max(grown);
         }
@@ -486,7 +489,9 @@ pub fn derive_metrics(raw: RawFontMetrics, adjust: &crate::config::MetricAdjust)
     // cell, so a positive value lifts the text — hence the subtraction.
     let ascent = (raw.ascent + half - adjust.font_baseline.apply(0.0)).round();
 
-    let underline_thick = adjust.underline_thickness.apply_thickness(raw.underline_thick);
+    let underline_thick = adjust
+        .underline_thickness
+        .apply_thickness(raw.underline_thick);
     let strikethrough_thick = adjust
         .strikethrough_thickness
         .apply_thickness(raw.strikethrough_thick);
@@ -535,7 +540,9 @@ fn raw_metrics(font: &FontRef<'static>, face: &ShapeFace<'static>, px: f32) -> R
     // half the ex-height.
     let underline = face.underline_metrics();
     let strikeout = face.strikeout_metrics();
-    let underline_thick = underline.map_or(0.0, |m| m.thickness as f32 * scale).max(1.0);
+    let underline_thick = underline
+        .map_or(0.0, |m| m.thickness as f32 * scale)
+        .max(1.0);
     let x_height = face.x_height().unwrap_or(0) as f32 * scale;
     RawFontMetrics {
         advance: scaled.h_advance(font.glyph_id(' ')),
@@ -545,11 +552,13 @@ fn raw_metrics(font: &FontRef<'static>, face: &ShapeFace<'static>, px: f32) -> R
         // ttf-parser reports the underline position as the (negative) distance
         // from the baseline to the line's *centre*, positive-up; we want the
         // distance down to its top.
-        underline_pos: underline
-            .map_or(underline_thick, |m| -(m.position as f32 * scale) - underline_thick / 2.0),
+        underline_pos: underline.map_or(underline_thick, |m| {
+            -(m.position as f32 * scale) - underline_thick / 2.0
+        }),
         underline_thick,
-        strikethrough_pos: strikeout
-            .map_or(x_height / 2.0, |m| m.position as f32 * scale + m.thickness as f32 * scale),
+        strikethrough_pos: strikeout.map_or(x_height / 2.0, |m| {
+            m.position as f32 * scale + m.thickness as f32 * scale
+        }),
         strikethrough_thick: strikeout
             .map_or(underline_thick, |m| m.thickness as f32 * scale)
             .max(1.0),
@@ -718,7 +727,9 @@ fn style_name_matches(face: &ttf_parser::Face, style: &str) -> bool {
         matches!(
             n.name_id,
             ttf_parser::name_id::SUBFAMILY | ttf_parser::name_id::TYPOGRAPHIC_SUBFAMILY
-        ) && n.to_string().is_some_and(|s| s.trim().eq_ignore_ascii_case(want))
+        ) && n
+            .to_string()
+            .is_some_and(|s| s.trim().eq_ignore_ascii_case(want))
     })
 }
 
@@ -735,11 +746,9 @@ fn find_font_styled(
     style: &crate::config::FontStyle,
 ) -> Option<(&'static [u8], u32)> {
     match style {
-        crate::config::FontStyle::Named(name) => {
-            scan_fonts(family, |face| {
-                family_name_matches(face, family) && style_name_matches(face, name)
-            })
-        }
+        crate::config::FontStyle::Named(name) => scan_fonts(family, |face| {
+            family_name_matches(face, family) && style_name_matches(face, name)
+        }),
         _ => find_font(family, bold, italic),
     }
 }
@@ -752,7 +761,9 @@ fn family_name_matches(face: &ttf_parser::Face, family: &str) -> bool {
         matches!(
             n.name_id,
             ttf_parser::name_id::FAMILY | ttf_parser::name_id::TYPOGRAPHIC_FAMILY
-        ) && n.to_string().is_some_and(|s| s.trim().eq_ignore_ascii_case(want))
+        ) && n
+            .to_string()
+            .is_some_and(|s| s.trim().eq_ignore_ascii_case(want))
     })
 }
 
@@ -891,7 +902,8 @@ fn resolve_slots(spec: &FontSpec) -> ([(&'static [u8], u32); 4], [Synth; 4]) {
         let (family, bold, italic) = slots[i];
         i == 0
             || (!off(i)
-                && family.is_some_and(|f| find_font_styled(f, bold, italic, &spec.styles[i]).is_some()))
+                && family
+                    .is_some_and(|f| find_font_styled(f, bold, italic, &spec.styles[i]).is_some()))
     });
 
     for (i, (family, bold, italic)) in slots.into_iter().enumerate() {
@@ -1293,7 +1305,10 @@ impl Atlas {
     /// glyphs re-rasterize at the new size into the (reused) atlas texture.
     /// Reusing the texture keeps the existing bind group valid.
     pub fn set_px(&mut self, px: f32) {
-        self.metrics = derive_metrics(raw_metrics(&self.fonts[0], &self.shapers[0], px), &self.adjust);
+        self.metrics = derive_metrics(
+            raw_metrics(&self.fonts[0], &self.shapers[0], px),
+            &self.adjust,
+        );
         self.cell_w = self.metrics.cell_w;
         self.ascent = self.metrics.ascent;
         self.cell_h = self.metrics.cell_h;
@@ -1853,11 +1868,11 @@ impl Atlas {
 mod tests {
     use super::{
         COLOR_FONT, ColorFont, Constraint, FALLBACK_FONTS, FONT_BOLD, FONT_BOLD_ITALIC,
-        FONT_ITALIC, FONT_REGULAR, Feature, FontSpec, LayerCollector, ShapeFace, classify,
-        composite_color_layers, face_matches, family_name_matches, find_font, find_regular_font,
-        derive_metrics, fit_scale, has_4char_tag, parse_features, resolve_slots, RawFontMetrics,
-        Raster, Synth, apply_variations, embolden, embolden_strength, leak_font, shear,
-        style_name_matches, ITALIC_SKEW,
+        FONT_ITALIC, FONT_REGULAR, Feature, FontSpec, ITALIC_SKEW, LayerCollector, Raster,
+        RawFontMetrics, ShapeFace, Synth, apply_variations, classify, composite_color_layers,
+        derive_metrics, embolden, embolden_strength, face_matches, family_name_matches, find_font,
+        find_regular_font, fit_scale, has_4char_tag, leak_font, parse_features, resolve_slots,
+        shear, style_name_matches,
     };
     use crate::config::MetricAdjust;
     use ab_glyph::{Font, FontRef, FontVec, ScaleFont, VariableFont};
@@ -2097,7 +2112,10 @@ mod tests {
     /// features applied (the same path `shape_run` drives).
     fn glyph_ids_feat(s: &str, feats: &[&str]) -> Vec<u16> {
         let face = ShapeFace::from_slice(FONT_REGULAR, 0).unwrap();
-        let features: Vec<Feature> = feats.iter().map(|f| Feature::from_str(f).unwrap()).collect();
+        let features: Vec<Feature> = feats
+            .iter()
+            .map(|f| Feature::from_str(f).unwrap())
+            .collect();
         let mut buf = UnicodeBuffer::new();
         buf.push_str(s);
         buf.set_direction(Direction::LeftToRight);
@@ -2130,7 +2148,11 @@ mod tests {
             "ss01".to_string(),
             String::new(), // invalid (empty)
         ]);
-        assert_eq!(f.len(), 2, "two valid features parsed, the empty one dropped");
+        assert_eq!(
+            f.len(),
+            2,
+            "two valid features parsed, the empty one dropped"
+        );
     }
 
     #[test]
@@ -2211,7 +2233,10 @@ mod tests {
     fn embolden_adds_ink_without_moving_the_glyphs_origin() {
         let out = embolden(&square(), 1.0);
         assert_eq!((out.w, out.h), (5, 5), "one pixel of growth on each axis");
-        assert!(out.bitmap.iter().filter(|&&v| v > 0).count() > 16, "more ink");
+        assert!(
+            out.bitmap.iter().filter(|&&v| v > 0).count() > 16,
+            "more ink"
+        );
         // The bearing is unchanged: the extra weight falls right/below, the way a
         // bold face is heavier than its regular without shifting left.
         assert_eq!(out.min, (0.0, -4.0));
@@ -2440,7 +2465,10 @@ mod tests {
         };
         let face = ttf_parser::Face::parse(&bytes, 0).expect("parses");
         assert!(style_name_matches(&face, "Semibold"));
-        assert!(style_name_matches(&face, "  semibold "), "trimmed, case-folded");
+        assert!(
+            style_name_matches(&face, "  semibold "),
+            "trimmed, case-folded"
+        );
         assert!(!style_name_matches(&face, "Bold"));
         // And the family still resolves, through the typographic family name.
         assert!(family_name_matches(&face, "Segoe UI"));
@@ -2535,7 +2563,10 @@ mod tests {
         // Family match is case-insensitive; the regular face is neither bold/italic.
         assert!(face_matches(&face, "Consolas", false, false));
         assert!(face_matches(&face, "consolas", false, false));
-        assert!(!face_matches(&face, "Consolas", true, false), "regular ≠ bold");
+        assert!(
+            !face_matches(&face, "Consolas", true, false),
+            "regular ≠ bold"
+        );
         assert!(!face_matches(&face, "Arial", false, false), "wrong family");
     }
 
@@ -2549,7 +2580,11 @@ mod tests {
         assert_eq!(classify('\u{2800}'), Constraint::Fill, "braille blank");
         assert_eq!(classify('\u{1FB00}'), Constraint::Fill, "sextant");
         assert_eq!(classify('\u{1CD00}'), Constraint::Fill, "octant");
-        assert_eq!(classify('\u{1FB82}'), Constraint::Fill, "upper quarter block");
+        assert_eq!(
+            classify('\u{1FB82}'),
+            Constraint::Fill,
+            "upper quarter block"
+        );
         assert_eq!(classify('\u{1FB3C}'), Constraint::Fill, "smooth mosaic");
         assert_eq!(classify('\u{1FBA0}'), Constraint::Fill, "corner diagonal");
         assert_eq!(
@@ -2641,7 +2676,6 @@ mod tests {
     }
 }
 
-
 /// Glyph-coverage sweep: the one place that answers "would this character
 /// render, or come out as an empty cell?" without a GPU.
 ///
@@ -2676,11 +2710,21 @@ mod coverage {
     }
 
     const fn own(name: &'static str, lo: u32, hi: u32) -> Range {
-        Range { name, lo, hi, source: Source::Own }
+        Range {
+            name,
+            lo,
+            hi,
+            source: Source::Own,
+        }
     }
 
     const fn sys(name: &'static str, lo: u32, hi: u32) -> Range {
-        Range { name, lo, hi, source: Source::System }
+        Range {
+            name,
+            lo,
+            hi,
+            source: Source::System,
+        }
     }
 
     /// The ranges giest claims to render with its default font set.

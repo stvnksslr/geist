@@ -108,7 +108,8 @@ fn run(command: &str) -> Vec<u8> {
         command.into(),
     ];
     select_mode();
-    let mut pty = Pty::spawn("powershell.exe", &args, None, &[], 80, 24, || {}).expect("spawn shell");
+    let mut pty =
+        Pty::spawn("powershell.exe", &args, None, &[], 80, 24, || {}).expect("spawn shell");
 
     let mut out = Vec::new();
     let started = Instant::now();
@@ -170,7 +171,10 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 }
 
 fn count(haystack: &[u8], needle: &[u8]) -> usize {
-    haystack.windows(needle.len()).filter(|w| *w == needle).count()
+    haystack
+        .windows(needle.len())
+        .filter(|w| *w == needle)
+        .count()
 }
 
 /// Emit a raw byte string from PowerShell without it being re-interpreted.
@@ -209,7 +213,10 @@ fn st() -> String {
 /// A PowerShell single-quoted literal. Single quotes suppress *all*
 /// interpolation, so the payload reaches the console byte for byte.
 fn lit(s: &str) -> String {
-    assert!(!s.contains('\''), "escape single quotes before using them here");
+    assert!(
+        !s.contains('\''),
+        "escape single quotes before using them here"
+    );
     format!("'{s}'")
 }
 
@@ -390,10 +397,20 @@ fn the_cmd_prompt_sets_the_bar_cursor_and_title() {
         program: "cmd.exe".into(),
         args: Vec::new(),
     };
-    let out = drive("cmd.exe", &profile.launch_args(), &[("\x1b]133;B", "exit\r")]);
+    let out = drive(
+        "cmd.exe",
+        &profile.launch_args(),
+        &[("\x1b]133;B", "exit\r")],
+    );
     let text = String::from_utf8_lossy(&out);
-    assert!(contains(&out, b"\x1b]133;A"), "the cmd prompt hook did not load: {text:?}");
-    assert!(contains(&out, b"\x1b[5 q"), "the bar cursor did not survive ConPTY: {text:?}");
+    assert!(
+        contains(&out, b"\x1b]133;A"),
+        "the cmd prompt hook did not load: {text:?}"
+    );
+    assert!(
+        contains(&out, b"\x1b[5 q"),
+        "the bar cursor did not survive ConPTY: {text:?}"
+    );
     assert!(
         contains(&out, b"\x1b]0;C:") || contains(&out, b"\x1b]2;C:"),
         "the cwd title did not survive ConPTY: {text:?}"
@@ -411,7 +428,10 @@ fn the_powershell_hook_reports_command_exit_codes() {
         args: Vec::new(),
     };
     let args = profile.launch_args();
-    assert!(!args.is_empty(), "the powershell profile should carry a hook");
+    assert!(
+        !args.is_empty(),
+        "the powershell profile should carry a hook"
+    );
 
     let out = drive(
         "powershell.exe",
@@ -431,23 +451,37 @@ fn the_powershell_hook_reports_command_exit_codes() {
     let text = String::from_utf8_lossy(&out);
 
     // The hook loaded at all: prompt marks and the cwd report are present.
-    assert!(contains(&out, b"\x1b]133;A"), "no OSC 133 A — the hook did not load: {text:?}");
-    assert!(contains(&out, b"\x1b]7;file://"), "no OSC 7 cwd report: {text:?}");
+    assert!(
+        contains(&out, b"\x1b]133;A"),
+        "no OSC 133 A — the hook did not load: {text:?}"
+    );
+    assert!(
+        contains(&out, b"\x1b]7;file://"),
+        "no OSC 7 cwd report: {text:?}"
+    );
     // …and the exit code round-trips. This is the whole feature: `$?` read
     // first, falling back to $LASTEXITCODE for a native program's real code.
     assert!(
         contains(&out, b"\x1b]133;D;3"),
         "the hook did not report exit code 3: {text:?}"
     );
-    assert!(contains(&out, b"giest-ok"), "the second command never ran: {text:?}");
+    assert!(
+        contains(&out, b"giest-ok"),
+        "the second command never ran: {text:?}"
+    );
     // `shell-integration-features` defaults: `cursor` (blinking bar at the
     // prompt) and `title` (cwd). ConPTY re-renders both rather than passing
     // them through, so what arrives is its own form: the DECSCUSR survives as
     // is, and the title comes back as a title-setting OSC (0 or 2).
-    assert!(contains(&out, b"\x1b[5 q"), "the bar cursor did not survive ConPTY: {text:?}");
     assert!(
-        contains(&out, b"\x1b]0;~") || contains(&out, b"\x1b]2;~")
-            || contains(&out, b"\x1b]0;C:") || contains(&out, b"\x1b]2;C:"),
+        contains(&out, b"\x1b[5 q"),
+        "the bar cursor did not survive ConPTY: {text:?}"
+    );
+    assert!(
+        contains(&out, b"\x1b]0;~")
+            || contains(&out, b"\x1b]2;~")
+            || contains(&out, b"\x1b]0;C:")
+            || contains(&out, b"\x1b]2;C:"),
         "the cwd title did not survive ConPTY: {text:?}"
     );
     // Two `D;0`s: one from the very first prompt (before anything ran — which is
@@ -510,11 +544,7 @@ fn apc_is_stripped_unless_passthrough() {
     // mode this is asserted *inverted*: if a future Windows build stops
     // stripping APC, it fails and tells us the feature is unblocked there too.
     // With passthrough on (GIEST_TEST_PASSTHROUGH=1) APC must arrive verbatim.
-    let out = run(&emit(&cat(&[
-        ESC.into(),
-        lit("_Ggiest-apc-probe"),
-        st(),
-    ])));
+    let out = run(&emit(&cat(&[ESC.into(), lit("_Ggiest-apc-probe"), st()])));
     let text = String::from_utf8_lossy(&out);
     eprintln!("ConPTY emitted {} bytes: {:?}", out.len(), text);
     if requested_passthrough() {
@@ -556,7 +586,10 @@ fn ghosttys_bash_integration_injects_through_the_wsl_bootstrap() {
     let env = vec![
         ("SHELL".to_string(), "/usr/bin/bash".to_string()),
         ("GIEST_SHELL_INTEGRATION_DIR".to_string(), msys),
-        ("GHOSTTY_SHELL_FEATURES".to_string(), "cursor:blink,title".to_string()),
+        (
+            "GHOSTTY_SHELL_FEATURES".to_string(),
+            "cursor:blink,title".to_string(),
+        ),
     ];
     let args = vec![
         "-c".to_string(),
@@ -590,9 +623,24 @@ fn ghosttys_bash_integration_injects_through_the_wsl_bootstrap() {
     }
     let _ = std::fs::remove_dir_all(&root);
     let text = String::from_utf8_lossy(&out);
-    assert!(contains(&out, b"\x1b]133;A"), "ghostty.bash never marked a prompt: {text:?}");
-    assert!(contains(&out, b"\x1b]133;C"), "no pre-exec C mark: {text:?}");
-    assert!(contains(&out, b"\x1b]133;D;1"), "`false` did not report exit 1: {text:?}");
-    assert!(contains(&out, b"\x1b[5 q"), "no bar cursor at the prompt: {text:?}");
-    assert!(contains(&out, b"\x1b]7;kitty-shell-cwd://"), "no cwd report: {text:?}");
+    assert!(
+        contains(&out, b"\x1b]133;A"),
+        "ghostty.bash never marked a prompt: {text:?}"
+    );
+    assert!(
+        contains(&out, b"\x1b]133;C"),
+        "no pre-exec C mark: {text:?}"
+    );
+    assert!(
+        contains(&out, b"\x1b]133;D;1"),
+        "`false` did not report exit 1: {text:?}"
+    );
+    assert!(
+        contains(&out, b"\x1b[5 q"),
+        "no bar cursor at the prompt: {text:?}"
+    );
+    assert!(
+        contains(&out, b"\x1b]7;kitty-shell-cwd://"),
+        "no cwd report: {text:?}"
+    );
 }

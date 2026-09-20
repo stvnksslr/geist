@@ -103,7 +103,11 @@ mod imp {
         // handle is correct for SND_FILENAME. SND_ASYNC returns immediately, so
         // the UI thread never blocks on playback.
         unsafe {
-            f(wide.as_ptr(), std::ptr::null_mut(), SND_FILENAME | SND_ASYNC | SND_NODEFAULT);
+            f(
+                wide.as_ptr(),
+                std::ptr::null_mut(),
+                SND_FILENAME | SND_ASYNC | SND_NODEFAULT,
+            );
         }
     }
 

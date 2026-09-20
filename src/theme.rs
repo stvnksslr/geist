@@ -62,7 +62,11 @@ pub const TAB_TINT_H: f32 = 3.0;
 /// Linear blend between two sRGB colors. `t = 0` is `a`, `t = 1` is `b`.
 pub fn mix(a: Rgb, b: Rgb, t: f32) -> Rgb {
     let t = t.clamp(0.0, 1.0);
-    let ch = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round().clamp(0.0, 255.0) as u8;
+    let ch = |x: u8, y: u8| {
+        (x as f32 + (y as f32 - x as f32) * t)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    };
     Rgb::new(ch(a.r, b.r), ch(a.g, b.g), ch(a.b, b.b))
 }
 
@@ -498,7 +502,10 @@ mod tests {
     #[test]
     fn window_theme_overrides_the_background() {
         let mut cfg = dark_cfg();
-        assert!(chrome(&cfg).dark, "a dark background should give dark chrome");
+        assert!(
+            chrome(&cfg).dark,
+            "a dark background should give dark chrome"
+        );
 
         cfg.window_theme = WindowTheme::Light;
         let ch = chrome(&cfg);
@@ -528,7 +535,10 @@ mod tests {
         let out = lift(raw, bg, 4.5);
         assert!(crate::engine::contrast_ratio(out, bg) >= 4.5);
         // …but stays blue rather than becoming white.
-        assert!(out.b > out.r, "lift should preserve the hue's dominant channel");
+        assert!(
+            out.b > out.r,
+            "lift should preserve the hue's dominant channel"
+        );
         assert!(out != Rgb::new(255, 255, 255));
         // An already-passing color is returned untouched.
         let fine = Rgb::new(0x9a, 0xb8, 0xff);

@@ -866,7 +866,9 @@ impl Action {
         if let Some(rest) = s.strip_prefix("goto_tab:") {
             // Ghostty's goto_tab is 1-based; giest indexes tabs from 0.
             let n: u16 = rest.trim().parse().ok()?;
-            return n.checked_sub(1).map(|i| Action::GotoTab(i.min(u8::MAX as u16) as u8));
+            return n
+                .checked_sub(1)
+                .map(|i| Action::GotoTab(i.min(u8::MAX as u16) as u8));
         }
         if let Some(rest) = s.strip_prefix("scroll_to_row:") {
             return rest.trim().parse().ok().map(Action::ScrollToRow);
@@ -930,7 +932,11 @@ impl Action {
             // amount a `u16` — both required, nothing defaulted.
             let (dir, amount) = rest.split_once(',')?;
             let dir = SplitDir::from_name(dir.trim())?;
-            return amount.trim().parse::<u16>().ok().map(|n| Action::ResizeSplit(dir, n));
+            return amount
+                .trim()
+                .parse::<u16>()
+                .ok()
+                .map(|n| Action::ResizeSplit(dir, n));
         }
         if let Some(rest) = s.strip_prefix("goto_window:") {
             return match rest.trim() {
@@ -1166,7 +1172,11 @@ pub fn catalog_with_entries(
 /// The fixed command set (no per-profile rows). See [`build_catalog`] for the
 /// catalog the palette actually shows.
 pub fn base_catalog() -> Vec<Command> {
-    BASE_ACTIONS.iter().cloned().map(Command::from_action).collect()
+    BASE_ACTIONS
+        .iter()
+        .cloned()
+        .map(Command::from_action)
+        .collect()
 }
 
 /// The full palette catalog: the [`base_catalog`] plus one "New Tab with
@@ -1420,7 +1430,10 @@ mod tests {
         // for giest's toggle — accepting it would make a transferred config do
         // something other than what it says.
         assert_eq!(Action::from_name("search"), None);
-        assert_eq!(Action::from_name("toggle_search"), Some(Action::ToggleSearch));
+        assert_eq!(
+            Action::from_name("toggle_search"),
+            Some(Action::ToggleSearch)
+        );
     }
 
     #[test]
@@ -1472,7 +1485,11 @@ mod tests {
         ];
         for (name, dir) in ALL {
             let parsed = Action::from_name(&format!("adjust_selection:{name}"));
-            assert_eq!(parsed, Some(Action::AdjustSelection(*dir)), "parsing {name}");
+            assert_eq!(
+                parsed,
+                Some(Action::AdjustSelection(*dir)),
+                "parsing {name}"
+            );
             // Round-trips, which is what keeps the two name tables in sync.
             assert_eq!(parsed.unwrap().name(), format!("adjust_selection:{name}"));
         }
@@ -1596,8 +1613,10 @@ mod tests {
         let names = vec!["PowerShell".to_string(), "Command Prompt".to_string()];
         let cat = build_catalog(&names);
         assert_eq!(cat.len(), base_catalog().len() + 2);
-        assert!(cat.iter().any(|c| c.title == "New Tab with PowerShell"
-            && c.action == Action::NewTabWithProfile(0)));
+        assert!(
+            cat.iter().any(|c| c.title == "New Tab with PowerShell"
+                && c.action == Action::NewTabWithProfile(0))
+        );
         assert!(cat.iter().any(|c| c.title == "New Tab with Command Prompt"
             && c.action == Action::NewTabWithProfile(1)));
     }

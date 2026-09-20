@@ -119,7 +119,11 @@ pub fn search_rows_regex(rows: &[RowText], re: &regex::Regex) -> Vec<Match> {
             if m.is_empty() {
                 continue;
             }
-            out.push(span(origin, byte_to_char[m.start()], byte_to_char[m.end() - 1]));
+            out.push(span(
+                origin,
+                byte_to_char[m.start()],
+                byte_to_char[m.end() - 1],
+            ));
         }
     });
     out
@@ -440,7 +444,15 @@ mod tests {
     fn regex_matches_across_a_soft_wrap_but_not_a_hard_break() {
         let w = wrapped_rows(&["hello wond", "erful"], 0);
         let m = search_rows_regex(&w, &re("won.*ful"));
-        assert_eq!(m, vec![Match { row: 0, col_start: 6, end_row: 1, col_end: 4 }]);
+        assert_eq!(
+            m,
+            vec![Match {
+                row: 0,
+                col_start: 6,
+                end_row: 1,
+                col_end: 4
+            }]
+        );
         // `$` anchors to the logical line, so it isn't the wrap point…
         assert!(search_rows_regex(&w, &re("wond$")).is_empty());
         // …while unwrapped rows are separate lines.
@@ -453,9 +465,20 @@ mod tests {
     fn regex_maps_multibyte_chars_to_their_columns() {
         // '世' is 3 UTF-8 bytes and 2 columns wide: byte offsets must not leak
         // into column numbers.
-        let row = RowText { row: 0, chars: vec!['世', 'x', 'y'], cols: vec![0, 2, 3], wrapped: false };
-        assert_eq!(search_rows_regex(&[row.clone()], &re("xy")), vec![Match::single(0, 2, 3)]);
-        assert_eq!(search_rows_regex(&[row], &re("世x")), vec![Match::single(0, 0, 2)]);
+        let row = RowText {
+            row: 0,
+            chars: vec!['世', 'x', 'y'],
+            cols: vec![0, 2, 3],
+            wrapped: false,
+        };
+        assert_eq!(
+            search_rows_regex(&[row.clone()], &re("xy")),
+            vec![Match::single(0, 2, 3)]
+        );
+        assert_eq!(
+            search_rows_regex(&[row], &re("世x")),
+            vec![Match::single(0, 0, 2)]
+        );
     }
 
     #[test]
@@ -464,7 +487,10 @@ mod tests {
         assert!(search_rows_regex(&r, &re("a*")).is_empty());
         let r = rows(&["Foo foo"], 0);
         assert_eq!(search_rows_regex(&r, &re("foo")).len(), 2);
-        assert_eq!(search_rows_regex(&r, &compile_regex("foo", true).unwrap()).len(), 1);
+        assert_eq!(
+            search_rows_regex(&r, &compile_regex("foo", true).unwrap()).len(),
+            1
+        );
         // Unicode folding in regex mode (the substring search folds ASCII only).
         let r = rows(&["ÉCOLE"], 0);
         assert_eq!(search_rows_regex(&r, &re("école")).len(), 1);
@@ -520,16 +546,27 @@ mod tests {
         // match moved up by ten.
         let shift = row_shift(100, 90);
         assert_eq!(shift, -10);
-        assert_eq!(shifted(Match::single(50, 1, 3), shift), Some(Match::single(40, 1, 3)));
+        assert_eq!(
+            shifted(Match::single(50, 1, 3), shift),
+            Some(Match::single(40, 1, 3))
+        );
         // A match in the rows that were evicted is dropped, not drawn ten lines
         // higher over unrelated text.
         assert_eq!(shifted(Match::single(4, 0, 0), shift), None);
         // A match whose *end* fell off is dropped too.
-        let straddling = Match { row: 12, col_start: 0, end_row: 3, col_end: 0 };
+        let straddling = Match {
+            row: 12,
+            col_start: 0,
+            end_row: 3,
+            col_end: 0,
+        };
         assert_eq!(shifted(straddling, shift), None);
         // Nothing evicted: identity.
         assert_eq!(row_shift(100, 100), 0);
-        assert_eq!(shifted(Match::single(7, 0, 1), 0), Some(Match::single(7, 0, 1)));
+        assert_eq!(
+            shifted(Match::single(7, 0, 1), 0),
+            Some(Match::single(7, 0, 1))
+        );
     }
 
     #[test]

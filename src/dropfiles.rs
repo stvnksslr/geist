@@ -70,7 +70,8 @@ pub fn wsl_path(p: &str) -> String {
 
 fn posix_quote(s: &str) -> String {
     let plain = !s.is_empty()
-        && s.chars().all(|c| c.is_ascii_alphanumeric() || "/._-+:,@%=".contains(c));
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "/._-+:,@%=".contains(c));
     if plain {
         s.to_string()
     } else {
@@ -81,7 +82,8 @@ fn posix_quote(s: &str) -> String {
 fn pwsh_quote(s: &str) -> String {
     let plain = !s.is_empty()
         && !s.starts_with('-')
-        && s.chars().all(|c| c.is_ascii_alphanumeric() || r"\/._-:+=".contains(c));
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || r"\/._-:+=".contains(c));
     if plain {
         s.to_string()
     } else {
@@ -95,8 +97,14 @@ fn cmd_quote(s: &str) -> String {
     // still expand inside quotes but is legal in paths and cannot be escaped
     // on an interactive cmd line, so it is left alone (as Explorer's own
     // drag-to-console does).
-    let needs = s.is_empty() || s.chars().any(|c| c.is_whitespace() || "&()[]{}^=;!'+,`~<>|".contains(c));
-    if needs { format!("\"{s}\"") } else { s.to_string() }
+    let needs = s.is_empty()
+        || s.chars()
+            .any(|c| c.is_whitespace() || "&()[]{}^=;!'+,`~<>|".contains(c));
+    if needs {
+        format!("\"{s}\"")
+    } else {
+        s.to_string()
+    }
 }
 
 /// The text to type for `paths` dropped onto a `kind` shell: each path quoted
@@ -126,9 +134,15 @@ mod tests {
     fn programs_classify() {
         assert_eq!(ShellKind::from_program("pwsh.exe"), ShellKind::PowerShell);
         assert_eq!(ShellKind::from_program("powershell"), ShellKind::PowerShell);
-        assert_eq!(ShellKind::from_program(r"C:\Windows\System32\cmd.exe"), ShellKind::Cmd);
+        assert_eq!(
+            ShellKind::from_program(r"C:\Windows\System32\cmd.exe"),
+            ShellKind::Cmd
+        );
         assert_eq!(ShellKind::from_program("wsl.exe"), ShellKind::Wsl);
-        assert_eq!(ShellKind::from_program(r"C:\Windows\System32\bash.exe"), ShellKind::Wsl);
+        assert_eq!(
+            ShellKind::from_program(r"C:\Windows\System32\bash.exe"),
+            ShellKind::Wsl
+        );
         assert_eq!(ShellKind::from_program("ubuntu2204.exe"), ShellKind::Wsl);
         assert_eq!(
             ShellKind::from_program(r"C:\Program Files\Git\bin\bash.exe"),
@@ -148,19 +162,31 @@ mod tests {
 
     #[test]
     fn powershell_quoting() {
-        assert_eq!(quote_paths(ShellKind::PowerShell, &[r"C:\tmp\a.txt"]), r"C:\tmp\a.txt ");
+        assert_eq!(
+            quote_paths(ShellKind::PowerShell, &[r"C:\tmp\a.txt"]),
+            r"C:\tmp\a.txt "
+        );
         assert_eq!(
             quote_paths(ShellKind::PowerShell, &[r"C:\My Files\it's.txt", r"C:\x"]),
             r"'C:\My Files\it''s.txt' C:\x "
         );
         // `$` and backtick would expand or escape unquoted.
-        assert_eq!(quote_paths(ShellKind::PowerShell, &[r"C:\$x`y"]), r"'C:\$x`y' ");
+        assert_eq!(
+            quote_paths(ShellKind::PowerShell, &[r"C:\$x`y"]),
+            r"'C:\$x`y' "
+        );
     }
 
     #[test]
     fn cmd_quoting() {
-        assert_eq!(quote_paths(ShellKind::Cmd, &[r"C:\tmp\a.txt"]), r"C:\tmp\a.txt ");
-        assert_eq!(quote_paths(ShellKind::Cmd, &[r"C:\My Files\a&b"]), r#""C:\My Files\a&b" "#);
+        assert_eq!(
+            quote_paths(ShellKind::Cmd, &[r"C:\tmp\a.txt"]),
+            r"C:\tmp\a.txt "
+        );
+        assert_eq!(
+            quote_paths(ShellKind::Cmd, &[r"C:\My Files\a&b"]),
+            r#""C:\My Files\a&b" "#
+        );
     }
 
     #[test]
@@ -169,7 +195,13 @@ mod tests {
             quote_paths(ShellKind::Wsl, &[r"C:\Users\me\it's here.txt"]),
             r"'/mnt/c/Users/me/it'\''s here.txt' "
         );
-        assert_eq!(quote_paths(ShellKind::Wsl, &[r"C:\src\main.rs"]), "/mnt/c/src/main.rs ");
-        assert_eq!(quote_paths(ShellKind::Posix, &[r"C:\src\a b"]), "'C:/src/a b' ");
+        assert_eq!(
+            quote_paths(ShellKind::Wsl, &[r"C:\src\main.rs"]),
+            "/mnt/c/src/main.rs "
+        );
+        assert_eq!(
+            quote_paths(ShellKind::Posix, &[r"C:\src\a b"]),
+            "'C:/src/a b' "
+        );
     }
 }

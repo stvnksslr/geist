@@ -80,7 +80,10 @@ pub const DRAG_THRESHOLD: f32 = 4.0;
 
 /// Where a pane's grab handle sits.
 pub fn handle_rect(pane: Rect) -> Rect {
-    let size = Vec2::new(HANDLE_SIZE.x.min(pane.width()), HANDLE_SIZE.y.min(pane.height()));
+    let size = Vec2::new(
+        HANDLE_SIZE.x.min(pane.width()),
+        HANDLE_SIZE.y.min(pane.height()),
+    );
     Rect::from_min_size(Pos2::new(pane.center().x - size.x * 0.5, pane.top()), size)
 }
 
@@ -202,9 +205,15 @@ mod tests {
 
     #[test]
     fn handle_is_centred_on_the_top_edge_and_shrinks_with_the_pane() {
-        assert_eq!(handle_rect(r(0.0, 0.0, 200.0, 100.0)), r(60.0, 0.0, 80.0, 12.0));
+        assert_eq!(
+            handle_rect(r(0.0, 0.0, 200.0, 100.0)),
+            r(60.0, 0.0, 80.0, 12.0)
+        );
         assert_eq!(handle_rect(r(0.0, 0.0, 40.0, 8.0)), r(0.0, 0.0, 40.0, 8.0));
-        assert_eq!(hover_band(r(0.0, 10.0, 200.0, 100.0)), r(0.0, 10.0, 200.0, 20.0));
+        assert_eq!(
+            hover_band(r(0.0, 10.0, 200.0, 100.0)),
+            r(0.0, 10.0, 200.0, 20.0)
+        );
     }
 
     fn two_windows() -> Vec<WindowGeom> {
@@ -213,7 +222,10 @@ mod tests {
                 window: 1,
                 screen: r(100.0, 100.0, 400.0, 300.0),
                 tab: 7,
-                panes: vec![(1, r(0.0, 30.0, 200.0, 270.0)), (2, r(200.0, 30.0, 200.0, 270.0))],
+                panes: vec![
+                    (1, r(0.0, 30.0, 200.0, 270.0)),
+                    (2, r(200.0, 30.0, 200.0, 270.0)),
+                ],
                 strip: Some(r(0.0, 0.0, 400.0, 30.0)),
                 tab_rects: vec![r(0.0, 0.0, 100.0, 30.0), r(100.0, 0.0, 100.0, 30.0)],
             },
@@ -233,16 +245,37 @@ mod tests {
         let g = two_windows();
         assert_eq!(
             resolve(&g, Pos2::new(110.0, 250.0), 1),
-            DropTarget::Pane { window: 1, tab: 7, leaf: 1, zone: Zone::Left }
+            DropTarget::Pane {
+                window: 1,
+                tab: 7,
+                leaf: 1,
+                zone: Zone::Left
+            }
         );
         // The strip, with the index from the tab centres.
-        assert_eq!(resolve(&g, Pos2::new(260.0, 110.0), 1), DropTarget::Strip { window: 1, index: 2 });
-        assert_eq!(resolve(&g, Pos2::new(120.0, 110.0), 1), DropTarget::Strip { window: 1, index: 0 });
+        assert_eq!(
+            resolve(&g, Pos2::new(260.0, 110.0), 1),
+            DropTarget::Strip {
+                window: 1,
+                index: 2
+            }
+        );
+        assert_eq!(
+            resolve(&g, Pos2::new(120.0, 110.0), 1),
+            DropTarget::Strip {
+                window: 1,
+                index: 0
+            }
+        );
         assert_eq!(resolve(&g, Pos2::new(50.0, 50.0), 1), DropTarget::Outside);
         // Only window 2 covers this point.
         assert!(matches!(
             resolve(&g, Pos2::new(650.0, 450.0), 1),
-            DropTarget::Pane { window: 2, leaf: 5, .. }
+            DropTarget::Pane {
+                window: 2,
+                leaf: 5,
+                ..
+            }
         ));
     }
 
@@ -250,14 +283,23 @@ mod tests {
     fn resolve_prefers_the_source_window_where_they_overlap() {
         let g = two_windows();
         let p = Pos2::new(450.0, 300.0); // inside both
-        assert!(matches!(resolve(&g, p, 1), DropTarget::Pane { window: 1, .. }));
-        assert!(matches!(resolve(&g, p, 2), DropTarget::Pane { window: 2, .. }));
+        assert!(matches!(
+            resolve(&g, p, 1),
+            DropTarget::Pane { window: 1, .. }
+        ));
+        assert!(matches!(
+            resolve(&g, p, 2),
+            DropTarget::Pane { window: 2, .. }
+        ));
     }
 
     #[test]
     fn resolve_inside_a_window_but_off_every_target() {
         let mut g = two_windows();
         g[0].panes.clear();
-        assert_eq!(resolve(&g, Pos2::new(110.0, 250.0), 1), DropTarget::Window { window: 1 });
+        assert_eq!(
+            resolve(&g, Pos2::new(110.0, 250.0), 1),
+            DropTarget::Window { window: 1 }
+        );
     }
 }

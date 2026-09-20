@@ -12,13 +12,19 @@ fn a_request_round_trips_over_a_real_named_pipe() {
     // SAFETY (edition 2024 `set_var`): this test binary has one test, so no
     // other thread reads the environment concurrently.
     unsafe {
-        std::env::set_var("GIEST_IPC_PIPE", format!("giest-test-{}", std::process::id()));
+        std::env::set_var(
+            "GIEST_IPC_PIPE",
+            format!("giest-test-{}", std::process::id()),
+        );
     }
     let name = ipc::pipe_name();
 
     // Nobody listening yet: the client must say so, which is what makes a
     // launch fall back to starting its own instance.
-    assert!(matches!(ipc::send(&name, &Request::List), Err(SendError::NoServer)));
+    assert!(matches!(
+        ipc::send(&name, &Request::List),
+        Err(SendError::NoServer)
+    ));
 
     assert!(ipc::start_server(), "first bind claims the name");
     // FILE_FLAG_FIRST_PIPE_INSTANCE: a second server can't slip in.

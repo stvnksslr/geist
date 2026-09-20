@@ -40,7 +40,9 @@ pub fn set_snapshot(text: Option<String>) {
 fn write_snapshot() {
     let text = SNAPSHOT.lock().ok().and_then(|s| s.clone());
     let Some(text) = text else { return };
-    let Some(path) = crate::state::state_path() else { return };
+    let Some(path) = crate::state::state_path() else {
+        return;
+    };
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
@@ -101,7 +103,10 @@ mod imp {
         // by this (the UI) thread, as SetWindowSubclass requires.
         unsafe {
             SetWindowSubclass(hwnd as HWND, subclass, SUBCLASS_ID, 0);
-            RegisterApplicationRestart(args.as_ptr(), super::RESTART_NO_CRASH | super::RESTART_NO_HANG) >= 0
+            RegisterApplicationRestart(
+                args.as_ptr(),
+                super::RESTART_NO_CRASH | super::RESTART_NO_HANG,
+            ) >= 0
         }
     }
 }

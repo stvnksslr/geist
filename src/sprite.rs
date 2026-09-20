@@ -1244,10 +1244,10 @@ fn draw_diagonal_legacy(c: &mut Canvas, m: Metrics, cp: u32) {
             let thick = f64::from(m.line(Weight::Light));
             let corners = CORNER_DIAGONALS[(cp - 0x1FBA0) as usize];
             for (bit, from, to) in [
-                (0b0001u8, (cx, 0.0), (0.0, cy)),  // tl
-                (0b0010, (cx, 0.0), (w, cy)),      // tr
-                (0b0100, (cx, h), (0.0, cy)),      // bl
-                (0b1000, (cx, h), (w, cy)),        // br
+                (0b0001u8, (cx, 0.0), (0.0, cy)), // tl
+                (0b0010, (cx, 0.0), (w, cy)),     // tr
+                (0b0100, (cx, h), (0.0, cy)),     // bl
+                (0b1000, (cx, h), (w, cy)),       // br
             ] {
                 if corners & bit != 0 {
                     c.stroke(&[from, to], thick);
@@ -1731,14 +1731,15 @@ mod tests {
 
     #[test]
     fn every_smooth_mosaic_draws_something() {
-        let m = Metrics { w: 12, h: 26, thickness: 2 };
+        let m = Metrics {
+            w: 12,
+            h: 26,
+            thickness: 2,
+        };
         for cp in 0x1FB3Cu32..=0x1FB67 {
             let ch = char::from_u32(cp).expect("valid");
             let b = buf(ch, m);
-            assert!(
-                b.iter().any(|&v| v > 0),
-                "U+{cp:04X} rendered as nothing"
-            );
+            assert!(b.iter().any(|&v| v > 0), "U+{cp:04X} rendered as nothing");
             assert!(
                 b.iter().any(|&v| v < 0xFF),
                 "U+{cp:04X} filled the whole cell"
@@ -1750,7 +1751,11 @@ mod tests {
     fn a_smooth_mosaic_is_the_wedge_its_pattern_describes() {
         // U+1FB3C is `... / ... / #.. / ##.` — a wedge from two thirds down the
         // left edge to the middle of the bottom. Computed corners, not a glance.
-        let m = Metrics { w: 16, h: 30, thickness: 2 };
+        let m = Metrics {
+            w: 16,
+            h: 30,
+            thickness: 2,
+        };
         let b = buf('\u{1FB3C}', m);
         // Deep inside the wedge, and well outside it.
         assert_eq!(at(&b, m, 0, 29), 0xFF, "bottom-left corner is inside");
@@ -1767,7 +1772,11 @@ mod tests {
         // one exact boundary and the polygon fill computes real areas, so the
         // coverages sum. That is what makes the pair safe to draw as two
         // polygons instead of upstream's fill-then-invert.
-        let m = Metrics { w: 15, h: 29, thickness: 2 };
+        let m = Metrics {
+            w: 15,
+            h: 29,
+            thickness: 2,
+        };
         for (tri, inv) in [
             ('\u{1FB6C}', '\u{1FB68}'),
             ('\u{1FB6D}', '\u{1FB69}'),
@@ -1788,7 +1797,11 @@ mod tests {
 
     #[test]
     fn a_shaded_corner_triangle_is_half_lit_inside_and_dark_outside() {
-        let m = Metrics { w: 16, h: 32, thickness: 2 };
+        let m = Metrics {
+            w: 16,
+            h: 32,
+            thickness: 2,
+        };
         let b = buf('\u{1FB9C}', m); // upper-left half, medium shade
         assert_eq!(at(&b, m, 0, 0), 0x80, "well inside");
         assert_eq!(at(&b, m, 15, 31), 0x00, "well outside");
@@ -1813,7 +1826,11 @@ mod tests {
         // U+1FBAE draws all four; upstream rounds the centre *up* on an odd
         // cell so they cross at a single pixel rather than in a knot. The
         // centre column must be lit on the centre row, and the corners dark.
-        let m = Metrics { w: 15, h: 31, thickness: 1 };
+        let m = Metrics {
+            w: 15,
+            h: 31,
+            thickness: 1,
+        };
         let b = buf('\u{1FBAE}', m);
         let (cx, cy) = (15 / 2 + 1, 31 / 2 + 1);
         assert!(at(&b, m, cx - 1, 0) > 0, "the top vertex is drawn");
@@ -1821,7 +1838,6 @@ mod tests {
         assert_eq!(at(&b, m, 0, 0), 0x00, "the corners stay empty");
         assert_eq!(at(&b, m, 14, 30), 0x00);
     }
-
 
     #[test]
     fn the_sextant_index_skips_exactly_the_two_halves() {
@@ -1834,9 +1850,17 @@ mod tests {
         let patterns: Vec<u32> = (0..=0x3B).map(|k| k + k / 0x14 + 1).collect();
         assert_eq!(patterns.len(), 60);
         assert_eq!(patterns[0], 1, "U+1FB00 is sextant 1 (top-left)");
-        assert_eq!(*patterns.last().expect("last"), 62, "one short of the full block");
+        assert_eq!(
+            *patterns.last().expect("last"),
+            62,
+            "one short of the full block"
+        );
         // Strictly ascending, no repeats, and missing exactly 21 and 42.
-        assert!(patterns.windows(2).all(|w| w[1] == w[0] + 1 || w[1] == w[0] + 2));
+        assert!(
+            patterns
+                .windows(2)
+                .all(|w| w[1] == w[0] + 1 || w[1] == w[0] + 2)
+        );
         let missing: Vec<u32> = (1..=62).filter(|p| !patterns.contains(p)).collect();
         assert_eq!(missing, vec![0b010101, 0b101010]);
     }
@@ -1845,7 +1869,11 @@ mod tests {
     fn a_sextant_fills_exactly_its_share_of_the_cell() {
         // U+1FB00 is the top-left sextant: the left half of the top third, and
         // nothing else. Computed, not eyeballed — 10×21 so the thirds are exact.
-        let m = Metrics { w: 10, h: 21, thickness: 2 };
+        let m = Metrics {
+            w: 10,
+            h: 21,
+            thickness: 2,
+        };
         let b = buf('\u{1FB00}', m);
         for y in 0..m.h {
             for x in 0..m.w {
@@ -1887,11 +1915,19 @@ mod tests {
     #[test]
     fn an_octant_fills_exactly_its_share_of_the_cell() {
         // U+1CD00 is octant 3 — the left half of the second quarter.
-        let m = Metrics { w: 10, h: 20, thickness: 2 };
+        let m = Metrics {
+            w: 10,
+            h: 20,
+            thickness: 2,
+        };
         let b = buf('\u{1CD00}', m);
         for y in 0..m.h {
             for x in 0..m.w {
-                let want = if x < 5 && (5..10).contains(&y) { 0xFF } else { 0x00 };
+                let want = if x < 5 && (5..10).contains(&y) {
+                    0xFF
+                } else {
+                    0x00
+                };
                 assert_eq!(at(&b, m, x, y), want, "pixel ({x},{y})");
             }
         }
@@ -1951,7 +1987,11 @@ mod tests {
     fn the_eighth_blocks_land_on_their_own_eighth() {
         // U+1FB70 is "vertical one eighth block 2" — the *second* of eight
         // columns, `▏` being the first and already a block-elements character.
-        let m = Metrics { w: 16, h: 8, thickness: 1 };
+        let m = Metrics {
+            w: 16,
+            h: 8,
+            thickness: 1,
+        };
         let b = buf('\u{1FB70}', m);
         assert_eq!(row_span(&b, m, 0), vec![2, 3]);
         // The last of the six, position 7.
@@ -1965,17 +2005,21 @@ mod tests {
 
     #[test]
     fn the_diagonal_fills_hatch_the_whole_cell_in_both_directions() {
-        let m = Metrics { w: 16, h: 16, thickness: 1 };
-        for (cp, name) in [('\u{1FB98}', "upper-left to lower-right"), ('\u{1FB99}', "the mirror")] {
+        let m = Metrics {
+            w: 16,
+            h: 16,
+            thickness: 1,
+        };
+        for (cp, name) in [
+            ('\u{1FB98}', "upper-left to lower-right"),
+            ('\u{1FB99}', "the mirror"),
+        ] {
             let b = buf(cp, m);
             // Every row and every column is struck: the hatch reaches all four
             // corners rather than leaving the one the diagonals enter from
             // empty, which is what a naive loop from zero does.
             for y in 0..m.h {
-                assert!(
-                    row_span(&b, m, y).len() > 1,
-                    "{name}: row {y} is bare"
-                );
+                assert!(row_span(&b, m, y).len() > 1, "{name}: row {y} is bare");
             }
             for x in 0..m.w {
                 assert!(!col_span(&b, m, x).is_empty(), "{name}: column {x} is bare");
@@ -1997,7 +2041,11 @@ mod tests {
     fn a_shaded_half_is_partial_coverage_not_a_dither() {
         // Like `░▒▓`, and for the same reason: a dither pattern breaks up at
         // small cell sizes, a coverage value doesn't.
-        let m = Metrics { w: 10, h: 20, thickness: 2 };
+        let m = Metrics {
+            w: 10,
+            h: 20,
+            thickness: 2,
+        };
         let b = buf('\u{1FB8C}', m); // left half medium shade
         assert_eq!(at(&b, m, 0, 0), 0x80);
         assert_eq!(at(&b, m, 4, 19), 0x80);
@@ -2076,7 +2124,10 @@ mod tests {
         let b = buf('═', M);
         let mid = M.h / 2;
         let rows = col_span(&b, M, 0);
-        assert!(!rows.contains(&mid), "the centre of a double line is hollow");
+        assert!(
+            !rows.contains(&mid),
+            "the centre of a double line is hollow"
+        );
         assert_eq!(rows.len(), (M.thickness * 2) as usize);
     }
 
@@ -2246,7 +2297,10 @@ mod tests {
     fn every_ported_codepoint_draws_something() {
         // A gap in the table would be a character that silently vanishes: it is
         // claimed by `covers` (so the font is skipped) but draws nothing.
-        for cp in (0x2500..=0x259F).chain(0xE0B0..=0xE0BF).chain([0xE0D2, 0xE0D4]) {
+        for cp in (0x2500..=0x259F)
+            .chain(0xE0B0..=0xE0BF)
+            .chain([0xE0D2, 0xE0D4])
+        {
             let ch = char::from_u32(cp).unwrap();
             if !covers(ch) {
                 continue;
@@ -2277,8 +2331,14 @@ mod tests {
         // '╭' has arms going down and right: its bottom edge sits on the same
         // column as '│', its right edge on the same row as '─'.
         let b = buf('╭', M);
-        assert!(solid_col(&b, x).contains(&(M.h - 1)), "reaches the bottom edge");
-        assert!(solid_row(&b, y).contains(&(M.w - 1)), "reaches the right edge");
+        assert!(
+            solid_col(&b, x).contains(&(M.h - 1)),
+            "reaches the bottom edge"
+        );
+        assert!(
+            solid_row(&b, y).contains(&(M.w - 1)),
+            "reaches the right edge"
+        );
         assert!(vline.contains(&(M.h - 1)) && hline.contains(&(M.w - 1)));
 
         // '╯' goes up and left.
@@ -2331,7 +2391,11 @@ mod tests {
                 .chunks(M.w as usize)
                 .flat_map(|row| row.iter().rev().copied())
                 .collect();
-            assert_eq!(mirrored, b, "U+{:04X} vs U+{:04X}", left as u32, right as u32);
+            assert_eq!(
+                mirrored, b,
+                "U+{:04X} vs U+{:04X}",
+                left as u32, right as u32
+            );
         }
     }
 
@@ -2339,7 +2403,9 @@ mod tests {
     fn a_solid_powerline_triangle_covers_half_the_cell() {
         // Area rather than exact pixels: robust under supersampling, and it
         // catches a mirrored or degenerate polygon immediately.
-        for ch in ['\u{E0B0}', '\u{E0B2}', '\u{E0B8}', '\u{E0BA}', '\u{E0BC}', '\u{E0BE}'] {
+        for ch in [
+            '\u{E0B0}', '\u{E0B2}', '\u{E0B8}', '\u{E0BA}', '\u{E0BC}', '\u{E0BE}',
+        ] {
             let b = buf(ch, M);
             let area: f64 = b.iter().map(|&v| v as f64 / 255.0).sum();
             let half = (M.w * M.h) as f64 / 2.0;

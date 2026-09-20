@@ -23,7 +23,11 @@
 pub const VERB: &str = "giest";
 
 /// The three class keys the verb is added to.
-pub const CLASSES: [&str; 3] = [r"Directory\Background\shell", r"Directory\shell", r"Drive\shell"];
+pub const CLASSES: [&str; 3] = [
+    r"Directory\Background\shell",
+    r"Directory\shell",
+    r"Drive\shell",
+];
 
 /// The menu label.
 pub const LABEL: &str = "Open giest here";
@@ -73,7 +77,13 @@ mod imp {
             result: *mut Hkey,
             disposition: *mut u32,
         ) -> i32;
-        fn RegOpenKeyExW(key: Hkey, subkey: *const u16, options: u32, sam: u32, result: *mut Hkey) -> i32;
+        fn RegOpenKeyExW(
+            key: Hkey,
+            subkey: *const u16,
+            options: u32,
+            sam: u32,
+            result: *mut Hkey,
+        ) -> i32;
         fn RegSetValueExW(
             key: Hkey,
             name: *const u16,
@@ -121,11 +131,28 @@ mod imp {
             if RegOpenKeyExW(HKEY_CURRENT_USER, p.as_ptr(), 0, KEY_READ, &mut key) != 0 {
                 return Ok(());
             }
-            let r = RegQueryInfoKeyW(key, n, n.cast(), n.cast(), &mut subkeys, n.cast(), n.cast(), &mut values, n.cast(), n.cast(), n.cast(), n.cast());
+            let r = RegQueryInfoKeyW(
+                key,
+                n,
+                n.cast(),
+                n.cast(),
+                &mut subkeys,
+                n.cast(),
+                n.cast(),
+                &mut values,
+                n.cast(),
+                n.cast(),
+                n.cast(),
+                n.cast(),
+            );
             RegCloseKey(key);
             check(r, path)?;
         }
-        if subkeys == 0 && values == 0 { delete_tree(path) } else { Ok(()) }
+        if subkeys == 0 && values == 0 {
+            delete_tree(path)
+        } else {
+            Ok(())
+        }
     }
 
     /// Whether `HKCU\<path>` exists.
@@ -156,7 +183,10 @@ mod imp {
     }
 
     fn wide(s: &str) -> Vec<u16> {
-        std::ffi::OsStr::new(s).encode_wide().chain(Some(0)).collect()
+        std::ffi::OsStr::new(s)
+            .encode_wide()
+            .chain(Some(0))
+            .collect()
     }
 
     fn check(code: i32, what: &str) -> std::io::Result<()> {
@@ -217,11 +247,26 @@ mod imp {
             let mut len = 0u32;
             let mut ty = 0u32;
             let mut out = None;
-            if RegQueryValueExW(key, np, std::ptr::null_mut(), &mut ty, std::ptr::null_mut(), &mut len) == 0
+            if RegQueryValueExW(
+                key,
+                np,
+                std::ptr::null_mut(),
+                &mut ty,
+                std::ptr::null_mut(),
+                &mut len,
+            ) == 0
                 && ty == REG_SZ
             {
                 let mut buf = vec![0u16; (len as usize).div_ceil(2)];
-                if RegQueryValueExW(key, np, std::ptr::null_mut(), &mut ty, buf.as_mut_ptr() as *mut u8, &mut len) == 0 {
+                if RegQueryValueExW(
+                    key,
+                    np,
+                    std::ptr::null_mut(),
+                    &mut ty,
+                    buf.as_mut_ptr() as *mut u8,
+                    &mut len,
+                ) == 0
+                {
                     let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
                     out = Some(String::from_utf16_lossy(&buf[..end]));
                 }

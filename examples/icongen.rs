@@ -96,11 +96,18 @@ fn main() -> std::io::Result<()> {
         let mut witness = false;
         for p in rgba.chunks_exact(4) {
             if p[3] > 0 && p[3] < 255 {
-                assert_eq!([p[0], p[1], p[2]], tile, "non-tile color on the silhouette at size {size}");
+                assert_eq!(
+                    [p[0], p[1], p[2]],
+                    tile,
+                    "non-tile color on the silhouette at size {size}"
+                );
                 witness |= p[..3].iter().any(|&c| c > p[3]);
             }
         }
-        assert!(size != 256 || witness, "master lost its straight-alpha witness pixel");
+        assert!(
+            size != 256 || witness,
+            "master lost its straight-alpha witness pixel"
+        );
 
         if size == 256 {
             master_png = encode_png(size, &rgba);
@@ -117,6 +124,11 @@ fn main() -> std::io::Result<()> {
     let ico = build_ico(&entries);
     std::fs::write(&ico_path, &ico)?;
     println!("wrote {} ({} bytes)", png_path.display(), master_png.len());
-    println!("wrote {} ({} bytes, {} entries)", ico_path.display(), ico.len(), entries.len());
+    println!(
+        "wrote {} ({} bytes, {} entries)",
+        ico_path.display(),
+        ico.len(),
+        entries.len()
+    );
     Ok(())
 }

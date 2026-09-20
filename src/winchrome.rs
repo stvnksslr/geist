@@ -182,7 +182,13 @@ pub fn caption_buttons(client_w: f32, m: CaptionMetrics) -> Vec<(CaptionHit, [f3
 /// whose top few pixels resize), and it is absent when maximized — a maximized
 /// window has no border to drag, and its top edge sits at the screen edge where
 /// the band would steal clicks from the tabs and buttons.
-pub fn caption_hit(x: f32, y: f32, client_w: f32, m: CaptionMetrics, maximized: bool) -> CaptionHit {
+pub fn caption_hit(
+    x: f32,
+    y: f32,
+    client_w: f32,
+    m: CaptionMetrics,
+    maximized: bool,
+) -> CaptionHit {
     if !maximized && y >= 0.0 && y < m.frame {
         // Corners get the diagonal cursor over a frame-sized span, like the
         // side borders' own corner zones.
@@ -302,7 +308,11 @@ mod imp {
             // SAFETY: a live HWND owned by this thread.
             unsafe {
                 let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-                let want = if hidden { ex | WS_EX_TOOLWINDOW } else { ex & !WS_EX_TOOLWINDOW };
+                let want = if hidden {
+                    ex | WS_EX_TOOLWINDOW
+                } else {
+                    ex & !WS_EX_TOOLWINDOW
+                };
                 if want != ex {
                     let visible = IsWindowVisible(hwnd) != 0;
                     if visible {
@@ -434,7 +444,8 @@ mod imp {
     /// `ITipInvocation`: `IUnknown`, then its single method.
     #[repr(C)]
     struct TipVtbl {
-        query_interface: unsafe extern "system" fn(*mut c_void, *const Guid, *mut *mut c_void) -> i32,
+        query_interface:
+            unsafe extern "system" fn(*mut c_void, *const Guid, *mut *mut c_void) -> i32,
         add_ref: unsafe extern "system" fn(*mut c_void) -> u32,
         release: unsafe extern "system" fn(*mut c_void) -> u32,
         toggle: unsafe extern "system" fn(*mut c_void, HWND) -> i32,
@@ -649,7 +660,15 @@ mod caption_imp {
         fn GetSystemMetricsForDpi(index: i32, dpi: u32) -> i32;
         fn GetWindowLongPtrW(hwnd: HWND, index: i32) -> isize;
         fn GetClassNameW(hwnd: HWND, buf: *mut u16, len: i32) -> i32;
-        fn SetWindowPos(hwnd: HWND, after: HWND, x: i32, y: i32, cx: i32, cy: i32, flags: u32) -> i32;
+        fn SetWindowPos(
+            hwnd: HWND,
+            after: HWND,
+            x: i32,
+            y: i32,
+            cx: i32,
+            cy: i32,
+            flags: u32,
+        ) -> i32;
         fn PostMessageW(hwnd: HWND, msg: u32, wp: usize, lp: isize) -> i32;
         fn TrackMouseEvent(tme: *mut TrackMouseEventS) -> i32;
     }
@@ -719,7 +738,10 @@ mod caption_imp {
     }
 
     fn lparam_point(lp: isize) -> (i32, i32) {
-        ((lp & 0xFFFF) as i16 as i32, ((lp >> 16) & 0xFFFF) as i16 as i32)
+        (
+            (lp & 0xFFFF) as i16 as i32,
+            ((lp >> 16) & 0xFFFF) as i16 as i32,
+        )
     }
 
     unsafe extern "system" fn subclass(
@@ -758,7 +780,12 @@ mod caption_imp {
                         frame_px(hwnd),
                         IsZoomed(hwnd) != 0,
                     );
-                    params.rgrc[0] = RECT { left: l, top: t, right: rr, bottom: b };
+                    params.rgrc[0] = RECT {
+                        left: l,
+                        top: t,
+                        right: rr,
+                        bottom: b,
+                    };
                     r
                 }
                 WM_NCHITTEST => {
@@ -875,7 +902,9 @@ mod caption_imp {
             1
         }
         if caption_state::style() == CaptionStyle::Native
-            && INSTALLED.lock().is_ok_and(|s| s.as_ref().is_none_or(|s| s.is_empty()))
+            && INSTALLED
+                .lock()
+                .is_ok_and(|s| s.as_ref().is_none_or(|s| s.is_empty()))
         {
             return; // never used: never subclass anything
         }
@@ -914,7 +943,12 @@ pub fn sync_window_flags(_hidden_from_taskbar: bool, _shadow: bool) {}
 mod tests {
     use super::*;
 
-    const G: StepGeometry = StepGeometry { cell_w: 10.0, cell_h: 20.0, extra_w: 4.0, extra_h: 30.0 };
+    const G: StepGeometry = StepGeometry {
+        cell_w: 10.0,
+        cell_h: 20.0,
+        extra_w: 4.0,
+        extra_h: 30.0,
+    };
 
     #[test]
     fn snaps_the_dragged_edge_down_to_whole_cells() {
@@ -944,7 +978,12 @@ mod tests {
     }
 
     /// 150% scaling: 48px strip, 69px buttons, 12px frame, 1200px client.
-    const M: CaptionMetrics = CaptionMetrics { strip_h: 48.0, button_w: 69.0, frame: 12.0, buttons: true };
+    const M: CaptionMetrics = CaptionMetrics {
+        strip_h: 48.0,
+        button_w: 69.0,
+        frame: 12.0,
+        buttons: true,
+    };
 
     #[test]
     fn caption_buttons_are_right_aligned_min_max_close() {
@@ -957,7 +996,16 @@ mod tests {
                 (CaptionHit::Close, [1131.0, 0.0, 1200.0, 48.0]),
             ]
         );
-        assert!(caption_buttons(1200.0, CaptionMetrics { buttons: false, ..M }).is_empty());
+        assert!(
+            caption_buttons(
+                1200.0,
+                CaptionMetrics {
+                    buttons: false,
+                    ..M
+                }
+            )
+            .is_empty()
+        );
         assert!(caption_buttons(1200.0, CaptionMetrics { strip_h: 0.0, ..M }).is_empty());
     }
 
@@ -994,8 +1042,14 @@ mod tests {
 
     #[test]
     fn hidden_style_has_no_buttons_but_keeps_the_band() {
-        let h = CaptionMetrics { buttons: false, ..M };
-        assert_eq!(caption_hit(1100.0, 30.0, 1200.0, h, false), CaptionHit::Client);
+        let h = CaptionMetrics {
+            buttons: false,
+            ..M
+        };
+        assert_eq!(
+            caption_hit(1100.0, 30.0, 1200.0, h, false),
+            CaptionHit::Client
+        );
         assert_eq!(caption_hit(1100.0, 3.0, 1200.0, h, false), CaptionHit::Top);
     }
 
@@ -1015,7 +1069,10 @@ mod tests {
         let after = [108, 131, 1092, 892];
         assert_eq!(nc_client_rect(after, 100, 8, false), [108, 100, 1092, 892]);
         // Maximized: the window hangs `frame` past the monitor top.
-        assert_eq!(nc_client_rect([0, 23, 1920, 1032], -8, 8, true), [0, 0, 1920, 1032]);
+        assert_eq!(
+            nc_client_rect([0, 23, 1920, 1032], -8, 8, true),
+            [0, 0, 1920, 1032]
+        );
     }
 
     #[test]

@@ -7,8 +7,8 @@ mod atlas;
 use std::ops::Range;
 use std::sync::Arc;
 
-use atlas::{Atlas, FallbackGlyph, ShapedGlyph};
 pub use atlas::FontSpec;
+use atlas::{Atlas, FallbackGlyph, ShapedGlyph};
 use eframe::egui_wgpu::{self, CallbackTrait};
 use eframe::wgpu::{self, util::DeviceExt};
 use unicode_width::UnicodeWidthChar;
@@ -512,7 +512,11 @@ pub fn device_lost() -> Option<String> {
 /// and the only remedy (a lost wgpu device cannot be revived in place).
 pub fn device_lost_message(reason: &str, msg: &str) -> String {
     let msg = msg.trim();
-    let detail = if msg.is_empty() { String::new() } else { format!(": {msg}") };
+    let detail = if msg.is_empty() {
+        String::new()
+    } else {
+        format!(": {msg}")
+    };
     format!(
         "The GPU device was lost ({reason}){detail}.\n\nThis is usually a driver reset or \
          crash. Your shells are still running, but giest cannot draw them any more \
@@ -837,7 +841,11 @@ fn chain_targets(
     sampler: &wgpu::Sampler,
     uniform: &wgpu::Buffer,
     size: (u32, u32),
-) -> ([wgpu::Texture; 2], [wgpu::TextureView; 2], [wgpu::BindGroup; 2]) {
+) -> (
+    [wgpu::Texture; 2],
+    [wgpu::TextureView; 2],
+    [wgpu::BindGroup; 2],
+) {
     let make = || {
         device.create_texture(&wgpu::TextureDescriptor {
             label: Some("custom-shader-target"),
@@ -985,7 +993,12 @@ impl GpuResources {
                 return [r, g, b, alpha];
             }
             let s = crate::colorspace::p3_to_srgb(c);
-            return [s.r as f32 / 255.0, s.g as f32 / 255.0, s.b as f32 / 255.0, alpha];
+            return [
+                s.r as f32 / 255.0,
+                s.g as f32 / 255.0,
+                s.b as f32 / 255.0,
+                alpha,
+            ];
         }
         if self.is_srgb {
             [
@@ -1037,7 +1050,8 @@ impl GpuResources {
                     continue;
                 }
                 let d = &p.data;
-                if d.width == 0 || d.height == 0 || d.rgba.len() < (d.width * d.height * 4) as usize {
+                if d.width == 0 || d.height == 0 || d.rgba.len() < (d.width * d.height * 4) as usize
+                {
                     continue;
                 }
                 let entry = self.img_cache.entry(key).or_insert_with(|| {
@@ -1356,7 +1370,10 @@ impl GpuResources {
         let [ax, ay, aw, ah] = frame.area_px;
         let mut bg_instance = None;
         if let Some(bg) = frame.bg_image.as_ref() {
-            let tex = (bg.source.width.max(1) as f32, bg.source.height.max(1) as f32);
+            let tex = (
+                bg.source.width.max(1) as f32,
+                bg.source.height.max(1) as f32,
+            );
             let dest = crate::bgimage::dest_rect((aw, ah), tex, bg.fit, bg.position);
             bg_instance = Some(out.len() as u32);
             out.push(Instance {
@@ -1409,29 +1426,28 @@ impl GpuResources {
             // the pane's instance stream is the entire z implementation.
             // `snap.images` arrives sorted by (z, image_id), so each layer is a
             // contiguous run and the within-layer order is already right.
-            let emit_images = |layer: ImageLayer,
-                                   out: &mut Vec<Instance>,
-                                   pane_images: &mut Vec<(u32, u32)>| {
-                for p in snap.images.iter().filter(|p| image_layer(p.z) == layer) {
-                    if !image_visible(p.row, p.grid_rows, snap.rows, has_over) {
-                        continue;
+            let emit_images =
+                |layer: ImageLayer, out: &mut Vec<Instance>, pane_images: &mut Vec<(u32, u32)>| {
+                    for p in snap.images.iter().filter(|p| image_layer(p.z) == layer) {
+                        if !image_visible(p.row, p.grid_rows, snap.rows, has_over) {
+                            continue;
+                        }
+                        // The slot `sync_images` assigned this frame; none means
+                        // the image had no usable pixels, so there is nothing to draw.
+                        let Some(&slot) = img_slot_of.get(&(Arc::as_ptr(&p.data) as usize)) else {
+                            continue;
+                        };
+                        pane_images.push((out.len() as u32, slot));
+                        out.push(Instance {
+                            rect: image_rect([ox, oy], (cw, ch), p, shift),
+                            uv: image_uv(p),
+                            color: [1.0, 1.0, 1.0, 1.0],
+                            mode: 5,
+                            param: 0,
+                            extra: [0.0; 2],
+                        });
                     }
-                    // The slot `sync_images` assigned this frame; none means
-                    // the image had no usable pixels, so there is nothing to draw.
-                    let Some(&slot) = img_slot_of.get(&(Arc::as_ptr(&p.data) as usize)) else {
-                        continue;
-                    };
-                    pane_images.push((out.len() as u32, slot));
-                    out.push(Instance {
-                        rect: image_rect([ox, oy], (cw, ch), p, shift),
-                        uv: image_uv(p),
-                        color: [1.0, 1.0, 1.0, 1.0],
-                        mode: 5,
-                        param: 0,
-                        extra: [0.0; 2],
-                    });
-                }
-            };
+                };
 
             // Below the cell backgrounds (kitty z < i32::MIN/2).
             emit_images(ImageLayer::BelowBg, &mut out, &mut pane_images);
@@ -1452,7 +1468,11 @@ impl GpuResources {
             // `cursor-opacity` applies only to a focused pane's cursor; an
             // unfocused one stays fully opaque (Ghostty's cursor.zig does the
             // same). `cursor_hollow` is exactly "this pane isn't focused".
-            let cursor_alpha = if pane.cursor_hollow { 1.0 } else { frame.cursor_opacity };
+            let cursor_alpha = if pane.cursor_hollow {
+                1.0
+            } else {
+                frame.cursor_opacity
+            };
 
             // Per-cell search-highlight mask (0 = none, 1 = match, 2 = current),
             // built only when a search is active so the common path pays nothing.
@@ -1476,7 +1496,9 @@ impl GpuResources {
                         (false, false)
                     };
                     let (fg, mut bg) = if is_cursor_cell {
-                        let fg = frame.cursor_text.map_or(cell.bg, |t| t.resolve(cell.fg, cell.bg));
+                        let fg = frame
+                            .cursor_text
+                            .map_or(cell.bg, |t| t.resolve(cell.fg, cell.bg));
                         (fg, snap.cursor_color)
                     } else {
                         (cell.fg, cell.bg)
@@ -1622,10 +1644,7 @@ impl GpuResources {
                     // A blank, concealed (invisible), or blink-off cell draws no
                     // glyph and breaks the run so the next visible cell starts a
                     // fresh one. The background/decorations were already emitted.
-                    if cell.text.is_empty()
-                        || cell.invisible
-                        || (cell.blink && pane.blink_hidden)
-                    {
+                    if cell.text.is_empty() || cell.invisible || (cell.blink && pane.blink_hidden) {
                         cur_open = false;
                         continue;
                     }
@@ -1724,25 +1743,24 @@ impl GpuResources {
                         // precedence Ghostty's `CodepointResolver` gives its
                         // sprite face. A font's versions are drawn to its em box,
                         // so they leave seams between cells at any line spacing.
-                        let placed: Option<(_, u32)> = if let Some(g) =
-                            self.atlas.sprite_glyph(ch_first, queue)
-                        {
-                            Some((g, 1))
-                        } else if let Some(g) = self.atlas.mapped_glyph(ch_first, span, queue) {
-                            // `font-codepoint-map` beats the primary font:
-                            // forcing a face is the point of the option.
-                            Some((g, 1))
-                        } else if sg.glyph_id != 0 {
-                            self.atlas
-                                .glyph(sg.glyph_id, r.style, constraint, span, queue)
-                                .map(|g| (g, 1))
-                        } else {
-                            match self.atlas.glyph_fallback(ch_first, span, queue) {
-                                Some(FallbackGlyph::Mono(g)) => Some((g, 1)),
-                                Some(FallbackGlyph::Color(g)) => Some((g, 2)),
-                                None => None,
-                            }
-                        };
+                        let placed: Option<(_, u32)> =
+                            if let Some(g) = self.atlas.sprite_glyph(ch_first, queue) {
+                                Some((g, 1))
+                            } else if let Some(g) = self.atlas.mapped_glyph(ch_first, span, queue) {
+                                // `font-codepoint-map` beats the primary font:
+                                // forcing a face is the point of the option.
+                                Some((g, 1))
+                            } else if sg.glyph_id != 0 {
+                                self.atlas
+                                    .glyph(sg.glyph_id, r.style, constraint, span, queue)
+                                    .map(|g| (g, 1))
+                            } else {
+                                match self.atlas.glyph_fallback(ch_first, span, queue) {
+                                    Some(FallbackGlyph::Mono(g)) => Some((g, 1)),
+                                    Some(FallbackGlyph::Color(g)) => Some((g, 2)),
+                                    None => None,
+                                }
+                            };
                         let Some((g, mode)) = placed else {
                             continue;
                         };
@@ -2266,14 +2284,23 @@ mod tests {
         // Cell pixel offsets (kitty X=/Y=) shift within the origin cell.
         p.x_offset = 4;
         p.y_offset = 7;
-        assert_eq!(image_rect([100.0, 50.0], (10.0, 20.0), &p, 0.0), [134.0, 97.0, 40.0, 40.0]);
+        assert_eq!(
+            image_rect([100.0, 50.0], (10.0, 20.0), &p, 0.0),
+            [134.0, 97.0, 40.0, 40.0]
+        );
 
         // The smooth-scroll shift moves images exactly like the text.
-        assert_eq!(image_rect([100.0, 50.0], (10.0, 20.0), &p, 6.0), [134.0, 103.0, 40.0, 40.0]);
+        assert_eq!(
+            image_rect([100.0, 50.0], (10.0, 20.0), &p, 6.0),
+            [134.0, 103.0, 40.0, 40.0]
+        );
 
         // A negative row (origin scrolled above the viewport) is legal.
         let p = placement(0, -1);
-        assert_eq!(image_rect([0.0, 0.0], (10.0, 20.0), &p, 0.0), [0.0, -20.0, 40.0, 40.0]);
+        assert_eq!(
+            image_rect([0.0, 0.0], (10.0, 20.0), &p, 0.0),
+            [0.0, -20.0, 40.0, 40.0]
+        );
     }
 
     #[test]
@@ -2334,7 +2361,12 @@ mod tests {
         // Adjacent images produce no zero-length range between them.
         assert_eq!(
             check(&[(12, 1), (13, 2)]),
-            vec![(10..12, None), (12..13, Some(1)), (13..14, Some(2)), (14..20, None)]
+            vec![
+                (10..12, None),
+                (12..13, Some(1)),
+                (13..14, Some(2)),
+                (14..20, None)
+            ]
         );
         // Out-of-range entries are ignored rather than corrupting the tiling.
         assert_eq!(check(&[(3, 9), (99, 9)]), vec![(10..20, None)]);
@@ -2354,14 +2386,18 @@ mod tests {
         let o = 0.8;
         // (selected, inverse, bg_explicit) -> alpha, with opacity-cells off.
         for (sel, inv, expl, want) in [
-            (true, false, false, 1.0),  // selection is always opaque
+            (true, false, false, 1.0), // selection is always opaque
             (true, false, true, 1.0),
-            (false, true, false, 1.0),  // reverse video is always opaque
+            (false, true, false, 1.0), // reverse video is always opaque
             (false, true, true, 1.0),
             (false, false, true, 1.0),  // explicit bg is opaque by default
             (false, false, false, 0.0), // default bg draws nothing
         ] {
-            assert_eq!(bg_alpha(sel, inv, expl, o, false), want, "{sel} {inv} {expl}");
+            assert_eq!(
+                bg_alpha(sel, inv, expl, o, false),
+                want,
+                "{sel} {inv} {expl}"
+            );
         }
 
         // With `background-opacity-cells`, only the explicit-bg branch changes.
@@ -2386,8 +2422,16 @@ mod tests {
     fn bg_alpha_branch_order_is_ghostty_s() {
         // Both rules that force opacity must be tested *before* opacity-cells,
         // otherwise selected/reverse-video cells would go translucent.
-        assert_eq!(bg_alpha(true, false, true, 0.3, true), 1.0, "selected beats cells");
-        assert_eq!(bg_alpha(false, true, true, 0.3, true), 1.0, "inverse beats cells");
+        assert_eq!(
+            bg_alpha(true, false, true, 0.3, true),
+            1.0,
+            "selected beats cells"
+        );
+        assert_eq!(
+            bg_alpha(false, true, true, 0.3, true),
+            1.0,
+            "inverse beats cells"
+        );
     }
 
     #[test]
@@ -2412,8 +2456,18 @@ mod tests {
     #[test]
     fn search_mask_marks_match_and_current_spans() {
         let hl = vec![
-            SearchHighlight { row: 0, col_start: 1, col_end: 3, current: false },
-            SearchHighlight { row: 1, col_start: 0, col_end: 0, current: true },
+            SearchHighlight {
+                row: 0,
+                col_start: 1,
+                col_end: 3,
+                current: false,
+            },
+            SearchHighlight {
+                row: 1,
+                col_start: 0,
+                col_end: 0,
+                current: true,
+            },
         ];
         let m = build_search_mask(&hl, 4, 2);
         // Row 0 cols 1..=3 are plain matches (1); col 0 untouched.
@@ -2429,8 +2483,18 @@ mod tests {
     fn search_mask_clamps_out_of_range() {
         // col_end past the last column is clamped; an off-grid row is skipped.
         let hl = vec![
-            SearchHighlight { row: 0, col_start: 2, col_end: 99, current: true },
-            SearchHighlight { row: 5, col_start: 0, col_end: 1, current: false },
+            SearchHighlight {
+                row: 0,
+                col_start: 2,
+                col_end: 99,
+                current: true,
+            },
+            SearchHighlight {
+                row: 5,
+                col_start: 0,
+                col_end: 1,
+                current: false,
+            },
         ];
         let m = build_search_mask(&hl, 3, 1);
         assert_eq!(m, vec![0, 0, 2]);

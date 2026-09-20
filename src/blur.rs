@@ -75,9 +75,9 @@ mod imp {
     use std::sync::OnceLock;
     use windows_sys::Win32::Foundation::{FALSE, HWND};
     use windows_sys::Win32::Graphics::Dwm::{
-        DWMSBT_MAINWINDOW, DWMSBT_NONE, DWMSBT_TRANSIENTWINDOW, DWMWA_SYSTEMBACKDROP_TYPE,
-        DWMWA_USE_IMMERSIVE_DARK_MODE, DwmEnableBlurBehindWindow, DwmSetWindowAttribute,
-        DWM_BLURBEHIND, DWM_BB_ENABLE,
+        DWM_BB_ENABLE, DWM_BLURBEHIND, DWMSBT_MAINWINDOW, DWMSBT_NONE, DWMSBT_TRANSIENTWINDOW,
+        DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE, DwmEnableBlurBehindWindow,
+        DwmSetWindowAttribute,
     };
     use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
 
@@ -121,8 +121,11 @@ mod imp {
             if user32.is_null() {
                 return None;
             }
-            GetProcAddress(user32, c"SetWindowCompositionAttribute".as_ptr() as *const u8)
-                .map(|p| p as usize)
+            GetProcAddress(
+                user32,
+                c"SetWindowCompositionAttribute".as_ptr() as *const u8,
+            )
+            .map(|p| p as usize)
         }))?;
         // SAFETY: the address came from GetProcAddress for this exact export, so
         // transmuting it to that export's signature is the intended use.
@@ -217,7 +220,6 @@ mod imp {
         // the title bar and the tab strip below it can never disagree.
         set_dark_mode(hwnd, crate::theme::prefers_dark(tint));
 
-
         if !blur.enabled() {
             // Clear both mechanisms, so toggling the key off in a config reload
             // actually takes the backdrop away.
@@ -289,25 +291,43 @@ mod tests {
     #[test]
     fn backdrop_maps_intensity_to_two_buckets() {
         // Disabled.
-        assert_eq!(Backdrop::for_blur(BackgroundBlur::Off, false), Backdrop::Off);
-        assert_eq!(Backdrop::for_blur(BackgroundBlur::Radius(0), false), Backdrop::Off);
+        assert_eq!(
+            Backdrop::for_blur(BackgroundBlur::Off, false),
+            Backdrop::Off
+        );
+        assert_eq!(
+            Backdrop::for_blur(BackgroundBlur::Radius(0), false),
+            Backdrop::Off
+        );
 
         // Low intensities take the subtler effect, higher ones the stronger.
-        assert_eq!(Backdrop::for_blur(BackgroundBlur::Radius(5), false), Backdrop::AccentBlur);
+        assert_eq!(
+            Backdrop::for_blur(BackgroundBlur::Radius(5), false),
+            Backdrop::AccentBlur
+        );
         assert_eq!(
             Backdrop::for_blur(BackgroundBlur::Radius(10), false),
             Backdrop::AccentAcrylic
         );
         // Ghostty's `true` is intensity 20, which must reach acrylic.
-        assert_eq!(Backdrop::for_blur(BackgroundBlur::On, false), Backdrop::AccentAcrylic);
+        assert_eq!(
+            Backdrop::for_blur(BackgroundBlur::On, false),
+            Backdrop::AccentAcrylic
+        );
         assert_eq!(
             Backdrop::for_blur(BackgroundBlur::Radius(255), false),
             Backdrop::AccentAcrylic
         );
 
         // The untinted system-attribute fallback mirrors the same split.
-        assert_eq!(Backdrop::for_blur(BackgroundBlur::Radius(5), true), Backdrop::SystemMica);
-        assert_eq!(Backdrop::for_blur(BackgroundBlur::On, true), Backdrop::SystemAcrylic);
+        assert_eq!(
+            Backdrop::for_blur(BackgroundBlur::Radius(5), true),
+            Backdrop::SystemMica
+        );
+        assert_eq!(
+            Backdrop::for_blur(BackgroundBlur::On, true),
+            Backdrop::SystemAcrylic
+        );
         assert_eq!(Backdrop::for_blur(BackgroundBlur::Off, true), Backdrop::Off);
     }
 }

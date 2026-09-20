@@ -26,7 +26,11 @@ pub fn set(text: &str) {
 
 /// The PRIMARY contents, or `None` if nothing has been selected yet.
 pub fn get() -> Option<String> {
-    PRIMARY.lock().ok().filter(|p| !p.is_empty()).map(|p| p.clone())
+    PRIMARY
+        .lock()
+        .ok()
+        .filter(|p| !p.is_empty())
+        .map(|p| p.clone())
 }
 
 #[cfg(test)]

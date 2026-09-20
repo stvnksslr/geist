@@ -1781,8 +1781,17 @@ impl Terminal<'_, '_> {
     /// `ghostty_terminal_paste` (giest-local): a kitty paste event when mode
     /// 5522 is on and a clipboard-read handler is installed, otherwise the
     /// text framed per mode 2004. Output goes to the `on_pty_write` handler.
-    pub fn paste(&mut self, text: &str, source: PasteSource, allow_unsafe: bool) -> Result<PasteOutcome> {
-        unsafe extern "C" fn reader(ud: *mut std::ffi::c_void, _mime: ffi::String, w: ffi::Writer) -> bool {
+    pub fn paste(
+        &mut self,
+        text: &str,
+        source: PasteSource,
+        allow_unsafe: bool,
+    ) -> Result<PasteOutcome> {
+        unsafe extern "C" fn reader(
+            ud: *mut std::ffi::c_void,
+            _mime: ffi::String,
+            w: ffi::Writer,
+        ) -> bool {
             // SAFETY: `ud` is the `&str` passed below, alive for the call.
             let text = unsafe { &*ud.cast::<&str>() };
             match w.write {
@@ -1808,12 +1817,17 @@ impl Terminal<'_, '_> {
             allow_unsafe,
         };
         let mut written = false;
-        let code = unsafe { ffi::ghostty_terminal_paste(self.inner.as_raw(), &paste, &mut written) };
+        let code =
+            unsafe { ffi::ghostty_terminal_paste(self.inner.as_raw(), &paste, &mut written) };
         if code == ffi::Result::REJECTED {
             return Ok(PasteOutcome::Rejected);
         }
         from_result(code)?;
-        Ok(if written { PasteOutcome::Written } else { PasteOutcome::Empty })
+        Ok(if written {
+            PasteOutcome::Written
+        } else {
+            PasteOutcome::Empty
+        })
     }
 }
 

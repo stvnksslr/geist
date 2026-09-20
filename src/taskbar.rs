@@ -138,12 +138,14 @@ mod imp {
         unregister_tab: unsafe extern "system" fn(*mut c_void, isize) -> i32,
         set_tab_order: unsafe extern "system" fn(*mut c_void, isize, isize) -> i32,
         set_tab_active: unsafe extern "system" fn(*mut c_void, isize, isize, u32) -> i32,
-        thumb_bar_add_buttons: unsafe extern "system" fn(*mut c_void, isize, u32, *mut c_void) -> i32,
+        thumb_bar_add_buttons:
+            unsafe extern "system" fn(*mut c_void, isize, u32, *mut c_void) -> i32,
         thumb_bar_update_buttons:
             unsafe extern "system" fn(*mut c_void, isize, u32, *mut c_void) -> i32,
         thumb_bar_set_image_list: unsafe extern "system" fn(*mut c_void, isize, *mut c_void) -> i32,
         /// Slot 18: `SetOverlayIcon(HWND, HICON, LPCWSTR)`.
-        set_overlay_icon: unsafe extern "system" fn(*mut c_void, isize, *mut c_void, *const u16) -> i32,
+        set_overlay_icon:
+            unsafe extern "system" fn(*mut c_void, isize, *mut c_void, *const u16) -> i32,
     }
 
     #[repr(C)]
@@ -300,8 +302,14 @@ mod imp {
         // silently, so pin the layout: 3 IUnknown + 5 ITaskbarList + 1
         // ITaskbarList2 + 10 ITaskbarList3 slots, SetOverlayIcon the last.
         let p = std::mem::size_of::<usize>();
-        assert_eq!(std::mem::offset_of!(ITaskbarList3Vtbl, set_progress_value), 9 * p);
-        assert_eq!(std::mem::offset_of!(ITaskbarList3Vtbl, set_overlay_icon), 18 * p);
+        assert_eq!(
+            std::mem::offset_of!(ITaskbarList3Vtbl, set_progress_value),
+            9 * p
+        );
+        assert_eq!(
+            std::mem::offset_of!(ITaskbarList3Vtbl, set_overlay_icon),
+            18 * p
+        );
         assert_eq!(std::mem::size_of::<ITaskbarList3Vtbl>(), 19 * p);
     }
 
@@ -422,7 +430,10 @@ mod tests {
     fn wire_states_map_to_taskbar_states() {
         let f = |s, v| Progress::from_report(report(s, v), 0);
         assert_eq!(f(ProgressState::Remove, None), Progress::None);
-        assert_eq!(f(ProgressState::Indeterminate, None), Progress::Indeterminate);
+        assert_eq!(
+            f(ProgressState::Indeterminate, None),
+            Progress::Indeterminate
+        );
         assert_eq!(f(ProgressState::Set, Some(42)), Progress::Normal(42));
         assert_eq!(f(ProgressState::Error, Some(42)), Progress::Error(42));
         assert_eq!(f(ProgressState::Pause, Some(42)), Progress::Paused(42));

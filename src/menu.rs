@@ -34,9 +34,7 @@ impl MenuId {
             MenuId::SplitDown => Action::SplitDown,
             MenuId::SplitUp => Action::SplitUp,
             MenuId::ResetTerminal => Action::ResetTerminal,
-            MenuId::ToggleInspector => {
-                Action::Inspector(crate::inspector::InspectorMode::Toggle)
-            }
+            MenuId::ToggleInspector => Action::Inspector(crate::inspector::InspectorMode::Toggle),
             MenuId::ToggleReadonly => Action::ToggleReadonly,
             MenuId::ChangeTabTitle => Action::PromptTabTitle,
             MenuId::ChangeTerminalTitle => Action::PromptSurfaceTitle,
@@ -57,7 +55,12 @@ pub enum MenuItem {
 }
 
 fn item(id: MenuId, label: &'static str) -> MenuItem {
-    MenuItem::Item { id, label, enabled: true, checked: false }
+    MenuItem::Item {
+        id,
+        label,
+        enabled: true,
+        checked: false,
+    }
 }
 
 /// The menu for a pane. `has_selection` enables Copy; `on_link` adds Copy URL
@@ -143,9 +146,12 @@ mod tests {
         let find = |m: &[MenuItem], want: MenuId| {
             m.iter()
                 .find_map(|i| match i {
-                    MenuItem::Item { id, enabled, checked, .. } if *id == want => {
-                        Some((*enabled, *checked))
-                    }
+                    MenuItem::Item {
+                        id,
+                        enabled,
+                        checked,
+                        ..
+                    } if *id == want => Some((*enabled, *checked)),
                     _ => None,
                 })
                 .unwrap()
@@ -161,8 +167,18 @@ mod tests {
     #[test]
     fn items_route_through_the_keybind_actions() {
         assert_eq!(MenuId::SplitLeft.action(), Some(Action::SplitLeft));
-        assert_eq!(MenuId::ChangeTerminalTitle.action(), Some(Action::PromptSurfaceTitle));
-        assert_eq!(MenuId::ChangeTabTitle.action(), Some(Action::PromptTabTitle));
-        assert_eq!(MenuId::Copy.action(), None, "copy acts on the clicked pane directly");
+        assert_eq!(
+            MenuId::ChangeTerminalTitle.action(),
+            Some(Action::PromptSurfaceTitle)
+        );
+        assert_eq!(
+            MenuId::ChangeTabTitle.action(),
+            Some(Action::PromptTabTitle)
+        );
+        assert_eq!(
+            MenuId::Copy.action(),
+            None,
+            "copy acts on the clicked pane directly"
+        );
     }
 }

@@ -285,7 +285,11 @@ mod tests {
 
     #[test]
     fn mode_names_round_trip() {
-        for m in [InspectorMode::Toggle, InspectorMode::Show, InspectorMode::Hide] {
+        for m in [
+            InspectorMode::Toggle,
+            InspectorMode::Show,
+            InspectorMode::Hide,
+        ] {
             assert_eq!(InspectorMode::from_name(m.name()), Some(m));
         }
         assert_eq!(InspectorMode::from_name("open"), None);
@@ -355,7 +359,10 @@ mod tests {
         assert_eq!(log.io().count(), MAX_IO);
         // The oldest survivor is #11, and the sequence numbers say so.
         assert_eq!(log.io().next().expect("head").seq, 11);
-        assert_eq!(log.io().next_back().expect("tail").seq, (MAX_IO + 10) as u64);
+        assert_eq!(
+            log.io().next_back().expect("tail").seq,
+            (MAX_IO + 10) as u64
+        );
     }
 
     #[test]

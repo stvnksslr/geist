@@ -132,7 +132,10 @@ impl DecscusrScanner {
                 if self.space {
                     self.decscusr = false;
                 } else {
-                    self.param = self.param.saturating_mul(10).saturating_add((b - b'0') as u32);
+                    self.param = self
+                        .param
+                        .saturating_mul(10)
+                        .saturating_add((b - b'0') as u32);
                 }
             }
             // Parameter separator: note a mode-12 param, then start the next one.

@@ -256,7 +256,11 @@ impl ShellFeatures {
     pub fn wsl_env_value(&self, cursor_blink: bool) -> Option<String> {
         let mut parts = Vec::new();
         if self.cursor {
-            parts.push(if cursor_blink { "cursor:blink" } else { "cursor:steady" });
+            parts.push(if cursor_blink {
+                "cursor:blink"
+            } else {
+                "cursor:steady"
+            });
         }
         if self.path {
             parts.push("path");
@@ -367,7 +371,8 @@ const PWSH_TITLE: &str = r#"  if ($p) {
 /// session's OSC 7 parser tolerates), the optional title / bar cursor, the
 /// visible `path>` prompt, then B (prompt end / input start).
 fn cmd_prompt(si: &Integration) -> String {
-    let mut s = String::from("prompt $E]133;D$E\\$E]133;A;cl=line$E\\$E]7;file://%COMPUTERNAME%/$P$E\\");
+    let mut s =
+        String::from("prompt $E]133;D$E\\$E]133;A;cl=line$E\\$E]7;file://%COMPUTERNAME%/$P$E\\");
     if si.features.title {
         s.push_str("$E]2;$P$E\\");
     }
@@ -424,15 +429,35 @@ function global:prompt {
 /// so a bare `giest.exe` needs no install layout. Paths are relative to the
 /// `shell-integration` dir; upstream license headers travel with the files.
 const SI_FILES: &[(&str, &str)] = &[
-    ("giest-wsl.sh", include_str!("../assets/shell-integration/giest-wsl.sh")),
-    ("LICENSE-ghostty", include_str!("../assets/shell-integration/LICENSE-ghostty")),
-    ("bash/ghostty.bash", include_str!("../assets/shell-integration/bash/ghostty.bash")),
-    ("bash/bash-preexec.sh", include_str!("../assets/shell-integration/bash/bash-preexec.sh")),
-    ("zsh/.zshenv", include_str!("../assets/shell-integration/zsh/.zshenv")),
-    ("zsh/ghostty-integration", include_str!("../assets/shell-integration/zsh/ghostty-integration")),
+    (
+        "giest-wsl.sh",
+        include_str!("../assets/shell-integration/giest-wsl.sh"),
+    ),
+    (
+        "LICENSE-ghostty",
+        include_str!("../assets/shell-integration/LICENSE-ghostty"),
+    ),
+    (
+        "bash/ghostty.bash",
+        include_str!("../assets/shell-integration/bash/ghostty.bash"),
+    ),
+    (
+        "bash/bash-preexec.sh",
+        include_str!("../assets/shell-integration/bash/bash-preexec.sh"),
+    ),
+    (
+        "zsh/.zshenv",
+        include_str!("../assets/shell-integration/zsh/.zshenv"),
+    ),
+    (
+        "zsh/ghostty-integration",
+        include_str!("../assets/shell-integration/zsh/ghostty-integration"),
+    ),
     (
         "fish/vendor_conf.d/ghostty-shell-integration.fish",
-        include_str!("../assets/shell-integration/fish/vendor_conf.d/ghostty-shell-integration.fish"),
+        include_str!(
+            "../assets/shell-integration/fish/vendor_conf.d/ghostty-shell-integration.fish"
+        ),
     ),
     (
         "elvish/lib/ghostty-integration.elv",
@@ -565,9 +590,18 @@ mod tests {
         assert!(PWSH_SHELL_HOOK.contains("]133;B"));
         // The cmd prompt argument carries the same marks (alongside OSC 7).
         let args = Profile::new("Command Prompt", "cmd.exe").launch_args();
-        let prompt = args.iter().find(|a| a.contains("prompt")).expect("cmd prompt arg");
-        assert!(prompt.contains("]133;A"), "cmd prompt missing OSC 133 A: {prompt}");
-        assert!(prompt.contains("]133;B"), "cmd prompt missing OSC 133 B: {prompt}");
+        let prompt = args
+            .iter()
+            .find(|a| a.contains("prompt"))
+            .expect("cmd prompt arg");
+        assert!(
+            prompt.contains("]133;A"),
+            "cmd prompt missing OSC 133 A: {prompt}"
+        );
+        assert!(
+            prompt.contains("]133;B"),
+            "cmd prompt missing OSC 133 B: {prompt}"
+        );
         assert!(prompt.contains("]7;"), "cmd prompt should still emit OSC 7");
         // Both opt in to `cursor-click-to-move` (line editors that take arrows).
         assert!(PWSH_SHELL_HOOK.contains("]133;A;cl=line"));
@@ -580,8 +614,14 @@ mod tests {
         // an exit code; cmd cannot.
         assert!(PWSH_SHELL_HOOK.contains("]133;D;$code"));
         let args = Profile::new("Command Prompt", "cmd.exe").launch_args();
-        let prompt = args.iter().find(|a| a.contains("prompt")).expect("cmd prompt arg");
-        assert!(prompt.contains("]133;D"), "cmd prompt missing OSC 133 D: {prompt}");
+        let prompt = args
+            .iter()
+            .find(|a| a.contains("prompt"))
+            .expect("cmd prompt arg");
+        assert!(
+            prompt.contains("]133;D"),
+            "cmd prompt missing OSC 133 D: {prompt}"
+        );
     }
 
     #[test]
@@ -626,7 +666,10 @@ mod tests {
     /// Decode a pwsh `-EncodedCommand` launch back to the hook text.
     fn decoded_hook(l: &Launch) -> String {
         let bytes = STANDARD.decode(&l.args[2]).unwrap();
-        let utf16: Vec<u16> = bytes.chunks(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        let utf16: Vec<u16> = bytes
+            .chunks(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
         String::from_utf16(&utf16).unwrap()
     }
 
@@ -677,7 +720,10 @@ mod tests {
         let l = Profile::new("p", "powershell.exe").launch(&bare, None, &[]);
         let hook = decoded_hook(&l);
         assert!(!hook.contains(" q\")") && !hook.contains("]2;"));
-        assert!(hook.contains("]133;A") && hook.contains("]7;"), "marks stay on");
+        assert!(
+            hook.contains("]133;A") && hook.contains("]7;"),
+            "marks stay on"
+        );
         assert!(!l.reset_cursor_on_submit);
     }
 
@@ -705,11 +751,25 @@ mod tests {
         let get = |k: &str| l.env.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str());
         assert_eq!(get("FOO"), Some("1"));
         assert_eq!(get("GIEST_SHELL_INTEGRATION"), Some("zsh"));
-        assert_eq!(get("GIEST_SHELL_INTEGRATION_DIR"), Some(dir.to_str().unwrap()));
-        assert_eq!(get("GHOSTTY_SHELL_FEATURES"), Some("cursor:blink,path,title"));
+        assert_eq!(
+            get("GIEST_SHELL_INTEGRATION_DIR"),
+            Some(dir.to_str().unwrap())
+        );
+        assert_eq!(
+            get("GHOSTTY_SHELL_FEATURES"),
+            Some("cursor:blink,path,title")
+        );
         let wslenv = get("WSLENV").unwrap();
-        assert!(wslenv.split(':').any(|p| p == "GIEST_SHELL_INTEGRATION_DIR/p"), "{wslenv}");
-        assert!(!l.reset_cursor_on_submit, "the upstream scripts reset it themselves");
+        assert!(
+            wslenv
+                .split(':')
+                .any(|p| p == "GIEST_SHELL_INTEGRATION_DIR/p"),
+            "{wslenv}"
+        );
+        assert!(
+            !l.reset_cursor_on_submit,
+            "the upstream scripts reset it themselves"
+        );
 
         // No extracted dir: launch plainly rather than half-integrated.
         let plain = Profile::new("WSL", "wsl.exe").launch(&Integration::default(), None, &[]);
@@ -717,7 +777,10 @@ mod tests {
         // A WSL profile that already carries args is left alone.
         let mut custom = Profile::new("WSL", "wsl.exe");
         custom.args = vec!["-d".into(), "Ubuntu".into()];
-        assert_eq!(custom.launch(&Integration::default(), Some(dir), &[]).args, custom.args);
+        assert_eq!(
+            custom.launch(&Integration::default(), Some(dir), &[]).args,
+            custom.args
+        );
     }
 
     #[test]
@@ -737,8 +800,14 @@ mod tests {
         // The upstream ssh wrapper calls `$GHOSTTY_BIN_DIR/ghostty +ssh`, which
         // does not exist inside WSL — passing ssh-* would break `ssh` outright.
         let f = ShellFeatures::parse("true").unwrap();
-        assert_eq!(f.wsl_env_value(false).unwrap(), "cursor:steady,path,sudo,title");
-        assert_eq!(ShellFeatures::parse("false").unwrap().wsl_env_value(true), None);
+        assert_eq!(
+            f.wsl_env_value(false).unwrap(),
+            "cursor:steady,path,sudo,title"
+        );
+        assert_eq!(
+            ShellFeatures::parse("false").unwrap().wsl_env_value(true),
+            None
+        );
     }
 
     #[test]
@@ -747,10 +816,16 @@ mod tests {
         let dir = extract_shell_integration(&root).unwrap();
         for rel in ["giest-wsl.sh", "bash/ghostty.bash", "zsh/.zshenv"] {
             let body = std::fs::read(dir.join(rel)).unwrap();
-            assert!(!body.contains(&b'\r'), "{rel} has CR — it would break under sh");
+            assert!(
+                !body.contains(&b'\r'),
+                "{rel} has CR — it would break under sh"
+            );
         }
         let bash = std::fs::read_to_string(dir.join("bash/ghostty.bash")).unwrap();
-        assert!(bash.contains("GNU General Public License"), "license header kept");
+        assert!(
+            bash.contains("GNU General Public License"),
+            "license header kept"
+        );
         // Idempotent.
         assert_eq!(extract_shell_integration(&root), Some(dir));
         let _ = std::fs::remove_dir_all(&root);

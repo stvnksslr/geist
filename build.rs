@@ -29,7 +29,9 @@ fn main() {
         let mut res = winresource::WindowsResource::new();
         res.set_icon("assets/icon.ico");
         if let Err(e) = res.compile() {
-            println!("cargo:warning=giest: could not embed the icon resource ({e}). The exe will build and run, but Explorer and the taskbar will show the default icon. This usually means rc.exe (Windows SDK) is not discoverable.");
+            println!(
+                "cargo:warning=giest: could not embed the icon resource ({e}). The exe will build and run, but Explorer and the taskbar will show the default icon. This usually means rc.exe (Windows SDK) is not discoverable."
+            );
         }
     }
 }

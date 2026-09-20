@@ -8,7 +8,11 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const COMMIT: &str = env!("GIEST_GIT_COMMIT");
 
 /// `debug` or `release`, which matters when someone reports a performance bug.
-pub const PROFILE: &str = if cfg!(debug_assertions) { "debug" } else { "release" };
+pub const PROFILE: &str = if cfg!(debug_assertions) {
+    "debug"
+} else {
+    "release"
+};
 
 /// The links the dialog offers, as (label, URL).
 pub const LINKS: &[(&str, &str)] = &[

@@ -183,7 +183,10 @@ mod tests {
         assert_eq!(scan(&[b"\x1b]133;D;0\x1b\\"]), vec![end(Some(0))]);
         assert_eq!(scan(&[b"\x1b]133;D;1\x1b\\"]), vec![end(Some(1))]);
         // Shells report signals and .NET exceptions as large or negative codes.
-        assert_eq!(scan(&[b"\x1b]133;D;-1073741510\x1b\\"]), vec![end(Some(-1073741510))]);
+        assert_eq!(
+            scan(&[b"\x1b]133;D;-1073741510\x1b\\"]),
+            vec![end(Some(-1073741510))]
+        );
     }
 
     #[test]
@@ -195,7 +198,9 @@ mod tests {
         );
         assert_eq!(
             scan(&[b"\x1b]133;A;aid=9;click_events=1\x07"]),
-            vec![Mark::PromptClick(ClickMode::ClickEvents { relative: false })]
+            vec![Mark::PromptClick(ClickMode::ClickEvents {
+                relative: false
+            })]
         );
         // Options only count on A.
         assert!(scan(&[b"\x1b]133;B;cl=line\x1b\\"]).is_empty());
@@ -213,7 +218,11 @@ mod tests {
             b"\x1b]133;P;k=i\x1b\\",
             b"\x1b]133;I\x1b\\",
         ] {
-            assert!(scan(&[body]).is_empty(), "{:?}", String::from_utf8_lossy(body));
+            assert!(
+                scan(&[body]).is_empty(),
+                "{:?}",
+                String::from_utf8_lossy(body)
+            );
         }
         // …and so are other OSCs that merely start with the same digits.
         assert!(scan(&[b"\x1b]1337;File=x\x07"]).is_empty());
@@ -238,7 +247,10 @@ mod tests {
         assert!(scan(&[b"\x1b]133;Done\x1b\\"]).is_empty());
         assert!(scan(&[b"\x1b]133;Custom\x1b\\"]).is_empty());
         // `C` with options is still C.
-        assert_eq!(scan(&[b"\x1b]133;C;cmdline=ls\x1b\\"]), vec![Mark::CommandStart]);
+        assert_eq!(
+            scan(&[b"\x1b]133;C;cmdline=ls\x1b\\"]),
+            vec![Mark::CommandStart]
+        );
     }
 
     #[test]
@@ -252,7 +264,10 @@ mod tests {
 
     #[test]
     fn handles_sequences_split_across_chunks() {
-        assert_eq!(scan(&[b"\x1b]133;D", b";4", b"2\x1b\\"]), vec![end(Some(42))]);
+        assert_eq!(
+            scan(&[b"\x1b]133;D", b";4", b"2\x1b\\"]),
+            vec![end(Some(42))]
+        );
     }
 
     #[test]
