@@ -2222,10 +2222,10 @@ const SETTERS: &[(&str, Setter)] = &[
     ("font-size", |c, v, d| {
         if v.is_empty() {
             c.font_points = d.font_points;
-        } else if let Ok(n) = v.parse::<f32>() {
-            if n > 0.0 {
-                c.font_points = n;
-            }
+        } else if let Ok(n) = v.parse::<f32>()
+            && n > 0.0
+        {
+            c.font_points = n;
         }
     }),
     // Repeatable, like `palette` and `keybind`: each line appends to the
@@ -3545,10 +3545,10 @@ fn config_value(text: &str, key: &str) -> Option<String> {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        if let Some((k, v)) = line.split_once('=') {
-            if k.trim() == key {
-                found = Some(unquote(v.trim()).to_string());
-            }
+        if let Some((k, v)) = line.split_once('=')
+            && k.trim() == key
+        {
+            found = Some(unquote(v.trim()).to_string());
         }
     }
     found
@@ -3577,10 +3577,10 @@ fn select_theme_variant(spec: &str) -> String {
 /// Expand a leading `~/` or `~\` (or a bare `~`) to `%USERPROFILE%`, as
 /// upstream expands `~` in theme paths. Anything else is returned verbatim.
 fn expand_home(p: &str) -> PathBuf {
-    if p == "~" {
-        if let Some(h) = home_dir() {
-            return h;
-        }
+    if p == "~"
+        && let Some(h) = home_dir()
+    {
+        return h;
     }
     if let Some(rest) = p.strip_prefix("~/").or_else(|| p.strip_prefix(r"~\"))
         && let Some(h) = home_dir()
@@ -5520,7 +5520,7 @@ mod tests {
         assert_eq!(ms("750ms"), 750);
         assert_eq!(ms("45s"), 45_000);
         // Components add…
-        assert_eq!(ms("1h30m"), 5_400_000_u64.min(60_000));
+        assert_eq!(ms("1h30m"), 60_000);
         // …and repeat rather than overwrite (1h1h == 2h), though both clamp here.
         assert_eq!(ms("2s500ms"), 2_500);
         // A bare integer is milliseconds (a giest superset).

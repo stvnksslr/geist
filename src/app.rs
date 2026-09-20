@@ -2228,21 +2228,22 @@ impl Window {
         if bell.system {
             crate::bell::system_alert();
         }
-        if bell.audio {
-            if let Some(raw) = self.config.bell_audio_path.as_deref() {
-                let dir = crate::config::config_path();
-                let dir = dir.as_deref().and_then(|p| p.parent());
-                if let Some(path) = crate::bell::resolve_audio_path(raw, dir) {
-                    crate::bell::play_audio(&path);
-                }
+        if bell.audio
+            && let Some(raw) = self.config.bell_audio_path.as_deref()
+        {
+            let dir = crate::config::config_path();
+            let dir = dir.as_deref().and_then(|p| p.parent());
+            if let Some(path) = crate::bell::resolve_audio_path(raw, dir) {
+                crate::bell::play_audio(&path);
             }
         }
         // Ghostty requests attention only when the window is *unfocused* — a
         // taskbar flash on the window you're already looking at is just noise.
-        if bell.attention && !ctx.input(|i| i.focused) {
-            if let Some(hwnd) = self.hwnd {
-                crate::bell::request_attention(hwnd);
-            }
+        if bell.attention
+            && !ctx.input(|i| i.focused)
+            && let Some(hwnd) = self.hwnd
+        {
+            crate::bell::request_attention(hwnd);
         }
         if bell.title {
             self.bell_title = true;
@@ -2758,10 +2759,10 @@ impl Window {
         if modal.should_close() {
             decision = Some(false);
         }
-        if let Some(allow) = decision {
-            if let Some(s) = self.tabs[active].root.payload_mut(leaf_id) {
-                s.resolve_clipboard(allow);
-            }
+        if let Some(allow) = decision
+            && let Some(s) = self.tabs[active].root.payload_mut(leaf_id)
+        {
+            s.resolve_clipboard(allow);
         }
     }
 
@@ -2811,16 +2812,16 @@ impl Window {
                     modifiers,
                     ..
                 } = event
+                    && modifiers.ctrl
+                    && !modifiers.shift
                 {
-                    if modifiers.ctrl && !modifiers.shift {
-                        match key {
-                            egui::Key::Equals | egui::Key::Plus => {
-                                target = Some(self.font_points + 1.0)
-                            }
-                            egui::Key::Minus => target = Some(self.font_points - 1.0),
-                            egui::Key::Num0 => target = Some(self.config.font_points),
-                            _ => {}
+                    match key {
+                        egui::Key::Equals | egui::Key::Plus => {
+                            target = Some(self.font_points + 1.0)
                         }
+                        egui::Key::Minus => target = Some(self.font_points - 1.0),
+                        egui::Key::Num0 => target = Some(self.config.font_points),
+                        _ => {}
                     }
                 }
             }
@@ -3132,7 +3133,7 @@ impl Window {
 
     /// Whether the quick terminal is showing or sliding in (not sliding out).
     fn quick_shown(&self) -> bool {
-        self.quick_visible && !self.quick_anim.is_some_and(|a| !a.showing)
+        self.quick_visible && self.quick_anim.is_none_or(|a| a.showing)
     }
 
     /// Show or hide the quick terminal, sliding when
@@ -4514,31 +4515,31 @@ impl Window {
             Action::Copy => {
                 let toast = self.config.app_notifications.clipboard_copy;
                 let win_id = self.window_id;
-                if let Some(s) = self.focused_session_mut() {
-                    if let Some(text) = s.copy_text() {
-                        ctx.copy_text(text);
-                        s.clear_selection();
-                        if toast {
-                            push_toast(ctx, win_id, "Copied to clipboard");
-                        }
+                if let Some(s) = self.focused_session_mut()
+                    && let Some(text) = s.copy_text()
+                {
+                    ctx.copy_text(text);
+                    s.clear_selection();
+                    if toast {
+                        push_toast(ctx, win_id, "Copied to clipboard");
                     }
                 }
             }
             Action::Paste => {
-                if let Some(text) = session::read_clipboard() {
-                    if let Some(s) = self.focused_session_mut() {
-                        s.paste_str(&text);
-                    }
+                if let Some(text) = session::read_clipboard()
+                    && let Some(s) = self.focused_session_mut()
+                {
+                    s.paste_str(&text);
                 }
             }
             // Strictly the emulated PRIMARY: unlike middle-click's default it
             // does not fall back to the clipboard, since `paste_from_clipboard`
             // already exists for that.
             Action::PasteFromSelection => {
-                if let Some(text) = crate::primary::get() {
-                    if let Some(s) = self.focused_session_mut() {
-                        s.paste_str(&text);
-                    }
+                if let Some(text) = crate::primary::get()
+                    && let Some(s) = self.focused_session_mut()
+                {
+                    s.paste_str(&text);
                 }
             }
             Action::SelectAll => {
@@ -4968,9 +4969,9 @@ impl Window {
             return;
         };
         let pane = pane.1;
-        if !self
+        if self
             .focused_session()
-            .is_some_and(|s| s.inspector().is_some())
+            .is_none_or(|s| s.inspector().is_none())
         {
             return;
         }
@@ -5696,9 +5697,7 @@ impl Window {
                                 );
 
                                 let show_close = is_active || resp.hovered();
-                                let fill = if is_active {
-                                    chrome.fill_active
-                                } else if resp.is_pointer_button_down_on() {
+                                let fill = if is_active || resp.is_pointer_button_down_on() {
                                     chrome.fill_active
                                 } else if resp.hovered() {
                                     chrome.fill_hover
@@ -6162,15 +6161,15 @@ impl Window {
         if let Some(i) = switch_to {
             self.active_tab = i;
         }
-        if let Some((i, col)) = want_color {
-            if let Some(t) = self.tabs.get_mut(i) {
-                t.color = col;
-            }
+        if let Some((i, col)) = want_color
+            && let Some(t) = self.tabs.get_mut(i)
+        {
+            t.color = col;
         }
-        if let Some((i, val)) = commit_rename {
-            if let Some(t) = self.tabs.get_mut(i) {
-                t.name = val;
-            }
+        if let Some((i, val)) = commit_rename
+            && let Some(t) = self.tabs.get_mut(i)
+        {
+            t.name = val;
         }
         if let Some(i) = want_rename {
             let cur = self
@@ -6454,10 +6453,10 @@ impl Window {
                         .map(|(id, _)| *id)
                 })
             };
-        if self.pane_drag.is_some() || self.tab_drag.is_some() {
-            if let Some(p) = ptr_pos {
-                self.drag_ptr = Some(p);
-            }
+        if (self.pane_drag.is_some() || self.tab_drag.is_some())
+            && let Some(p) = ptr_pos
+        {
+            self.drag_ptr = Some(p);
         }
         // A drag whose pane left this tab (reaped, or the tab switched) is over.
         if self
@@ -6608,10 +6607,10 @@ impl Window {
         } else {
             press_pos
         };
-        if let Some(pos) = click_pos {
-            if let Some(l) = leaves.iter().find(|l| l.rect.contains(pos)) {
-                focus_id = l.id;
-            }
+        if let Some(pos) = click_pos
+            && let Some(l) = leaves.iter().find(|l| l.rect.contains(pos))
+        {
+            focus_id = l.id;
         }
         let (link_osc8, link_url) = (self.config.link_osc8, self.config.link_url);
         // `focus-follows-mouse`: hovering a split focuses it, no click needed.
@@ -6709,10 +6708,8 @@ impl Window {
             // Visual bell: advance/drain this pane's flash every frame (so a BEL
             // isn't lost even if its snapshot transiently fails below).
             let flash = session.bell_flash_alpha(now);
-            if bell_border {
-                if let Some(a) = flash {
-                    bell_flashes.push((leaf_rect, a));
-                }
+            if bell_border && let Some(a) = flash {
+                bell_flashes.push((leaf_rect, a));
             }
             if let Some(a) = session.highlight_alpha(now) {
                 highlights.push((leaf_rect, a));
@@ -6941,14 +6938,15 @@ impl Window {
                     // on every drag step. `primary`/`both` feed the emulated
                     // PRIMARY buffer that middle-click and
                     // `paste_from_selection` read.
-                    if copy_on_select != CopyOnSelect::None && gesture_released {
-                        if let Some(text) = session.copy_text() {
-                            if copy_on_select.primary() {
-                                crate::primary::set(&text);
-                            }
-                            if copy_on_select.clipboard() {
-                                ctx.copy_text(text);
-                            }
+                    if copy_on_select != CopyOnSelect::None
+                        && gesture_released
+                        && let Some(text) = session.copy_text()
+                    {
+                        if copy_on_select.primary() {
+                            crate::primary::set(&text);
+                        }
+                        if copy_on_select.clipboard() {
+                            ctx.copy_text(text);
                         }
                     }
 
@@ -7225,19 +7223,18 @@ impl Window {
             if primary_down
                 && resp.is_pointer_button_down_on()
                 && session.scrollbar_grab().is_none()
+                && let Some(pos) = resp.interact_pointer_pos()
             {
-                if let Some(pos) = resp.interact_pointer_pos() {
-                    let y = pos.y - track.top();
-                    match scrollbar::track_click_page(y, &thumb) {
-                        0 => session.set_scrollbar_grab(Some(y - thumb.top)),
-                        dir => {
-                            // Click in the track pages toward the pointer, eased.
-                            // `scroll_lines` takes a negative delta to move *up*
-                            // into history, which is the same sign convention
-                            // `track_click_page` uses (-1 = above the thumb).
-                            let page = session.page_lines();
-                            session.scroll_lines(dir as isize * page, ch);
-                        }
+                let y = pos.y - track.top();
+                match scrollbar::track_click_page(y, &thumb) {
+                    0 => session.set_scrollbar_grab(Some(y - thumb.top)),
+                    dir => {
+                        // Click in the track pages toward the pointer, eased.
+                        // `scroll_lines` takes a negative delta to move *up*
+                        // into history, which is the same sign convention
+                        // `track_click_page` uses (-1 = above the thumb).
+                        let page = session.page_lines();
+                        session.scroll_lines(dir as isize * page, ch);
                     }
                 }
             }
@@ -8911,7 +8908,7 @@ impl App {
                 } else {
                     back
                 };
-                if let Err(lost) = self.put_moved(ctx, src, moved, &home) {
+                if let Err(lost) = self.put_moved(ctx, src, *moved, &home) {
                     // Unreachable in practice (the source window is still
                     // there); never drop live shells silently, though.
                     let w = &mut self.windows[si];
@@ -8930,7 +8927,7 @@ impl App {
         from: u64,
         moved: Moved<Session>,
         dest: &Dest,
-    ) -> Result<Grab, Moved<Session>> {
+    ) -> Result<Grab, Box<Moved<Session>>> {
         if let Dest::NewWindow { geom } = dest {
             let Some(src) = self
                 .windows
@@ -8938,7 +8935,7 @@ impl App {
                 .find(|w| w.window_id == from)
                 .or_else(|| self.windows.first())
             else {
-                return Err(moved);
+                return Err(Box::new(moved));
             };
             // A fresh window numbers its panes from 1.
             let mut next_id = 1;
@@ -8969,10 +8966,10 @@ impl App {
             });
         }
         let Some(dw) = dest.window() else {
-            return Err(moved);
+            return Err(Box::new(moved));
         };
         let Some(w) = self.windows.iter_mut().find(|w| w.window_id == dw) else {
-            return Err(moved);
+            return Err(Box::new(moved));
         };
         let r = put_grab(
             &mut w.tabs,
@@ -8988,7 +8985,7 @@ impl App {
             let vp = w.viewport_id();
             ctx.send_viewport_cmd_to(vp, egui::ViewportCommand::Focus);
         }
-        r
+        r.map_err(Box::new)
     }
 
     /// A pane or tab drag was released at `screen`: work out what it landed
@@ -9695,9 +9692,7 @@ impl App {
         self.focused = focused;
 
         if self.windows.is_empty() {
-            let Some(mut last) = removed else {
-                return None;
-            };
+            let mut last = removed?;
             let cfg = &last.config;
             if cfg.quit_after_last_window_closed
                 && cfg.quit_after_last_window_closed_delay_ms.is_none()

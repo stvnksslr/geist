@@ -46,9 +46,6 @@ const DECO_DOTTED: u32 = 0;
 const DECO_DASHED: u32 = 1;
 const DECO_CURLY: u32 = 2;
 
-/// Background tint for scrollback-search matches; the *current* (navigated) match
-/// uses the brighter shade so it stands out among the others.
-
 impl Instance {
     fn solid(rect: [f32; 4], color: [f32; 4]) -> Self {
         Self {
@@ -2229,6 +2226,13 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 }
 "#;
 
+/// Resolve an installed font family (or a font file path) to its bytes and
+/// face index — the lookup `font-family` uses. For UI fonts such as
+/// `window-title-font-family`.
+pub fn find_ui_font(family: &str) -> Option<(&'static [u8], u32)> {
+    atlas::find_regular_font(family)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -2499,11 +2503,4 @@ mod tests {
         let m = build_search_mask(&hl, 3, 1);
         assert_eq!(m, vec![0, 0, 2]);
     }
-}
-
-/// Resolve an installed font family (or a font file path) to its bytes and
-/// face index — the lookup `font-family` uses. For UI fonts such as
-/// `window-title-font-family`.
-pub fn find_ui_font(family: &str) -> Option<(&'static [u8], u32)> {
-    atlas::find_regular_font(family)
 }

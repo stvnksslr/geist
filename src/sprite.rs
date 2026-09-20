@@ -2025,7 +2025,7 @@ mod tests {
                 assert!(!col_span(&b, m, x).is_empty(), "{name}: column {x} is bare");
             }
             // It is a hatch, not a solid fill: gaps remain between the lines.
-            assert!(b.iter().any(|&v| v == 0), "{name}: filled solid");
+            assert!(b.contains(&0), "{name}: filled solid");
         }
         // They run opposite ways, so they are not the same picture. (Corners
         // don't discriminate: the hatch overshoots the cell on both sides, so

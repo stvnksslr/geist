@@ -467,10 +467,10 @@ mod imp {
     /// `\\.\pipe\giest-<SID>-<session>`, or `$GIEST_IPC_PIPE` (tests and
     /// side-by-side builds).
     pub fn pipe_name() -> String {
-        if let Ok(n) = std::env::var("GIEST_IPC_PIPE") {
-            if !n.trim().is_empty() {
-                return format!(r"\\.\pipe\{}", n.trim());
-            }
+        if let Ok(n) = std::env::var("GIEST_IPC_PIPE")
+            && !n.trim().is_empty()
+        {
+            return format!(r"\\.\pipe\{}", n.trim());
         }
         let sid = current_user_sid()
             .unwrap_or_else(|| std::env::var("USERNAME").unwrap_or_else(|_| "user".into()));

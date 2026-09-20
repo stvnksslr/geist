@@ -38,7 +38,7 @@ fn encode_png(size: u32, rgba: &[u8]) -> Vec<u8> {
 /// embedding successfully.
 fn bmp_entry(size: u32, rgba: &[u8]) -> Vec<u8> {
     let (w, h) = (size as usize, size as usize);
-    let mask_row = (w + 31) / 32 * 4;
+    let mask_row = w.div_ceil(32) * 4;
     let mut out = Vec::with_capacity(40 + w * h * 4 + h * mask_row);
     out.extend_from_slice(&40u32.to_le_bytes()); // biSize
     out.extend_from_slice(&(w as i32).to_le_bytes()); // biWidth

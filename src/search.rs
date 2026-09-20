@@ -472,7 +472,7 @@ mod tests {
             wrapped: false,
         };
         assert_eq!(
-            search_rows_regex(&[row.clone()], &re("xy")),
+            search_rows_regex(std::slice::from_ref(&row), &re("xy")),
             vec![Match::single(0, 2, 3)]
         );
         assert_eq!(

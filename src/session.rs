@@ -509,8 +509,7 @@ impl Session {
             pty.wake_pending
                 .store(false, std::sync::atomic::Ordering::Release);
         }
-        loop {
-            let Some(pty) = self.pty.as_ref() else { break };
+        while let Some(pty) = self.pty.as_ref() {
             match pty.output.try_recv() {
                 Ok(chunk) => {
                     // `scroll-to-bottom = output` (off by default): new data
@@ -554,11 +553,12 @@ impl Session {
         if self.alive && !self.pty.as_mut().is_some_and(Pty::is_running) {
             self.alive = false;
         }
-        if !self.alive && self.exit.is_none() {
-            if let Some(info) = self.pty.as_mut().and_then(Pty::exit_info) {
-                let hold = exit_hold(self.wait_after_command, self.abnormal_exit_ms, info);
-                self.exit = Some((info, hold));
-            }
+        if !self.alive
+            && self.exit.is_none()
+            && let Some(info) = self.pty.as_mut().and_then(Pty::exit_info)
+        {
+            let hold = exit_hold(self.wait_after_command, self.abnormal_exit_ms, info);
+            self.exit = Some((info, hold));
         }
         let mut responses = self.engine.take_responses();
         // Answer the color queries the VT engine drops. Built *after* the whole
@@ -842,7 +842,7 @@ impl Session {
     /// program's grab unless `mouse-shift-capture` (or the program's
     /// `XTSHIFTESCAPE`) says Shift belongs to the program.
     pub fn mouse_reports_now(&self, shift_held: bool, policy: config::MouseShiftCapture) -> bool {
-        self.is_mouse_tracking() && !(shift_held && !policy.captured(self.shift_escape.capture()))
+        self.is_mouse_tracking() && (!shift_held || policy.captured(self.shift_escape.capture()))
     }
 
     /// Toggle `mouse-reporting` for this pane (Ghostty's
@@ -2071,11 +2071,11 @@ impl Session {
                 // keymap (a composed string is not a key), and still behind the
                 // read-only gate below.
                 egui::Event::Ime(ime) => {
-                    if let Some(text) = self.preedit.apply(ime) {
-                        if dedupe.commit(&text) {
-                            bytes.extend_from_slice(text.as_bytes());
-                            typed = true;
-                        }
+                    if let Some(text) = self.preedit.apply(ime)
+                        && dedupe.commit(&text)
+                    {
+                        bytes.extend_from_slice(text.as_bytes());
+                        typed = true;
                     }
                 }
                 // While composing, Enter/Backspace/arrows edit the preedit —
@@ -2682,6 +2682,10 @@ fn grid_dims(width_pts: f32, height_pts: f32, ppp: f32, cell_w: f32, cell_h: f32
 /// many device pixels *lower* than the pane origin (the partly-visible
 /// `over_row` fills the gap), so a hit test that ignored it would report the
 /// row below the one under the pointer.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "independent scalars from three sources (pointer, pane metrics,               scroll state); a struct would only rename them"
+)]
 fn cell_from_pos(
     rel_x: f32,
     rel_y: f32,

@@ -283,8 +283,8 @@ mod imp {
                     f_icon: 1,
                     x_hotspot: 0,
                     y_hotspot: 0,
-                    hbm_mask: hbm_mask as *mut c_void,
-                    hbm_color: hbm_color as *mut c_void,
+                    hbm_mask,
+                    hbm_color,
                 };
                 let icon = CreateIconIndirect(&info);
                 DeleteObject(hbm_color);

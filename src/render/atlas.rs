@@ -194,9 +194,7 @@ impl ColorFont {
         let face = ttf_parser::Face::parse(bytes, 0).ok()?;
         let raster = FontRef::try_from_slice(bytes).ok()?;
         // Only useful if it actually carries color tables.
-        if face.color_palettes().is_none() {
-            return None;
-        }
+        face.color_palettes()?;
         Some(Self { face, raster })
     }
 }
@@ -264,12 +262,16 @@ impl<'a> ttf_parser::colr::Painter<'a> for LayerCollector {
 /// rasterizing each layer with `raster` and alpha-compositing in source order.
 /// `srgb` converts palette colors to linear so the result matches the sRGB
 /// render target. Returns the RGBA buffer, its size, and its pixel min corner.
+/// A composited color glyph: RGBA pixels, their width and height, and the
+/// (x, y) offset of the bitmap's top-left corner from the glyph origin.
+type ColorBitmap = (Vec<u8>, u32, u32, (f32, f32));
+
 fn composite_color_layers(
     raster: &FontRef<'static>,
     layers: &[(u16, [u8; 4])],
     px: f32,
     srgb: bool,
-) -> Option<(Vec<u8>, u32, u32, (f32, f32))> {
+) -> Option<ColorBitmap> {
     // Rasterize every layer once and find the union pixel bounds.
     let mut rastered: Vec<(Raster, [u8; 4])> = Vec::with_capacity(layers.len());
     let (mut min_x, mut min_y) = (f32::MAX, f32::MAX);
@@ -1343,7 +1345,7 @@ impl Atlas {
             return;
         }
 
-        let mut buf = self.shape_buf.take().unwrap_or_else(UnicodeBuffer::new);
+        let mut buf = self.shape_buf.take().unwrap_or_default();
         buf.push_str(text);
         buf.set_direction(Direction::LeftToRight);
         let glyphs = rustybuzz::shape(&self.shapers[style], &self.features, buf);
@@ -1912,8 +1914,10 @@ mod tests {
     #[test]
     fn adjust_cell_height_centres_the_text_and_moves_the_decorations_with_it() {
         // The line-spacing case: +8px of cell height puts 4 above the text.
-        let mut a = MetricAdjust::default();
-        a.cell_height = crate::config::MetricModifier::Pixels(8);
+        let a = MetricAdjust {
+            cell_height: crate::config::MetricModifier::Pixels(8),
+            ..Default::default()
+        };
         let m = derive_metrics(raw(), &a);
         assert_eq!(m.cell_h, 28.0);
         assert_eq!(m.ascent, 20.0, "half the growth goes above the baseline");
@@ -1929,8 +1933,10 @@ mod tests {
         // percentage adjustment, so applying it afterwards does nothing.
         let mut fractional = raw();
         fractional.advance = 9.6;
-        let mut a = MetricAdjust::default();
-        a.cell_width = crate::config::MetricModifier::Percent(0.04);
+        let mut a = MetricAdjust {
+            cell_width: crate::config::MetricModifier::Percent(0.04),
+            ..Default::default()
+        };
         assert_eq!(derive_metrics(fractional, &a).cell_w, 10.0);
         // …and the same adjustment on a whole-pixel advance still moves it.
         a.cell_width = crate::config::MetricModifier::Pixels(2);
@@ -1939,11 +1945,13 @@ mod tests {
 
     #[test]
     fn positions_and_thicknesses_adjust_independently() {
-        let mut a = MetricAdjust::default();
-        a.underline_position = crate::config::MetricModifier::Pixels(3);
-        a.underline_thickness = crate::config::MetricModifier::Pixels(2);
-        a.strikethrough_position = crate::config::MetricModifier::Pixels(-2);
-        a.overline_position = crate::config::MetricModifier::Pixels(1);
+        let a = MetricAdjust {
+            underline_position: crate::config::MetricModifier::Pixels(3),
+            underline_thickness: crate::config::MetricModifier::Pixels(2),
+            strikethrough_position: crate::config::MetricModifier::Pixels(-2),
+            overline_position: crate::config::MetricModifier::Pixels(1),
+            ..Default::default()
+        };
         let m = derive_metrics(raw(), &a);
         assert_eq!(m.underline_pos, 21.0);
         assert_eq!(m.underline_thick, 3.0);
@@ -1957,9 +1965,11 @@ mod tests {
 
     #[test]
     fn a_thickness_can_never_be_adjusted_to_zero() {
-        let mut a = MetricAdjust::default();
-        a.underline_thickness = crate::config::MetricModifier::Percent(-1.0);
-        a.cursor_thickness = crate::config::MetricModifier::Pixels(-50);
+        let mut a = MetricAdjust {
+            underline_thickness: crate::config::MetricModifier::Percent(-1.0),
+            cursor_thickness: crate::config::MetricModifier::Pixels(-50),
+            ..Default::default()
+        };
         let m = derive_metrics(raw(), &a);
         assert_eq!(m.underline_thick, 1.0);
         assert_eq!(m.cursor_thick, 1.0);
@@ -1993,10 +2003,12 @@ mod tests {
 
     #[test]
     fn adjust_font_baseline_lifts_the_text_off_the_bottom() {
-        let mut a = MetricAdjust::default();
         // Documented as a distance from the *bottom* of the cell, so a positive
         // value moves the text up — which is a *smaller* top-to-baseline ascent.
-        a.font_baseline = crate::config::MetricModifier::Pixels(2);
+        let a = MetricAdjust {
+            font_baseline: crate::config::MetricModifier::Pixels(2),
+            ..Default::default()
+        };
         assert_eq!(derive_metrics(raw(), &a).ascent, 14.0);
     }
 
@@ -2054,11 +2066,11 @@ mod tests {
                 continue;
             };
             any_present = true;
-            if let Ok(f) = FontVec::try_from_vec_and_index(bytes, *idx) {
-                if f.glyph_id('中').0 != 0 {
-                    covered = true;
-                    break;
-                }
+            if let Ok(f) = FontVec::try_from_vec_and_index(bytes, *idx)
+                && f.glyph_id('中').0 != 0
+            {
+                covered = true;
+                break;
             }
         }
         if any_present {
@@ -2790,10 +2802,10 @@ mod coverage {
         pub fn load() -> Self {
             let mut fallbacks = Vec::new();
             for (path, idx) in FALLBACK_FONTS {
-                if let Ok(bytes) = std::fs::read(path) {
-                    if let Ok(f) = FontVec::try_from_vec_and_index(bytes, *idx) {
-                        fallbacks.push(f);
-                    }
+                if let Ok(bytes) = std::fs::read(path)
+                    && let Ok(f) = FontVec::try_from_vec_and_index(bytes, *idx)
+                {
+                    fallbacks.push(f);
                 }
             }
             Self {
@@ -2808,14 +2820,13 @@ mod coverage {
             if crate::sprite::covers(ch) || self.primary.glyph_id(ch).0 != 0 {
                 return true;
             }
-            if let Some(cf) = &self.color {
-                if cf
+            if let Some(cf) = &self.color
+                && cf
                     .face
                     .glyph_index(ch)
                     .is_some_and(|g| cf.face.is_color_glyph(g))
-                {
-                    return true;
-                }
+            {
+                return true;
             }
             self.fallbacks.iter().any(|f| f.glyph_id(ch).0 != 0)
         }

@@ -357,10 +357,11 @@ mod tests {
     }
 
     fn light_cfg() -> Config {
-        let mut c = Config::default();
-        c.bg = Rgb::new(0xfa, 0xfa, 0xfa);
-        c.fg = Rgb::new(0x20, 0x22, 0x26);
-        c
+        Config {
+            bg: Rgb::new(0xfa, 0xfa, 0xfa),
+            fg: Rgb::new(0x20, 0x22, 0x26),
+            ..Default::default()
+        }
     }
 
     #[test]

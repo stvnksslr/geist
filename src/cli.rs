@@ -135,15 +135,15 @@ named pipe and exits; set single-instance = false to always start a new one.";
 
 /// Expand a leading `~` against `home`.
 fn expand_home(v: &str, home: Option<&Path>) -> PathBuf {
-    if v == "~" {
-        if let Some(h) = home {
-            return h.to_path_buf();
-        }
+    if v == "~"
+        && let Some(h) = home
+    {
+        return h.to_path_buf();
     }
-    if let Some(rest) = v.strip_prefix("~/").or_else(|| v.strip_prefix(r"~\")) {
-        if let Some(h) = home {
-            return h.join(rest);
-        }
+    if let Some(rest) = v.strip_prefix("~/").or_else(|| v.strip_prefix(r"~\"))
+        && let Some(h) = home
+    {
+        return h.join(rest);
     }
     PathBuf::from(v)
 }
@@ -182,33 +182,33 @@ pub fn parse(
     let mut it = args.iter().peekable();
 
     // A `+verb` is only recognised first, as upstream does.
-    if let Some(first) = it.peek() {
-        if let Some(verb) = first.strip_prefix('+') {
-            let (name, value) = match verb.split_once('=') {
-                Some((n, v)) => (n, Some(v.to_string())),
-                None => (verb, None),
-            };
-            cli.verb = match (name, value) {
-                ("new-window", None) => Verb::NewWindow,
-                ("new-tab", None) => Verb::NewTab,
-                ("list", None) => Verb::List,
-                ("focus", None) => Verb::Focus,
-                ("action", Some(a)) if !a.trim().is_empty() => Verb::Action(a.trim().to_string()),
-                ("input", Some(t)) => Verb::Input(t),
-                ("help", None) => Verb::Help,
-                ("version", None) => Verb::Version,
-                ("register-shell-integration", None) => Verb::RegisterShellIntegration,
-                ("unregister-shell-integration", None) => Verb::UnregisterShellIntegration,
-                ("register-default-terminal", None) => Verb::RegisterDefaultTerminal,
-                ("unregister-default-terminal", None) => Verb::UnregisterDefaultTerminal,
-                _ => {
-                    cli.errors
-                        .push(format!("unknown or malformed action '{first}'"));
-                    Verb::Help
-                }
-            };
-            it.next();
-        }
+    if let Some(first) = it.peek()
+        && let Some(verb) = first.strip_prefix('+')
+    {
+        let (name, value) = match verb.split_once('=') {
+            Some((n, v)) => (n, Some(v.to_string())),
+            None => (verb, None),
+        };
+        cli.verb = match (name, value) {
+            ("new-window", None) => Verb::NewWindow,
+            ("new-tab", None) => Verb::NewTab,
+            ("list", None) => Verb::List,
+            ("focus", None) => Verb::Focus,
+            ("action", Some(a)) if !a.trim().is_empty() => Verb::Action(a.trim().to_string()),
+            ("input", Some(t)) => Verb::Input(t),
+            ("help", None) => Verb::Help,
+            ("version", None) => Verb::Version,
+            ("register-shell-integration", None) => Verb::RegisterShellIntegration,
+            ("unregister-shell-integration", None) => Verb::UnregisterShellIntegration,
+            ("register-default-terminal", None) => Verb::RegisterDefaultTerminal,
+            ("unregister-default-terminal", None) => Verb::UnregisterDefaultTerminal,
+            _ => {
+                cli.errors
+                    .push(format!("unknown or malformed action '{first}'"));
+                Verb::Help
+            }
+        };
+        it.next();
     }
 
     let forwarding = matches!(cli.verb, Verb::NewWindow | Verb::NewTab);

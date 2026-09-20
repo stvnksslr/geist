@@ -198,7 +198,6 @@ impl GhosttyVtEngine {
     /// Order is load-bearing: the ends are tracked **before** `set_selection`,
     /// which is a mutating call that invalidates every untracked reference —
     /// including the two inside `sel`.
-    #[expect(clippy::type_complexity, reason = "two pins, returned together")]
     fn install_selection(
         &self,
         sel: &libghostty_vt::selection::Selection<'_>,
@@ -487,10 +486,10 @@ fn install_clipboard(
         };
         // The follow-up read of a paste event: the user already pasted, so it
         // is served whatever `clipboard-read` says (kitty does the same).
-        if r.granted() {
-            if let Some(text) = st.paste_text.clone() {
-                return serve(Some(text));
-            }
+        if r.granted()
+            && let Some(text) = st.paste_text.clone()
+        {
+            return serve(Some(text));
         }
         // A bare targets listing reveals only "there is text"; upstream and
         // kitty serve it without a prompt.
@@ -693,7 +692,6 @@ fn walk_placements(
             visible: info.viewport_visible,
         });
     }
-    drop(it);
     // Ghostty's draw order: ascending z, ties broken by image id.
     out.sort_by_key(|p| (p.z, p.image_id));
     evict_absent(cache, seen);
@@ -780,6 +778,1304 @@ fn map_key(code: KeyCode) -> Key {
         Comma => Key::Comma,
         Period => Key::Period,
         Slash => Key::Slash,
+    }
+}
+
+fn map_mouse_button(b: MouseButton) -> mouse::Button {
+    match b {
+        MouseButton::Left => mouse::Button::Left,
+        MouseButton::Middle => mouse::Button::Middle,
+        MouseButton::Right => mouse::Button::Right,
+        MouseButton::WheelUp => mouse::Button::Four,
+        MouseButton::WheelDown => mouse::Button::Five,
+    }
+}
+
+fn map_mouse_action(a: MouseAction) -> mouse::Action {
+    match a {
+        MouseAction::Press => mouse::Action::Press,
+        MouseAction::Release => mouse::Action::Release,
+        MouseAction::Motion => mouse::Action::Motion,
+    }
+}
+
+fn map_mods(m: super::KeyMods) -> Mods {
+    let mut out = Mods::empty();
+    if m.shift {
+        out |= Mods::SHIFT;
+    }
+    if m.ctrl {
+        out |= Mods::CTRL;
+    }
+    if m.alt {
+        out |= Mods::ALT;
+    }
+    if m.sup {
+        out |= Mods::SUPER;
+    }
+    out
+}
+
+fn rgb(c: libghostty_vt::style::RgbColor) -> Rgb {
+    Rgb::new(c.r, c.g, c.b)
+}
+
+/// Map libghostty's underline style to the neutral [`UnderlineStyle`]. The
+/// binding enum is `#[non_exhaustive]`, so any future variant degrades to a
+/// plain single underline rather than failing to compile.
+fn map_underline(u: Underline) -> UnderlineStyle {
+    match u {
+        Underline::None => UnderlineStyle::None,
+        Underline::Single => UnderlineStyle::Single,
+        Underline::Double => UnderlineStyle::Double,
+        Underline::Curly => UnderlineStyle::Curly,
+        Underline::Dotted => UnderlineStyle::Dotted,
+        Underline::Dashed => UnderlineStyle::Dashed,
+        _ => UnderlineStyle::Single,
+    }
+}
+
+/// Resolve a style color (none / palette index / direct RGB) to concrete RGB
+/// against `palette`. Used for the underline color, which the render iterator
+/// (unlike `fg_color`/`bg_color`) does not pre-resolve. `None` means unset.
+fn resolve_color(c: StyleColor, palette: &[Rgb; 256]) -> Option<Rgb> {
+    match c {
+        StyleColor::None => None,
+        StyleColor::Rgb(c) => Some(rgb(c)),
+        StyleColor::Palette(idx) => palette.get(idx.0 as usize).copied(),
+    }
+}
+
+/// Adjust an already-resolved bold foreground for the bold-color policy, mirroring
+/// Ghostty's `Style.fg` (see `terminal/style.zig`). Only called for bold cells
+/// when a policy is active. `resolved` is the cell's normal foreground (from the
+/// render iterator, which honors the terminal's live palette); `raw` is the cell's
+/// unflattened style color, needed to tell an explicit ANSI palette index from a
+/// default/RGB foreground:
+/// - an ANSI palette color (0–7) brightens to its 8–15 variant (under *either*
+///   policy — `bright` or a fixed color);
+/// - a `none`/default or default-valued RGB foreground takes the fixed color
+///   (and is left untouched under `bright`).
+///
+/// `inverse` is **not** applied here — the caller swaps fg/bg afterward, matching
+/// where Ghostty applies it.
+fn apply_bold_color(
+    raw: StyleColor,
+    resolved: Rgb,
+    default_fg: Rgb,
+    palette: &[Rgb; 256],
+    policy: BoldColor,
+) -> Rgb {
+    match raw {
+        StyleColor::Palette(idx) => {
+            let i = idx.0;
+            if i < 8 {
+                return palette.get((i + 8) as usize).copied().unwrap_or(resolved);
+            }
+            resolved
+        }
+        StyleColor::None => match policy {
+            BoldColor::Color(c) => c,
+            _ => resolved,
+        },
+        StyleColor::Rgb(_) => match policy {
+            BoldColor::Color(c) if resolved == default_fg => c,
+            _ => resolved,
+        },
+    }
+}
+
+/// Linearize one sRGB channel (0–255) to linear light in `0.0..=1.0`, matching
+/// the shader's `linearize` (the WCAG transfer function Ghostty uses for
+/// contrast). Required so the contrast ratio is computed in the same space.
+fn srgb_to_linear(c: u8) -> f32 {
+    let v = c as f32 / 255.0;
+    if v <= 0.04045 {
+        v / 12.92
+    } else {
+        ((v + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// Relative luminance of an sRGB color, per WCAG (linearized channels weighted
+/// 0.2126/0.7152/0.0722). Mirrors the renderer's `luminance`.
+pub fn luminance(c: Rgb) -> f32 {
+    0.2126 * srgb_to_linear(c.r) + 0.7152 * srgb_to_linear(c.g) + 0.0722 * srgb_to_linear(c.b)
+}
+
+/// WCAG contrast ratio between two colors (`1.0..=21.0`). Mirrors the renderer's
+/// `contrast_ratio`.
+///
+/// Also the chrome's contrast floor (see [`crate::theme`]), so the UI and the
+/// terminal's `minimum-contrast` agree on what "readable" means.
+pub fn contrast_ratio(a: Rgb, b: Rgb) -> f32 {
+    let la = luminance(a) + 0.05;
+    let lb = luminance(b) + 0.05;
+    la.max(lb) / la.min(lb)
+}
+
+/// If `fg` on `bg` fails the `min` contrast ratio, replace it with pure white or
+/// black (whichever contrasts more), exactly like the shader's `contrasted_color`.
+/// Otherwise `fg` is returned unchanged. `min <= 1.0` is a no-op.
+fn enforce_contrast(fg: Rgb, bg: Rgb, min: f32) -> Rgb {
+    if min <= 1.0 || contrast_ratio(fg, bg) >= min {
+        return fg;
+    }
+    let white = Rgb::new(255, 255, 255);
+    let black = Rgb::new(0, 0, 0);
+    if contrast_ratio(white, bg) > contrast_ratio(black, bg) {
+        white
+    } else {
+        black
+    }
+}
+
+/// Whether minimum-contrast should be skipped for `text` because it is a
+/// graphics glyph (box-drawing, block, legacy-computing, or Powerline), where
+/// forcing pure black/white looks wrong. Mirrors Ghostty's `noMinContrast`
+/// (`renderer/cell.zig`). Tested on the first scalar of the cell's grapheme.
+fn is_graphics_element(text: &str) -> bool {
+    let Some(ch) = text.chars().next() else {
+        return false;
+    };
+    let c = ch as u32;
+    matches!(c,
+        0x2500..=0x257F   // box drawing
+        | 0x2580..=0x259F // block elements
+        | 0x1FB00..=0x1FBFF | 0x1CC00..=0x1CEBF // legacy computing (+ supplement)
+        | 0xE0B0..=0xE0D7) // Powerline
+}
+
+/// Copy one libghostty render cell into a neutral [`Cell`], resolving colors
+/// (applying `inverse`) against the given defaults and reusing `dst`'s inline
+/// string buffer. Shared by the full-grid snapshot and the smooth-scroll
+/// over-row read.
+/// The pre-`ghostty_terminal_paste` encoder, kept as `encode_paste`'s fallback.
+fn encode_paste_legacy(bracketed: bool, text: &str) -> Vec<u8> {
+    let src = text.as_bytes();
+    let mut data = src.to_vec();
+    // Bracketed markers add 12 bytes; newline→CR is length-preserving.
+    let mut buf = vec![0u8; src.len() + 16];
+    match paste::encode(&mut data, bracketed, &mut buf) {
+        Ok(n) => {
+            buf.truncate(n);
+            buf
+        }
+        Err(_) => src.to_vec(),
+    }
+}
+
+/// Reset a cell to a blank default-colored cell, keeping its string buffer.
+fn blank_cell(cell: &mut Cell) {
+    cell.text.clear();
+    cell.fg = Rgb::default();
+    cell.bg = Rgb::default();
+    cell.bold = false;
+    cell.italic = false;
+    cell.underline = UnderlineStyle::None;
+    cell.underline_color = None;
+    cell.strikethrough = false;
+    cell.overline = false;
+    cell.faint = false;
+    cell.blink = false;
+    cell.invisible = false;
+    // `bg` above is a placeholder the renderer never paints: a blank cell
+    // has no explicit background, so it emits no background quad at all.
+    cell.bg_explicit = false;
+    cell.inverse = false;
+    cell.selected = false;
+}
+
+fn copy_cell(
+    cell: &CellIteration<'_, '_>,
+    default_fg: Rgb,
+    default_bg: Rgb,
+    palette: &[Rgb; 256],
+    bold_color: BoldColor,
+    min_contrast: f32,
+    dst: &mut Cell,
+) -> Result<()> {
+    let style = cell.style()?;
+    let mut fg = cell.fg_color()?.map(rgb).unwrap_or(default_fg);
+    // The bold-color policy needs the *raw* style color (an explicit ANSI palette
+    // index is lost once `fg_color()` flattens it to RGB).
+    if style.bold && bold_color != BoldColor::None {
+        fg = apply_bold_color(style.fg_color, fg, default_fg, palette, bold_color);
+    }
+    // Keep the *raw* option: once flattened to the default there is no way back,
+    // and the renderer needs to know whether this background is the terminal
+    // default (such a cell draws no background quad under `background-opacity`).
+    let bg_raw = cell.bg_color()?;
+    let mut bg = bg_raw.map(rgb).unwrap_or(default_bg);
+    if style.inverse {
+        std::mem::swap(&mut fg, &mut bg);
+    }
+    dst.text.clear();
+    for ch in cell.graphemes()? {
+        dst.text.push(ch);
+    }
+    // Minimum-contrast runs on the final (post-inverse) colors, skipping graphics
+    // glyphs — matching where Ghostty's shader applies it.
+    let mut faint = style.faint;
+    if min_contrast > 1.0 && !is_graphics_element(&dst.text) {
+        let forced = enforce_contrast(fg, bg, min_contrast);
+        if forced != fg {
+            // Ghostty's `contrasted_color` returns a fully opaque white/black,
+            // discarding the premultiplied faint alpha. Drop faint so the forced
+            // color renders at full strength — otherwise dimming a color that was
+            // just forced for readability would defeat minimum-contrast.
+            faint = false;
+            fg = forced;
+        }
+    }
+    dst.fg = fg;
+    dst.bg = bg;
+    dst.bold = style.bold;
+    dst.italic = style.italic;
+    dst.underline = map_underline(style.underline);
+    dst.underline_color = resolve_color(style.underline_color, palette);
+    dst.strikethrough = style.strikethrough;
+    dst.overline = style.overline;
+    dst.faint = faint;
+    dst.blink = style.blink;
+    dst.invisible = style.invisible;
+    dst.bg_explicit = bg_raw.is_some();
+    dst.inverse = style.inverse;
+    Ok(())
+}
+
+impl TerminalEngine for GhosttyVtEngine {
+    fn write(&mut self, bytes: &[u8]) {
+        self.term.vt_write(bytes);
+        self.collect_clipboard_deferrals();
+        // Kitty drag-and-drop (OSC 72): the engine answers `t=q` and tracks
+        // registrations, but the C API has no way to *deliver* a drop
+        // (upstream drives `kitty.dnd.State.dragDrop` from Zig). Advertising a
+        // protocol giest can't complete would make a program wait for drops
+        // that never come, so its replies are withheld — the program sees no
+        // support and file drops keep pasting paths.
+        strip_osc72(&mut self.responses.borrow_mut());
+        // Upstream ignores KAM in termio unless `vt-kam-allowed`; lib-vt has no
+        // such switch, so undo it: a locked keyboard is a denial of service.
+        if !self.kam_allowed && self.term.mode(Mode::KAM).unwrap_or(false) {
+            let _ = self.term.set_mode(Mode::KAM, false);
+        }
+    }
+
+    fn resize(&mut self, cols: u16, rows: u16, cell_px: (u32, u32)) -> Result<()> {
+        self.term.resize(cols, rows, cell_px.0, cell_px.1)?;
+        Ok(())
+    }
+
+    fn encode_key(&mut self, input: &KeyInput) -> Vec<u8> {
+        self.key_event
+            .set_action(if input.press {
+                Action::Press
+            } else {
+                Action::Release
+            })
+            .set_key(map_key(input.code))
+            .set_mods(map_mods(input.mods))
+            .set_utf8(input.text.clone());
+
+        // Pick up cursor-key/keypad/kitty/modifyOtherKeys modes from live state.
+        self.encoder.set_options_from_terminal(&self.term);
+
+        let mut out = Vec::with_capacity(16);
+        if self
+            .encoder
+            .encode_to_vec(&self.key_event, &mut out)
+            .is_err()
+        {
+            out.clear();
+        }
+        out
+    }
+
+    fn scroll(&mut self, delta: isize) {
+        self.term.scroll_viewport(ScrollViewport::Delta(delta));
+        self.viewport_moved = true;
+    }
+
+    fn scroll_to_bottom(&mut self) {
+        self.term.scroll_viewport(ScrollViewport::Bottom);
+        self.viewport_moved = true;
+    }
+
+    fn scroll_to_top(&mut self) {
+        self.term.scroll_viewport(ScrollViewport::Top);
+        self.viewport_moved = true;
+    }
+
+    fn scrollback_rows(&self) -> usize {
+        self.term.scrollback_rows().unwrap_or(0)
+    }
+
+    fn snapshot_over_row(&mut self, out: &mut Vec<Cell>) -> Result<()> {
+        // Reveal the line just above the viewport top by scrolling up one line,
+        // read its cells, then restore the viewport. The net Delta is zero, so
+        // the caller's pin is unchanged.
+        self.term.scroll_viewport(ScrollViewport::Delta(-1));
+        let bold_color = self.bold_color;
+        let min_contrast = self.min_contrast;
+        let read = (|| -> Result<()> {
+            let snapshot = self.render_state.update(&self.term)?;
+            let colors = snapshot.colors()?;
+            let cols = snapshot.cols()? as usize;
+            let default_fg = rgb(colors.foreground);
+            let default_bg = rgb(colors.background);
+            // Live palette (OSC-4-aware), as in `snapshot`.
+            let palette = colors.palette.map(rgb);
+            out.clear();
+            out.resize(cols, Cell::default());
+            let mut rows_iter = self.rows_buf.update(&snapshot)?;
+            if let Some(row) = rows_iter.next() {
+                let mut x = 0usize;
+                let mut cells_iter = self.cells_buf.update(row)?;
+                while let Some(cell) = cells_iter.next() {
+                    if x >= cols {
+                        break;
+                    }
+                    copy_cell(
+                        cell,
+                        default_fg,
+                        default_bg,
+                        &palette,
+                        bold_color,
+                        min_contrast,
+                        &mut out[x],
+                    )?;
+                    x += 1;
+                }
+            }
+            Ok(())
+        })();
+        // Restore the viewport regardless of read errors.
+        self.term.scroll_viewport(ScrollViewport::Delta(1));
+        read
+    }
+
+    fn apply_theme(&mut self, fg: Rgb, bg: Rgb, palette: &[Rgb; 256]) -> Result<()> {
+        let to_c = |c: Rgb| libghostty_vt::style::RgbColor {
+            r: c.r,
+            g: c.g,
+            b: c.b,
+        };
+        let mut pal = [libghostty_vt::style::RgbColor::default(); 256];
+        for (dst, src) in pal.iter_mut().zip(palette.iter()) {
+            *dst = to_c(*src);
+        }
+        self.term.set_default_fg_color(Some(to_c(fg)))?;
+        self.term.set_default_bg_color(Some(to_c(bg)))?;
+        self.term
+            .set_default_color_palette(Some(libghostty_vt::style::Palette(pal)))?;
+        Ok(())
+    }
+
+    fn set_cursor_color(&mut self, color: Option<Rgb>) -> Result<()> {
+        let c = color.map(|c| libghostty_vt::style::RgbColor {
+            r: c.r,
+            g: c.g,
+            b: c.b,
+        });
+        self.term.set_default_cursor_color(c)?;
+        Ok(())
+    }
+
+    fn cursor_at_prompt(&self) -> Option<bool> {
+        // The row-level semantic-prompt enum only has None/Prompt/Continuation —
+        // there is no Command/Output variant — so "not a prompt row" is ambiguous
+        // between "a command is running" and "this shell emits no OSC 133 marks".
+        // Report `Some(false)` for it and let the session's latch disambiguate.
+        let y = self.term.cursor_y().ok()?;
+        let gr = self
+            .term
+            .grid_ref(Point::Viewport(PointCoordinate { x: 0, y: y as u32 }))
+            .ok()?;
+        let sp = gr.row().ok()?.semantic_prompt().ok()?;
+        Some(matches!(
+            sp,
+            RowSemanticPrompt::Prompt | RowSemanticPrompt::Continuation
+        ))
+    }
+
+    fn prompt_rows(&self) -> Vec<super::PromptRowInfo> {
+        use libghostty_vt::screen::CellSemanticContent;
+        let (Ok(cols), Ok(rows)) = (self.term.cols(), self.term.rows()) else {
+            return Vec::new();
+        };
+        (0..rows as u32)
+            .map(|y| {
+                let row_ref = self
+                    .term
+                    .grid_ref(Point::Viewport(PointCoordinate { x: 0, y }))
+                    .ok();
+                let row = row_ref.as_ref().and_then(|gr| gr.row().ok());
+                let input = (0..cols)
+                    .map(|x| {
+                        self.term
+                            .grid_ref(Point::Viewport(PointCoordinate { x, y }))
+                            .ok()
+                            .and_then(|gr| gr.cell().ok())
+                            .and_then(|c| c.semantic_content().ok())
+                            .is_some_and(|s| s == CellSemanticContent::Input)
+                    })
+                    .collect();
+                super::PromptRowInfo {
+                    input,
+                    wrap: row.is_some_and(|r| r.is_wrapped().unwrap_or(false)),
+                    wrap_continuation: row
+                        .is_some_and(|r| r.is_wrap_continuation().unwrap_or(false)),
+                    prompt: match row.and_then(|r| r.semantic_prompt().ok()) {
+                        Some(RowSemanticPrompt::Prompt) => super::RowPrompt::Prompt,
+                        Some(RowSemanticPrompt::Continuation) => super::RowPrompt::Continuation,
+                        _ => super::RowPrompt::None,
+                    },
+                }
+            })
+            .collect()
+    }
+
+    fn dynamic_colors(&self) -> (Rgb, Rgb, Option<Rgb>) {
+        // Read straight off the terminal, NOT through `RenderState::update` (the
+        // path `snapshot` uses). That call consumes the terminal's dirty state,
+        // so routing this through it would make the next real snapshot see
+        // `Dirty::Clean`, take the skip fast path, and freeze the grid.
+        let fg = self.term.fg_color().ok().flatten().map(rgb);
+        let bg = self.term.bg_color().ok().flatten().map(rgb);
+        let cursor = self.term.cursor_color().ok().flatten().map(rgb);
+        (
+            fg.unwrap_or(Rgb::new(0xc5, 0xc8, 0xc6)),
+            bg.unwrap_or(Rgb::new(0x10, 0x12, 0x18)),
+            cursor,
+        )
+    }
+
+    fn set_bold_color(&mut self, bold: BoldColor) -> Result<()> {
+        self.bold_color = bold;
+        // Resolved into every cell: re-copy the grid (rows stay clean otherwise).
+        self.viewport_moved = true;
+        Ok(())
+    }
+
+    fn set_image_storage_limit(&mut self, bytes: u64) -> Result<()> {
+        self.term.set_kitty_image_storage_limit(bytes)?;
+        // Refuse every non-direct transmission medium. `t=s` (shared memory) is
+        // a hard `UnsupportedMedium` on Windows upstream, and `t=f`/`t=t` resolve
+        // paths with posix `realpath`/`unlink` against a hardcoded `/tmp` and
+        // `/dev/shm`. The binding already defaults these off; setting them
+        // explicitly documents the divergence and survives a change to those
+        // defaults.
+        self.term.set_kitty_image_from_file_allowed(false)?;
+        self.term.set_kitty_image_temp_file_dir(None)?;
+        self.term.set_kitty_image_from_shared_mem_allowed(false)?;
+        Ok(())
+    }
+
+    fn set_min_contrast(&mut self, ratio: f32) -> Result<()> {
+        self.min_contrast = ratio;
+        self.viewport_moved = true;
+        Ok(())
+    }
+
+    fn set_vt_policy(
+        &mut self,
+        title_report: bool,
+        kam_allowed: bool,
+        grapheme_unicode: bool,
+    ) -> Result<()> {
+        self.term.set_title_report_enabled(title_report)?;
+        self.kam_allowed = kam_allowed;
+        self.term
+            .set_default_mode(Mode::GRAPHEME_CLUSTER, grapheme_unicode)?;
+        self.term
+            .set_mode(Mode::GRAPHEME_CLUSTER, grapheme_unicode)?;
+        Ok(())
+    }
+
+    fn set_enquiry_response(&mut self, response: &str) {
+        self.enquiry.set(intern_enquiry(response));
+    }
+
+    fn set_scrollback_lines(&mut self, lines: Option<usize>) -> Result<()> {
+        self.term.set_scrollback_max_lines(lines)?;
+        Ok(())
+    }
+
+    fn compress_tick(
+        &mut self,
+        now: std::time::Instant,
+        budget: std::time::Duration,
+    ) -> Result<()> {
+        use libghostty_vt::terminal::{CompressionMode, CompressionResult};
+        let activity = self.term.compression_activity()?;
+        if self.compress_activity != Some(activity) {
+            self.compress_activity = Some(activity);
+            self.compress_since = now;
+            self.compress_done = false;
+            return Ok(());
+        }
+        if self.compress_done || now.duration_since(self.compress_since) < super::COMPRESS_IDLE {
+            return Ok(());
+        }
+        let start = std::time::Instant::now();
+        loop {
+            match self.term.compress(CompressionMode::Incremental)? {
+                CompressionResult::Pending if start.elapsed() < budget => {}
+                CompressionResult::Pending => break,
+                _ => {
+                    self.compress_done = true;
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn is_mouse_tracking(&self) -> bool {
+        self.term.is_mouse_tracking().unwrap_or(false)
+    }
+
+    fn encode_mouse(&mut self, m: &MouseInput) -> Vec<u8> {
+        let size = mouse::EncoderSize {
+            screen_width: m.screen_px.0.max(1),
+            screen_height: m.screen_px.1.max(1),
+            cell_width: m.cell_px.0.max(1),
+            cell_height: m.cell_px.1.max(1),
+            padding_top: 0,
+            padding_bottom: 0,
+            padding_right: 0,
+            padding_left: 0,
+        };
+        self.mouse_encoder
+            .set_options_from_terminal(&self.term)
+            .set_size(size);
+        self.mouse_event
+            .set_action(map_mouse_action(m.action))
+            .set_button(m.button.map(map_mouse_button))
+            .set_mods(map_mods(m.mods))
+            .set_position(mouse::Position {
+                x: m.pos_px.0 as f32,
+                y: m.pos_px.1 as f32,
+            });
+
+        let mut out = Vec::with_capacity(16);
+        if self
+            .mouse_encoder
+            .encode_to_vec(&self.mouse_event, &mut out)
+            .is_err()
+        {
+            out.clear();
+        }
+        out
+    }
+
+    fn encode_paste(&mut self, text: &str) -> Vec<u8> {
+        // Upstream's shared paste path (`ghostty_terminal_paste`): it applies the
+        // terminal's own encoding rules (bracketing, newline handling) and writes
+        // through the PTY-write callback, i.e. into `responses`. Those may
+        // already hold unsent replies, so set them aside and splice them back.
+        // `allow_unsafe = true`: giest's own gate (`Session::paste_str`) has
+        // already decided; the engine must not second-guess it.
+        use libghostty_vt::terminal::{PasteOutcome, PasteSource};
+        let pending = std::mem::take(&mut *self.responses.borrow_mut());
+        let outcome = self.term.paste(text, PasteSource::Clipboard, true);
+        let encoded = std::mem::replace(&mut *self.responses.borrow_mut(), pending);
+        if matches!(outcome, Ok(PasteOutcome::Written)) && !encoded.is_empty() {
+            return encoded;
+        }
+        encode_paste_legacy(self.term.mode(Mode::BRACKETED_PASTE).unwrap_or(false), text)
+    }
+
+    fn bracketed_paste(&self) -> bool {
+        self.term.mode(Mode::BRACKETED_PASTE).unwrap_or(false)
+    }
+
+    fn take_responses(&mut self) -> Vec<u8> {
+        std::mem::take(&mut *self.responses.borrow_mut())
+    }
+
+    fn take_bell(&mut self) -> bool {
+        self.bell.replace(false)
+    }
+
+    fn title(&self) -> Option<String> {
+        self.term
+            .title()
+            .ok()
+            .map(str::to_string)
+            .filter(|s| !s.is_empty())
+    }
+
+    fn hyperlink_at(&self, x: u16, y: u16) -> Option<String> {
+        // Resolve a grid reference for the viewport cell and read its OSC 8 URI.
+        // `hyperlink_uri` writes 0 bytes when the cell has no hyperlink, and the
+        // grid ref is read immediately (valid only until the next terminal write).
+        let gr = self
+            .term
+            .grid_ref(Point::Viewport(PointCoordinate { x, y: y as u32 }))
+            .ok()?;
+        let mut buf = [0u8; 2048];
+        let n = gr.hyperlink_uri(&mut buf).ok()?;
+        (n > 0).then(|| String::from_utf8_lossy(&buf[..n]).into_owned())
+    }
+
+    fn select_semantic(
+        &mut self,
+        kind: SelectKind,
+        x: u16,
+        y: u16,
+        word_boundaries: &[char],
+    ) -> bool {
+        use libghostty_vt::selection::{SelectLineOptions, SelectWordOptions};
+
+        let installed = (|| {
+            let gr = self
+                .term
+                .grid_ref(Point::Viewport(PointCoordinate { x, y: y as u32 }))
+                .ok()?;
+            let sel = match kind {
+                SelectKind::Word => {
+                    let mut opts = SelectWordOptions::new(gr);
+                    // An empty list means "use Ghostty's defaults" — passing an
+                    // empty slice would instead mean *no* boundaries, i.e. the
+                    // whole line is one word.
+                    if !word_boundaries.is_empty() {
+                        opts = opts.with_boundary_codepoints(word_boundaries);
+                    }
+                    self.term.select_word(opts).ok()?
+                }
+                // `with_semantic_prompt_boundary` stops a line selection at a
+                // prompt, so triple-clicking a command doesn't drag in the
+                // shell's output.
+                SelectKind::Line => self
+                    .term
+                    .select_line(SelectLineOptions::new(gr).with_semantic_prompt_boundary(true))
+                    .ok()?,
+                SelectKind::Output => self.term.select_output(gr).ok()?,
+            }?;
+            self.install_selection(&sel)
+        })();
+
+        // A gesture that finds nothing leaves the existing selection alone.
+        if installed.is_some() {
+            // Word / line / output extents are runs of text, never blocks.
+            self.sel_rectangle = false;
+        }
+        self.adopt_selection(installed)
+    }
+
+    fn selection_begin(&mut self, x: u16, y: u16, rectangle: bool) {
+        self.sel_anchor = self.track_viewport(x, y);
+        // A fresh drag selects the single cell under the pointer until it moves.
+        self.selection_update(x, y, rectangle);
+    }
+
+    fn selection_update(&mut self, x: u16, y: u16, rectangle: bool) {
+        // The anchor's tracked reference is resolved to an untracked snapshot and
+        // consumed *within this call* — the binding's untracked refs are invalid
+        // after any mutating terminal operation, and `set_selection` is one.
+        let installed = (|| {
+            let anchor = self.sel_anchor.as_ref()?;
+            if !anchor.has_value() {
+                return None;
+            }
+            let start = anchor.snapshot(&self.term).ok()??;
+            let end = self
+                .term
+                .grid_ref(Point::Viewport(PointCoordinate { x, y: y as u32 }))
+                .ok()?;
+            let sel = libghostty_vt::selection::Selection::new(start, end, rectangle);
+            self.install_selection(&sel)
+        })();
+        self.sel_rectangle = rectangle;
+        if !self.adopt_selection(installed) {
+            // The anchor lost its cell (the screen was reset or its row pruned
+            // beyond recovery). Dropping the selection is the honest outcome —
+            // extending from a cell that no longer exists would select something
+            // the user never pointed at.
+            self.selection_clear();
+        }
+    }
+
+    fn selection_clear(&mut self) {
+        self.sel_anchor = None;
+        self.sel_head = None;
+        self.sel_rectangle = false;
+        if self.selection_installed {
+            let _ = self.term.set_selection(None);
+            self.selection_dirty = true;
+        }
+        self.selection_installed = false;
+    }
+
+    fn gesture_press(&mut self, p: super::GesturePress, word_boundaries: &[char]) -> u8 {
+        use gesture::{Behavior, Behaviors};
+        // Explicit table: the binding's `Behaviors::default()` is the *zeroed*
+        // C struct, i.e. cell/cell/cell — not upstream's cell/word/line.
+        let behaviors = Behaviors::new()
+            .with_single_click_behavior(Behavior::Cell)
+            .with_double_click_behavior(Behavior::Word)
+            .with_triple_click_behavior(match p.triple {
+                SelectKind::Output => Behavior::Output,
+                _ => Behavior::Line,
+            });
+        let ev = &mut self.gesture_press_ev;
+        let configured = (|| -> libghostty_vt::error::Result<()> {
+            // Word chars first: clearing them means replacing the event.
+            if word_boundaries.is_empty() {
+                *ev = gesture::PressEvent::new()?;
+            } else {
+                ev.set_word_boundary_codepoints(word_boundaries)?;
+            }
+            ev.set_position(p.at.px.0, p.at.px.1)?
+                .set_time(p.time)?
+                .set_repeat_interval(p.repeat_interval)?
+                .set_repeat_distance(p.repeat_distance)?
+                .set_behaviors(&behaviors)?;
+            Ok(())
+        })();
+        if configured.is_err() {
+            return 0;
+        }
+        let Ok(gr) = self.term.grid_ref(Point::Viewport(PointCoordinate {
+            x: p.at.cell.0,
+            y: p.at.cell.1 as u32,
+        })) else {
+            return 0;
+        };
+        let installed = match self
+            .gesture_press_ev
+            .apply(&mut self.gesture, &self.term, gr)
+        {
+            Ok(Some(sel)) => self.install_selection(&sel),
+            _ => None,
+        };
+        let count = self.gesture.click_count(&self.term).unwrap_or(0);
+        if installed.is_some() {
+            self.sel_rectangle = false;
+            self.adopt_selection(installed);
+        } else if count == 1 {
+            // Upstream clears on a single-click *press*, not on release.
+            self.selection_clear();
+        }
+        count
+    }
+
+    fn gesture_drag(
+        &mut self,
+        at: super::GesturePoint,
+        geometry: super::GestureGeometry,
+        rectangle: bool,
+        word_boundaries: &[char],
+    ) -> isize {
+        // Only mid-gesture, and only while the press anchor is still on this
+        // screen — upstream bails *without* touching the selection otherwise.
+        if self.gesture.click_count(&self.term).unwrap_or(0) == 0
+            || !matches!(self.gesture.anchor(&self.term), Ok(Some(_)))
+        {
+            return 0;
+        }
+        let ev = &mut self.gesture_drag_ev;
+        let configured = (|| -> libghostty_vt::error::Result<()> {
+            // An empty list means "Ghostty's defaults", which is the *unset*
+            // option — an empty slice would mean no boundaries at all. The
+            // binding has no unset, so a fresh event stands in for one.
+            if word_boundaries.is_empty() {
+                *ev = gesture::DragEvent::new()?;
+            } else {
+                ev.set_word_boundary_codepoints(word_boundaries)?;
+            }
+            ev.set_position(at.px.0, at.px.1)?
+                .set_rectangle(rectangle)?;
+            Ok(())
+        })();
+        if configured.is_err() {
+            return 0;
+        }
+        let Ok(gr) = self.term.grid_ref(Point::Viewport(PointCoordinate {
+            x: at.cell.0,
+            y: at.cell.1 as u32,
+        })) else {
+            return 0;
+        };
+        let geo = gesture::Geometry {
+            columns: geometry.cols.max(1),
+            cell_width: geometry.cell_w.max(1),
+            padding_left: 0,
+            screen_height: geometry.height.max(1),
+        };
+        let sel = self
+            .gesture_drag_ev
+            .apply(&mut self.gesture, &self.term, gr, geo);
+        let installed = match sel {
+            Ok(Some(sel)) => {
+                let rect = sel.is_rectangle();
+                self.install_selection(&sel).map(|i| (i, rect))
+            }
+            _ => None,
+        };
+        match installed {
+            Some((pins, rect)) => {
+                self.sel_rectangle = rect;
+                self.adopt_selection(Some(pins));
+            }
+            // Not across the within-cell threshold yet: upstream installs the
+            // null selection, i.e. clears.
+            None => self.selection_clear(),
+        }
+        match self.gesture.autoscroll(&self.term) {
+            Ok(gesture::Autoscroll::Up) => -1,
+            Ok(gesture::Autoscroll::Down) => 1,
+            _ => 0,
+        }
+    }
+
+    fn gesture_release(&mut self, cell: Option<(u16, u16)>) -> bool {
+        let gr = cell.and_then(|(x, y)| {
+            self.term
+                .grid_ref(Point::Viewport(PointCoordinate { x, y: y as u32 }))
+                .ok()
+        });
+        let _ = self
+            .gesture_release_ev
+            .apply(&mut self.gesture, &self.term, gr);
+        self.gesture.dragged(&self.term).unwrap_or(false)
+    }
+
+    fn gesture_reset(&mut self) {
+        self.gesture.reset(&self.term);
+    }
+
+    fn select_all(&mut self) -> bool {
+        let installed = (|| {
+            let sel = self.term.select_all().ok()??;
+            self.install_selection(&sel)
+        })();
+        if installed.is_some() {
+            self.sel_rectangle = false;
+        }
+        self.adopt_selection(installed)
+    }
+
+    fn selection_adjust(&mut self, how: super::SelectionAdjust) -> Option<u32> {
+        use libghostty_vt::selection::Adjustment;
+
+        let how = match how {
+            super::SelectionAdjust::Left => Adjustment::Left,
+            super::SelectionAdjust::Right => Adjustment::Right,
+            super::SelectionAdjust::Up => Adjustment::Up,
+            super::SelectionAdjust::Down => Adjustment::Down,
+            super::SelectionAdjust::PageUp => Adjustment::PageUp,
+            super::SelectionAdjust::PageDown => Adjustment::PageDown,
+            super::SelectionAdjust::Home => Adjustment::Home,
+            super::SelectionAdjust::End => Adjustment::End,
+            super::SelectionAdjust::BeginningOfLine => Adjustment::BeginningOfLine,
+            super::SelectionAdjust::EndOfLine => Adjustment::EndOfLine,
+        };
+
+        // Rebuild the selection from both tracked ends, move its end, reinstall.
+        // The terminal owns the live selection but cannot be asked for it, which
+        // is the whole reason the head is tracked at all.
+        let (installed, end_row) = {
+            let out = (|| {
+                if !self.selection_installed {
+                    return None;
+                }
+                let (a, h) = (self.sel_anchor.as_ref()?, self.sel_head.as_ref()?);
+                if !a.has_value() || !h.has_value() {
+                    return None;
+                }
+                let start = a.snapshot(&self.term).ok()??;
+                let end = h.snapshot(&self.term).ok()??;
+                let mut sel =
+                    libghostty_vt::selection::Selection::new(start, end, self.sel_rectangle);
+                sel.adjust(&self.term, how).ok()?;
+                // Read the new end's row *before* installing: installing is a
+                // mutating call and invalidates these untracked refs.
+                let row = self
+                    .term
+                    .point_from_grid_ref(&sel.end(), PointSpace::Screen)
+                    .ok()
+                    .flatten()
+                    .map(|p| p.y);
+                self.install_selection(&sel).map(|pins| (pins, row))
+            })();
+            match out {
+                Some((pins, row)) => (Some(pins), row),
+                None => (None, None),
+            }
+        };
+        self.adopt_selection(installed).then_some(end_row).flatten()
+    }
+
+    fn selection_active(&self) -> bool {
+        self.selection_installed
+    }
+
+    fn selection_end_row(&self) -> Option<u32> {
+        if !self.selection_installed {
+            return None;
+        }
+        let h = self.sel_head.as_ref()?;
+        let end = h.snapshot(&self.term).ok()??;
+        self.term
+            .point_from_grid_ref(&end, PointSpace::Screen)
+            .ok()
+            .flatten()
+            .map(|p| p.y)
+    }
+
+    fn selected_text(&self, trim: bool) -> Option<String> {
+        use libghostty_vt::selection::FormatOptions;
+
+        if !self.selection_installed {
+            return None;
+        }
+        // `unwrap` + `trim` is documented by the binding as Ghostty's own
+        // `Screen.selectionString()` clipboard behaviour; `trim` is the user's
+        // `clipboard-trim-trailing-spaces`. With no `with_selection`, this
+        // formats the terminal's *active* selection — the tracked one, so the
+        // read spans scrollback without giest holding any pins for it.
+        let opts = FormatOptions::new().with_unwrap(true).with_trim(trim);
+        let bytes = self.term.format_selection_alloc(None, opts).ok()??;
+        Some(String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    fn set_row_anchor(&mut self, row: Option<u32>) {
+        self.row_anchor = row.and_then(|y| {
+            self.term
+                .track_grid_ref(Point::Screen(PointCoordinate { x: 0, y }))
+                .ok()
+        });
+    }
+
+    fn row_anchor_now(&self) -> Option<u32> {
+        let a = self.row_anchor.as_ref()?;
+        // A tracked reference whose row was destroyed reports no value — and
+        // upstream *also* moves such a pin to the screen's top-left, so trusting
+        // a bare point would silently read as "row 0, no drift" at exactly the
+        // moment there is drift. `has_value` is the discriminator.
+        if !a.has_value() {
+            return None;
+        }
+        Some(a.point(PointSpace::Screen).ok()??.y)
+    }
+
+    fn jump_to_prompt(&self, delta: isize) -> Option<usize> {
+        if delta == 0 {
+            return None;
+        }
+        let rows = self.term.rows().ok()? as u32;
+        // `scrollback_rows` = total rows minus the viewport height, i.e. the
+        // screen-space y of the viewport top when resting at the live bottom and
+        // the maximum lines the viewport can scroll up.
+        let bottom_top = self.term.scrollback_rows().unwrap_or(0) as u32;
+        let last = bottom_top + rows.saturating_sub(1);
+
+        // The current viewport top in absolute screen coordinates.
+        let vp_gr = self
+            .term
+            .grid_ref(Point::Viewport(PointCoordinate { x: 0, y: 0 }))
+            .ok()?;
+        let vp_top = self
+            .term
+            .point_from_grid_ref(&vp_gr, PointSpace::Screen)
+            .ok()??
+            .y;
+
+        // Is the screen row at `y` a (primary) semantic-prompt row?
+        let is_prompt = |y: u32| -> bool {
+            self.term
+                .grid_ref(Point::Screen(PointCoordinate { x: 0, y }))
+                .ok()
+                .and_then(|gr| gr.row().ok())
+                .and_then(|row| row.semantic_prompt().ok())
+                .is_some_and(|sp| sp == RowSemanticPrompt::Prompt)
+        };
+
+        // Walk outward from the current top (excluding it) until the |delta|-th
+        // prompt row, then report its offset above the live bottom.
+        let want = delta.unsigned_abs();
+        let mut found = 0usize;
+        if delta < 0 {
+            let mut y = vp_top;
+            while y > 0 {
+                y -= 1;
+                if is_prompt(y) {
+                    found += 1;
+                    if found == want {
+                        return Some(bottom_top.saturating_sub(y) as usize);
+                    }
+                }
+            }
+        } else {
+            let mut y = vp_top;
+            while y < last {
+                y += 1;
+                if is_prompt(y) {
+                    found += 1;
+                    if found == want {
+                        return Some(bottom_top.saturating_sub(y) as usize);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn screen_text(&self) -> Vec<super::RowText> {
+        let cols = self.term.cols().unwrap_or(0);
+        let rows = self.term.rows().unwrap_or(0) as u32;
+        let scrollback = self.term.scrollback_rows().unwrap_or(0) as u32;
+        let total = scrollback + rows;
+        let mut out = Vec::with_capacity(total as usize);
+        // Grapheme clusters are almost always 1 char; 8 covers base + combining.
+        // `big` is a heap fallback for the rare cluster that overflows `buf`.
+        let mut buf = ['\0'; 8];
+        let mut big: Vec<char> = Vec::new();
+        for y in 0..total {
+            let mut chars: Vec<char> = Vec::new();
+            let mut col_of = Vec::new();
+            // Chars up to and including the last non-blank cell, so trailing
+            // blanks (the spaces we emit for empty cells) are dropped.
+            let mut last_non_blank = 0usize;
+            for x in 0..cols {
+                let Ok(gr) = self.term.grid_ref(Point::Screen(PointCoordinate { x, y })) else {
+                    // Unreadable cell: keep the column alignment with a blank.
+                    chars.push(' ');
+                    col_of.push(x);
+                    continue;
+                };
+                // The tail half of a wide char is an empty spacer cell — skip it
+                // (emit nothing, don't advance a column) so the wide char's
+                // codepoint stays adjacent to its neighbor; a space here would
+                // defeat search/copy of e.g. "世界".
+                //
+                // `SpacerHead` is the same problem at the other end: the blank
+                // left at the end of a soft-wrapped row when a wide character
+                // didn't fit and moved to the next row. Emitting a space for it
+                // would put one *inside* a word that wrapped, so a query
+                // spanning the wrap would not match.
+                if matches!(
+                    gr.cell().ok().and_then(|c| c.wide().ok()),
+                    Some(CellWide::SpacerTail | CellWide::SpacerHead)
+                ) {
+                    continue;
+                }
+                // Read the grapheme, retrying on a heap buffer for clusters longer
+                // than `buf` (long ZWJ emoji) so they stay searchable, not blanked.
+                let cluster: &[char] = match gr.graphemes(&mut buf) {
+                    Ok(n) => &buf[..n],
+                    Err(libghostty_vt::error::Error::OutOfSpace { required }) => {
+                        big.clear();
+                        big.resize(required, '\0');
+                        match gr.graphemes(&mut big) {
+                            Ok(n) => &big[..n],
+                            Err(_) => &[],
+                        }
+                    }
+                    Err(_) => &[],
+                };
+                if cluster.is_empty() {
+                    // A genuine blank cell: a space keeps char→column alignment.
+                    chars.push(' ');
+                    col_of.push(x);
+                } else {
+                    for &ch in cluster {
+                        chars.push(ch);
+                        col_of.push(x);
+                    }
+                    last_non_blank = chars.len();
+                }
+            }
+            chars.truncate(last_non_blank);
+            col_of.truncate(last_non_blank);
+            // Does this row continue onto the next? Search joins such rows into
+            // one logical line so a query can span the wrap.
+            let wrapped = self
+                .term
+                .grid_ref(Point::Screen(PointCoordinate { x: 0, y }))
+                .ok()
+                .and_then(|gr| gr.row().ok())
+                .and_then(|r| r.is_wrapped().ok())
+                .unwrap_or(false);
+            out.push(super::RowText {
+                row: y,
+                chars,
+                cols: col_of,
+                wrapped,
+            });
+        }
+        out
+    }
+
+    fn snapshot(&mut self, out: &mut GridSnapshot) -> Result<()> {
+        // A selection change is treated exactly like a viewport move: it may not
+        // dirty the render state, and the clean fast path below would then leave
+        // the highlight unpainted on an idle screen.
+        let moved = self.viewport_moved || self.selection_dirty;
+        self.viewport_moved = false;
+        self.selection_dirty = false;
+
+        // Borrows of the distinct fields below are disjoint, so the snapshot
+        // (which holds &mut render_state) coexists with the iterator buffers.
+        let snapshot = self.render_state.update(&self.term)?;
+
+        let cols = snapshot.cols()?;
+        let rows = snapshot.rows()?;
+
+        // Kitty placements are refreshed on EVERY snapshot, deliberately ahead
+        // of the dirty-skip below. libghostty's image storage keeps its own dirty
+        // flag that the C API doesn't expose and that isn't part of the render
+        // state's, so a kitty delete or a place-only command can leave the frame
+        // `Clean` — and an image that was just deleted would otherwise stay on
+        // screen forever. This is a handful of FFI reads over 1-10 placements;
+        // the expensive part (the pixel copy) is keyed on image id and skipped
+        // on a hit. Errors are swallowed: a malformed image must never blank the
+        // pane, which is what returning `Err` from here would do.
+        let _ = walk_placements(
+            &self.term,
+            &mut self.placements,
+            &mut self.image_cache,
+            &mut self.image_ids_seen,
+            &mut out.images,
+        );
+
+        // Nothing changed since the last snapshot of this same-sized grid: keep
+        // the previously-filled cells and skip the O(rows*cols) per-cell FFI
+        // walk. (`update` consumed the dirty state; writes re-dirty it, and a
+        // viewport scroll sets `moved`, so only idle/cursor-blink frames skip.)
+        // Cells store colours already resolved (defaults, palette, bold-is-
+        // bright), so a colour change with no cell edit still needs a full copy;
+        // the render state leaves those rows clean.
+        let colors = snapshot.colors()?;
+        let palette_now = colors.palette.map(rgb);
+        let recolored = rgb(colors.foreground) != out.default_fg
+            || rgb(colors.background) != out.default_bg
+            || self.last_palette.as_deref() != Some(&palette_now[..]);
+        if recolored {
+            self.last_palette = Some(palette_now.to_vec());
+        }
+        let moved = moved || recolored;
+        let clean = !moved
+            && matches!(snapshot.dirty()?, Dirty::Clean)
+            && !out.cells.is_empty()
+            && out.cols == cols
+            && out.rows == rows;
+
+        // `Partial`: only some rows changed. Keep the others as filled last time
+        // and re-copy just the dirty ones. Anything that could move content
+        // between rows (scroll, a selection change, a resize) takes the full path.
+        let partial = !moved
+            && matches!(snapshot.dirty()?, Dirty::Partial)
+            && out.cols == cols
+            && out.rows == rows
+            && out.cells.len() == cols as usize * rows as usize
+            && self.row_blink.len() == rows as usize;
+
+        // Cursor and colours are read on every snapshot, *before* the clean skip:
+        // they are cheap, and a cursor-only change (a move, `?25l`) can leave
+        // every row clean.
+        out.default_fg = rgb(colors.foreground);
+        out.default_bg = rgb(colors.background);
+        out.cursor_color = colors.cursor.map(rgb).unwrap_or(out.default_fg);
+
+        out.cursor_visible = snapshot.cursor_visible()?;
+        out.cursor_blinking = snapshot.cursor_blinking()?;
+        out.cursor_shape = match snapshot.cursor_visual_style()? {
+            CursorVisualStyle::Bar => CursorShape::Bar,
+            CursorVisualStyle::Block => CursorShape::Block,
+            CursorVisualStyle::Underline => CursorShape::Underline,
+            CursorVisualStyle::BlockHollow => CursorShape::HollowBlock,
+            _ => CursorShape::Block,
+        };
+        if let Some(cur) = snapshot.cursor_viewport()? {
+            out.cursor_x = cur.x;
+            out.cursor_y = cur.y;
+        }
+        if clean {
+            return Ok(());
+        }
+        out.cols = cols;
+        out.rows = rows;
+
+        // Resize to the grid and blank every cell up front (reusing each cell's
+        // inline-string buffer via `clear()` rather than reallocating). Cells the
+        // iterators don't yield therefore read back blank, matching a fresh grid.
+        let total = cols as usize * rows as usize;
+        out.cells.resize(total, Cell::default());
+        if !partial {
+            out.cells.iter_mut().for_each(blank_cell);
+        }
+        self.row_blink.resize(rows as usize, false);
+
+        let default_fg = out.default_fg;
+        let default_bg = out.default_bg;
+        // Use the *live* palette from the render snapshot (it reflects OSC 4
+        // redefinitions), not the static config copy, so the bold-is-bright bump
+        // and palette-indexed underline colors track runtime changes — matching
+        // Ghostty's `Style.fg`, which reads the live terminal palette.
+        let palette = colors.palette.map(rgb);
+        let bold_color = self.bold_color;
+        let min_contrast = self.min_contrast;
+        let mut has_blink = false;
+        let mut y: usize = 0;
+        let mut rows_iter = self.rows_buf.update(&snapshot)?;
+        while let Some(row) = rows_iter.next() {
+            if y >= rows as usize {
+                break;
+            }
+            // The row-local selection range, asked once per row rather than per
+            // cell — which is what the C API recommends for a renderer that can
+            // work in spans, and it is where a soft-wrapped, scrollback-spanning
+            // or reflowed selection resolves to actual columns.
+            if partial && !row.dirty().unwrap_or(true) {
+                has_blink |= self.row_blink[y];
+                y += 1;
+                continue;
+            }
+            let row_start = y * cols as usize;
+            if partial {
+                out.cells[row_start..row_start + cols as usize]
+                    .iter_mut()
+                    .for_each(blank_cell);
+            }
+            let mut row_has_blink = false;
+            let sel = row.selection().ok().flatten();
+            let mut x: usize = 0;
+            let mut cells_iter = self.cells_buf.update(row)?;
+            while let Some(cell) = cells_iter.next() {
+                if x >= cols as usize {
+                    break;
+                }
+                // Fill in place, reusing the blanked cell's string buffer.
+                let idx = y * cols as usize + x;
+                copy_cell(
+                    cell,
+                    default_fg,
+                    default_bg,
+                    &palette,
+                    bold_color,
+                    min_contrast,
+                    &mut out.cells[idx],
+                )?;
+                out.cells[idx].selected =
+                    sel.is_some_and(|s| x >= s.start_x as usize && x <= s.end_x as usize);
+                row_has_blink |= out.cells[idx].blink;
+                x += 1;
+            }
+            self.row_blink[y] = row_has_blink;
+            has_blink |= row_has_blink;
+            let _ = row.set_dirty(false);
+            y += 1;
+        }
+        out.has_blink = has_blink;
+        // Acknowledge the frame, as upstream's renderer does: without this the
+        // render state reports `Full` forever and every change re-copies the grid.
+        snapshot.set_dirty(Dirty::Clean)?;
+
+        Ok(())
     }
 }
 
@@ -1217,7 +2513,7 @@ mod tests {
         let p = &s.images[0];
         assert_eq!((p.image_id, p.placement_id), (1, 1));
         assert_eq!((p.data.width, p.data.height), (1, 2));
-        assert_eq!(p.data.rgba.len(), 1 * 2 * 4, "RGB expanded to RGBA");
+        assert_eq!(p.data.rgba.len(), 2 * 4, "RGB expanded to RGBA");
         assert_eq!((p.grid_cols, p.grid_rows), (4, 2));
         // 4x2 cells at a 10x20 cell size.
         assert_eq!((p.dest_w, p.dest_h), (40, 40));
@@ -2790,1303 +4086,5 @@ mod tests {
         });
         // Release in SGR mode terminates with 'm' (press would be 'M').
         assert_eq!(out, b"\x1b[<0;101;60m");
-    }
-}
-
-fn map_mouse_button(b: MouseButton) -> mouse::Button {
-    match b {
-        MouseButton::Left => mouse::Button::Left,
-        MouseButton::Middle => mouse::Button::Middle,
-        MouseButton::Right => mouse::Button::Right,
-        MouseButton::WheelUp => mouse::Button::Four,
-        MouseButton::WheelDown => mouse::Button::Five,
-    }
-}
-
-fn map_mouse_action(a: MouseAction) -> mouse::Action {
-    match a {
-        MouseAction::Press => mouse::Action::Press,
-        MouseAction::Release => mouse::Action::Release,
-        MouseAction::Motion => mouse::Action::Motion,
-    }
-}
-
-fn map_mods(m: super::KeyMods) -> Mods {
-    let mut out = Mods::empty();
-    if m.shift {
-        out |= Mods::SHIFT;
-    }
-    if m.ctrl {
-        out |= Mods::CTRL;
-    }
-    if m.alt {
-        out |= Mods::ALT;
-    }
-    if m.sup {
-        out |= Mods::SUPER;
-    }
-    out
-}
-
-fn rgb(c: libghostty_vt::style::RgbColor) -> Rgb {
-    Rgb::new(c.r, c.g, c.b)
-}
-
-/// Map libghostty's underline style to the neutral [`UnderlineStyle`]. The
-/// binding enum is `#[non_exhaustive]`, so any future variant degrades to a
-/// plain single underline rather than failing to compile.
-fn map_underline(u: Underline) -> UnderlineStyle {
-    match u {
-        Underline::None => UnderlineStyle::None,
-        Underline::Single => UnderlineStyle::Single,
-        Underline::Double => UnderlineStyle::Double,
-        Underline::Curly => UnderlineStyle::Curly,
-        Underline::Dotted => UnderlineStyle::Dotted,
-        Underline::Dashed => UnderlineStyle::Dashed,
-        _ => UnderlineStyle::Single,
-    }
-}
-
-/// Resolve a style color (none / palette index / direct RGB) to concrete RGB
-/// against `palette`. Used for the underline color, which the render iterator
-/// (unlike `fg_color`/`bg_color`) does not pre-resolve. `None` means unset.
-fn resolve_color(c: StyleColor, palette: &[Rgb; 256]) -> Option<Rgb> {
-    match c {
-        StyleColor::None => None,
-        StyleColor::Rgb(c) => Some(rgb(c)),
-        StyleColor::Palette(idx) => palette.get(idx.0 as usize).copied(),
-    }
-}
-
-/// Adjust an already-resolved bold foreground for the bold-color policy, mirroring
-/// Ghostty's `Style.fg` (see `terminal/style.zig`). Only called for bold cells
-/// when a policy is active. `resolved` is the cell's normal foreground (from the
-/// render iterator, which honors the terminal's live palette); `raw` is the cell's
-/// unflattened style color, needed to tell an explicit ANSI palette index from a
-/// default/RGB foreground:
-/// - an ANSI palette color (0–7) brightens to its 8–15 variant (under *either*
-///   policy — `bright` or a fixed color);
-/// - a `none`/default or default-valued RGB foreground takes the fixed color
-///   (and is left untouched under `bright`).
-///
-/// `inverse` is **not** applied here — the caller swaps fg/bg afterward, matching
-/// where Ghostty applies it.
-fn apply_bold_color(
-    raw: StyleColor,
-    resolved: Rgb,
-    default_fg: Rgb,
-    palette: &[Rgb; 256],
-    policy: BoldColor,
-) -> Rgb {
-    match raw {
-        StyleColor::Palette(idx) => {
-            let i = idx.0;
-            if i < 8 {
-                return palette.get((i + 8) as usize).copied().unwrap_or(resolved);
-            }
-            resolved
-        }
-        StyleColor::None => match policy {
-            BoldColor::Color(c) => c,
-            _ => resolved,
-        },
-        StyleColor::Rgb(_) => match policy {
-            BoldColor::Color(c) if resolved == default_fg => c,
-            _ => resolved,
-        },
-    }
-}
-
-/// Linearize one sRGB channel (0–255) to linear light in `0.0..=1.0`, matching
-/// the shader's `linearize` (the WCAG transfer function Ghostty uses for
-/// contrast). Required so the contrast ratio is computed in the same space.
-fn srgb_to_linear(c: u8) -> f32 {
-    let v = c as f32 / 255.0;
-    if v <= 0.04045 {
-        v / 12.92
-    } else {
-        ((v + 0.055) / 1.055).powf(2.4)
-    }
-}
-
-/// Relative luminance of an sRGB color, per WCAG (linearized channels weighted
-/// 0.2126/0.7152/0.0722). Mirrors the renderer's `luminance`.
-pub fn luminance(c: Rgb) -> f32 {
-    0.2126 * srgb_to_linear(c.r) + 0.7152 * srgb_to_linear(c.g) + 0.0722 * srgb_to_linear(c.b)
-}
-
-/// WCAG contrast ratio between two colors (`1.0..=21.0`). Mirrors the renderer's
-/// `contrast_ratio`.
-///
-/// Also the chrome's contrast floor (see [`crate::theme`]), so the UI and the
-/// terminal's `minimum-contrast` agree on what "readable" means.
-pub fn contrast_ratio(a: Rgb, b: Rgb) -> f32 {
-    let la = luminance(a) + 0.05;
-    let lb = luminance(b) + 0.05;
-    la.max(lb) / la.min(lb)
-}
-
-/// If `fg` on `bg` fails the `min` contrast ratio, replace it with pure white or
-/// black (whichever contrasts more), exactly like the shader's `contrasted_color`.
-/// Otherwise `fg` is returned unchanged. `min <= 1.0` is a no-op.
-fn enforce_contrast(fg: Rgb, bg: Rgb, min: f32) -> Rgb {
-    if min <= 1.0 || contrast_ratio(fg, bg) >= min {
-        return fg;
-    }
-    let white = Rgb::new(255, 255, 255);
-    let black = Rgb::new(0, 0, 0);
-    if contrast_ratio(white, bg) > contrast_ratio(black, bg) {
-        white
-    } else {
-        black
-    }
-}
-
-/// Whether minimum-contrast should be skipped for `text` because it is a
-/// graphics glyph (box-drawing, block, legacy-computing, or Powerline), where
-/// forcing pure black/white looks wrong. Mirrors Ghostty's `noMinContrast`
-/// (`renderer/cell.zig`). Tested on the first scalar of the cell's grapheme.
-fn is_graphics_element(text: &str) -> bool {
-    let Some(ch) = text.chars().next() else {
-        return false;
-    };
-    let c = ch as u32;
-    matches!(c,
-        0x2500..=0x257F   // box drawing
-        | 0x2580..=0x259F // block elements
-        | 0x1FB00..=0x1FBFF | 0x1CC00..=0x1CEBF // legacy computing (+ supplement)
-        | 0xE0B0..=0xE0D7) // Powerline
-}
-
-/// Copy one libghostty render cell into a neutral [`Cell`], resolving colors
-/// (applying `inverse`) against the given defaults and reusing `dst`'s inline
-/// string buffer. Shared by the full-grid snapshot and the smooth-scroll
-/// over-row read.
-/// The pre-`ghostty_terminal_paste` encoder, kept as `encode_paste`'s fallback.
-fn encode_paste_legacy(bracketed: bool, text: &str) -> Vec<u8> {
-    let src = text.as_bytes();
-    let mut data = src.to_vec();
-    // Bracketed markers add 12 bytes; newline→CR is length-preserving.
-    let mut buf = vec![0u8; src.len() + 16];
-    match paste::encode(&mut data, bracketed, &mut buf) {
-        Ok(n) => {
-            buf.truncate(n);
-            buf
-        }
-        Err(_) => src.to_vec(),
-    }
-}
-
-/// Reset a cell to a blank default-colored cell, keeping its string buffer.
-fn blank_cell(cell: &mut Cell) {
-    cell.text.clear();
-    cell.fg = Rgb::default();
-    cell.bg = Rgb::default();
-    cell.bold = false;
-    cell.italic = false;
-    cell.underline = UnderlineStyle::None;
-    cell.underline_color = None;
-    cell.strikethrough = false;
-    cell.overline = false;
-    cell.faint = false;
-    cell.blink = false;
-    cell.invisible = false;
-    // `bg` above is a placeholder the renderer never paints: a blank cell
-    // has no explicit background, so it emits no background quad at all.
-    cell.bg_explicit = false;
-    cell.inverse = false;
-    cell.selected = false;
-}
-
-fn copy_cell(
-    cell: &CellIteration<'_, '_>,
-    default_fg: Rgb,
-    default_bg: Rgb,
-    palette: &[Rgb; 256],
-    bold_color: BoldColor,
-    min_contrast: f32,
-    dst: &mut Cell,
-) -> Result<()> {
-    let style = cell.style()?;
-    let mut fg = cell.fg_color()?.map(rgb).unwrap_or(default_fg);
-    // The bold-color policy needs the *raw* style color (an explicit ANSI palette
-    // index is lost once `fg_color()` flattens it to RGB).
-    if style.bold && bold_color != BoldColor::None {
-        fg = apply_bold_color(style.fg_color, fg, default_fg, palette, bold_color);
-    }
-    // Keep the *raw* option: once flattened to the default there is no way back,
-    // and the renderer needs to know whether this background is the terminal
-    // default (such a cell draws no background quad under `background-opacity`).
-    let bg_raw = cell.bg_color()?;
-    let mut bg = bg_raw.map(rgb).unwrap_or(default_bg);
-    if style.inverse {
-        std::mem::swap(&mut fg, &mut bg);
-    }
-    dst.text.clear();
-    for ch in cell.graphemes()? {
-        dst.text.push(ch);
-    }
-    // Minimum-contrast runs on the final (post-inverse) colors, skipping graphics
-    // glyphs — matching where Ghostty's shader applies it.
-    let mut faint = style.faint;
-    if min_contrast > 1.0 && !is_graphics_element(&dst.text) {
-        let forced = enforce_contrast(fg, bg, min_contrast);
-        if forced != fg {
-            // Ghostty's `contrasted_color` returns a fully opaque white/black,
-            // discarding the premultiplied faint alpha. Drop faint so the forced
-            // color renders at full strength — otherwise dimming a color that was
-            // just forced for readability would defeat minimum-contrast.
-            faint = false;
-            fg = forced;
-        }
-    }
-    dst.fg = fg;
-    dst.bg = bg;
-    dst.bold = style.bold;
-    dst.italic = style.italic;
-    dst.underline = map_underline(style.underline);
-    dst.underline_color = resolve_color(style.underline_color, palette);
-    dst.strikethrough = style.strikethrough;
-    dst.overline = style.overline;
-    dst.faint = faint;
-    dst.blink = style.blink;
-    dst.invisible = style.invisible;
-    dst.bg_explicit = bg_raw.is_some();
-    dst.inverse = style.inverse;
-    Ok(())
-}
-
-impl TerminalEngine for GhosttyVtEngine {
-    fn write(&mut self, bytes: &[u8]) {
-        self.term.vt_write(bytes);
-        self.collect_clipboard_deferrals();
-        // Kitty drag-and-drop (OSC 72): the engine answers `t=q` and tracks
-        // registrations, but the C API has no way to *deliver* a drop
-        // (upstream drives `kitty.dnd.State.dragDrop` from Zig). Advertising a
-        // protocol giest can't complete would make a program wait for drops
-        // that never come, so its replies are withheld — the program sees no
-        // support and file drops keep pasting paths.
-        strip_osc72(&mut self.responses.borrow_mut());
-        // Upstream ignores KAM in termio unless `vt-kam-allowed`; lib-vt has no
-        // such switch, so undo it: a locked keyboard is a denial of service.
-        if !self.kam_allowed && self.term.mode(Mode::KAM).unwrap_or(false) {
-            let _ = self.term.set_mode(Mode::KAM, false);
-        }
-    }
-
-    fn resize(&mut self, cols: u16, rows: u16, cell_px: (u32, u32)) -> Result<()> {
-        self.term.resize(cols, rows, cell_px.0, cell_px.1)?;
-        Ok(())
-    }
-
-    fn encode_key(&mut self, input: &KeyInput) -> Vec<u8> {
-        self.key_event
-            .set_action(if input.press {
-                Action::Press
-            } else {
-                Action::Release
-            })
-            .set_key(map_key(input.code))
-            .set_mods(map_mods(input.mods))
-            .set_utf8(input.text.clone());
-
-        // Pick up cursor-key/keypad/kitty/modifyOtherKeys modes from live state.
-        self.encoder.set_options_from_terminal(&self.term);
-
-        let mut out = Vec::with_capacity(16);
-        if self
-            .encoder
-            .encode_to_vec(&self.key_event, &mut out)
-            .is_err()
-        {
-            out.clear();
-        }
-        out
-    }
-
-    fn scroll(&mut self, delta: isize) {
-        self.term.scroll_viewport(ScrollViewport::Delta(delta));
-        self.viewport_moved = true;
-    }
-
-    fn scroll_to_bottom(&mut self) {
-        self.term.scroll_viewport(ScrollViewport::Bottom);
-        self.viewport_moved = true;
-    }
-
-    fn scroll_to_top(&mut self) {
-        self.term.scroll_viewport(ScrollViewport::Top);
-        self.viewport_moved = true;
-    }
-
-    fn scrollback_rows(&self) -> usize {
-        self.term.scrollback_rows().unwrap_or(0)
-    }
-
-    fn snapshot_over_row(&mut self, out: &mut Vec<Cell>) -> Result<()> {
-        // Reveal the line just above the viewport top by scrolling up one line,
-        // read its cells, then restore the viewport. The net Delta is zero, so
-        // the caller's pin is unchanged.
-        self.term.scroll_viewport(ScrollViewport::Delta(-1));
-        let bold_color = self.bold_color;
-        let min_contrast = self.min_contrast;
-        let read = (|| -> Result<()> {
-            let snapshot = self.render_state.update(&self.term)?;
-            let colors = snapshot.colors()?;
-            let cols = snapshot.cols()? as usize;
-            let default_fg = rgb(colors.foreground);
-            let default_bg = rgb(colors.background);
-            // Live palette (OSC-4-aware), as in `snapshot`.
-            let palette = colors.palette.map(rgb);
-            out.clear();
-            out.resize(cols, Cell::default());
-            let mut rows_iter = self.rows_buf.update(&snapshot)?;
-            if let Some(row) = rows_iter.next() {
-                let mut x = 0usize;
-                let mut cells_iter = self.cells_buf.update(row)?;
-                while let Some(cell) = cells_iter.next() {
-                    if x >= cols {
-                        break;
-                    }
-                    copy_cell(
-                        cell,
-                        default_fg,
-                        default_bg,
-                        &palette,
-                        bold_color,
-                        min_contrast,
-                        &mut out[x],
-                    )?;
-                    x += 1;
-                }
-            }
-            Ok(())
-        })();
-        // Restore the viewport regardless of read errors.
-        self.term.scroll_viewport(ScrollViewport::Delta(1));
-        read
-    }
-
-    fn apply_theme(&mut self, fg: Rgb, bg: Rgb, palette: &[Rgb; 256]) -> Result<()> {
-        let to_c = |c: Rgb| libghostty_vt::style::RgbColor {
-            r: c.r,
-            g: c.g,
-            b: c.b,
-        };
-        let mut pal = [libghostty_vt::style::RgbColor::default(); 256];
-        for (dst, src) in pal.iter_mut().zip(palette.iter()) {
-            *dst = to_c(*src);
-        }
-        self.term.set_default_fg_color(Some(to_c(fg)))?;
-        self.term.set_default_bg_color(Some(to_c(bg)))?;
-        self.term
-            .set_default_color_palette(Some(libghostty_vt::style::Palette(pal)))?;
-        Ok(())
-    }
-
-    fn set_cursor_color(&mut self, color: Option<Rgb>) -> Result<()> {
-        let c = color.map(|c| libghostty_vt::style::RgbColor {
-            r: c.r,
-            g: c.g,
-            b: c.b,
-        });
-        self.term.set_default_cursor_color(c)?;
-        Ok(())
-    }
-
-    fn cursor_at_prompt(&self) -> Option<bool> {
-        // The row-level semantic-prompt enum only has None/Prompt/Continuation —
-        // there is no Command/Output variant — so "not a prompt row" is ambiguous
-        // between "a command is running" and "this shell emits no OSC 133 marks".
-        // Report `Some(false)` for it and let the session's latch disambiguate.
-        let y = self.term.cursor_y().ok()?;
-        let gr = self
-            .term
-            .grid_ref(Point::Viewport(PointCoordinate { x: 0, y: y as u32 }))
-            .ok()?;
-        let sp = gr.row().ok()?.semantic_prompt().ok()?;
-        Some(matches!(
-            sp,
-            RowSemanticPrompt::Prompt | RowSemanticPrompt::Continuation
-        ))
-    }
-
-    fn prompt_rows(&self) -> Vec<super::PromptRowInfo> {
-        use libghostty_vt::screen::CellSemanticContent;
-        let (Ok(cols), Ok(rows)) = (self.term.cols(), self.term.rows()) else {
-            return Vec::new();
-        };
-        (0..rows as u32)
-            .map(|y| {
-                let row_ref = self
-                    .term
-                    .grid_ref(Point::Viewport(PointCoordinate { x: 0, y }))
-                    .ok();
-                let row = row_ref.as_ref().and_then(|gr| gr.row().ok());
-                let input = (0..cols as u16)
-                    .map(|x| {
-                        self.term
-                            .grid_ref(Point::Viewport(PointCoordinate { x, y }))
-                            .ok()
-                            .and_then(|gr| gr.cell().ok())
-                            .and_then(|c| c.semantic_content().ok())
-                            .is_some_and(|s| s == CellSemanticContent::Input)
-                    })
-                    .collect();
-                super::PromptRowInfo {
-                    input,
-                    wrap: row.is_some_and(|r| r.is_wrapped().unwrap_or(false)),
-                    wrap_continuation: row
-                        .is_some_and(|r| r.is_wrap_continuation().unwrap_or(false)),
-                    prompt: match row.and_then(|r| r.semantic_prompt().ok()) {
-                        Some(RowSemanticPrompt::Prompt) => super::RowPrompt::Prompt,
-                        Some(RowSemanticPrompt::Continuation) => super::RowPrompt::Continuation,
-                        _ => super::RowPrompt::None,
-                    },
-                }
-            })
-            .collect()
-    }
-
-    fn dynamic_colors(&self) -> (Rgb, Rgb, Option<Rgb>) {
-        // Read straight off the terminal, NOT through `RenderState::update` (the
-        // path `snapshot` uses). That call consumes the terminal's dirty state,
-        // so routing this through it would make the next real snapshot see
-        // `Dirty::Clean`, take the skip fast path, and freeze the grid.
-        let fg = self.term.fg_color().ok().flatten().map(rgb);
-        let bg = self.term.bg_color().ok().flatten().map(rgb);
-        let cursor = self.term.cursor_color().ok().flatten().map(rgb);
-        (
-            fg.unwrap_or(Rgb::new(0xc5, 0xc8, 0xc6)),
-            bg.unwrap_or(Rgb::new(0x10, 0x12, 0x18)),
-            cursor,
-        )
-    }
-
-    fn set_bold_color(&mut self, bold: BoldColor) -> Result<()> {
-        self.bold_color = bold;
-        // Resolved into every cell: re-copy the grid (rows stay clean otherwise).
-        self.viewport_moved = true;
-        Ok(())
-    }
-
-    fn set_image_storage_limit(&mut self, bytes: u64) -> Result<()> {
-        self.term.set_kitty_image_storage_limit(bytes)?;
-        // Refuse every non-direct transmission medium. `t=s` (shared memory) is
-        // a hard `UnsupportedMedium` on Windows upstream, and `t=f`/`t=t` resolve
-        // paths with posix `realpath`/`unlink` against a hardcoded `/tmp` and
-        // `/dev/shm`. The binding already defaults these off; setting them
-        // explicitly documents the divergence and survives a change to those
-        // defaults.
-        self.term.set_kitty_image_from_file_allowed(false)?;
-        self.term.set_kitty_image_temp_file_dir(None)?;
-        self.term.set_kitty_image_from_shared_mem_allowed(false)?;
-        Ok(())
-    }
-
-    fn set_min_contrast(&mut self, ratio: f32) -> Result<()> {
-        self.min_contrast = ratio;
-        self.viewport_moved = true;
-        Ok(())
-    }
-
-    fn set_vt_policy(
-        &mut self,
-        title_report: bool,
-        kam_allowed: bool,
-        grapheme_unicode: bool,
-    ) -> Result<()> {
-        self.term.set_title_report_enabled(title_report)?;
-        self.kam_allowed = kam_allowed;
-        self.term
-            .set_default_mode(Mode::GRAPHEME_CLUSTER, grapheme_unicode)?;
-        self.term
-            .set_mode(Mode::GRAPHEME_CLUSTER, grapheme_unicode)?;
-        Ok(())
-    }
-
-    fn set_enquiry_response(&mut self, response: &str) {
-        self.enquiry.set(intern_enquiry(response));
-    }
-
-    fn set_scrollback_lines(&mut self, lines: Option<usize>) -> Result<()> {
-        self.term.set_scrollback_max_lines(lines)?;
-        Ok(())
-    }
-
-    fn compress_tick(
-        &mut self,
-        now: std::time::Instant,
-        budget: std::time::Duration,
-    ) -> Result<()> {
-        use libghostty_vt::terminal::{CompressionMode, CompressionResult};
-        let activity = self.term.compression_activity()?;
-        if self.compress_activity != Some(activity) {
-            self.compress_activity = Some(activity);
-            self.compress_since = now;
-            self.compress_done = false;
-            return Ok(());
-        }
-        if self.compress_done || now.duration_since(self.compress_since) < super::COMPRESS_IDLE {
-            return Ok(());
-        }
-        let start = std::time::Instant::now();
-        loop {
-            match self.term.compress(CompressionMode::Incremental)? {
-                CompressionResult::Pending if start.elapsed() < budget => {}
-                CompressionResult::Pending => break,
-                _ => {
-                    self.compress_done = true;
-                    break;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn is_mouse_tracking(&self) -> bool {
-        self.term.is_mouse_tracking().unwrap_or(false)
-    }
-
-    fn encode_mouse(&mut self, m: &MouseInput) -> Vec<u8> {
-        let size = mouse::EncoderSize {
-            screen_width: m.screen_px.0.max(1),
-            screen_height: m.screen_px.1.max(1),
-            cell_width: m.cell_px.0.max(1),
-            cell_height: m.cell_px.1.max(1),
-            padding_top: 0,
-            padding_bottom: 0,
-            padding_right: 0,
-            padding_left: 0,
-        };
-        self.mouse_encoder
-            .set_options_from_terminal(&self.term)
-            .set_size(size);
-        self.mouse_event
-            .set_action(map_mouse_action(m.action))
-            .set_button(m.button.map(map_mouse_button))
-            .set_mods(map_mods(m.mods))
-            .set_position(mouse::Position {
-                x: m.pos_px.0 as f32,
-                y: m.pos_px.1 as f32,
-            });
-
-        let mut out = Vec::with_capacity(16);
-        if self
-            .mouse_encoder
-            .encode_to_vec(&self.mouse_event, &mut out)
-            .is_err()
-        {
-            out.clear();
-        }
-        out
-    }
-
-    fn encode_paste(&mut self, text: &str) -> Vec<u8> {
-        // Upstream's shared paste path (`ghostty_terminal_paste`): it applies the
-        // terminal's own encoding rules (bracketing, newline handling) and writes
-        // through the PTY-write callback, i.e. into `responses`. Those may
-        // already hold unsent replies, so set them aside and splice them back.
-        // `allow_unsafe = true`: giest's own gate (`Session::paste_str`) has
-        // already decided; the engine must not second-guess it.
-        use libghostty_vt::terminal::{PasteOutcome, PasteSource};
-        let pending = std::mem::take(&mut *self.responses.borrow_mut());
-        let outcome = self.term.paste(text, PasteSource::Clipboard, true);
-        let encoded = std::mem::replace(&mut *self.responses.borrow_mut(), pending);
-        if matches!(outcome, Ok(PasteOutcome::Written)) && !encoded.is_empty() {
-            return encoded;
-        }
-        encode_paste_legacy(self.term.mode(Mode::BRACKETED_PASTE).unwrap_or(false), text)
-    }
-
-    fn bracketed_paste(&self) -> bool {
-        self.term.mode(Mode::BRACKETED_PASTE).unwrap_or(false)
-    }
-
-    fn take_responses(&mut self) -> Vec<u8> {
-        std::mem::take(&mut *self.responses.borrow_mut())
-    }
-
-    fn take_bell(&mut self) -> bool {
-        self.bell.replace(false)
-    }
-
-    fn title(&self) -> Option<String> {
-        self.term
-            .title()
-            .ok()
-            .map(str::to_string)
-            .filter(|s| !s.is_empty())
-    }
-
-    fn hyperlink_at(&self, x: u16, y: u16) -> Option<String> {
-        // Resolve a grid reference for the viewport cell and read its OSC 8 URI.
-        // `hyperlink_uri` writes 0 bytes when the cell has no hyperlink, and the
-        // grid ref is read immediately (valid only until the next terminal write).
-        let gr = self
-            .term
-            .grid_ref(Point::Viewport(PointCoordinate { x, y: y as u32 }))
-            .ok()?;
-        let mut buf = [0u8; 2048];
-        let n = gr.hyperlink_uri(&mut buf).ok()?;
-        (n > 0).then(|| String::from_utf8_lossy(&buf[..n]).into_owned())
-    }
-
-    fn select_semantic(
-        &mut self,
-        kind: SelectKind,
-        x: u16,
-        y: u16,
-        word_boundaries: &[char],
-    ) -> bool {
-        use libghostty_vt::selection::{SelectLineOptions, SelectWordOptions};
-
-        let installed = (|| {
-            let gr = self
-                .term
-                .grid_ref(Point::Viewport(PointCoordinate { x, y: y as u32 }))
-                .ok()?;
-            let sel = match kind {
-                SelectKind::Word => {
-                    let mut opts = SelectWordOptions::new(gr);
-                    // An empty list means "use Ghostty's defaults" — passing an
-                    // empty slice would instead mean *no* boundaries, i.e. the
-                    // whole line is one word.
-                    if !word_boundaries.is_empty() {
-                        opts = opts.with_boundary_codepoints(word_boundaries);
-                    }
-                    self.term.select_word(opts).ok()?
-                }
-                // `with_semantic_prompt_boundary` stops a line selection at a
-                // prompt, so triple-clicking a command doesn't drag in the
-                // shell's output.
-                SelectKind::Line => self
-                    .term
-                    .select_line(SelectLineOptions::new(gr).with_semantic_prompt_boundary(true))
-                    .ok()?,
-                SelectKind::Output => self.term.select_output(gr).ok()?,
-            }?;
-            self.install_selection(&sel)
-        })();
-
-        // A gesture that finds nothing leaves the existing selection alone.
-        if installed.is_some() {
-            // Word / line / output extents are runs of text, never blocks.
-            self.sel_rectangle = false;
-        }
-        self.adopt_selection(installed)
-    }
-
-    fn selection_begin(&mut self, x: u16, y: u16, rectangle: bool) {
-        self.sel_anchor = self.track_viewport(x, y);
-        // A fresh drag selects the single cell under the pointer until it moves.
-        self.selection_update(x, y, rectangle);
-    }
-
-    fn selection_update(&mut self, x: u16, y: u16, rectangle: bool) {
-        // The anchor's tracked reference is resolved to an untracked snapshot and
-        // consumed *within this call* — the binding's untracked refs are invalid
-        // after any mutating terminal operation, and `set_selection` is one.
-        let installed = (|| {
-            let anchor = self.sel_anchor.as_ref()?;
-            if !anchor.has_value() {
-                return None;
-            }
-            let start = anchor.snapshot(&self.term).ok()??;
-            let end = self
-                .term
-                .grid_ref(Point::Viewport(PointCoordinate { x, y: y as u32 }))
-                .ok()?;
-            let sel = libghostty_vt::selection::Selection::new(start, end, rectangle);
-            self.install_selection(&sel)
-        })();
-        self.sel_rectangle = rectangle;
-        if !self.adopt_selection(installed) {
-            // The anchor lost its cell (the screen was reset or its row pruned
-            // beyond recovery). Dropping the selection is the honest outcome —
-            // extending from a cell that no longer exists would select something
-            // the user never pointed at.
-            self.selection_clear();
-        }
-    }
-
-    fn selection_clear(&mut self) {
-        self.sel_anchor = None;
-        self.sel_head = None;
-        self.sel_rectangle = false;
-        if self.selection_installed {
-            let _ = self.term.set_selection(None);
-            self.selection_dirty = true;
-        }
-        self.selection_installed = false;
-    }
-
-    fn gesture_press(&mut self, p: super::GesturePress, word_boundaries: &[char]) -> u8 {
-        use gesture::{Behavior, Behaviors};
-        // Explicit table: the binding's `Behaviors::default()` is the *zeroed*
-        // C struct, i.e. cell/cell/cell — not upstream's cell/word/line.
-        let behaviors = Behaviors::new()
-            .with_single_click_behavior(Behavior::Cell)
-            .with_double_click_behavior(Behavior::Word)
-            .with_triple_click_behavior(match p.triple {
-                SelectKind::Output => Behavior::Output,
-                _ => Behavior::Line,
-            });
-        let ev = &mut self.gesture_press_ev;
-        let configured = (|| -> libghostty_vt::error::Result<()> {
-            // Word chars first: clearing them means replacing the event.
-            if word_boundaries.is_empty() {
-                *ev = gesture::PressEvent::new()?;
-            } else {
-                ev.set_word_boundary_codepoints(word_boundaries)?;
-            }
-            ev.set_position(p.at.px.0, p.at.px.1)?
-                .set_time(p.time)?
-                .set_repeat_interval(p.repeat_interval)?
-                .set_repeat_distance(p.repeat_distance)?
-                .set_behaviors(&behaviors)?;
-            Ok(())
-        })();
-        if configured.is_err() {
-            return 0;
-        }
-        let Ok(gr) = self.term.grid_ref(Point::Viewport(PointCoordinate {
-            x: p.at.cell.0,
-            y: p.at.cell.1 as u32,
-        })) else {
-            return 0;
-        };
-        let installed = match self
-            .gesture_press_ev
-            .apply(&mut self.gesture, &self.term, gr)
-        {
-            Ok(Some(sel)) => self.install_selection(&sel),
-            _ => None,
-        };
-        let count = self.gesture.click_count(&self.term).unwrap_or(0);
-        if installed.is_some() {
-            self.sel_rectangle = false;
-            self.adopt_selection(installed);
-        } else if count == 1 {
-            // Upstream clears on a single-click *press*, not on release.
-            self.selection_clear();
-        }
-        count
-    }
-
-    fn gesture_drag(
-        &mut self,
-        at: super::GesturePoint,
-        geometry: super::GestureGeometry,
-        rectangle: bool,
-        word_boundaries: &[char],
-    ) -> isize {
-        // Only mid-gesture, and only while the press anchor is still on this
-        // screen — upstream bails *without* touching the selection otherwise.
-        if self.gesture.click_count(&self.term).unwrap_or(0) == 0
-            || !matches!(self.gesture.anchor(&self.term), Ok(Some(_)))
-        {
-            return 0;
-        }
-        let ev = &mut self.gesture_drag_ev;
-        let configured = (|| -> libghostty_vt::error::Result<()> {
-            // An empty list means "Ghostty's defaults", which is the *unset*
-            // option — an empty slice would mean no boundaries at all. The
-            // binding has no unset, so a fresh event stands in for one.
-            if word_boundaries.is_empty() {
-                *ev = gesture::DragEvent::new()?;
-            } else {
-                ev.set_word_boundary_codepoints(word_boundaries)?;
-            }
-            ev.set_position(at.px.0, at.px.1)?
-                .set_rectangle(rectangle)?;
-            Ok(())
-        })();
-        if configured.is_err() {
-            return 0;
-        }
-        let Ok(gr) = self.term.grid_ref(Point::Viewport(PointCoordinate {
-            x: at.cell.0,
-            y: at.cell.1 as u32,
-        })) else {
-            return 0;
-        };
-        let geo = gesture::Geometry {
-            columns: geometry.cols.max(1),
-            cell_width: geometry.cell_w.max(1),
-            padding_left: 0,
-            screen_height: geometry.height.max(1),
-        };
-        let sel = self
-            .gesture_drag_ev
-            .apply(&mut self.gesture, &self.term, gr, geo);
-        let installed = match sel {
-            Ok(Some(sel)) => {
-                let rect = sel.is_rectangle();
-                self.install_selection(&sel).map(|i| (i, rect))
-            }
-            _ => None,
-        };
-        match installed {
-            Some((pins, rect)) => {
-                self.sel_rectangle = rect;
-                self.adopt_selection(Some(pins));
-            }
-            // Not across the within-cell threshold yet: upstream installs the
-            // null selection, i.e. clears.
-            None => self.selection_clear(),
-        }
-        match self.gesture.autoscroll(&self.term) {
-            Ok(gesture::Autoscroll::Up) => -1,
-            Ok(gesture::Autoscroll::Down) => 1,
-            _ => 0,
-        }
-    }
-
-    fn gesture_release(&mut self, cell: Option<(u16, u16)>) -> bool {
-        let gr = cell.and_then(|(x, y)| {
-            self.term
-                .grid_ref(Point::Viewport(PointCoordinate { x, y: y as u32 }))
-                .ok()
-        });
-        let _ = self
-            .gesture_release_ev
-            .apply(&mut self.gesture, &self.term, gr);
-        self.gesture.dragged(&self.term).unwrap_or(false)
-    }
-
-    fn gesture_reset(&mut self) {
-        self.gesture.reset(&self.term);
-    }
-
-    fn select_all(&mut self) -> bool {
-        let installed = (|| {
-            let sel = self.term.select_all().ok()??;
-            self.install_selection(&sel)
-        })();
-        if installed.is_some() {
-            self.sel_rectangle = false;
-        }
-        self.adopt_selection(installed)
-    }
-
-    fn selection_adjust(&mut self, how: super::SelectionAdjust) -> Option<u32> {
-        use libghostty_vt::selection::Adjustment;
-
-        let how = match how {
-            super::SelectionAdjust::Left => Adjustment::Left,
-            super::SelectionAdjust::Right => Adjustment::Right,
-            super::SelectionAdjust::Up => Adjustment::Up,
-            super::SelectionAdjust::Down => Adjustment::Down,
-            super::SelectionAdjust::PageUp => Adjustment::PageUp,
-            super::SelectionAdjust::PageDown => Adjustment::PageDown,
-            super::SelectionAdjust::Home => Adjustment::Home,
-            super::SelectionAdjust::End => Adjustment::End,
-            super::SelectionAdjust::BeginningOfLine => Adjustment::BeginningOfLine,
-            super::SelectionAdjust::EndOfLine => Adjustment::EndOfLine,
-        };
-
-        // Rebuild the selection from both tracked ends, move its end, reinstall.
-        // The terminal owns the live selection but cannot be asked for it, which
-        // is the whole reason the head is tracked at all.
-        let (installed, end_row) = {
-            let out = (|| {
-                if !self.selection_installed {
-                    return None;
-                }
-                let (a, h) = (self.sel_anchor.as_ref()?, self.sel_head.as_ref()?);
-                if !a.has_value() || !h.has_value() {
-                    return None;
-                }
-                let start = a.snapshot(&self.term).ok()??;
-                let end = h.snapshot(&self.term).ok()??;
-                let mut sel =
-                    libghostty_vt::selection::Selection::new(start, end, self.sel_rectangle);
-                sel.adjust(&self.term, how).ok()?;
-                // Read the new end's row *before* installing: installing is a
-                // mutating call and invalidates these untracked refs.
-                let row = self
-                    .term
-                    .point_from_grid_ref(&sel.end(), PointSpace::Screen)
-                    .ok()
-                    .flatten()
-                    .map(|p| p.y);
-                self.install_selection(&sel).map(|pins| (pins, row))
-            })();
-            match out {
-                Some((pins, row)) => (Some(pins), row),
-                None => (None, None),
-            }
-        };
-        self.adopt_selection(installed).then_some(end_row).flatten()
-    }
-
-    fn selection_active(&self) -> bool {
-        self.selection_installed
-    }
-
-    fn selection_end_row(&self) -> Option<u32> {
-        if !self.selection_installed {
-            return None;
-        }
-        let h = self.sel_head.as_ref()?;
-        let end = h.snapshot(&self.term).ok()??;
-        self.term
-            .point_from_grid_ref(&end, PointSpace::Screen)
-            .ok()
-            .flatten()
-            .map(|p| p.y)
-    }
-
-    fn selected_text(&self, trim: bool) -> Option<String> {
-        use libghostty_vt::selection::FormatOptions;
-
-        if !self.selection_installed {
-            return None;
-        }
-        // `unwrap` + `trim` is documented by the binding as Ghostty's own
-        // `Screen.selectionString()` clipboard behaviour; `trim` is the user's
-        // `clipboard-trim-trailing-spaces`. With no `with_selection`, this
-        // formats the terminal's *active* selection — the tracked one, so the
-        // read spans scrollback without giest holding any pins for it.
-        let opts = FormatOptions::new().with_unwrap(true).with_trim(trim);
-        let bytes = self.term.format_selection_alloc(None, opts).ok()??;
-        Some(String::from_utf8_lossy(&bytes).into_owned())
-    }
-
-    fn set_row_anchor(&mut self, row: Option<u32>) {
-        self.row_anchor = row.and_then(|y| {
-            self.term
-                .track_grid_ref(Point::Screen(PointCoordinate { x: 0, y }))
-                .ok()
-        });
-    }
-
-    fn row_anchor_now(&self) -> Option<u32> {
-        let a = self.row_anchor.as_ref()?;
-        // A tracked reference whose row was destroyed reports no value — and
-        // upstream *also* moves such a pin to the screen's top-left, so trusting
-        // a bare point would silently read as "row 0, no drift" at exactly the
-        // moment there is drift. `has_value` is the discriminator.
-        if !a.has_value() {
-            return None;
-        }
-        Some(a.point(PointSpace::Screen).ok()??.y)
-    }
-
-    fn jump_to_prompt(&self, delta: isize) -> Option<usize> {
-        if delta == 0 {
-            return None;
-        }
-        let rows = self.term.rows().ok()? as u32;
-        // `scrollback_rows` = total rows minus the viewport height, i.e. the
-        // screen-space y of the viewport top when resting at the live bottom and
-        // the maximum lines the viewport can scroll up.
-        let bottom_top = self.term.scrollback_rows().unwrap_or(0) as u32;
-        let last = bottom_top + rows.saturating_sub(1);
-
-        // The current viewport top in absolute screen coordinates.
-        let vp_gr = self
-            .term
-            .grid_ref(Point::Viewport(PointCoordinate { x: 0, y: 0 }))
-            .ok()?;
-        let vp_top = self
-            .term
-            .point_from_grid_ref(&vp_gr, PointSpace::Screen)
-            .ok()??
-            .y;
-
-        // Is the screen row at `y` a (primary) semantic-prompt row?
-        let is_prompt = |y: u32| -> bool {
-            self.term
-                .grid_ref(Point::Screen(PointCoordinate { x: 0, y }))
-                .ok()
-                .and_then(|gr| gr.row().ok())
-                .and_then(|row| row.semantic_prompt().ok())
-                .is_some_and(|sp| sp == RowSemanticPrompt::Prompt)
-        };
-
-        // Walk outward from the current top (excluding it) until the |delta|-th
-        // prompt row, then report its offset above the live bottom.
-        let want = delta.unsigned_abs();
-        let mut found = 0usize;
-        if delta < 0 {
-            let mut y = vp_top;
-            while y > 0 {
-                y -= 1;
-                if is_prompt(y) {
-                    found += 1;
-                    if found == want {
-                        return Some(bottom_top.saturating_sub(y) as usize);
-                    }
-                }
-            }
-        } else {
-            let mut y = vp_top;
-            while y < last {
-                y += 1;
-                if is_prompt(y) {
-                    found += 1;
-                    if found == want {
-                        return Some(bottom_top.saturating_sub(y) as usize);
-                    }
-                }
-            }
-        }
-        None
-    }
-
-    fn screen_text(&self) -> Vec<super::RowText> {
-        let cols = self.term.cols().unwrap_or(0);
-        let rows = self.term.rows().unwrap_or(0) as u32;
-        let scrollback = self.term.scrollback_rows().unwrap_or(0) as u32;
-        let total = scrollback + rows;
-        let mut out = Vec::with_capacity(total as usize);
-        // Grapheme clusters are almost always 1 char; 8 covers base + combining.
-        // `big` is a heap fallback for the rare cluster that overflows `buf`.
-        let mut buf = ['\0'; 8];
-        let mut big: Vec<char> = Vec::new();
-        for y in 0..total {
-            let mut chars: Vec<char> = Vec::new();
-            let mut col_of = Vec::new();
-            // Chars up to and including the last non-blank cell, so trailing
-            // blanks (the spaces we emit for empty cells) are dropped.
-            let mut last_non_blank = 0usize;
-            for x in 0..cols {
-                let Ok(gr) = self.term.grid_ref(Point::Screen(PointCoordinate { x, y })) else {
-                    // Unreadable cell: keep the column alignment with a blank.
-                    chars.push(' ');
-                    col_of.push(x);
-                    continue;
-                };
-                // The tail half of a wide char is an empty spacer cell — skip it
-                // (emit nothing, don't advance a column) so the wide char's
-                // codepoint stays adjacent to its neighbor; a space here would
-                // defeat search/copy of e.g. "世界".
-                //
-                // `SpacerHead` is the same problem at the other end: the blank
-                // left at the end of a soft-wrapped row when a wide character
-                // didn't fit and moved to the next row. Emitting a space for it
-                // would put one *inside* a word that wrapped, so a query
-                // spanning the wrap would not match.
-                if matches!(
-                    gr.cell().ok().and_then(|c| c.wide().ok()),
-                    Some(CellWide::SpacerTail | CellWide::SpacerHead)
-                ) {
-                    continue;
-                }
-                // Read the grapheme, retrying on a heap buffer for clusters longer
-                // than `buf` (long ZWJ emoji) so they stay searchable, not blanked.
-                let cluster: &[char] = match gr.graphemes(&mut buf) {
-                    Ok(n) => &buf[..n],
-                    Err(libghostty_vt::error::Error::OutOfSpace { required }) => {
-                        big.clear();
-                        big.resize(required, '\0');
-                        match gr.graphemes(&mut big) {
-                            Ok(n) => &big[..n],
-                            Err(_) => &[],
-                        }
-                    }
-                    Err(_) => &[],
-                };
-                if cluster.is_empty() {
-                    // A genuine blank cell: a space keeps char→column alignment.
-                    chars.push(' ');
-                    col_of.push(x);
-                } else {
-                    for &ch in cluster {
-                        chars.push(ch);
-                        col_of.push(x);
-                    }
-                    last_non_blank = chars.len();
-                }
-            }
-            chars.truncate(last_non_blank);
-            col_of.truncate(last_non_blank);
-            // Does this row continue onto the next? Search joins such rows into
-            // one logical line so a query can span the wrap.
-            let wrapped = self
-                .term
-                .grid_ref(Point::Screen(PointCoordinate { x: 0, y }))
-                .ok()
-                .and_then(|gr| gr.row().ok())
-                .and_then(|r| r.is_wrapped().ok())
-                .unwrap_or(false);
-            out.push(super::RowText {
-                row: y,
-                chars,
-                cols: col_of,
-                wrapped,
-            });
-        }
-        out
-    }
-
-    fn snapshot(&mut self, out: &mut GridSnapshot) -> Result<()> {
-        // A selection change is treated exactly like a viewport move: it may not
-        // dirty the render state, and the clean fast path below would then leave
-        // the highlight unpainted on an idle screen.
-        let moved = self.viewport_moved || self.selection_dirty;
-        self.viewport_moved = false;
-        self.selection_dirty = false;
-
-        // Borrows of the distinct fields below are disjoint, so the snapshot
-        // (which holds &mut render_state) coexists with the iterator buffers.
-        let snapshot = self.render_state.update(&self.term)?;
-
-        let cols = snapshot.cols()?;
-        let rows = snapshot.rows()?;
-
-        // Kitty placements are refreshed on EVERY snapshot, deliberately ahead
-        // of the dirty-skip below. libghostty's image storage keeps its own dirty
-        // flag that the C API doesn't expose and that isn't part of the render
-        // state's, so a kitty delete or a place-only command can leave the frame
-        // `Clean` — and an image that was just deleted would otherwise stay on
-        // screen forever. This is a handful of FFI reads over 1-10 placements;
-        // the expensive part (the pixel copy) is keyed on image id and skipped
-        // on a hit. Errors are swallowed: a malformed image must never blank the
-        // pane, which is what returning `Err` from here would do.
-        let _ = walk_placements(
-            &self.term,
-            &mut self.placements,
-            &mut self.image_cache,
-            &mut self.image_ids_seen,
-            &mut out.images,
-        );
-
-        // Nothing changed since the last snapshot of this same-sized grid: keep
-        // the previously-filled cells and skip the O(rows*cols) per-cell FFI
-        // walk. (`update` consumed the dirty state; writes re-dirty it, and a
-        // viewport scroll sets `moved`, so only idle/cursor-blink frames skip.)
-        // Cells store colours already resolved (defaults, palette, bold-is-
-        // bright), so a colour change with no cell edit still needs a full copy;
-        // the render state leaves those rows clean.
-        let colors = snapshot.colors()?;
-        let palette_now = colors.palette.map(rgb);
-        let recolored = rgb(colors.foreground) != out.default_fg
-            || rgb(colors.background) != out.default_bg
-            || self.last_palette.as_deref() != Some(&palette_now[..]);
-        if recolored {
-            self.last_palette = Some(palette_now.to_vec());
-        }
-        let moved = moved || recolored;
-        let clean = !moved
-            && matches!(snapshot.dirty()?, Dirty::Clean)
-            && !out.cells.is_empty()
-            && out.cols == cols
-            && out.rows == rows;
-
-        // `Partial`: only some rows changed. Keep the others as filled last time
-        // and re-copy just the dirty ones. Anything that could move content
-        // between rows (scroll, a selection change, a resize) takes the full path.
-        let partial = !moved
-            && matches!(snapshot.dirty()?, Dirty::Partial)
-            && out.cols == cols
-            && out.rows == rows
-            && out.cells.len() == cols as usize * rows as usize
-            && self.row_blink.len() == rows as usize;
-
-        // Cursor and colours are read on every snapshot, *before* the clean skip:
-        // they are cheap, and a cursor-only change (a move, `?25l`) can leave
-        // every row clean.
-        out.default_fg = rgb(colors.foreground);
-        out.default_bg = rgb(colors.background);
-        out.cursor_color = colors.cursor.map(rgb).unwrap_or(out.default_fg);
-
-        out.cursor_visible = snapshot.cursor_visible()?;
-        out.cursor_blinking = snapshot.cursor_blinking()?;
-        out.cursor_shape = match snapshot.cursor_visual_style()? {
-            CursorVisualStyle::Bar => CursorShape::Bar,
-            CursorVisualStyle::Block => CursorShape::Block,
-            CursorVisualStyle::Underline => CursorShape::Underline,
-            CursorVisualStyle::BlockHollow => CursorShape::HollowBlock,
-            _ => CursorShape::Block,
-        };
-        if let Some(cur) = snapshot.cursor_viewport()? {
-            out.cursor_x = cur.x;
-            out.cursor_y = cur.y;
-        }
-        if clean {
-            return Ok(());
-        }
-        out.cols = cols;
-        out.rows = rows;
-
-        // Resize to the grid and blank every cell up front (reusing each cell's
-        // inline-string buffer via `clear()` rather than reallocating). Cells the
-        // iterators don't yield therefore read back blank, matching a fresh grid.
-        let total = cols as usize * rows as usize;
-        out.cells.resize(total, Cell::default());
-        if !partial {
-            out.cells.iter_mut().for_each(blank_cell);
-        }
-        self.row_blink.resize(rows as usize, false);
-
-        let default_fg = out.default_fg;
-        let default_bg = out.default_bg;
-        // Use the *live* palette from the render snapshot (it reflects OSC 4
-        // redefinitions), not the static config copy, so the bold-is-bright bump
-        // and palette-indexed underline colors track runtime changes — matching
-        // Ghostty's `Style.fg`, which reads the live terminal palette.
-        let palette = colors.palette.map(rgb);
-        let bold_color = self.bold_color;
-        let min_contrast = self.min_contrast;
-        let mut has_blink = false;
-        let mut y: usize = 0;
-        let mut rows_iter = self.rows_buf.update(&snapshot)?;
-        while let Some(row) = rows_iter.next() {
-            if y >= rows as usize {
-                break;
-            }
-            // The row-local selection range, asked once per row rather than per
-            // cell — which is what the C API recommends for a renderer that can
-            // work in spans, and it is where a soft-wrapped, scrollback-spanning
-            // or reflowed selection resolves to actual columns.
-            if partial && !row.dirty().unwrap_or(true) {
-                has_blink |= self.row_blink[y];
-                y += 1;
-                continue;
-            }
-            let row_start = y * cols as usize;
-            if partial {
-                out.cells[row_start..row_start + cols as usize]
-                    .iter_mut()
-                    .for_each(blank_cell);
-            }
-            let mut row_has_blink = false;
-            let sel = row.selection().ok().flatten();
-            let mut x: usize = 0;
-            let mut cells_iter = self.cells_buf.update(row)?;
-            while let Some(cell) = cells_iter.next() {
-                if x >= cols as usize {
-                    break;
-                }
-                // Fill in place, reusing the blanked cell's string buffer.
-                let idx = y * cols as usize + x;
-                copy_cell(
-                    cell,
-                    default_fg,
-                    default_bg,
-                    &palette,
-                    bold_color,
-                    min_contrast,
-                    &mut out.cells[idx],
-                )?;
-                out.cells[idx].selected =
-                    sel.is_some_and(|s| x >= s.start_x as usize && x <= s.end_x as usize);
-                row_has_blink |= out.cells[idx].blink;
-                x += 1;
-            }
-            self.row_blink[y] = row_has_blink;
-            has_blink |= row_has_blink;
-            let _ = row.set_dirty(false);
-            y += 1;
-        }
-        out.has_blink = has_blink;
-        // Acknowledge the frame, as upstream's renderer does: without this the
-        // render state reports `Full` forever and every change re-copies the grid.
-        snapshot.set_dirty(Dirty::Clean)?;
-
-        Ok(())
     }
 }

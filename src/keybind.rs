@@ -1619,7 +1619,7 @@ mod tests {
     #[test]
     fn modifier_aliases_and_case_insensitive() {
         assert_eq!(chord("Control+Option+Left"), chord("ctrl+alt+left"));
-        assert_eq!(chord("CMD+k").mods.sup, true);
+        assert!(chord("CMD+k").mods.sup);
     }
 
     #[test]
