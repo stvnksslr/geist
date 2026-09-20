@@ -8,3 +8,7 @@
 
 # Release packaging output (scripts/package.ps1)
 /dist
+
+# Perf harness output; baselines are committed explicitly.
+perf/
+!perf/baseline.json

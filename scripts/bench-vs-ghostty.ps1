@@ -12,7 +12,7 @@
   Ghostty's own methodology measures it), then runs giest's `stream` bench with
   `GIEST_BENCH_DATA` pointed at the same corpus, and prints both throughputs.
 
-  It degrades gracefully: if Zig 0.15.2, the ghostty source, or a corpus can't be
+  It degrades gracefully: if Zig 0.16.0, the ghostty source, or a corpus can't be
   found it prints a clear notice and skips that half rather than failing.
 
   Note on methodology: the two harnesses differ (Ghostty = single-pass wall clock
@@ -51,10 +51,10 @@ $GHOSTTY_REPO = 'https://github.com/ghostty-org/ghostty.git'
 function Note($msg) { Write-Host "›› $msg" -ForegroundColor Cyan }
 function Warn($msg) { Write-Host "!! $msg" -ForegroundColor Yellow }
 
-# --- Resolve a Zig 0.15.2 invoker (prefer mise, like the project's build) -------
+# --- Resolve a Zig 0.16.0 invoker (prefer mise, like the project's build) -------
 $zigPrefix = $null
 if (Get-Command mise -ErrorAction SilentlyContinue) {
-    $zigPrefix = @('mise', 'exec', 'zig@0.15.2', '--')
+    $zigPrefix = @('mise', 'exec', 'zig@0.16.0', '--')
 } elseif (Get-Command zig -ErrorAction SilentlyContinue) {
     $zigPrefix = @()  # zig already on PATH
 } else {

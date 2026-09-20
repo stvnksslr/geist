@@ -2,8 +2,13 @@
 zig = "0.16.0"
 
 [tasks.dev]
-description = "Local dev: debug build + run"
-run = "cargo run"
+description = "Local dev: debug build + run (installs the sideloaded ConPTY first)"
+# The inbox conhost is ~6x slower at draining a flood than the OpenConsole that
+# `mise package` ships (12.9 vs 84.4 MiB/s, docs/benchmarking.md), and it strips
+# APC, so kitty graphics silently do nothing. Without this, developers measure
+# and debug a configuration users never get. The script is a no-op once the
+# files are in place.
+run = ["pwsh -NoProfile -File scripts/fetch-conpty.ps1", "cargo run"]
 
 [tasks.release]
 description = "Optimized release build"

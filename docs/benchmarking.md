@@ -98,3 +98,55 @@ Caveats — read the ratio, not the absolute figure:
   profile (`ReleaseFast` for release, `Debug` for the dev profile). For the fairest
   engine comparison, ensure the vt lib was built optimized (a release build) — a
   debug vt lib will read far slower than Ghostty's ReleaseFast bench.
+
+## Cross-terminal comparison (`scripts/perf-vs.ps1`)
+
+Runs the **same byte streams** inside giest, Windows Terminal and WezTerm and
+records write-side throughput (how fast the terminal drains its PTY, as the
+program sees it — the quantity `ghostty-bench` and vtebench time). Workloads:
+a 17 MiB SGR/UTF-8 flood plus vtebench's suites, pre-generated to streams with
+Git's bash (vtebench's own runner needs `/bin/sh`, so it records nothing on
+Windows) and replayed by `scripts/perf-flood.ps1`.
+
+```powershell
+pwsh scripts/perf-vs.ps1 -WezTerm <path\to\wezterm-gui.exe>          # all three
+pwsh scripts/perf-vs.ps1 -Only giest                                  # just giest
+pwsh scripts/perf-vs.ps1 -Only giest-inbox -GiestExtraArgs '--conpty-passthrough=false' -GiestLabelSuffix '-inbox'
+```
+
+**Fairness rules the script enforces, learned the hard way:**
+
+- **Same grid.** ConPTY's cost scales with the cell count, so every terminal is
+  pinned to 120x40 (`--window-width/-height`, `wt --size`, WezTerm
+  `initial_cols/rows`). Unpinned, each opens at its own default and you measure
+  window size.
+- **Same console host.** WezTerm bundles a newer OpenConsole; giest uses one only
+  when `conpty.dll` + `OpenConsole.exe` sit beside the exe (`scripts/fetch-conpty.ps1`;
+  `mise package` bundles them). This is the largest single factor — see below.
+- Windows Terminal hosts the console layer in-process and never pays the pipe hop
+  the others do; treat it as the ceiling, not a peer.
+- Launch from PowerShell with the call operator or a bare `pwsh`, not
+  `Start-Process -ArgumentList` with a full path: `-ArgumentList` joins its
+  elements with spaces *without quoting*, so `C:\Program Files\...\pwsh.exe`
+  arrives as two arguments. (This masqueraded as a `giest -e` bug for an hour;
+  `-e` handles quoted paths with spaces fine.)
+
+**Reference numbers** (2026-09-19, release build, 144 Hz, median of 3, MiB/s):
+
+| workload | giest (OpenConsole) | giest (inbox conhost) | Windows Terminal | WezTerm |
+|---|---|---|---|---|
+| 17 MiB flood | 84.4 | 12.9 | 87.5 | 16.5 |
+| cursor_motion | 70.0 | 26.5 | 65.3 | 32.9 |
+| dense_cells | 100.7 | 50.2 | 98.6 | 73.3 |
+| light_cells | 307 | 339 | 328 | 245 |
+| medium_cells | 84.1 | 9.6 | 81.6 | 7.5 |
+| sync_medium_cells | 84.2 | 10.0 | 57.6 | 7.2 |
+| scrolling | 18.3 | 0.7 | 12.0 | 0.6 |
+| scrolling_fullscreen | 25.0 | 0.9 | 16.9 | 0.8 |
+| unicode | 103 | 25.1 | 110 | 7.6 |
+
+Read: on the same host and grid giest is at Windows Terminal's level and ahead
+of WezTerm; the inbox conhost costs 6x on byte-heavy work. The reader loop's
+buffer size and wake rate were tested and are **not** a factor (see `pty.rs`).
+Ghostty itself cannot be compared here: its app doesn't build on Windows and
+giest already runs Ghostty's engine — the `stream` bench is that engine plus FFI.
