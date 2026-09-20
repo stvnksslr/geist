@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Mutex;
 
-use ab_glyph::{Font, FontRef, FontVec, GlyphId, PxScale, ScaleFont, VariableFont, point};
+use ab_glyph::{Font, FontRef, GlyphId, PxScale, ScaleFont, VariableFont, point};
 use eframe::wgpu;
 use rustybuzz::ttf_parser;
 use rustybuzz::{Direction, Face as ShapeFace, Feature, UnicodeBuffer};
@@ -643,10 +643,11 @@ fn apply_variations(
     }
 }
 
-/// Leak font bytes to `'static`. The atlas (and its `FontRef`/`ShapeFace`, which
-/// borrow `'static`) lives until the process exits or a restart-triggering
-/// config change; user fonts are loaded once at atlas construction, mirroring the
-/// embedded `'static` consts and the leaked color/fallback faces.
+/// Leak font bytes to `'static`, for a face built from an in-memory buffer.
+///
+/// Test-only since fonts became memory-mapped: real font files now go through
+/// [`map_font`], which maps rather than reads and caches by path.
+#[cfg(test)]
 fn leak_font(bytes: Vec<u8>) -> &'static [u8] {
     Box::leak(bytes.into_boxed_slice())
 }
