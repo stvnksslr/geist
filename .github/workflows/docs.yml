@@ -1,7 +1,16 @@
 name: docs
 
+# Also builds (but does not deploy) on pull requests: `mkdocs build --strict`
+# turns a broken cross-reference into a failure, and running it only on main
+# means the first sign of one is a red main.
 on:
   push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "mkdocs.yml"
+      - ".github/workflows/docs.yml"
+  pull_request:
     branches: [main]
     paths:
       - "docs/**"
@@ -14,9 +23,10 @@ permissions:
   pages: write
   id-token: write
 
-# Allow one concurrent deployment, cancelling in-progress runs.
+# One run per ref, cancelling in-progress ones: main still has a single
+# deployment in flight, and a PR build cannot cancel it.
 concurrency:
-  group: pages
+  group: pages-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -30,9 +40,11 @@ jobs:
       # site as build_type=workflow but no-ops (409) on an already-enabled site,
       # so the explicit PUT below switches an existing branch-based site over.
       - uses: actions/configure-pages@v5
+        if: github.event_name != 'pull_request'
         with:
           enablement: true
       - name: Force Pages source to GitHub Actions
+        if: github.event_name != 'pull_request'
         # Best-effort: if the token can't change the Pages source, don't fail the
         # whole build — set it once manually (Settings → Pages → Source → GitHub
         # Actions) and subsequent runs deploy fine.
@@ -46,11 +58,13 @@ jobs:
       - run: pip install -r docs/requirements.txt
       - run: mkdocs build --strict
       - uses: actions/upload-pages-artifact@v3
+        if: github.event_name != 'pull_request'
         with:
           path: site
 
   deploy:
     needs: build
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     environment:
       name: github-pages

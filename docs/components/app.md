@@ -69,7 +69,7 @@ frame, so it addresses tabs by id.
 
 ## Undo and redo
 
-`App` owns one [`undo::UndoStack`](../../src/undo.rs) spanning every window —
+`App` owns one `undo::UndoStack` spanning every window —
 app-scoped rather than per-window because a *window* close is itself undoable,
 and a stack living on the window that closed would go with it.
 
