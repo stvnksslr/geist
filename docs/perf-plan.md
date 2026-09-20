@@ -6,7 +6,7 @@
 |---|---|---|
 | 1a fonts mmap + dedupe | **done** | Rust heap 76.6 -> 3.7 MB; working set 274 -> 201 MB; throughput unchanged (84.4 -> 85.5 MiB/s); 784 tests pass |
 | 1b lazy fallback loading | **dropped** | mmap made it moot — see below |
-| 1c GPU driver enumeration | **investigated, needs a decision** | no app-level knob works; DX12 201 MB vs GL 87 MB |
+| 1c GPU driver enumeration | **closed — accepted** | ~114 MB of shared driver images; keeping DX12 is worth it (2026-09-20) |
 | 2 latency vs WezTerm | **done — giest wins** | 38.2 ms p50 vs WezTerm's 62.3 (20 samples each, identical 1200x800 client) |
 | 3 dev build uses OpenConsole | **done** | `mise dev` now runs `fetch-conpty.ps1` (0.3 s no-op once installed) |
 | 4 memory series in the harness | **blocked** | needs the perf-harness branch merged; commit signing is down |
@@ -23,7 +23,24 @@ Lazy loading would now save a few handles and a millisecond of startup (already
 15-55 ms warm, vs WezTerm's ~265 ms). Implementing it would be motion without
 measurable benefit, so it is deliberately not done.
 
-### 1c: measured, and the decision it needs
+### 1c: closed — the overhead is accepted
+
+**Decision (2026-09-20): keep DX12 and live with the idle memory.** giest idles
+at ~201 MB against WezTerm's ~78. The measurements below stand; what they buy
+is not worth either price on offer, so no more work is planned here.
+
+Why accepting is defensible: the gap is almost entirely *shared, pageable
+driver images* (`nvwgf2umx` 86 MB, `amdxc64` 78 MB, `d3d10warp` 6 MB) mapped by
+wgpu's adapter enumeration, not memory giest allocates — its own Rust heap is
+3.7 MB after 1a. The cost scales with how many GPUs the machine has, and the
+pages are reclaimable under pressure.
+
+**What would reopen it:** giest wanting idle memory as a headline number; a
+wgpu release exposing an adapter filter (then it is a config change, not a
+vendored patch); or a report of real memory pressure on a multi-GPU machine.
+The route, if so, is option (1) below — everything needed to act is recorded.
+
+### 1c: the measurements behind that decision
 
 Neither `WGPU_ADAPTER_NAME=NVIDIA` nor `WGPU_POWER_PREF=high` changes anything —
 both still map `nvwgf2umx` (86 MB) + `amdxc64` (78 MB) + `d3d10warp` (6 MB) and
@@ -47,10 +64,11 @@ Three ways forward, none of which I took without a call from you:
    that crashed startup with no error at all. Not recommended.
 3. **Accept and document it.** These are shared, pageable driver images; the
    cost is real in working set but is not giest's own allocation, and it tracks
-   the machine's GPU count. giest would stay ~2.5x WezTerm on idle memory.
+   the machine's GPU count. giest stays ~2.5x WezTerm on idle memory.
 
-Recommendation: (1) if idle memory is a headline number for giest, otherwise (3).
-Either way the cost is now known rather than suspected.
+**Chosen: (3).** Option (1) would bind giest to a vendored copy of a large,
+fast-moving crate at every wgpu bump, and (2) trades memory for transparency
+and a startup crash. Neither is worth ~114 MB of shared driver pages.
 
 ### 2: measured — latency is not a gap
 
@@ -158,7 +176,13 @@ Even mapped, six files are opened and their tables parsed at startup. Load a
 fallback face on the first codepoint the earlier faces miss. Most sessions never
 render CJK or Korean. Keeps startup flat and cuts handle count.
 
-### 1c. Stop initializing every GPU adapter (M, ~60 MB WS)
+### 1c. Stop initializing every GPU adapter (M) — CLOSED, accepted
+
+> Superseded by the decision at the top of this file: the overhead is accepted
+> and no work is planned. Kept because it records the options and what each
+> costs, for whoever reopens it. The "~60 MB" estimate below was measured
+> before 1a landed; the true figure is ~114 MB.
+
 
 wgpu-hal's DX12 backend opens a D3D12 device on *every* DXGI adapter while
 enumerating, which loads each vendor's user-mode driver and WARP. giest already
@@ -229,11 +253,18 @@ Target: within 1 ms of WezTerm at p50, or a written reason it cannot be.
 
 ## Order
 
-1. **1a** fonts mmap + dedupe (largest win, smallest change, no risk).
-2. **2** latency probe — decides whether there is a second big item.
-3. **4** memory series in the harness, so 1a/1c are gated from now on.
-4. **1b**, then **1c** (investigate before patching).
-5. **3** dev-build OpenConsole fetch.
+All done or closed except one:
+
+1. ~~**1a** fonts mmap + dedupe~~ done — the largest win, and the whole of it.
+2. ~~**2** latency probe~~ done — giest leads, so there was no second big item.
+3. **4** memory series in the harness, so 1a stays fixed. **Still open**, and
+   blocked on merging the perf-harness branch (`src/perf.rs`, `mise perf`).
+4. ~~**1b**~~ dropped (mmap made it moot), ~~**1c**~~ closed (accepted).
+5. ~~**3** dev-build OpenConsole fetch~~ done.
+
+With 1c accepted, giest's standing against WezTerm is: **ahead** on throughput
+(5x) and keystroke latency (1.6x), **level** on startup and idle CPU, **behind**
+on idle memory by ~2.5x, by choice and for a known reason.
 
 ## Decided against
 
