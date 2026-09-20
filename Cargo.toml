@@ -22,6 +22,10 @@ compact_str = "0.8"
 # The `link` config table (user regex link matchers). Already in the tree
 # transitively; this only names it.
 regex = "1"
+# Memory-map font files instead of reading them: the Windows fallback chain is
+# ~60 MB of CJK/emoji faces, of which a session touches a few pages. See
+# `render/atlas.rs::map_font`.
+memmap2 = "0.9"
 # HarfBuzz-equivalent text shaper (pure Rust) for ligature/contextual-alternate
 # substitution. We shape per-style cell runs and snap the resulting glyphs back
 # onto the terminal grid by cluster.

@@ -192,7 +192,49 @@ fn run_embedding() -> Option<i32> {
     None
 }
 
+/// Live Rust-heap bytes, for memory attribution: driver and GPU allocations
+/// show up in the process's private bytes but never here, so the difference
+/// is theirs. Costs two atomic adds per allocation.
+struct CountingAlloc;
+static HEAP_LIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static HEAP_PEAK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+// SAFETY: forwards every call to the system allocator unchanged; the counters
+// are plain atomics and never allocate.
+unsafe impl std::alloc::GlobalAlloc for CountingAlloc {
+    unsafe fn alloc(&self, l: std::alloc::Layout) -> *mut u8 {
+        let p = unsafe { std::alloc::System.alloc(l) };
+        if !p.is_null() {
+            let live = HEAP_LIVE.fetch_add(l.size(), std::sync::atomic::Ordering::Relaxed) + l.size();
+            HEAP_PEAK.fetch_max(live, std::sync::atomic::Ordering::Relaxed);
+        }
+        p
+    }
+    unsafe fn dealloc(&self, p: *mut u8, l: std::alloc::Layout) {
+        HEAP_LIVE.fetch_sub(l.size(), std::sync::atomic::Ordering::Relaxed);
+        unsafe { std::alloc::System.dealloc(p, l) }
+    }
+}
+
+#[global_allocator]
+static GLOBAL: CountingAlloc = CountingAlloc;
+
+/// `GIEST_HEAP_PROBE=<file>`: append `live_bytes peak_bytes` every second, so
+/// a memory investigation can read the Rust heap without a debugger.
+fn start_heap_probe() {
+    let Ok(path) = std::env::var("GIEST_HEAP_PROBE") else { return };
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            let live = HEAP_LIVE.load(std::sync::atomic::Ordering::Relaxed);
+            let peak = HEAP_PEAK.load(std::sync::atomic::Ordering::Relaxed);
+            let _ = std::fs::write(&path, format!("{live} {peak}\n"));
+        }
+    });
+}
+
 fn main() -> eframe::Result {
+    start_heap_probe();
     let embedding = giest::handoff::is_embedding(&std::env::args().skip(1).collect::<Vec<_>>());
     let cli = if embedding {
         // No update apply here: OpenConsole is waiting on the COM call.
