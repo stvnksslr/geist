@@ -78,5 +78,6 @@ nav:
       - Building & testing: guides/building.md
       - Configuration: guides/configuration.md
       - Benchmarking: benchmarking.md
+      - Performance plan: perf-plan.md
       - Testing & perf gap analysis: testing-host-env-gap-analysis.md
   - Gotchas: gotchas.md

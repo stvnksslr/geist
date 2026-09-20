@@ -140,10 +140,7 @@ impl Keymap {
     /// the final entry rather than being skipped while a table is active. A
     /// table is therefore *not* modal on its own; shadowing a root binding takes
     /// an explicit `ignore`.
-    fn search_order<'a>(
-        &'a self,
-        stack: &'a [TableEntry],
-    ) -> impl Iterator<Item = &'a Vec<Bind>> {
+    fn search_order<'a>(&'a self, stack: &'a [TableEntry]) -> impl Iterator<Item = &'a Vec<Bind>> {
         stack
             .iter()
             .rev()
@@ -452,7 +449,9 @@ impl Keymap {
                     continue;
                 }
                 let Some(chord) = parse_chord(rest.trim()) else {
-                    eprintln!("giest: ignoring global keybind with unparseable trigger '{trigger}'");
+                    eprintln!(
+                        "giest: ignoring global keybind with unparseable trigger '{trigger}'"
+                    );
                     continue;
                 };
                 let a = action.trim();
@@ -497,7 +496,14 @@ impl Keymap {
             }
             match Action::from_name(a) {
                 Some(act) => {
-                    km.set(table.as_deref(), seq.clone(), act, performable, unconsumed, all);
+                    km.set(
+                        table.as_deref(),
+                        seq.clone(),
+                        act,
+                        performable,
+                        unconsumed,
+                        all,
+                    );
                     // Only a successful plain bind becomes a chain parent.
                     chain_parent = Some((table, seq));
                 }
@@ -600,7 +606,10 @@ fn default_binds() -> Vec<Bind> {
         ("ctrl+shift+f", Action::ToggleSearch),
         // Ghostty's own trigger, which its comment records as "matching
         // Chromium" — the devtools chord every browser uses.
-        ("ctrl+shift+i", Action::Inspector(crate::inspector::InspectorMode::Toggle)),
+        (
+            "ctrl+shift+i",
+            Action::Inspector(crate::inspector::InspectorMode::Toggle),
+        ),
         ("ctrl+alt+left", Action::FocusSplitLeft),
         ("ctrl+alt+right", Action::FocusSplitRight),
         ("ctrl+alt+up", Action::FocusSplitUp),
@@ -652,7 +661,10 @@ fn default_binds() -> Vec<Bind> {
         ("ctrl+shift+y", Action::Redo),
         ("escape", Action::EndSearch),
         ("shift+left", Action::AdjustSelection(SelectionAdjust::Left)),
-        ("shift+right", Action::AdjustSelection(SelectionAdjust::Right)),
+        (
+            "shift+right",
+            Action::AdjustSelection(SelectionAdjust::Right),
+        ),
         ("shift+up", Action::AdjustSelection(SelectionAdjust::Up)),
         ("shift+down", Action::AdjustSelection(SelectionAdjust::Down)),
     ];
@@ -988,7 +1000,10 @@ mod tests {
             ("scratch/".into(), "".into()),
             ("chain".into(), "new_tab".into()),
         ]);
-        assert_eq!(km.lookup_chain(&[], &chord("ctrl+alt+a")), vec![Action::NewWindow]);
+        assert_eq!(
+            km.lookup_chain(&[], &chord("ctrl+alt+a")),
+            vec![Action::NewWindow]
+        );
     }
 
     #[test]
@@ -1109,7 +1124,10 @@ mod tests {
         let km = Keymap::from_config(&[("unconsumed:ctrl+a>n".into(), "new_tab".into())]);
         let (a, n) = (chord("ctrl+a"), chord("n"));
         assert!(!km.is_unconsumed(&[], &[a]), "the leader is consumed");
-        assert!(km.is_unconsumed(&[], &[a, n]), "the complete binding is not");
+        assert!(
+            km.is_unconsumed(&[], &[a, n]),
+            "the complete binding is not"
+        );
         assert_eq!(km.lookup_seq(&[a]), Lookup::Pending);
     }
 
@@ -1117,7 +1135,10 @@ mod tests {
     fn trigger_flags_stack_in_any_order() {
         // Upstream documents stacking (`global:unconsumed:…`) without fixing an
         // order, so both spellings must parse the same.
-        for t in ["performable:unconsumed:ctrl+alt+k", "unconsumed:performable:ctrl+alt+k"] {
+        for t in [
+            "performable:unconsumed:ctrl+alt+k",
+            "unconsumed:performable:ctrl+alt+k",
+        ] {
             let km = Keymap::from_config(&[(t.into(), "new_tab".into())]);
             let seq = [chord("ctrl+alt+k")];
             assert_eq!(km.lookup(&chord("ctrl+alt+k")), Some(Action::NewTab), "{t}");
@@ -1164,7 +1185,10 @@ mod tests {
         let copy = stack(&["copy"]);
 
         // Root bindings stay reachable through an active table.
-        assert_eq!(km.lookup(&chord("ctrl+shift+p")), Some(Action::TogglePalette));
+        assert_eq!(
+            km.lookup(&chord("ctrl+shift+p")),
+            Some(Action::TogglePalette)
+        );
         assert_eq!(
             km.lookup_in(&copy, &chord("ctrl+shift+p")),
             Some(Action::TogglePalette)
@@ -1265,7 +1289,10 @@ mod tests {
         );
         assert!(km.is_performable(&[chord("shift+down")]));
         // The scroll binds next to them are *not* performable — they always act.
-        assert_eq!(km.lookup(&chord("shift+pageup")), Some(Action::ScrollPageUp));
+        assert_eq!(
+            km.lookup(&chord("shift+pageup")),
+            Some(Action::ScrollPageUp)
+        );
         assert!(!km.is_performable(&[chord("shift+pageup")]));
     }
 
@@ -1285,10 +1312,8 @@ mod tests {
 
     #[test]
     fn a_global_trigger_binds_globally_and_not_in_the_ordinary_keymap() {
-        let km = Keymap::from_config(&[(
-            "global:ctrl+alt+g".into(),
-            "toggle_quick_terminal".into(),
-        )]);
+        let km =
+            Keymap::from_config(&[("global:ctrl+alt+g".into(), "toggle_quick_terminal".into())]);
         assert_eq!(
             km.globals(),
             [(chord("ctrl+alt+g"), Action::ToggleQuickTerminal)]
@@ -1374,13 +1399,22 @@ mod tests {
         assert_eq!(Action::from_name("move_tab:-2"), Some(Action::MoveTab(-2)));
         assert_eq!(Action::from_name("move_tab:x"), None);
 
-        assert_eq!(Action::from_name("set_font_size:14"), Some(Action::SetFontSize(14)));
+        assert_eq!(
+            Action::from_name("set_font_size:14"),
+            Some(Action::SetFontSize(14))
+        );
         // Ghostty's parameter is a float; giest's font size is whole points, so
         // round rather than reject — 13.5 meaning 14 beats doing nothing.
-        assert_eq!(Action::from_name("set_font_size:13.5"), Some(Action::SetFontSize(14)));
+        assert_eq!(
+            Action::from_name("set_font_size:13.5"),
+            Some(Action::SetFontSize(14))
+        );
         assert_eq!(Action::from_name("set_font_size:0"), None);
 
-        assert_eq!(Action::from_name("scroll_page_lines:-5"), Some(Action::ScrollLines(-5)));
+        assert_eq!(
+            Action::from_name("scroll_page_lines:-5"),
+            Some(Action::ScrollLines(-5))
+        );
         // Stored x100 so `Action` stays `Copy + Eq` without carrying a float.
         assert_eq!(
             Action::from_name("scroll_page_fractional:0.5"),
@@ -1399,7 +1433,12 @@ mod tests {
             Action::ScrollLines(-5),
             Action::ScrollPageFraction(50),
         ] {
-            assert_eq!(Action::from_name(&a.name()), Some(a.clone()), "{}", a.name());
+            assert_eq!(
+                Action::from_name(&a.name()),
+                Some(a.clone()),
+                "{}",
+                a.name()
+            );
         }
     }
 
@@ -1428,8 +1467,8 @@ mod tests {
         ] {
             for act in [WriteAction::Copy, WriteAction::Paste, WriteAction::Open] {
                 let spec = format!("{name}:{}", act.name());
-                let parsed = Action::from_name(&spec)
-                    .unwrap_or_else(|| panic!("{spec} should parse"));
+                let parsed =
+                    Action::from_name(&spec).unwrap_or_else(|| panic!("{spec} should parse"));
                 assert_eq!(parsed, Action::WriteFile(scope, act));
                 assert_eq!(parsed.name(), spec, "name() must round-trip");
             }
@@ -1472,7 +1511,11 @@ mod tests {
 
         // The leader alone is not an action — it is a promise of one.
         assert_eq!(km.lookup_seq(&[a]), Lookup::Pending);
-        assert_eq!(km.lookup(&a), None, "a leader must not resolve as an action");
+        assert_eq!(
+            km.lookup(&a),
+            None,
+            "a leader must not resolve as an action"
+        );
         // …and completing it runs the binding.
         assert_eq!(km.lookup_seq(&[a, n]), Lookup::Action(vec![Action::NewTab]));
         // A wrong second key is a dead end, not a partial match.
@@ -1501,7 +1544,10 @@ mod tests {
             ("ctrl+a>n".into(), "new_tab".into()),
             ("ctrl+a".into(), "new_window".into()),
         ]);
-        assert_eq!(km.lookup_seq(&[chord("ctrl+a")]), Lookup::Action(vec![Action::NewWindow]));
+        assert_eq!(
+            km.lookup_seq(&[chord("ctrl+a")]),
+            Lookup::Action(vec![Action::NewWindow])
+        );
         // The longer binding becomes unreachable, which is the user's choice to
         // make — but it must not break lookup.
         assert_eq!(
@@ -1544,7 +1590,10 @@ mod tests {
             km.lookup_seq(&[chord("ctrl+a"), chord("w")]),
             Lookup::Action(_)
         ));
-        assert!(km.starts_binding(&chord("ctrl+a")), "the leader still leads somewhere");
+        assert!(
+            km.starts_binding(&chord("ctrl+a")),
+            "the leader still leads somewhere"
+        );
     }
 
     #[test]
@@ -1570,7 +1619,7 @@ mod tests {
     #[test]
     fn modifier_aliases_and_case_insensitive() {
         assert_eq!(chord("Control+Option+Left"), chord("ctrl+alt+left"));
-        assert_eq!(chord("CMD+k").mods.sup, true);
+        assert!(chord("CMD+k").mods.sup);
     }
 
     #[test]
@@ -1584,7 +1633,10 @@ mod tests {
         let km = Keymap::default();
         assert_eq!(km.lookup(&chord("ctrl+shift+t")), Some(Action::NewTab));
         assert_eq!(km.lookup(&chord("ctrl+shift+e")), Some(Action::SplitDown));
-        assert_eq!(km.lookup(&chord("ctrl+alt+left")), Some(Action::FocusSplitLeft));
+        assert_eq!(
+            km.lookup(&chord("ctrl+alt+left")),
+            Some(Action::FocusSplitLeft)
+        );
         assert_eq!(km.lookup(&chord("alt+1")), Some(Action::GotoTab(0)));
         assert_eq!(km.lookup(&chord("alt+9")), Some(Action::LastTab));
         assert_eq!(km.lookup(&chord("ctrl+tab")), Some(Action::NextTab));
@@ -1601,9 +1653,21 @@ mod tests {
         for &code in crate::engine::KeyCode::ALL {
             for mods in [
                 KeyMods::default(),
-                KeyMods { ctrl: true, ..Default::default() },
-                KeyMods { ctrl: true, shift: true, ..Default::default() },
-                KeyMods { sup: true, ctrl: true, alt: true, shift: true },
+                KeyMods {
+                    ctrl: true,
+                    ..Default::default()
+                },
+                KeyMods {
+                    ctrl: true,
+                    shift: true,
+                    ..Default::default()
+                },
+                KeyMods {
+                    sup: true,
+                    ctrl: true,
+                    alt: true,
+                    shift: true,
+                },
             ] {
                 let chord = Chord { mods, code };
                 let name = chord.name();
@@ -1678,7 +1742,10 @@ mod tests {
         // Existing chord rebound to the new action.
         assert_eq!(km.lookup(&chord("ctrl+shift+t")), Some(Action::CloseTab));
         // New chord added.
-        assert_eq!(km.lookup(&chord("ctrl+shift+r")), Some(Action::ReloadConfig));
+        assert_eq!(
+            km.lookup(&chord("ctrl+shift+r")),
+            Some(Action::ReloadConfig)
+        );
         // Untouched default still resolves.
         assert_eq!(km.lookup(&chord("ctrl+shift+e")), Some(Action::SplitDown));
     }
@@ -1704,7 +1771,11 @@ mod tests {
             Action::ToggleFullscreen,
             Action::ScrollToRow(200),
         ] {
-            assert_eq!(Action::from_name(&a.name()), Some(a.clone()), "roundtrip {a:?}");
+            assert_eq!(
+                Action::from_name(&a.name()),
+                Some(a.clone()),
+                "roundtrip {a:?}"
+            );
         }
     }
 
@@ -1713,7 +1784,10 @@ mod tests {
     #[test]
     fn default_keymap_binds_the_scrollback_keys() {
         let km = Keymap::default();
-        assert_eq!(km.lookup(&chord("shift+pageup")), Some(Action::ScrollPageUp));
+        assert_eq!(
+            km.lookup(&chord("shift+pageup")),
+            Some(Action::ScrollPageUp)
+        );
         assert_eq!(
             km.lookup(&chord("shift+pagedown")),
             Some(Action::ScrollPageDown)
@@ -1734,7 +1808,10 @@ mod tests {
     #[test]
     fn default_keymap_binds_fullscreen_and_zoom() {
         let km = Keymap::default();
-        assert_eq!(km.lookup(&chord("ctrl+enter")), Some(Action::ToggleFullscreen));
+        assert_eq!(
+            km.lookup(&chord("ctrl+enter")),
+            Some(Action::ToggleFullscreen)
+        );
         assert_eq!(
             km.lookup(&chord("ctrl+shift+enter")),
             Some(Action::ToggleSplitZoom)

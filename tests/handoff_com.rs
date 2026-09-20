@@ -34,9 +34,18 @@ type Handle = *mut c_void;
 
 #[repr(C)]
 struct Guid(u32, u16, u16, [u8; 8]);
-const CLSID_TERMINAL: Guid = Guid(0x2ced_21a9, 0x5236, 0x4f72, [0xb7, 0x1f, 0x10, 0xf3, 0x94, 0x92, 0x95, 0xe5]);
-const IID_ITERMINALHANDOFF3: Guid =
-    Guid(0x6f23_da90, 0x15c5, 0x4203, [0x9d, 0xb0, 0x64, 0xe7, 0x3f, 0x1b, 0x1b, 0x00]);
+const CLSID_TERMINAL: Guid = Guid(
+    0x2ced_21a9,
+    0x5236,
+    0x4f72,
+    [0xb7, 0x1f, 0x10, 0xf3, 0x94, 0x92, 0x95, 0xe5],
+);
+const IID_ITERMINALHANDOFF3: Guid = Guid(
+    0x6f23_da90,
+    0x15c5,
+    0x4203,
+    [0x9d, 0xb0, 0x64, 0xe7, 0x3f, 0x1b, 0x1b, 0x00],
+);
 
 #[repr(C)]
 struct StartupInfo {
@@ -67,7 +76,13 @@ struct Vtbl {
 #[link(name = "ole32")]
 unsafe extern "system" {
     fn CoInitializeEx(r: *mut c_void, c: u32) -> i32;
-    fn CoCreateInstance(c: *const Guid, o: *mut c_void, ctx: u32, i: *const Guid, out: *mut *mut c_void) -> i32;
+    fn CoCreateInstance(
+        c: *const Guid,
+        o: *mut c_void,
+        ctx: u32,
+        i: *const Guid,
+        out: *mut *mut c_void,
+    ) -> i32;
 }
 #[link(name = "oleaut32")]
 unsafe extern "system" {
@@ -90,12 +105,21 @@ fn run(cmd: &mut Command) -> Output {
     cmd.output().expect("run")
 }
 fn text(o: &Output) -> String {
-    format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr))
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&o.stdout),
+        String::from_utf8_lossy(&o.stderr)
+    )
 }
 fn snapshot() -> String {
     WATCHED
         .iter()
-        .map(|k| format!("== {k}\n{}", text(&run(Command::new("reg").args(["query", k, "/s"])))))
+        .map(|k| {
+            format!(
+                "== {k}\n{}",
+                text(&run(Command::new("reg").args(["query", k, "/s"])))
+            )
+        })
         .collect()
 }
 fn giest_running() -> bool {
@@ -134,7 +158,8 @@ fn read_until(h: OwnedHandle, secs: u64, pred: impl Fn(&[u8]) -> bool + Send + '
         }
         let _ = tx.send(got);
     });
-    rx.recv_timeout(Duration::from_secs(secs)).unwrap_or_default()
+    rx.recv_timeout(Duration::from_secs(secs))
+        .unwrap_or_default()
 }
 
 fn wide(s: &str) -> Vec<u16> {
@@ -170,11 +195,16 @@ fn run_parent(mode: &str) {
     let _guard = Guard { before };
     giest::handoff::register_com_only(std::path::Path::new(GIEST)).expect("register");
     // Declared after the guard, so it is dropped (killed) before it.
-    let _first = KillOnDrop((mode == MODE_FORWARDED).then(|| Command::new(GIEST).spawn().expect("start giest")));
+    let _first = KillOnDrop(
+        (mode == MODE_FORWARDED).then(|| Command::new(GIEST).spawn().expect("start giest")),
+    );
     if mode == MODE_FORWARDED {
         let t0 = Instant::now();
         while !run(Command::new(GIEST).arg("+list")).status.success() {
-            assert!(t0.elapsed() < Duration::from_secs(20), "the first giest never served IPC");
+            assert!(
+                t0.elapsed() < Duration::from_secs(20),
+                "the first giest never served IPC"
+            );
             std::thread::sleep(Duration::from_millis(300));
         }
     }
@@ -213,7 +243,13 @@ fn com_child() {
     unsafe {
         assert!(CoInitializeEx(std::ptr::null_mut(), 0) >= 0);
         let mut obj: *mut c_void = std::ptr::null_mut();
-        let hr = CoCreateInstance(&CLSID_TERMINAL, std::ptr::null_mut(), 0x4, &IID_ITERMINALHANDOFF3, &mut obj);
+        let hr = CoCreateInstance(
+            &CLSID_TERMINAL,
+            std::ptr::null_mut(),
+            0x4,
+            &IID_ITERMINALHANDOFF3,
+            &mut obj,
+        );
         assert_eq!(hr, 0, "CoCreateInstance: {hr:#010x}");
         let vt = &**(obj as *const *const Vtbl);
 
@@ -226,7 +262,12 @@ fn com_child() {
         // here it exits at once with code 1, which silently made the exit
         // checks below pass for the wrong reason.)
         let client = Command::new("powershell.exe")
-            .args(["-NoProfile", "-NonInteractive", "-Command", "Start-Sleep -Seconds 120"])
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Start-Sleep -Seconds 120",
+            ])
             .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
@@ -263,10 +304,14 @@ fn com_child() {
         // 1. The first resize arrives on the signal pipe.
         let sig = read_until(sig_r, 20, |b| b.len() >= 6);
         eprintln!("signal: {sig:?}");
-        assert!(sig.len() >= 6 && sig[0..2] == [8, 0], "no PTY_SIGNAL_RESIZE_WINDOW: {sig:?}");
+        assert!(
+            sig.len() >= 6 && sig[0..2] == [8, 0],
+            "no PTY_SIGNAL_RESIZE_WINDOW: {sig:?}"
+        );
 
         // 2. Output reaches the engine.
-        out.write_all(b"\x1b]2;COM_OK\x07hello from the handoff\r\n").unwrap();
+        out.write_all(b"\x1b]2;COM_OK\x07hello from the handoff\r\n")
+            .unwrap();
         let t0 = Instant::now();
         let mut listed = String::new();
         while t0.elapsed() < Duration::from_secs(15) {
@@ -284,21 +329,38 @@ fn com_child() {
         assert!(o.status.success(), "{}", text(&o));
         let got = read_until(in_, 10, |b| b.windows(3).any(|w| w == b"abc"));
         eprintln!("input pipe: {:?}", String::from_utf8_lossy(&got));
-        assert!(got.windows(3).any(|w| w == b"abc"), "typed input never arrived");
+        assert!(
+            got.windows(3).any(|w| w == b"abc"),
+            "typed input never arrived"
+        );
 
         if mode == MODE_FORWARDED {
             // Forwarded: one instance, two tabs; the `-Embedding` process
             // has handed over and gone.
             assert_eq!(listed.matches("\"tabs\"").count(), 1, "expected one window");
-            assert!(listed.matches("\"active\"").count() >= 2, "expected a second tab");
+            assert!(
+                listed.matches("\"active\"").count() >= 2,
+                "expected a second tab"
+            );
             let n = run(Command::new("tasklist").args(["/FI", "IMAGENAME eq giest.exe", "/NH"]));
-            assert_eq!(String::from_utf8_lossy(&n.stdout).matches("giest.exe").count(), 1);
+            assert_eq!(
+                String::from_utf8_lossy(&n.stdout)
+                    .matches("giest.exe")
+                    .count(),
+                1
+            );
         }
 
         // 4. The client exiting reaps the pane; standalone, the instance too.
         // First: nothing may have gone away early.
-        assert!(guard.0.as_mut().unwrap().try_wait().unwrap().is_none(), "stand-in client died");
-        assert!(listed.contains("COM_OK") && giest_running(), "pane gone before the client exited");
+        assert!(
+            guard.0.as_mut().unwrap().try_wait().unwrap().is_none(),
+            "stand-in client died"
+        );
+        assert!(
+            listed.contains("COM_OK") && giest_running(),
+            "pane gone before the client exited"
+        );
         // Outlive `abnormal-command-exit-runtime` (250 ms): a client killed
         // sooner is held open as "failed to launch" by design, not reaped.
         std::thread::sleep(Duration::from_millis(600));
@@ -312,8 +374,14 @@ fn com_child() {
             }
             let listed = text(&run(Command::new(GIEST).arg("+list")));
             eprintln!("+list after the client exited: {listed}");
-            assert!(!listed.contains("COM_OK"), "the handed-off tab was not reaped");
-            assert!(giest_running(), "the running instance went away with the tab");
+            assert!(
+                !listed.contains("COM_OK"),
+                "the handed-off tab was not reaped"
+            );
+            assert!(
+                giest_running(),
+                "the running instance went away with the tab"
+            );
         } else {
             while t0.elapsed() < Duration::from_secs(10) && giest_running() {
                 std::thread::sleep(Duration::from_millis(300));

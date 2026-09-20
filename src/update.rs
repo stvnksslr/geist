@@ -79,7 +79,11 @@ impl AutoUpdate {
     /// giest has no such preference: a release build checks, a debug build
     /// (a developer's tree) never phones home unless asked.
     pub fn default_for_build() -> Self {
-        if cfg!(debug_assertions) { Self::Off } else { Self::Check }
+        if cfg!(debug_assertions) {
+            Self::Off
+        } else {
+            Self::Check
+        }
     }
 }
 
@@ -160,7 +164,12 @@ impl Version {
                 })
                 .collect::<Option<Vec<_>>>()?,
         };
-        Some(Self { major, minor, patch, pre })
+        Some(Self {
+            major,
+            minor,
+            patch,
+            pre,
+        })
     }
 
     pub fn is_prerelease(&self) -> bool {
@@ -265,7 +274,11 @@ pub fn parse_manifest(bytes: &[u8]) -> Result<Manifest, String> {
 }
 
 /// The newest release the channel admits that is newer than `current`.
-pub fn select_release<'a>(releases: &'a [Release], channel: Channel, current: &Version) -> Option<(&'a Release, Version)> {
+pub fn select_release<'a>(
+    releases: &'a [Release],
+    channel: Channel,
+    current: &Version,
+) -> Option<(&'a Release, Version)> {
     releases
         .iter()
         .filter(|r| !r.draft)
@@ -302,7 +315,11 @@ pub fn verify_file(path: &Path, want: &str) -> Result<(), String> {
 }
 
 pub fn current_arch() -> &'static str {
-    if cfg!(target_arch = "aarch64") { "arm64" } else { "x64" }
+    if cfg!(target_arch = "aarch64") {
+        "arm64"
+    } else {
+        "x64"
+    }
 }
 
 /// A resolved update: what to fetch and what it must hash to.
@@ -355,7 +372,11 @@ impl Http for Curl {
         if out.status.success() {
             Ok(out.stdout)
         } else {
-            Err(format!("fetch failed ({}): {}", out.status, String::from_utf8_lossy(&out.stderr).trim()))
+            Err(format!(
+                "fetch failed ({}): {}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            ))
         }
     }
 
@@ -368,7 +389,11 @@ impl Http for Curl {
             .map_err(|e| format!("curl: {e}"))?;
         loop {
             if let Some(st) = child.try_wait().map_err(|e| e.to_string())? {
-                return if st.success() { Ok(()) } else { Err(format!("download failed ({st})")) };
+                return if st.success() {
+                    Ok(())
+                } else {
+                    Err(format!("download failed ({st})"))
+                };
             }
             if let Ok(m) = std::fs::metadata(dest) {
                 progress(m.len());
@@ -379,8 +404,14 @@ impl Http for Curl {
 }
 
 /// Resolve the update for this build, or `None` when up to date.
-pub fn find_update(http: &dyn Http, feed: &str, channel: Channel, current: &str) -> Result<Option<Plan>, String> {
-    let cur = Version::parse(current).ok_or_else(|| format!("unparseable current version {current}"))?;
+pub fn find_update(
+    http: &dyn Http,
+    feed: &str,
+    channel: Channel,
+    current: &str,
+) -> Result<Option<Plan>, String> {
+    let cur =
+        Version::parse(current).ok_or_else(|| format!("unparseable current version {current}"))?;
     let releases: Vec<Release> =
         serde_json::from_slice(&http.get(feed)?).map_err(|e| format!("bad release feed: {e}"))?;
     let Some((rel, ver)) = select_release(&releases, channel, &cur) else {
@@ -391,7 +422,10 @@ pub fn find_update(http: &dyn Http, feed: &str, channel: Channel, current: &str)
         .ok_or_else(|| format!("release {} has no {MANIFEST_NAME}", rel.tag_name))?;
     let man = parse_manifest(&http.get(&man_asset.browser_download_url)?)?;
     if Version::parse(&man.version) != Some(ver.clone()) {
-        return Err(format!("manifest version {} does not match release {}", man.version, rel.tag_name));
+        return Err(format!(
+            "manifest version {} does not match release {}",
+            man.version, rel.tag_name
+        ));
     }
     let file = man
         .files
@@ -435,7 +469,11 @@ pub fn extract_with_tar(zip: &Path, into: &Path) -> Result<(), String> {
         c.creation_flags(0x0800_0000);
     }
     let st = c.status().map_err(|e| format!("tar: {e}"))?;
-    if st.success() { Ok(()) } else { Err(format!("extract failed ({st})")) }
+    if st.success() {
+        Ok(())
+    } else {
+        Err(format!("extract failed ({st})"))
+    }
 }
 
 /// Download, verify, extract, mark pending. Nothing is extracted from a file
@@ -466,8 +504,12 @@ pub fn download_and_stage(
     if !dir.join("giest.exe").is_file() {
         return Err("update package has no giest.exe".into());
     }
-    let p = Pending { version: plan.version.clone(), dir };
-    std::fs::write(root.join("pending.json"), serde_json::to_vec(&p).unwrap()).map_err(|e| e.to_string())?;
+    let p = Pending {
+        version: plan.version.clone(),
+        dir,
+    };
+    std::fs::write(root.join("pending.json"), serde_json::to_vec(&p).unwrap())
+        .map_err(|e| e.to_string())?;
     Ok(p)
 }
 
@@ -499,7 +541,11 @@ pub fn apply_staged(staged: &Path, install: &Path) -> Result<Vec<PathBuf>, Strin
             let _ = std::fs::create_dir_all(parent);
         }
         if dst.exists() {
-            match aside_name(&dst).and_then(|aside| std::fs::rename(&dst, &aside).map(|_| aside).map_err(|e| e.to_string())) {
+            match aside_name(&dst).and_then(|aside| {
+                std::fs::rename(&dst, &aside)
+                    .map(|_| aside)
+                    .map_err(|e| e.to_string())
+            }) {
                 Ok(aside) => moved.push((dst.clone(), aside)),
                 Err(e) => {
                     result = Err(format!("cannot move {} aside: {e}", dst.display()));
@@ -523,9 +569,17 @@ pub fn apply_staged(staged: &Path, install: &Path) -> Result<Vec<PathBuf>, Strin
 }
 
 fn aside_name(p: &Path) -> Result<PathBuf, String> {
-    let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
+    let name = p
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
     for n in 0..100 {
-        let cand = if n == 0 { p.with_file_name(format!("{name}.old")) } else { p.with_file_name(format!("{name}.old-{n}")) };
+        let cand = if n == 0 {
+            p.with_file_name(format!("{name}.old"))
+        } else {
+            p.with_file_name(format!("{name}.old-{n}"))
+        };
         if !cand.exists() || std::fs::remove_file(&cand).is_ok() {
             return Ok(cand);
         }
@@ -548,10 +602,15 @@ fn collect_files(base: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Re
 /// Best-effort sweep of `*.old` / `*.old-N` left by an earlier apply. A file
 /// still mapped by a running process fails to delete and is kept for later.
 pub fn sweep_old(install: &Path) {
-    let Ok(rd) = std::fs::read_dir(install) else { return };
+    let Ok(rd) = std::fs::read_dir(install) else {
+        return;
+    };
     for e in rd.flatten() {
         let n = e.file_name().to_string_lossy().to_string();
-        if n.ends_with(".old") || n.rsplit_once(".old-").is_some_and(|(_, k)| k.bytes().all(|b| b.is_ascii_digit())) {
+        if n.ends_with(".old")
+            || n.rsplit_once(".old-")
+                .is_some_and(|(_, k)| k.bytes().all(|b| b.is_ascii_digit()))
+        {
             let _ = std::fs::remove_file(e.path());
         }
     }
@@ -582,19 +641,30 @@ pub fn is_packaged() -> bool {
 /// over the exe's directory, relaunches the new exe with the same arguments,
 /// and returns `true` (the caller exits).
 pub fn startup_apply() -> bool {
-    if let Some(pid) = std::env::var("GIEST_UPDATE_WAIT_PID").ok().and_then(|p| p.parse::<u32>().ok()) {
+    if let Some(pid) = std::env::var("GIEST_UPDATE_WAIT_PID")
+        .ok()
+        .and_then(|p| p.parse::<u32>().ok())
+    {
         // SAFETY: plain env mutation before any other thread exists.
         unsafe { std::env::remove_var("GIEST_UPDATE_WAIT_PID") };
         wait_for_pid(pid, Duration::from_secs(15));
     }
-    let Ok(exe) = std::env::current_exe() else { return false };
-    let Some(install) = exe.parent() else { return false };
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
+    let Some(install) = exe.parent() else {
+        return false;
+    };
     sweep_old(install);
     if is_packaged() {
         return false;
     }
-    let Some(root) = updates_root() else { return false };
-    let Some(p) = read_pending(&root) else { return false };
+    let Some(root) = updates_root() else {
+        return false;
+    };
+    let Some(p) = read_pending(&root) else {
+        return false;
+    };
     let cur = Version::parse(env!("CARGO_PKG_VERSION"));
     let newer = matches!((Version::parse(&p.version), cur), (Some(n), Some(c)) if n > c);
     let _ = std::fs::remove_file(root.join("pending.json"));
@@ -648,8 +718,14 @@ pub enum State {
     Checking,
     NotFound,
     Available(Plan),
-    Downloading { version: String, done: u64, total: u64 },
-    Ready { version: String },
+    Downloading {
+        version: String,
+        done: u64,
+        total: u64,
+    },
+    Ready {
+        version: String,
+    },
     Error(String),
 }
 
@@ -662,7 +738,10 @@ impl State {
             State::NotFound => "No Updates Available".into(),
             State::Available(p) => format!("Update Available: {}", p.version),
             State::Downloading { total, done, .. } if *total > 0 => {
-                format!("Downloading: {:.0}%", (*done as f64 / *total as f64).min(1.0) * 100.0)
+                format!(
+                    "Downloading: {:.0}%",
+                    (*done as f64 / *total as f64).min(1.0) * 100.0
+                )
             }
             State::Downloading { .. } => "Downloading\u{2026}".into(),
             State::Ready { .. } => "Restart to Complete Update".into(),
@@ -672,7 +751,9 @@ impl State {
 
     pub fn tooltip(&self) -> String {
         match self {
-            State::Available(p) => format!("Download and install giest {} ({})", p.version, p.notes_url),
+            State::Available(p) => {
+                format!("Download and install giest {} ({})", p.version, p.notes_url)
+            }
             State::Ready { version } => format!("giest {version} is ready; restart to apply"),
             State::Error(e) => e.clone(),
             State::NotFound => "You are running the latest version".into(),
@@ -713,7 +794,9 @@ impl Settings {
     pub fn from_config(c: &crate::config::Config) -> Self {
         Self {
             mode: c.auto_update,
-            channel: c.auto_update_channel.unwrap_or_else(|| Channel::of_version(env!("CARGO_PKG_VERSION"))),
+            channel: c
+                .auto_update_channel
+                .unwrap_or_else(|| Channel::of_version(env!("CARGO_PKG_VERSION"))),
             feed: c.auto_update_feed.clone(),
         }
     }
@@ -722,7 +805,12 @@ impl Settings {
 impl Updater {
     pub fn new(http: Arc<dyn Http>) -> Self {
         Self {
-            inner: Mutex::new(Inner { state: State::Idle, busy: false, last_check: None, shown_at: None }),
+            inner: Mutex::new(Inner {
+                state: State::Idle,
+                busy: false,
+                last_check: None,
+                shown_at: None,
+            }),
             http,
             wake: OnceLock::new(),
         }
@@ -753,7 +841,8 @@ impl Updater {
         {
             let mut i = self.inner.lock().unwrap();
             if matches!(i.state, State::NotFound | State::Error(_))
-                && i.shown_at.is_some_and(|t| t.elapsed() > Duration::from_secs(8))
+                && i.shown_at
+                    .is_some_and(|t| t.elapsed() > Duration::from_secs(8))
             {
                 i.state = State::Idle;
             }
@@ -778,7 +867,10 @@ impl Updater {
     pub fn check(&'static self, s: Settings, manual: bool) {
         if is_packaged() {
             if manual {
-                self.set(State::Error("This copy is installed as a package; App Installer / the Store updates it.".into()));
+                self.set(State::Error(
+                    "This copy is installed as a package; App Installer / the Store updates it."
+                        .into(),
+                ));
             }
             return;
         }
@@ -820,10 +912,20 @@ impl Updater {
             i.busy = true;
         }
         let total = plan.size;
-        self.set(State::Downloading { version: plan.version.clone(), done: 0, total });
+        self.set(State::Downloading {
+            version: plan.version.clone(),
+            done: 0,
+            total,
+        });
         std::thread::spawn(move || {
             let v = plan.version.clone();
-            let progress = |done| self.set(State::Downloading { version: v.clone(), done, total });
+            let progress = |done| {
+                self.set(State::Downloading {
+                    version: v.clone(),
+                    done,
+                    total,
+                })
+            };
             let r = download_and_stage(&*self.http, &plan, &root, &extract_with_tar, &progress);
             self.inner.lock().unwrap().busy = false;
             match r {
@@ -917,7 +1019,16 @@ mod tests {
         }
         assert_eq!(v("v1.2.3"), v("1.2.3"));
         assert_eq!(v("1.2.3+build.5").cmp(&v("1.2.3")), Ordering::Equal);
-        for bad in ["", "1", "1.2", "1.2.3.4", "1.x.3", "1.2.3-", "1.2.3-a..b", "01a.2.3"] {
+        for bad in [
+            "",
+            "1",
+            "1.2",
+            "1.2.3.4",
+            "1.x.3",
+            "1.2.3-",
+            "1.2.3-a..b",
+            "01a.2.3",
+        ] {
             assert!(Version::parse(bad).is_none(), "{bad}");
         }
     }
@@ -933,7 +1044,13 @@ mod tests {
     }
 
     fn rel(tag: &str, pre: bool, draft: bool) -> Release {
-        Release { tag_name: tag.into(), prerelease: pre, draft, html_url: String::new(), assets: vec![] }
+        Release {
+            tag_name: tag.into(),
+            prerelease: pre,
+            draft,
+            html_url: String::new(),
+            assets: vec![],
+        }
     }
 
     #[test]
@@ -946,8 +1063,17 @@ mod tests {
             rel("nightly", true, false), // unparseable: skipped
         ];
         let cur = v("0.1.0");
-        assert_eq!(select_release(&rs, Channel::Stable, &cur).unwrap().0.tag_name, "v0.1.5");
-        assert_eq!(select_release(&rs, Channel::Tip, &cur).unwrap().0.tag_name, "v0.2.0-tip.7");
+        assert_eq!(
+            select_release(&rs, Channel::Stable, &cur)
+                .unwrap()
+                .0
+                .tag_name,
+            "v0.1.5"
+        );
+        assert_eq!(
+            select_release(&rs, Channel::Tip, &cur).unwrap().0.tag_name,
+            "v0.2.0-tip.7"
+        );
         assert!(select_release(&rs, Channel::Stable, &v("0.1.5")).is_none());
         // A prerelease-shaped tag not flagged prerelease is still not stable.
         let rs2 = vec![rel("v0.9.0-rc.1", false, false)];
@@ -968,15 +1094,29 @@ mod tests {
 
     #[test]
     fn checksum_verification() {
-        assert_eq!(sha256_hex(b"abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
         let p = tmp("sum").join("f.bin");
         std::fs::write(&p, b"abc").unwrap();
-        assert!(verify_file(&p, "BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD").is_ok());
-        assert!(verify_file(&p, &"0".repeat(64)).unwrap_err().contains("mismatch"));
+        assert!(
+            verify_file(
+                &p,
+                "BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD"
+            )
+            .is_ok()
+        );
+        assert!(
+            verify_file(&p, &"0".repeat(64))
+                .unwrap_err()
+                .contains("mismatch")
+        );
     }
 
     fn tmp(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("giest-update-test-{tag}-{}", std::process::id()));
+        let d =
+            std::env::temp_dir().join(format!("giest-update-test-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
@@ -1017,11 +1157,17 @@ mod tests {
     #[test]
     fn find_update_resolves_the_arch_zip_through_the_manifest() {
         let m = feed_with(b"zip", &sha256_hex(b"zip"));
-        let p = find_update(&m, "https://x/feed", Channel::Stable, "0.1.0").unwrap().unwrap();
+        let p = find_update(&m, "https://x/feed", Channel::Stable, "0.1.0")
+            .unwrap()
+            .unwrap();
         assert_eq!(p.version, "9.0.0");
         assert_eq!(p.url, "https://x/z");
         assert_eq!(p.size, 3);
-        assert!(find_update(&m, "https://x/feed", Channel::Stable, "9.0.0").unwrap().is_none());
+        assert!(
+            find_update(&m, "https://x/feed", Channel::Stable, "9.0.0")
+                .unwrap()
+                .is_none()
+        );
         assert!(find_update(&m, "https://x/other", Channel::Stable, "0.1.0").is_err());
     }
 
@@ -1034,19 +1180,34 @@ mod tests {
         };
         let root = tmp("stage");
         let m = feed_with(b"zip", &sha256_hex(b"zip"));
-        let plan = find_update(&m, "https://x/feed", Channel::Stable, "0.1.0").unwrap().unwrap();
+        let plan = find_update(&m, "https://x/feed", Channel::Stable, "0.1.0")
+            .unwrap()
+            .unwrap();
         let p = download_and_stage(&m, &plan, &root, &fake_extract, &|_| {}).unwrap();
-        assert!(p.dir.ends_with("giest-9.0.0"), "single top folder is unwrapped");
+        assert!(
+            p.dir.ends_with("giest-9.0.0"),
+            "single top folder is unwrapped"
+        );
         assert_eq!(read_pending(&root), Some(p));
 
         // A tampered payload: the extractor must never run.
         let root = tmp("stage-bad");
         let m = feed_with(b"evil", &sha256_hex(b"zip"));
-        let plan = find_update(&m, "https://x/feed", Channel::Stable, "0.1.0").unwrap().unwrap();
-        let never = |_: &Path, _: &Path| -> Result<(), String> { panic!("extracted an unverified file") };
-        assert!(download_and_stage(&m, &plan, &root, &never, &|_| {}).unwrap_err().contains("mismatch"));
+        let plan = find_update(&m, "https://x/feed", Channel::Stable, "0.1.0")
+            .unwrap()
+            .unwrap();
+        let never =
+            |_: &Path, _: &Path| -> Result<(), String> { panic!("extracted an unverified file") };
+        assert!(
+            download_and_stage(&m, &plan, &root, &never, &|_| {})
+                .unwrap_err()
+                .contains("mismatch")
+        );
         assert!(read_pending(&root).is_none());
-        assert!(std::fs::read_dir(&root).unwrap().next().is_none(), "the bad download is deleted");
+        assert!(
+            std::fs::read_dir(&root).unwrap().next().is_none(),
+            "the bad download is deleted"
+        );
     }
 
     #[test]
@@ -1058,9 +1219,15 @@ mod tests {
         std::fs::write(install.join("giest.exe.old"), b"older").unwrap();
         let aside = apply_staged(&staged, &install).unwrap();
         assert_eq!(std::fs::read(install.join("giest.exe")).unwrap(), b"new");
-        assert_eq!(std::fs::read(install.join("conpty.dll")).unwrap(), b"newdll");
+        assert_eq!(
+            std::fs::read(install.join("conpty.dll")).unwrap(),
+            b"newdll"
+        );
         assert_eq!(aside, vec![install.join("giest.exe.old")]);
-        assert_eq!(std::fs::read(install.join("giest.exe.old")).unwrap(), b"old");
+        assert_eq!(
+            std::fs::read(install.join("giest.exe.old")).unwrap(),
+            b"old"
+        );
         sweep_old(&install);
         assert!(!install.join("giest.exe.old").exists());
         assert!(install.join("giest.exe").exists());
@@ -1072,18 +1239,34 @@ mod tests {
             "auto-update = download\nauto-update-channel = tip\nauto-update-feed = https://example/f\n",
         );
         let s = Settings::from_config(&c);
-        assert_eq!((s.mode, s.channel, s.feed.as_str()), (AutoUpdate::Download, Channel::Tip, "https://example/f"));
+        assert_eq!(
+            (s.mode, s.channel, s.feed.as_str()),
+            (AutoUpdate::Download, Channel::Tip, "https://example/f")
+        );
         let d = crate::config::Config::from_ghostty_config("auto-update = bogus\n");
         assert_eq!(d.auto_update, AutoUpdate::default_for_build());
         assert!(d.diagnostics.iter().any(|m| m.contains("auto-update")));
-        assert_eq!(Settings::from_config(&d).channel, Channel::of_version(env!("CARGO_PKG_VERSION")));
+        assert_eq!(
+            Settings::from_config(&d).channel,
+            Channel::of_version(env!("CARGO_PKG_VERSION"))
+        );
     }
 
     #[test]
     fn pill_text_matches_upstream_wording() {
-        let d = State::Downloading { version: "1".into(), done: 50, total: 200 };
+        let d = State::Downloading {
+            version: "1".into(),
+            done: 50,
+            total: 200,
+        };
         assert_eq!(d.text(), "Downloading: 25%");
-        assert_eq!(State::Ready { version: "1".into() }.text(), "Restart to Complete Update");
+        assert_eq!(
+            State::Ready {
+                version: "1".into()
+            }
+            .text(),
+            "Restart to Complete Update"
+        );
         assert_eq!(State::Idle.text(), "");
     }
 }

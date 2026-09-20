@@ -217,7 +217,9 @@ impl Palette {
                 let i = (pos.floor() as usize).min(n - 2);
                 let f = pos - i as f32;
                 let (a, b) = (self.tile[i], self.tile[i + 1]);
-                std::array::from_fn(|c| (a[c] as f32 + (b[c] as f32 - a[c] as f32) * f).round() as u8)
+                std::array::from_fn(|c| {
+                    (a[c] as f32 + (b[c] as f32 - a[c] as f32) * f).round() as u8
+                })
             }
         }
     }
@@ -341,7 +343,12 @@ mod tests {
         let px = render(64, &pal, 2).unwrap();
         let at = |x: usize, y: usize| px[(y * 64 + x) * 4];
         // Inside the rim, well away from the glyph: top brighter than bottom.
-        assert!(at(8, 10) > at(8, 54), "top {} bottom {}", at(8, 10), at(8, 54));
+        assert!(
+            at(8, 10) > at(8, 54),
+            "top {} bottom {}",
+            at(8, 10),
+            at(8, 54)
+        );
         let rim = &px[(32 * 64 + 4) * 4..(32 * 64 + 4) * 4 + 3];
         assert_eq!(rim, [1, 2, 3], "left rim at mid-height");
     }

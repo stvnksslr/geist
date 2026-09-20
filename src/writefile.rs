@@ -97,8 +97,7 @@ pub fn file_name(scope: WriteScope, stamp: u64) -> String {
 /// its path.
 pub fn write(dir: &Path, scope: WriteScope, stamp: u64, text: &str) -> Result<PathBuf> {
     let path = dir.join(file_name(scope, stamp));
-    std::fs::write(&path, text)
-        .with_context(|| format!("could not write {}", path.display()))?;
+    std::fs::write(&path, text).with_context(|| format!("could not write {}", path.display()))?;
     Ok(path)
 }
 

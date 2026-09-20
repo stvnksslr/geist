@@ -206,7 +206,10 @@ pub fn color_report(
     let body = match fmt {
         OscColorReportFormat::None => return Vec::new(),
         OscColorReportFormat::Bits8 => {
-            format!("\x1b]{};rgb:{:02x}/{:02x}/{:02x}", q.code, color.r, color.g, color.b)
+            format!(
+                "\x1b]{};rgb:{:02x}/{:02x}/{:02x}",
+                q.code, color.r, color.g, color.b
+            )
         }
         OscColorReportFormat::Bits16 => format!(
             "\x1b]{};rgb:{:04x}/{:04x}/{:04x}",
@@ -354,6 +357,9 @@ mod tests {
         // No cursor color set → report the foreground, not black.
         assert_eq!(query_color(ColorQuery { code: 12 }, fg, bg, None), Some(fg));
         let cur = Rgb::new(7, 8, 9);
-        assert_eq!(query_color(ColorQuery { code: 12 }, fg, bg, Some(cur)), Some(cur));
+        assert_eq!(
+            query_color(ColorQuery { code: 12 }, fg, bg, Some(cur)),
+            Some(cur)
+        );
     }
 }

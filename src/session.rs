@@ -8,21 +8,19 @@ use std::sync::Arc;
 use anyhow::Result;
 use eframe::egui;
 
-use crate::config::{
-    self, ClipboardPolicy, Config, OscColorReportFormat, ResizeOverlay,
-};
+use crate::config::{self, ClipboardPolicy, Config, OscColorReportFormat, ResizeOverlay};
 use crate::decscusr::DecscusrScanner;
 use crate::engine::{
     CursorShape, GhosttyVtEngine, GridSnapshot, KeyCode, KeyInput, KeyMods, MouseAction,
     MouseButton, MouseInput, RowText, SelectKind, TerminalEngine,
 };
 use crate::keybind::{Chord, Keymap, Lookup};
-use crate::search::{SearchHighlight, SearchState};
 use crate::osc_color::{ColorQuery, OscColorScanner, Terminator};
 use crate::osc_notify::{Notification, Osc9, OscNotifyScanner};
 use crate::osc133::{Mark, Osc133Scanner};
 use crate::profiles::Profile;
 use crate::pty::{ExitInfo, Pty};
+use crate::search::{SearchHighlight, SearchState};
 
 const DEFAULT_COLS: u16 = 80;
 const DEFAULT_ROWS: u16 = 24;
@@ -377,7 +375,11 @@ impl Session {
         engine.set_bold_color(config.bold_color)?;
         engine.set_min_contrast(config.min_contrast)?;
         engine.set_scrollback_lines(config.scrollback_limit_lines)?;
-        engine.set_vt_policy(config.title_report, config.vt_kam_allowed, config.grapheme_unicode)?;
+        engine.set_vt_policy(
+            config.title_report,
+            config.vt_kam_allowed,
+            config.grapheme_unicode,
+        )?;
         engine.set_enquiry_response(&config.enquiry_response);
         // Kitty graphics start disabled in libghostty, so this is what turns
         // inline images on at all.
@@ -504,10 +506,10 @@ impl Session {
         // Clear the reader's wake flag *before* draining: a chunk that lands
         // after this point posts its own wake, so nothing is left unpumped.
         if let Some(pty) = self.pty.as_ref() {
-            pty.wake_pending.store(false, std::sync::atomic::Ordering::Release);
+            pty.wake_pending
+                .store(false, std::sync::atomic::Ordering::Release);
         }
-        loop {
-            let Some(pty) = self.pty.as_ref() else { break };
+        while let Some(pty) = self.pty.as_ref() {
             match pty.output.try_recv() {
                 Ok(chunk) => {
                     // `scroll-to-bottom = output` (off by default): new data
@@ -551,11 +553,12 @@ impl Session {
         if self.alive && !self.pty.as_mut().is_some_and(Pty::is_running) {
             self.alive = false;
         }
-        if !self.alive && self.exit.is_none() {
-            if let Some(info) = self.pty.as_mut().and_then(Pty::exit_info) {
-                let hold = exit_hold(self.wait_after_command, self.abnormal_exit_ms, info);
-                self.exit = Some((info, hold));
-            }
+        if !self.alive
+            && self.exit.is_none()
+            && let Some(info) = self.pty.as_mut().and_then(Pty::exit_info)
+        {
+            let hold = exit_hold(self.wait_after_command, self.abnormal_exit_ms, info);
+            self.exit = Some((info, hold));
         }
         let mut responses = self.engine.take_responses();
         // Answer the color queries the VT engine drops. Built *after* the whole
@@ -705,11 +708,7 @@ impl Session {
     /// it's hidden (in which case the caller draws nothing and interacts only
     /// with the narrow wake-up band).
     pub fn scrollbar_alpha(&mut self, now: f64) -> Option<f32> {
-        transient_alpha(
-            &mut self.scrollbar_shown_until,
-            now,
-            SCROLLBAR_FADE_SECS,
-        )
+        transient_alpha(&mut self.scrollbar_shown_until, now, SCROLLBAR_FADE_SECS)
     }
 
     /// Whether the scrollbar thumb is currently being dragged.
@@ -748,7 +747,12 @@ impl Session {
         if scrollback == 0 {
             return None;
         }
-        Some(scrollbar_rows(scrollback, self.rows, self.scroll_px, cell_h))
+        Some(scrollbar_rows(
+            scrollback,
+            self.rows,
+            self.scroll_px,
+            cell_h,
+        ))
     }
 
     /// Scroll so screen row `offset_rows` (rows from the top of scrollback)
@@ -837,13 +841,8 @@ impl Session {
     /// selection. Kitty's rule, which Ghostty adopts: a held Shift overrides the
     /// program's grab unless `mouse-shift-capture` (or the program's
     /// `XTSHIFTESCAPE`) says Shift belongs to the program.
-    pub fn mouse_reports_now(
-        &self,
-        shift_held: bool,
-        policy: config::MouseShiftCapture,
-    ) -> bool {
-        self.is_mouse_tracking()
-            && !(shift_held && !policy.captured(self.shift_escape.capture()))
+    pub fn mouse_reports_now(&self, shift_held: bool, policy: config::MouseShiftCapture) -> bool {
+        self.is_mouse_tracking() && (!shift_held || policy.captured(self.shift_escape.capture()))
     }
 
     /// Toggle `mouse-reporting` for this pane (Ghostty's
@@ -857,9 +856,7 @@ impl Session {
     /// The pane's title: an explicit override (Ghostty `set_surface_title`) if
     /// one was set, otherwise whatever the program reported via OSC 0/2.
     pub fn title(&self) -> Option<String> {
-        self.title_override
-            .clone()
-            .or_else(|| self.engine.title())
+        self.title_override.clone().or_else(|| self.engine.title())
     }
 
     /// Override the pane's title (Ghostty `set_surface_title`). An empty value
@@ -1031,7 +1028,11 @@ impl Session {
             time: std::time::Duration::from_secs_f64(now.max(0.0)),
             repeat_interval: std::time::Duration::from_secs_f64(repeat.max(0.0)),
             repeat_distance: f64::from(cw),
-            triple: if ctrl { SelectKind::Output } else { SelectKind::Line },
+            triple: if ctrl {
+                SelectKind::Output
+            } else {
+                SelectKind::Line
+            },
         };
         self.autoscroll_accum = 0.0;
         self.gesture_held = true;
@@ -1296,13 +1297,17 @@ impl Session {
     /// setting it to zero wipes every stored image live.
     pub fn apply_config(&mut self, config: &Config) {
         self.links = config.links.clone();
-        let _ = self.engine.apply_theme(config.fg, config.bg, &config.effective_palette());
+        let _ = self
+            .engine
+            .apply_theme(config.fg, config.bg, &config.effective_palette());
         let _ = self.engine.set_cursor_color(config.cursor);
         let _ = self.engine.set_bold_color(config.bold_color);
         let _ = self.engine.set_min_contrast(config.min_contrast);
-        let _ = self
-            .engine
-            .set_vt_policy(config.title_report, config.vt_kam_allowed, config.grapheme_unicode);
+        let _ = self.engine.set_vt_policy(
+            config.title_report,
+            config.vt_kam_allowed,
+            config.grapheme_unicode,
+        );
         self.engine.set_enquiry_response(&config.enquiry_response);
         let _ = self
             .engine
@@ -1994,7 +1999,10 @@ impl Session {
         // closes "on any key press").
         if self.exit_bar().is_some() {
             if events.iter().any(|e| {
-                matches!(e, egui::Event::Key { pressed: true, .. } | egui::Event::Text(_))
+                matches!(
+                    e,
+                    egui::Event::Key { pressed: true, .. } | egui::Event::Text(_)
+                )
             }) {
                 self.exit_dismissed = true;
                 // The reap happens on the next pass; make sure there is one.
@@ -2063,11 +2071,11 @@ impl Session {
                 // keymap (a composed string is not a key), and still behind the
                 // read-only gate below.
                 egui::Event::Ime(ime) => {
-                    if let Some(text) = self.preedit.apply(ime) {
-                        if dedupe.commit(&text) {
-                            bytes.extend_from_slice(text.as_bytes());
-                            typed = true;
-                        }
+                    if let Some(text) = self.preedit.apply(ime)
+                        && dedupe.commit(&text)
+                    {
+                        bytes.extend_from_slice(text.as_bytes());
+                        typed = true;
                     }
                 }
                 // While composing, Enter/Backspace/arrows edit the preedit —
@@ -2674,6 +2682,10 @@ fn grid_dims(width_pts: f32, height_pts: f32, ppp: f32, cell_w: f32, cell_h: f32
 /// many device pixels *lower* than the pane origin (the partly-visible
 /// `over_row` fills the gap), so a hit test that ignored it would report the
 /// row below the one under the pointer.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "independent scalars from three sources (pointer, pane metrics,               scroll state); a struct would only rename them"
+)]
 fn cell_from_pos(
     rel_x: f32,
     rel_y: f32,
@@ -2790,7 +2802,6 @@ fn px_offset(rel: f32, ppp: f32) -> u32 {
     (rel * ppp).max(0.0) as u32
 }
 
-
 /// Find a URL spanning column `x` on row `y`: expand over the contiguous
 /// non-whitespace token under the cursor, strip trailing punctuation, and
 /// accept it only if it has a known scheme (or a leading `www.`, which gets an
@@ -2814,7 +2825,10 @@ fn url_span_at(snap: &GridSnapshot, x: u16, y: u16) -> Option<(u16, u16)> {
     }
     while r > l
         && char_at(r).is_some_and(|c| {
-            matches!(c, '.' | ',' | ')' | ']' | '}' | '>' | '"' | '\'' | ';' | ':')
+            matches!(
+                c,
+                '.' | ',' | ')' | ']' | '}' | '>' | '"' | '\'' | ';' | ':'
+            )
         })
     {
         r -= 1;
@@ -3060,7 +3074,10 @@ fn osc7_to_path(raw: &str) -> Option<PathBuf> {
         && (t.len() == 6 || t[6] == b'/')
     {
         let rest = if t.len() > 6 { &trimmed[6..] } else { "/" };
-        return Some(PathBuf::from(format!("{}:{rest}", (t[5] as char).to_ascii_uppercase())));
+        return Some(PathBuf::from(format!(
+            "{}:{rest}",
+            (t[5] as char).to_ascii_uppercase()
+        )));
     }
     Some(PathBuf::from(trimmed))
 }
@@ -3178,8 +3195,11 @@ mod exit_tests {
 
     #[test]
     fn a_spawn_error_names_the_command_and_the_cause() {
-        let m = spawn_error_message("nosuch.exe -l", "The system cannot find the file specified. (os error 2)
-");
+        let m = spawn_error_message(
+            "nosuch.exe -l",
+            "The system cannot find the file specified. (os error 2)
+",
+        );
         assert_eq!(
             m,
             "Failed to start \"nosuch.exe -l\": The system cannot find the file specified. (os error 2)"
@@ -3198,9 +3218,9 @@ mod exit_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        CommandFinish, CopyAction, KeyAction, bell_effect_due, cell_from_pos, copy_or_interrupt,
-        autoscroll_rows, find_url_at, url_span_at, produces_text, format_duration, grid_dims, notch_split, osc7_to_path,
-        px_offset, scroll_split, scrollbar_rows, transient_alpha,
+        CommandFinish, CopyAction, KeyAction, autoscroll_rows, bell_effect_due, cell_from_pos,
+        copy_or_interrupt, find_url_at, format_duration, grid_dims, notch_split, osc7_to_path,
+        produces_text, px_offset, scroll_split, scrollbar_rows, transient_alpha, url_span_at,
     };
     use crate::engine::{Cell, GridSnapshot, KeyCode, KeyInput, KeyMods};
     use crate::keybind::Keymap;
@@ -3267,7 +3287,9 @@ mod tests {
 
         // 144 Hz: not every frame, and the same rows per second.
         a = 0.0;
-        let ticks: isize = (0..144).map(|_| autoscroll_rows(&mut a, 1, 1.0 / 144.0)).sum();
+        let ticks: isize = (0..144)
+            .map(|_| autoscroll_rows(&mut a, 1, 1.0 / 144.0))
+            .sum();
         assert!(
             (65..=67).contains(&ticks),
             "≈66 rows in a second, not 144: {ticks}"
@@ -3275,7 +3297,10 @@ mod tests {
 
         // A stalled frame cannot bank an unbounded jump.
         a = 0.0;
-        assert!(autoscroll_rows(&mut a, 1, 10.0) <= 8, "a long pause is clamped");
+        assert!(
+            autoscroll_rows(&mut a, 1, 10.0) <= 8,
+            "a long pause is clamped"
+        );
 
         // Leaving the edge resets, so re-entering doesn't fire a burst.
         assert_eq!(autoscroll_rows(&mut a, 0, 1.0), 0);
@@ -3316,7 +3341,8 @@ mod tests {
         // Upstream: `global or all → consumed = true`. `all:` isn't tied to one
         // surface, so it always consumes and is always treated as performed —
         // it overrides both other flags, at both gates.
-        let km = Keymap::from_config(&[("all:unconsumed:ctrl+alt+k".into(), "clear_screen".into())]);
+        let km =
+            Keymap::from_config(&[("all:unconsumed:ctrl+alt+k".into(), "clear_screen".into())]);
         let mods = egui::Modifiers {
             ctrl: true,
             alt: true,
@@ -3446,7 +3472,13 @@ mod tests {
         ));
         // …and with no sequence bound, ctrl+a goes to the shell as before.
         assert!(matches!(
-            super::decide_key(egui::Key::A, &ctrl, &Keymap::default(), Default::default(), &[]),
+            super::decide_key(
+                egui::Key::A,
+                &ctrl,
+                &Keymap::default(),
+                Default::default(),
+                &[]
+            ),
             KeyAction::Encode(_)
         ));
     }
@@ -3508,7 +3540,10 @@ mod tests {
         );
         assert_eq!(p("file://box/mnt/d"), Some(PathBuf::from("D:/")));
         assert_eq!(p("file://box/home/me"), Some(PathBuf::from("/home/me")));
-        assert_eq!(p("file://box/mnt/data/x"), Some(PathBuf::from("/mnt/data/x")));
+        assert_eq!(
+            p("file://box/mnt/data/x"),
+            Some(PathBuf::from("/mnt/data/x"))
+        );
         // Percent-encoded spaces are decoded.
         assert_eq!(
             p("file://HOST/C:/Program%20Files"),
@@ -3644,7 +3679,13 @@ mod tests {
         // so the shell never sees the key (the app runs the action instead).
         let km = Keymap::from_config(&[("ctrl+a".to_string(), "new_tab".to_string())]);
         assert_eq!(
-            super::decide_key(egui::Key::A, &mods(true, false, false), &km, Default::default(), &[]),
+            super::decide_key(
+                egui::Key::A,
+                &mods(true, false, false),
+                &km,
+                Default::default(),
+                &[]
+            ),
             KeyAction::Swallow
         );
     }
@@ -3698,9 +3739,15 @@ mod tests {
     #[test]
     fn cell_from_pos_clamps_edges_and_negatives() {
         // Inside the grid: (25,30)pt at 10×20px → cell (2,1).
-        assert_eq!(cell_from_pos(25.0, 30.0, 1.0, 10.0, 20.0, 80, 24, 0.0), (2, 1));
+        assert_eq!(
+            cell_from_pos(25.0, 30.0, 1.0, 10.0, 20.0, 80, 24, 0.0),
+            (2, 1)
+        );
         // Negative offsets clamp to cell (0,0).
-        assert_eq!(cell_from_pos(-5.0, -9.0, 1.0, 10.0, 20.0, 80, 24, 0.0), (0, 0));
+        assert_eq!(
+            cell_from_pos(-5.0, -9.0, 1.0, 10.0, 20.0, 80, 24, 0.0),
+            (0, 0)
+        );
         // Far beyond the grid clamps to the last cell.
         assert_eq!(
             cell_from_pos(1.0e6, 1.0e6, 1.0, 10.0, 20.0, 80, 24, 0.0),
@@ -3708,10 +3755,19 @@ mod tests {
         );
         // A sub-line smooth-scroll shift draws the grid 15px lower, so row 0
         // covers y 15..35 and the same pointer that was row 1 is now row 0.
-        assert_eq!(cell_from_pos(25.0, 30.0, 1.0, 10.0, 20.0, 80, 24, 15.0), (2, 0));
-        assert_eq!(cell_from_pos(25.0, 36.0, 1.0, 10.0, 20.0, 80, 24, 15.0), (2, 1));
+        assert_eq!(
+            cell_from_pos(25.0, 30.0, 1.0, 10.0, 20.0, 80, 24, 15.0),
+            (2, 0)
+        );
+        assert_eq!(
+            cell_from_pos(25.0, 36.0, 1.0, 10.0, 20.0, 80, 24, 15.0),
+            (2, 1)
+        );
         // Inside the partly-visible over-row above row 0, clamp to row 0.
-        assert_eq!(cell_from_pos(25.0, 5.0, 1.0, 10.0, 20.0, 80, 24, 15.0), (2, 0));
+        assert_eq!(
+            cell_from_pos(25.0, 5.0, 1.0, 10.0, 20.0, 80, 24, 15.0),
+            (2, 0)
+        );
     }
 
     #[test]

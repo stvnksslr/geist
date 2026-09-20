@@ -272,9 +272,12 @@ mod imp {
         if want_hook && *hook == 0 {
             // SAFETY: a valid hook id and callback; a null module handle is
             // correct for a hook proc in this process.
-            let h = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, hook_proc, std::ptr::null_mut(), 0) };
+            let h =
+                unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, hook_proc, std::ptr::null_mut(), 0) };
             if h.is_null() {
-                eprintln!("giest: could not install the global-keybind hook; global: binds are inactive");
+                eprintln!(
+                    "giest: could not install the global-keybind hook; global: binds are inactive"
+                );
             } else {
                 *hook = h as usize;
                 HOOK.store(1, Ordering::Relaxed);

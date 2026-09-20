@@ -53,7 +53,12 @@ pub fn row_never_extends(row: &[Cell], default_bg: Rgb) -> bool {
 /// extends up/down when the nearest row passes [`row_never_extends`] —
 /// upstream applies that regardless of primary/alternate screen.
 pub fn extend_edges(mode: PaddingColor, snap: &GridSnapshot) -> Edges {
-    let all = Edges { up: true, down: true, left: true, right: true };
+    let all = Edges {
+        up: true,
+        down: true,
+        left: true,
+        right: true,
+    };
     match mode {
         PaddingColor::Background => Edges::default(),
         PaddingColor::ExtendAlways => all,
@@ -87,7 +92,9 @@ pub fn padding_rects(
     cell: egui::Vec2,
 ) -> Vec<(egui::Rect, Rgb)> {
     let mut out = Vec::new();
-    if snap.cols == 0 || snap.rows == 0 || snap.cells.len() < snap.cols as usize * snap.rows as usize
+    if snap.cols == 0
+        || snap.rows == 0
+        || snap.cells.len() < snap.cols as usize * snap.rows as usize
     {
         return out;
     }
@@ -101,7 +108,12 @@ pub fn padding_rects(
             out.push((r, c));
         }
     };
-    let (gl, gr, gt, gb) = (grid.left(), grid.left() + cols as f32 * cell.x, grid.top(), grid.top() + rows as f32 * cell.y);
+    let (gl, gr, gt, gb) = (
+        grid.left(),
+        grid.left() + cols as f32 * cell.x,
+        grid.top(),
+        grid.top() + rows as f32 * cell.y,
+    );
     let row_y = |y: u16| (gt + y as f32 * cell.y, gt + (y + 1) as f32 * cell.y);
     let col_x = |x: u16| (gl + x as f32 * cell.x, gl + (x + 1) as f32 * cell.x);
     let span = |x0: f32, x1: f32, y0: f32, y1: f32| {
@@ -143,7 +155,10 @@ pub fn padding_rects(
         push(span(pane.left(), gl, gb, pane.bottom()), at(0, rows - 1));
     }
     if edges.down && edges.right {
-        push(span(gr, pane.right(), gb, pane.bottom()), at(cols - 1, rows - 1));
+        push(
+            span(gr, pane.right(), gb, pane.bottom()),
+            at(cols - 1, rows - 1),
+        );
     }
     out
 }
@@ -165,7 +180,12 @@ mod tests {
     }
 
     fn grid(cols: u16, rows: u16, f: impl Fn(u16, u16) -> Cell) -> GridSnapshot {
-        let mut s = GridSnapshot { cols, rows, default_bg: DEF, ..Default::default() };
+        let mut s = GridSnapshot {
+            cols,
+            rows,
+            default_bg: DEF,
+            ..Default::default()
+        };
         for y in 0..rows {
             for x in 0..cols {
                 s.cells.push(f(x, y));
@@ -177,8 +197,16 @@ mod tests {
     #[test]
     fn modes_select_edges() {
         let full = grid(2, 2, |_, _| cell(Some(RED), "a"));
-        assert_eq!(extend_edges(PaddingColor::Background, &full), Edges::default());
-        let all = Edges { up: true, down: true, left: true, right: true };
+        assert_eq!(
+            extend_edges(PaddingColor::Background, &full),
+            Edges::default()
+        );
+        let all = Edges {
+            up: true,
+            down: true,
+            left: true,
+            right: true,
+        };
         assert_eq!(extend_edges(PaddingColor::ExtendAlways, &full), all);
         assert_eq!(extend_edges(PaddingColor::Extend, &full), all);
     }
@@ -193,7 +221,9 @@ mod tests {
         let s = grid(2, 1, |x, _| cell(Some(if x == 0 { RED } else { DEF }), "a"));
         assert!(!extend_edges(PaddingColor::Extend, &s).up);
         // A powerline glyph vetoes too, even on a coloured cell.
-        let s = grid(2, 1, |x, _| cell(Some(RED), if x == 1 { "\u{E0B0}" } else { "a" }));
+        let s = grid(2, 1, |x, _| {
+            cell(Some(RED), if x == 1 { "\u{E0B0}" } else { "a" })
+        });
         assert!(!extend_edges(PaddingColor::Extend, &s).up);
         // extend-always ignores all of it.
         assert!(extend_edges(PaddingColor::ExtendAlways, &s).up);
@@ -205,7 +235,12 @@ mod tests {
         let s = grid(2, 1, |x, _| cell((x == 0).then_some(RED), "a"));
         let pane = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(40.0, 40.0));
         let grid_r = egui::Rect::from_min_size(egui::pos2(10.0, 10.0), egui::vec2(20.0, 20.0));
-        let all = Edges { up: true, down: true, left: true, right: true };
+        let all = Edges {
+            up: true,
+            down: true,
+            left: true,
+            right: true,
+        };
         let rects = padding_rects(&s, all, pane, grid_r, egui::vec2(10.0, 20.0));
         let r = |x0: f32, y0: f32, x1: f32, y1: f32| {
             egui::Rect::from_min_max(egui::pos2(x0, y0), egui::pos2(x1, y1))
@@ -221,6 +256,8 @@ mod tests {
             (r(0.0, 30.0, 10.0, 40.0), RED),
         ];
         assert_eq!(rects, want);
-        assert!(padding_rects(&s, Edges::default(), pane, grid_r, egui::vec2(10.0, 20.0)).is_empty());
+        assert!(
+            padding_rects(&s, Edges::default(), pane, grid_r, egui::vec2(10.0, 20.0)).is_empty()
+        );
     }
 }

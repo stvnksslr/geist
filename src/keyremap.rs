@@ -124,12 +124,27 @@ mod tests {
 
     #[test]
     fn parses_generic_and_sided_names() {
-        assert_eq!(parse("ctrl=alt"), Some(Remap { from: Mod::Ctrl, to: Mod::Alt }));
+        assert_eq!(
+            parse("ctrl=alt"),
+            Some(Remap {
+                from: Mod::Ctrl,
+                to: Mod::Alt
+            })
+        );
         assert_eq!(
             parse("left_control=right_alt"),
-            Some(Remap { from: Mod::Ctrl, to: Mod::Alt })
+            Some(Remap {
+                from: Mod::Ctrl,
+                to: Mod::Alt
+            })
         );
-        assert_eq!(parse("cmd=shift"), Some(Remap { from: Mod::Super, to: Mod::Shift }));
+        assert_eq!(
+            parse("cmd=shift"),
+            Some(Remap {
+                from: Mod::Super,
+                to: Mod::Shift
+            })
+        );
         assert_eq!(parse("ctrl"), None);
         assert_eq!(parse("ctrl=hyper"), None);
     }

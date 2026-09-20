@@ -195,9 +195,10 @@ impl Pty {
                 let status = child.try_wait().ok()??;
                 (status.exit_code(), child.as_raw_handle())
             }
-            Backend::Handoff { client, .. } => {
-                (crate::handoff::process_exit(client)?, Some(client.as_raw_handle()))
-            }
+            Backend::Handoff { client, .. } => (
+                crate::handoff::process_exit(client)?,
+                Some(client.as_raw_handle()),
+            ),
         };
         let runtime_ms = handle
             .and_then(process_runtime_ms)

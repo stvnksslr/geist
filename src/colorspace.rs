@@ -36,12 +36,20 @@ const P3_TO_SRGB: [[f32; 3]; 3] = [
 /// The sRGB (and Display P3 — they share it) transfer function, decoded.
 pub fn decode(c: u8) -> f32 {
     let s = c as f32 / 255.0;
-    if s <= 0.04045 { s / 12.92 } else { ((s + 0.055) / 1.055).powf(2.4) }
+    if s <= 0.04045 {
+        s / 12.92
+    } else {
+        ((s + 0.055) / 1.055).powf(2.4)
+    }
 }
 
 fn encode(l: f32) -> u8 {
     let l = l.clamp(0.0, 1.0);
-    let s = if l <= 0.003_130_8 { l * 12.92 } else { 1.055 * l.powf(1.0 / 2.4) - 0.055 };
+    let s = if l <= 0.003_130_8 {
+        l * 12.92
+    } else {
+        1.055 * l.powf(1.0 / 2.4) - 0.055
+    };
     (s * 255.0).round() as u8
 }
 
@@ -102,6 +110,9 @@ mod tests {
         let c = p3_to_srgb(Rgb::new(0xC0, 0x60, 0x60));
         assert!(c.r > 0xC0 && c.g < 0x60, "{c:?}");
         // Hand-computed: P3 #C06060 is sRGB ~#CE595B.
-        assert!((c.r as i32 - 0xCE).abs() <= 2 && (c.g as i32 - 0x59).abs() <= 2, "{c:?}");
+        assert!(
+            (c.r as i32 - 0xCE).abs() <= 2 && (c.g as i32 - 0x59).abs() <= 2,
+            "{c:?}"
+        );
     }
 }

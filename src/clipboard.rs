@@ -246,7 +246,14 @@ mod tests {
 
     #[test]
     fn text_mime_spellings() {
-        for m in ["text/plain", "text/plain;charset=utf-8", "TEXT/PLAIN; charset=UTF8", "UTF8_STRING", "TEXT", "STRING"] {
+        for m in [
+            "text/plain",
+            "text/plain;charset=utf-8",
+            "TEXT/PLAIN; charset=UTF8",
+            "UTF8_STRING",
+            "TEXT",
+            "STRING",
+        ] {
             assert!(is_text_mime(m), "{m}");
         }
         for m in ["text/html", "image/png", "text/plain;charset=latin1", "."] {
@@ -258,9 +265,16 @@ mod tests {
     fn write_keeps_text_and_drops_the_rest() {
         let html: &[u8] = b"<b>hi</b>";
         let text: &[u8] = b"hi";
-        assert_eq!(write_text(&[("text/html", html), ("text/plain", text)]), WriteText::Text("hi".into()));
+        assert_eq!(
+            write_text(&[("text/html", html), ("text/plain", text)]),
+            WriteText::Text("hi".into())
+        );
         assert_eq!(write_text(&[("image/png", html)]), WriteText::Unsupported);
-        assert_eq!(write_text(&[]), WriteText::Text(String::new()), "no representations is a clear");
+        assert_eq!(
+            write_text(&[]),
+            WriteText::Text(String::new()),
+            "no representations is a clear"
+        );
     }
 
     #[test]
@@ -273,7 +287,10 @@ mod tests {
 
     #[test]
     fn reads_serve_only_the_text_types_asked_for() {
-        let mimes = vec!["image/png".to_string(), "text/plain;charset=utf-8".to_string()];
+        let mimes = vec![
+            "image/png".to_string(),
+            "text/plain;charset=utf-8".to_string(),
+        ];
         assert_eq!(
             read_contents(&mimes, Some("x")),
             vec![("text/plain;charset=utf-8".to_string(), b"x".to_vec())]
@@ -302,18 +319,34 @@ mod tests {
 
     #[test]
     fn replay_rebuilds_the_read() {
-        let kind = Deferred::Read { mimes: vec!["text/plain".into()], primary: false };
+        let kind = Deferred::Read {
+            mimes: vec!["text/plain".into()],
+            primary: false,
+        };
         assert_eq!(
             replay_request(&kind, b"\x1b]5522;type=read:status=EPERM:id=r1\x1b\\").unwrap(),
             b"\x1b]5522;type=read:id=r1;dGV4dC9wbGFpbg==\x1b\\"
         );
-        let prim = Deferred::Read { mimes: vec!["a".into(), "b".into()], primary: true };
+        let prim = Deferred::Read {
+            mimes: vec!["a".into(), "b".into()],
+            primary: true,
+        };
         assert_eq!(
             replay_request(&prim, b"\x1b]5522;type=read:status=EPERM\x07").unwrap(),
-            format!("\x1b]5522;type=read:loc=primary;{}\x1b\\", STANDARD.encode("a b")).into_bytes()
+            format!(
+                "\x1b]5522;type=read:loc=primary;{}\x1b\\",
+                STANDARD.encode("a b")
+            )
+            .into_bytes()
         );
-        assert_eq!(replay_request(&kind, b"\x1b]52;p;\x1b\\").unwrap(), b"\x1b]52;p;?\x1b\\");
-        assert_eq!(replay_request(&Deferred::Write("x".into()), b"\x1b]52;c;\x07"), None);
+        assert_eq!(
+            replay_request(&kind, b"\x1b]52;p;\x1b\\").unwrap(),
+            b"\x1b]52;p;?\x1b\\"
+        );
+        assert_eq!(
+            replay_request(&Deferred::Write("x".into()), b"\x1b]52;c;\x07"),
+            None
+        );
     }
 
     #[test]

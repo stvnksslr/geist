@@ -55,7 +55,10 @@ pub struct AppNotifications {
 
 impl Default for AppNotifications {
     fn default() -> Self {
-        Self { clipboard_copy: true, config_reload: true }
+        Self {
+            clipboard_copy: true,
+            config_reload: true,
+        }
     }
 }
 
@@ -65,7 +68,10 @@ impl Default for AppNotifications {
 /// whole value.
 fn parse_app_notifications(value: &str) -> Option<AppNotifications> {
     let v = value.trim();
-    let all = |on| AppNotifications { clipboard_copy: on, config_reload: on };
+    let all = |on| AppNotifications {
+        clipboard_copy: on,
+        config_reload: on,
+    };
     match v {
         "1" | "t" | "true" => return Some(all(true)),
         "0" | "f" | "false" => return Some(all(false)),
@@ -273,7 +279,10 @@ pub fn parse_clipboard_map(v: &str) -> Option<ClipboardMap> {
         Some([(a, b)]) if a == b => char::from_u32(*a)?.to_string(),
         _ => rhs.to_string(),
     };
-    Some(ClipboardMap { ranges, replacement })
+    Some(ClipboardMap {
+        ranges,
+        replacement,
+    })
 }
 
 /// Apply `clipboard-codepoint-map` to copied text. Later entries win over
@@ -360,14 +369,26 @@ pub struct BellFeatures {
 
 impl Default for BellFeatures {
     fn default() -> Self {
-        Self { system: false, audio: false, attention: true, title: true, border: false }
+        Self {
+            system: false,
+            audio: false,
+            attention: true,
+            title: true,
+            border: false,
+        }
     }
 }
 
 impl BellFeatures {
     /// Every feature set to `on` — Ghostty's bare-boolean shorthand.
     fn all(on: bool) -> Self {
-        Self { system: on, audio: on, attention: on, title: on, border: on }
+        Self {
+            system: on,
+            audio: on,
+            attention: on,
+            title: on,
+            border: on,
+        }
     }
 }
 
@@ -878,7 +899,11 @@ impl MetricModifier {
     pub fn parse(v: &str) -> Option<Self> {
         let s = v.trim();
         if let Some(p) = s.strip_suffix('%') {
-            return p.trim().parse::<f32>().ok().map(|v| Self::Percent(v / 100.0));
+            return p
+                .trim()
+                .parse::<f32>()
+                .ok()
+                .map(|v| Self::Percent(v / 100.0));
         }
         s.parse::<i32>().ok().map(Self::Pixels)
     }
@@ -1975,7 +2000,11 @@ impl Config {
             return self.palette;
         }
         use libghostty_vt::style::{Palette, PaletteIndex, PaletteMask, RgbColor};
-        let c = |x: Rgb| RgbColor { r: x.r, g: x.g, b: x.b };
+        let c = |x: Rgb| RgbColor {
+            r: x.r,
+            g: x.g,
+            b: x.b,
+        };
         let mut skip = PaletteMask::new();
         for i in 0..256usize {
             if self.palette_set[i / 64] & (1 << (i % 64)) != 0 {
@@ -1983,8 +2012,18 @@ impl Config {
             }
         }
         let base = Palette(self.palette.map(c));
-        let out = Palette::generate(Some(&base), Some(&skip), c(self.bg), c(self.fg), self.palette_harmonious);
-        out.0.map(|x| Rgb { r: x.r, g: x.g, b: x.b })
+        let out = Palette::generate(
+            Some(&base),
+            Some(&skip),
+            c(self.bg),
+            c(self.fg),
+            self.palette_harmonious,
+        );
+        out.0.map(|x| Rgb {
+            r: x.r,
+            g: x.g,
+            b: x.b,
+        })
     }
 
     pub fn load() -> Self {
@@ -1999,7 +2038,11 @@ impl Config {
                 probe.config_default_files
             })
             .unwrap_or(true);
-        let path = if default_files { config_path().unwrap_or_default() } else { PathBuf::new() };
+        let path = if default_files {
+            config_path().unwrap_or_default()
+        } else {
+            PathBuf::new()
+        };
         Self::load_from_file(&path)
     }
 
@@ -2179,10 +2222,10 @@ const SETTERS: &[(&str, Setter)] = &[
     ("font-size", |c, v, d| {
         if v.is_empty() {
             c.font_points = d.font_points;
-        } else if let Ok(n) = v.parse::<f32>() {
-            if n > 0.0 {
-                c.font_points = n;
-            }
+        } else if let Ok(n) = v.parse::<f32>()
+            && n > 0.0
+        {
+            c.font_points = n;
         }
     }),
     // Repeatable, like `palette` and `keybind`: each line appends to the
@@ -2214,7 +2257,11 @@ const SETTERS: &[(&str, Setter)] = &[
         c.search_selected_bg = terminal_color(v, c.search_selected_bg, d.search_selected_bg)
     }),
     ("cursor-text", |c, v, d| {
-        c.cursor_text = if v.is_empty() { d.cursor_text } else { TerminalColor::parse(v).or(c.cursor_text) };
+        c.cursor_text = if v.is_empty() {
+            d.cursor_text
+        } else {
+            TerminalColor::parse(v).or(c.cursor_text)
+        };
     }),
     ("search-selected-foreground", |c, v, d| {
         c.search_selected_fg = terminal_color(v, c.search_selected_fg, d.search_selected_fg)
@@ -2294,14 +2341,24 @@ const SETTERS: &[(&str, Setter)] = &[
     ("font-style", |c, v, d| set_font_style(c, d, v, 0)),
     ("font-style-bold", |c, v, d| set_font_style(c, d, v, 1)),
     ("font-style-italic", |c, v, d| set_font_style(c, d, v, 2)),
-    ("font-style-bold-italic", |c, v, d| set_font_style(c, d, v, 3)),
+    ("font-style-bold-italic", |c, v, d| {
+        set_font_style(c, d, v, 3)
+    }),
     ("font-variation", |c, v, d| set_font_variation(c, d, v, 0)),
-    ("font-variation-bold", |c, v, d| set_font_variation(c, d, v, 1)),
-    ("font-variation-italic", |c, v, d| set_font_variation(c, d, v, 2)),
-    ("font-variation-bold-italic", |c, v, d| set_font_variation(c, d, v, 3)),
+    ("font-variation-bold", |c, v, d| {
+        set_font_variation(c, d, v, 1)
+    }),
+    ("font-variation-italic", |c, v, d| {
+        set_font_variation(c, d, v, 2)
+    }),
+    ("font-variation-bold-italic", |c, v, d| {
+        set_font_variation(c, d, v, 3)
+    }),
     ("foreground", |c, v, d| c.fg = color(v, d.fg, c.fg)),
     ("background", |c, v, d| c.bg = color(v, d.bg, c.bg)),
-    ("cursor-color", |c, v, d| c.cursor = opt_color(v, d.cursor, c.cursor)),
+    ("cursor-color", |c, v, d| {
+        c.cursor = opt_color(v, d.cursor, c.cursor)
+    }),
     ("cursor-style", |c, v, d| {
         c.cursor_style = match v.to_ascii_lowercase().as_str() {
             "" => d.cursor_style,
@@ -2353,8 +2410,13 @@ const SETTERS: &[(&str, Setter)] = &[
     ("unfocused-split-opacity", |c, v, d| {
         // Ghostty's floor is 0.15, not 0: a fully transparent split "looks very
         // weird", so it clamps up rather than allowing it.
-        c.unfocused_split_opacity =
-            ratio(v, d.unfocused_split_opacity, c.unfocused_split_opacity, 0.15, 1.0)
+        c.unfocused_split_opacity = ratio(
+            v,
+            d.unfocused_split_opacity,
+            c.unfocused_split_opacity,
+            0.15,
+            1.0,
+        )
     }),
     ("unfocused-split-fill", |c, v, d| {
         c.unfocused_split_fill = opt_color(v, d.unfocused_split_fill, c.unfocused_split_fill)
@@ -2377,7 +2439,10 @@ const SETTERS: &[(&str, Setter)] = &[
             // macOS 26 glass effects: no Windows equivalent, and Ghostty itself
             // treats them as plain `true` off macOS since both imply some blur.
             "macos-glass-regular" | "macos-glass-clear" => BackgroundBlur::On,
-            _ => v.parse::<u8>().map(BackgroundBlur::Radius).unwrap_or(c.background_blur),
+            _ => v
+                .parse::<u8>()
+                .map(BackgroundBlur::Radius)
+                .unwrap_or(c.background_blur),
         }
     }),
     ("background-image", |c, v, d| {
@@ -2462,7 +2527,9 @@ const SETTERS: &[(&str, Setter)] = &[
             diag!("giest: ignoring bad palette entry: {v}");
         }
     }),
-    ("link-osc8", |c, v, d| c.link_osc8 = parse_bool(v, d.link_osc8)),
+    ("link-osc8", |c, v, d| {
+        c.link_osc8 = parse_bool(v, d.link_osc8)
+    }),
     ("link-url", |c, v, d| c.link_url = parse_bool(v, d.link_url)),
     ("link", |c, v, d| {
         if v.is_empty() {
@@ -2628,7 +2695,9 @@ const SETTERS: &[(&str, Setter)] = &[
             }
         }
     }),
-    ("font-thicken", |c, v, d| c.font_thicken = parse_bool(v, d.font_thicken)),
+    ("font-thicken", |c, v, d| {
+        c.font_thicken = parse_bool(v, d.font_thicken)
+    }),
     ("font-thicken-strength", |c, v, d| {
         c.font_thicken_strength = if v.is_empty() {
             d.font_thicken_strength
@@ -3111,7 +3180,9 @@ const SETTERS: &[(&str, Setter)] = &[
     ("window-inherit-working-directory", |c, v, d| {
         c.window_inherit_working_directory = parse_bool(v, d.window_inherit_working_directory);
     }),
-    ("palette-generate", |c, v, d| c.palette_generate = parse_bool(v, d.palette_generate)),
+    ("palette-generate", |c, v, d| {
+        c.palette_generate = parse_bool(v, d.palette_generate)
+    }),
     ("palette-harmonious", |c, v, d| {
         c.palette_harmonious = parse_bool(v, d.palette_harmonious);
     }),
@@ -3181,7 +3252,9 @@ const SETTERS: &[(&str, Setter)] = &[
             _ => c.app_icon,
         }
     }),
-    ("macos-custom-icon", |c, v, d| c.custom_icon = opt_string(v, &d.custom_icon)),
+    ("macos-custom-icon", |c, v, d| {
+        c.custom_icon = opt_string(v, &d.custom_icon)
+    }),
     ("macos-icon-frame", |c, v, d| {
         c.icon_frame = match v.to_ascii_lowercase().as_str() {
             "" => d.icon_frame,
@@ -3230,7 +3303,9 @@ const SETTERS: &[(&str, Setter)] = &[
     }),
     // An empty value resets (upstream: quote spaces for a blank title), so a
     // value of only spaces is kept verbatim.
-    ("title", |c, v, _d| c.title = (!v.is_empty()).then(|| v.to_string())),
+    ("title", |c, v, _d| {
+        c.title = (!v.is_empty()).then(|| v.to_string())
+    }),
     ("window-subtitle", |c, v, d| {
         c.window_subtitle = match v.to_ascii_lowercase().as_str() {
             "" => d.window_subtitle,
@@ -3245,16 +3320,24 @@ const SETTERS: &[(&str, Setter)] = &[
     ("window-step-resize", |c, v, d| {
         c.window_step_resize = parse_bool(v, d.window_step_resize)
     }),
-    ("window-vsync", |c, v, d| c.window_vsync = parse_bool(v, d.window_vsync)),
+    ("window-vsync", |c, v, d| {
+        c.window_vsync = parse_bool(v, d.window_vsync)
+    }),
     ("quit-after-last-window-closed", |c, v, d| {
         c.quit_after_last_window_closed = parse_bool(v, d.quit_after_last_window_closed)
     }),
-    ("single-instance", |c, v, d| c.single_instance = parse_bool(v, d.single_instance)),
+    ("single-instance", |c, v, d| {
+        c.single_instance = parse_bool(v, d.single_instance)
+    }),
     ("window-inherit-font-size", |c, v, d| {
         c.window_inherit_font_size = parse_bool(v, d.window_inherit_font_size);
     }),
     ("term", |c, v, d| {
-        c.term = if v.is_empty() { d.term.clone() } else { unquote(v).to_string() };
+        c.term = if v.is_empty() {
+            d.term.clone()
+        } else {
+            unquote(v).to_string()
+        };
     }),
     ("config-default-files", |c, v, d| {
         c.config_default_files = parse_bool(v, d.config_default_files);
@@ -3281,7 +3364,9 @@ const SETTERS: &[(&str, Setter)] = &[
             _ => d.drop_behavior,
         };
     }),
-    ("jump-list", |c, v, d| c.jump_list = parse_bool(v, d.jump_list)),
+    ("jump-list", |c, v, d| {
+        c.jump_list = parse_bool(v, d.jump_list)
+    }),
     ("auto-update", |c, v, d| {
         c.auto_update = if v.is_empty() {
             d.auto_update
@@ -3303,7 +3388,11 @@ const SETTERS: &[(&str, Setter)] = &[
         }
     }),
     ("auto-update-feed", |c, v, d| {
-        c.auto_update_feed = if v.is_empty() { d.auto_update_feed.clone() } else { v.to_string() }
+        c.auto_update_feed = if v.is_empty() {
+            d.auto_update_feed.clone()
+        } else {
+            v.to_string()
+        }
     }),
     ("quit-after-last-window-closed-delay", |c, v, d| {
         c.quit_after_last_window_closed_delay_ms = if v.is_empty() {
@@ -3312,7 +3401,9 @@ const SETTERS: &[(&str, Setter)] = &[
             parse_duration_ms(v).or(c.quit_after_last_window_closed_delay_ms)
         }
     }),
-    ("initial-window", |c, v, d| c.initial_window = parse_bool(v, d.initial_window)),
+    ("initial-window", |c, v, d| {
+        c.initial_window = parse_bool(v, d.initial_window)
+    }),
     // A packed-struct flag list: `navigation` / `no-navigation`, comma-separated.
     ("split-preserve-zoom", |c, v, d| {
         if v.is_empty() {
@@ -3326,9 +3417,15 @@ const SETTERS: &[(&str, Setter)] = &[
             }
         }
     }),
-    ("title-report", |c, v, d| c.title_report = parse_bool(v, d.title_report)),
-    ("vt-kam-allowed", |c, v, d| c.vt_kam_allowed = parse_bool(v, d.vt_kam_allowed)),
-    ("enquiry-response", |c, v, _| c.enquiry_response = v.to_string()),
+    ("title-report", |c, v, d| {
+        c.title_report = parse_bool(v, d.title_report)
+    }),
+    ("vt-kam-allowed", |c, v, d| {
+        c.vt_kam_allowed = parse_bool(v, d.vt_kam_allowed)
+    }),
+    ("enquiry-response", |c, v, _| {
+        c.enquiry_response = v.to_string()
+    }),
     ("grapheme-width-method", |c, v, d| {
         c.grapheme_unicode = match v {
             "unicode" => true,
@@ -3448,10 +3545,10 @@ fn config_value(text: &str, key: &str) -> Option<String> {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        if let Some((k, v)) = line.split_once('=') {
-            if k.trim() == key {
-                found = Some(unquote(v.trim()).to_string());
-            }
+        if let Some((k, v)) = line.split_once('=')
+            && k.trim() == key
+        {
+            found = Some(unquote(v.trim()).to_string());
         }
     }
     found
@@ -3480,10 +3577,10 @@ fn select_theme_variant(spec: &str) -> String {
 /// Expand a leading `~/` or `~\` (or a bare `~`) to `%USERPROFILE%`, as
 /// upstream expands `~` in theme paths. Anything else is returned verbatim.
 fn expand_home(p: &str) -> PathBuf {
-    if p == "~" {
-        if let Some(h) = home_dir() {
-            return h;
-        }
+    if p == "~"
+        && let Some(h) = home_dir()
+    {
+        return h;
     }
     if let Some(rest) = p.strip_prefix("~/").or_else(|| p.strip_prefix(r"~\"))
         && let Some(h) = home_dir()
@@ -3589,7 +3686,10 @@ fn ratio(value: &str, default: f32, current: f32, min: f32, max: f32) -> f32 {
     if value.is_empty() {
         default
     } else {
-        value.parse::<f32>().map(|n| n.clamp(min, max)).unwrap_or(current)
+        value
+            .parse::<f32>()
+            .map(|n| n.clamp(min, max))
+            .unwrap_or(current)
     }
 }
 
@@ -3980,8 +4080,14 @@ mod tests {
     #[test]
     fn enquiry_response_parses() {
         assert_eq!(Config::default().enquiry_response, "");
-        assert_eq!(parsed("enquiry-response = vt100 ok").enquiry_response, "vt100 ok");
-        assert_eq!(parsed("enquiry-response = x\nenquiry-response =").enquiry_response, "");
+        assert_eq!(
+            parsed("enquiry-response = vt100 ok").enquiry_response,
+            "vt100 ok"
+        );
+        assert_eq!(
+            parsed("enquiry-response = x\nenquiry-response =").enquiry_response,
+            ""
+        );
     }
 
     #[test]
@@ -3989,15 +4095,33 @@ mod tests {
         let d = Config::default();
         assert_eq!(d.window_decoration, WindowDecoration::Auto);
         assert!(d.quit_after_last_window_closed && d.initial_window && d.window_vsync);
-        assert_eq!(parsed("window-decoration = none").window_decoration, WindowDecoration::None);
-        assert_eq!(parsed("window-decoration = false").window_decoration, WindowDecoration::None);
-        assert_eq!(parsed("window-decoration = true").window_decoration, WindowDecoration::Auto);
-        assert_eq!(parsed("window-decoration = server").window_decoration, WindowDecoration::Server);
+        assert_eq!(
+            parsed("window-decoration = none").window_decoration,
+            WindowDecoration::None
+        );
+        assert_eq!(
+            parsed("window-decoration = false").window_decoration,
+            WindowDecoration::None
+        );
+        assert_eq!(
+            parsed("window-decoration = true").window_decoration,
+            WindowDecoration::Auto
+        );
+        assert_eq!(
+            parsed("window-decoration = server").window_decoration,
+            WindowDecoration::Server
+        );
         // `macos-titlebar-style`: native by default (divergence), upstream's
         // four values, junk keeps the previous value.
         assert_eq!(d.titlebar_style, TitlebarStyle::Native);
-        assert_eq!(parsed("macos-titlebar-style = tabs").titlebar_style, TitlebarStyle::Tabs);
-        assert_eq!(parsed("macos-titlebar-style = hidden").titlebar_style, TitlebarStyle::Hidden);
+        assert_eq!(
+            parsed("macos-titlebar-style = tabs").titlebar_style,
+            TitlebarStyle::Tabs
+        );
+        assert_eq!(
+            parsed("macos-titlebar-style = hidden").titlebar_style,
+            TitlebarStyle::Hidden
+        );
         assert_eq!(
             parsed("macos-titlebar-style = transparent").titlebar_style,
             TitlebarStyle::Transparent
@@ -4014,13 +4138,20 @@ mod tests {
         );
         assert_eq!(d.app_icon, AppIcon::Official);
         assert_eq!(parsed("macos-icon = xray").app_icon, AppIcon::Xray);
-        assert_eq!(parsed("macos-icon-frame = chrome").icon_frame, IconFrame::Chrome);
+        assert_eq!(
+            parsed("macos-icon-frame = chrome").icon_frame,
+            IconFrame::Chrome
+        );
         assert_eq!(
             parsed("macos-icon-screen-color = #000000,#ffffff").icon_screen_color,
             vec![Rgb::new(0, 0, 0), Rgb::new(255, 255, 255)]
         );
         // One bad stop rejects the whole list.
-        assert!(parsed("macos-icon-screen-color = #000000,nope").icon_screen_color.is_empty());
+        assert!(
+            parsed("macos-icon-screen-color = #000000,nope")
+                .icon_screen_color
+                .is_empty()
+        );
         assert!(!WindowDecoration::None.decorated() && WindowDecoration::Client.decorated());
         assert_eq!(
             parsed("window-titlebar-background = #102030").window_titlebar_background,
@@ -4031,7 +4162,10 @@ mod tests {
                 .window_titlebar_foreground,
             None
         );
-        assert_eq!(parsed("window-show-tab-bar = auto").window_show_tab_bar, ShowTabBar::Auto);
+        assert_eq!(
+            parsed("window-show-tab-bar = auto").window_show_tab_bar,
+            ShowTabBar::Auto
+        );
         assert!(!ShowTabBar::Auto.visible(1) && ShowTabBar::Auto.visible(2));
         assert!(!ShowTabBar::Never.visible(5) && ShowTabBar::Always.visible(1));
         assert!(parsed("maximize = true").maximize);
@@ -4043,7 +4177,9 @@ mod tests {
         assert!(parsed("window-subtitle = working-directory").window_subtitle);
         assert!(!parsed("window-subtitle = false").window_subtitle);
         assert_eq!(
-            parsed("window-title-font-family = Segoe UI").window_title_font_family.as_deref(),
+            parsed("window-title-font-family = Segoe UI")
+                .window_title_font_family
+                .as_deref(),
             Some("Segoe UI")
         );
         assert!(parsed("window-step-resize = true").window_step_resize);
@@ -4101,7 +4237,10 @@ mod tests {
         // Case-insensitive; the CamelCase spelling collapses spaces.
         assert_eq!(parse_color("ForestGreen"), Some(Rgb::new(34, 139, 34)));
         assert_eq!(parse_color("forestgreen"), Some(Rgb::new(34, 139, 34)));
-        assert_eq!(parse_color("medium spring green"), Some(Rgb::new(0, 250, 154)));
+        assert_eq!(
+            parse_color("medium spring green"),
+            Some(Rgb::new(0, 250, 154))
+        );
         // Hex still works through the same entry point (incl. short form).
         assert_eq!(parse_color("#ff8800"), Some(Rgb::new(0xff, 0x88, 0x00)));
         assert_eq!(parse_color("#f80"), Some(Rgb::new(0xff, 0x88, 0x00)));
@@ -4114,9 +4253,18 @@ mod tests {
         // The named-color path backs every color key, like Ghostty.
         assert_eq!(parsed("foreground = red").fg, Rgb::new(255, 0, 0));
         assert_eq!(parsed("background = black").bg, Rgb::new(0, 0, 0));
-        assert_eq!(parsed("cursor-color = blue").cursor, Some(Rgb::new(0, 0, 255)));
-        assert_eq!(parsed("cursor-text = cell-foreground").cursor_text, Some(TerminalColor::CellForeground));
-        assert_eq!(parsed("cursor-text = #00ff00").cursor_text, Some(TerminalColor::Color(Rgb::new(0, 255, 0))));
+        assert_eq!(
+            parsed("cursor-color = blue").cursor,
+            Some(Rgb::new(0, 0, 255))
+        );
+        assert_eq!(
+            parsed("cursor-text = cell-foreground").cursor_text,
+            Some(TerminalColor::CellForeground)
+        );
+        assert_eq!(
+            parsed("cursor-text = #00ff00").cursor_text,
+            Some(TerminalColor::Color(Rgb::new(0, 255, 0)))
+        );
         assert_eq!(parsed("").cursor_text, None);
         assert_eq!(
             parsed("bold-color = black").bold_color,
@@ -4185,21 +4333,53 @@ mod tests {
         let c = Config::default();
         assert_eq!(c.scrollback_limit, 10_000);
         assert_eq!(parsed("scrollback-limit = 50000").scrollback_limit, 50_000);
-        assert_eq!(parsed("scrollback-limit-bytes = 70000").scrollback_limit, 70_000);
-        assert_eq!(parsed("scrollback-limit-bytes = unlimited").scrollback_limit, usize::MAX);
-        assert_eq!(parsed("scrollback-limit-lines = 5000").scrollback_limit_lines, Some(5000));
-        assert_eq!(parsed("scrollback-limit-lines = unlimited").scrollback_limit_lines, None);
+        assert_eq!(
+            parsed("scrollback-limit-bytes = 70000").scrollback_limit,
+            70_000
+        );
+        assert_eq!(
+            parsed("scrollback-limit-bytes = unlimited").scrollback_limit,
+            usize::MAX
+        );
+        assert_eq!(
+            parsed("scrollback-limit-lines = 5000").scrollback_limit_lines,
+            Some(5000)
+        );
+        assert_eq!(
+            parsed("scrollback-limit-lines = unlimited").scrollback_limit_lines,
+            None
+        );
     }
 
     #[test]
     fn palette_generate_keeps_base_and_explicit_entries() {
         let off = parsed("palette = 100=#123456");
-        assert_eq!(off.effective_palette(), off.palette, "off by default: palette as configured");
+        assert_eq!(
+            off.effective_palette(),
+            off.palette,
+            "off by default: palette as configured"
+        );
 
         let c = parsed("palette-generate = true\npalette = 100=#123456\npalette = 1=#ff0000");
         let p = c.effective_palette();
-        assert_eq!(p[1], Rgb { r: 0xff, g: 0, b: 0 }, "base 16 preserved");
-        assert_eq!(p[100], Rgb { r: 0x12, g: 0x34, b: 0x56 }, "explicit entry kept");
+        assert_eq!(
+            p[1],
+            Rgb {
+                r: 0xff,
+                g: 0,
+                b: 0
+            },
+            "base 16 preserved"
+        );
+        assert_eq!(
+            p[100],
+            Rgb {
+                r: 0x12,
+                g: 0x34,
+                b: 0x56
+            },
+            "explicit entry kept"
+        );
         assert_ne!(p[101], c.palette[101], "cube regenerated");
         // Ramp runs background -> foreground.
         assert_ne!(p[232], c.palette[232]);
@@ -4220,9 +4400,7 @@ mod tests {
         assert_eq!(c.links[0].as_str(), r"JIRA-\d+");
         assert_eq!(c.link_previews, LinkPreviews::Osc8);
         assert_eq!(c.window_padding_color, PaddingColor::ExtendAlways);
-        let c = parsed(
-            "link = a\nlink =\nlink-previews = false\nwindow-padding-color = extend",
-        );
+        let c = parsed("link = a\nlink =\nlink-previews = false\nwindow-padding-color = extend");
         assert!(c.links.is_empty(), "an empty value clears the table");
         assert_eq!(c.link_previews, LinkPreviews::Never);
         assert_eq!(c.window_padding_color, PaddingColor::Extend);
@@ -4233,7 +4411,10 @@ mod tests {
         let d = parsed("");
         assert!(d.window_inherit_font_size && d.config_default_files && d.window_buttons);
         assert!(d.window_shadow && !d.hidden_from_taskbar);
-        assert_eq!(d.term, "", "no TERM by default: WSL has no xterm-ghostty terminfo");
+        assert_eq!(
+            d.term, "",
+            "no TERM by default: WSL has no xterm-ghostty terminfo"
+        );
         assert_eq!(d.drop_behavior, DropBehavior::NewTab);
 
         let c = parsed(
@@ -4251,7 +4432,10 @@ mod tests {
         // an unknown one both fall back rather than flipping the setting.
         assert!(!parsed("macos-window-buttons = false").window_buttons);
         assert!(parsed("macos-window-buttons = nonsense").window_buttons);
-        assert_eq!(parsed("macos-dock-drop-behavior = nonsense").drop_behavior, DropBehavior::NewTab);
+        assert_eq!(
+            parsed("macos-dock-drop-behavior = nonsense").drop_behavior,
+            DropBehavior::NewTab
+        );
         assert_eq!(parsed("term = \"xterm\"").term, "xterm", "quotes stripped");
     }
 
@@ -4260,17 +4444,32 @@ mod tests {
         let c = parsed("");
         assert!(c.link_osc8 && c.link_url);
         assert_eq!(c.clipboard.write_limit, Some(64 << 20));
-        let c = parsed("link-osc8 = false\nlink-url = false\nclipboard-write-limit-bytes = unlimited");
+        let c =
+            parsed("link-osc8 = false\nlink-url = false\nclipboard-write-limit-bytes = unlimited");
         assert!(!c.link_osc8 && !c.link_url);
         assert_eq!(c.clipboard.write_limit, None);
-        assert_eq!(parsed("clipboard-write-limit-bytes = 0").clipboard.write_limit, Some(0));
+        assert_eq!(
+            parsed("clipboard-write-limit-bytes = 0")
+                .clipboard
+                .write_limit,
+            Some(0)
+        );
     }
 
     #[test]
     fn conpty_passthrough_parses_auto_true_false() {
-        assert_eq!(Config::default().conpty_passthrough, ConptyPassthrough::Auto);
-        assert_eq!(parsed("conpty-passthrough = true").conpty_passthrough, ConptyPassthrough::On);
-        assert_eq!(parsed("conpty-passthrough = false").conpty_passthrough, ConptyPassthrough::Off);
+        assert_eq!(
+            Config::default().conpty_passthrough,
+            ConptyPassthrough::Auto
+        );
+        assert_eq!(
+            parsed("conpty-passthrough = true").conpty_passthrough,
+            ConptyPassthrough::On
+        );
+        assert_eq!(
+            parsed("conpty-passthrough = false").conpty_passthrough,
+            ConptyPassthrough::Off
+        );
         assert_eq!(
             parsed("conpty-passthrough = false\nconpty-passthrough = bogus").conpty_passthrough,
             ConptyPassthrough::Auto
@@ -4455,22 +4654,38 @@ mod tests {
     fn key_remap_is_repeatable_and_resettable() {
         let c = parsed("key-remap = ctrl=alt\nkey-remap = bogus\nkey-remap = left_shift=super");
         assert_eq!(c.key_remap.len(), 2);
-        assert!(parsed("key-remap = ctrl=alt\nkey-remap =").key_remap.is_empty());
+        assert!(
+            parsed("key-remap = ctrl=alt\nkey-remap =")
+                .key_remap
+                .is_empty()
+        );
     }
 
     #[test]
     fn mouse_shift_capture_and_click_interval() {
         use MouseShiftCapture as M;
         assert_eq!(Config::default().mouse_shift_capture, M::False);
-        assert_eq!(parsed("mouse-shift-capture = always").mouse_shift_capture, M::Always);
-        assert_eq!(parsed("mouse-shift-capture = never").mouse_shift_capture, M::Never);
-        assert_eq!(parsed("mouse-shift-capture = true").mouse_shift_capture, M::True);
+        assert_eq!(
+            parsed("mouse-shift-capture = always").mouse_shift_capture,
+            M::Always
+        );
+        assert_eq!(
+            parsed("mouse-shift-capture = never").mouse_shift_capture,
+            M::Never
+        );
+        assert_eq!(
+            parsed("mouse-shift-capture = true").mouse_shift_capture,
+            M::True
+        );
         // Only true/false defer to the program's XTSHIFTESCAPE.
         assert!(M::False.captured(Some(true)) && !M::False.captured(None));
         assert!(!M::True.captured(Some(false)) && M::True.captured(None));
         assert!(M::Always.captured(Some(false)) && !M::Never.captured(Some(true)));
         assert_eq!(Config::default().click_repeat_interval, 0);
-        assert_eq!(parsed("click-repeat-interval = 250").click_repeat_interval, 250);
+        assert_eq!(
+            parsed("click-repeat-interval = 250").click_repeat_interval,
+            250
+        );
         assert_eq!(parsed("click-repeat-interval = x").click_repeat_interval, 0);
     }
 
@@ -4485,7 +4700,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(e.title, "Focus Split: Right");
-        assert_eq!(e.description.as_deref(), Some("Focus the split to the right, if it exists."));
+        assert_eq!(
+            e.description.as_deref(),
+            Some("Focus the split to the right, if it exists.")
+        );
         assert_eq!(e.action, "goto_split:right");
         let e = parse_command_palette_entry(r#"title:"Ghostty",action:"text:\xf0""#).unwrap();
         assert_eq!(e.title, "Ghostty");
@@ -4498,7 +4716,9 @@ mod tests {
         let c = parsed("command-palette-entry = title:A,action:new_tab");
         assert!(c.palette_defaults);
         assert_eq!(c.palette_entries.len(), 1);
-        let c = parsed("command-palette-entry = title:A,action:new_tab\ncommand-palette-entry = clear\ncommand-palette-entry = title:B,action:new_tab");
+        let c = parsed(
+            "command-palette-entry = title:A,action:new_tab\ncommand-palette-entry = clear\ncommand-palette-entry = title:B,action:new_tab",
+        );
         assert!(!c.palette_defaults);
         assert_eq!(c.palette_entries[0].title, "B");
         let c = parsed("command-palette-entry = clear\ncommand-palette-entry =");
@@ -4512,7 +4732,10 @@ mod tests {
         );
         assert_eq!(c.clipboard_codepoint_map.len(), 3);
         // The later range wins for U+2500.
-        assert_eq!(map_clipboard_text(&c.clipboard_codepoint_map, "a\u{2500}\u{3a3}\u{2501}b"), "a|SUM|b");
+        assert_eq!(
+            map_clipboard_text(&c.clipboard_codepoint_map, "a\u{2500}\u{3a3}\u{2501}b"),
+            "a|SUM|b"
+        );
         assert_eq!(map_clipboard_text(&[], "x\u{2500}"), "x\u{2500}");
         assert!(parse_clipboard_map("2500=x").is_none());
         assert!(parse_clipboard_map("U+2502-U+2500=x").is_none());
@@ -4521,16 +4744,26 @@ mod tests {
     #[test]
     fn font_codepoint_map_and_shaping_and_thicken() {
         let c = parsed("font-codepoint-map = U+E000-U+E0FF,U+F000=Symbols Nerd Font");
-        assert_eq!(c.font_codepoint_map[0].ranges, vec![(0xE000, 0xE0FF), (0xF000, 0xF000)]);
+        assert_eq!(
+            c.font_codepoint_map[0].ranges,
+            vec![(0xE000, 0xE0FF), (0xF000, 0xF000)]
+        );
         assert_eq!(c.font_codepoint_map[0].family, "Symbols Nerd Font");
-        assert!(parsed("font-codepoint-map = U+E000=").font_codepoint_map.is_empty());
+        assert!(
+            parsed("font-codepoint-map = U+E000=")
+                .font_codepoint_map
+                .is_empty()
+        );
         assert!(Config::default().font_shaping_break_cursor);
         assert!(!parsed("font-shaping-break = no-cursor").font_shaping_break_cursor);
         assert!(parsed("font-shaping-break = no-cursor,cursor").font_shaping_break_cursor);
         let c = parsed("font-thicken = true\nfont-thicken-strength = 40");
         assert!(c.font_thicken);
         assert_eq!(c.font_thicken_strength, 40);
-        assert_eq!(parsed("font-thicken-strength = 300").font_thicken_strength, 255);
+        assert_eq!(
+            parsed("font-thicken-strength = 300").font_thicken_strength,
+            255
+        );
         assert!(!parsed("cursor-click-to-move = false").cursor_click_to_move);
     }
 
@@ -4713,7 +4946,11 @@ mod tests {
         // from being parked above the first line.
         assert_eq!(balance_padding(Balanced, 9.0, 20.0), (4.0, 5.0));
         assert_eq!(balance_padding(Balanced, 19.0, 20.0), (9.0, 10.0));
-        assert_eq!(balance_padding(Balanced, 30.0, 20.0), (10.0, 20.0), "capped");
+        assert_eq!(
+            balance_padding(Balanced, 30.0, 20.0),
+            (10.0, 20.0),
+            "capped"
+        );
         assert_eq!(balance_padding(Equal, 30.0, 20.0), (15.0, 15.0), "uncapped");
         // Nothing to share out, and a negative leftover can't invert the rect.
         assert_eq!(balance_padding(Equal, 0.0, 20.0), (0.0, 0.0));
@@ -4760,7 +4997,10 @@ mod tests {
     fn working_directory_resolves_its_special_values() {
         // `inherit` is the launching process's directory, which is what `None`
         // already means downstream.
-        assert_eq!(parsed("working-directory = inherit").working_directory, None);
+        assert_eq!(
+            parsed("working-directory = inherit").working_directory,
+            None
+        );
         assert_eq!(Config::default().working_directory, None);
         assert_eq!(
             parsed(r"working-directory = C:\src").working_directory,
@@ -4769,7 +5009,10 @@ mod tests {
         // `home` and `~/` need a home directory to exist; on a machine that has
         // one they resolve under it.
         if let Some(home) = home_dir() {
-            assert_eq!(parsed("working-directory = home").working_directory, Some(home.clone()));
+            assert_eq!(
+                parsed("working-directory = home").working_directory,
+                Some(home.clone())
+            );
             assert_eq!(
                 parsed("working-directory = ~/src").working_directory,
                 Some(home.join("src"))
@@ -4811,7 +5054,10 @@ mod tests {
     #[test]
     fn font_synthetic_style_has_the_packed_struct_grammar() {
         // On by default, all three.
-        assert_eq!(Config::default().font_synthetic_style, SyntheticStyle::all(true));
+        assert_eq!(
+            Config::default().font_synthetic_style,
+            SyntheticStyle::all(true)
+        );
         // A bare bool sets every flag.
         assert_eq!(
             parsed("font-synthetic-style = false").font_synthetic_style,
@@ -4828,7 +5074,11 @@ mod tests {
         assert!(!s.bold && s.italic && s.bold_italic);
         let s = parsed("font-synthetic-style = no-bold,no-italic").font_synthetic_style;
         assert!(!s.bold && !s.italic && s.bold_italic);
-        assert!(!parsed("font-synthetic-style = no-bold-italic").font_synthetic_style.bold_italic);
+        assert!(
+            !parsed("font-synthetic-style = no-bold-italic")
+                .font_synthetic_style
+                .bold_italic
+        );
         // One unknown token rejects the whole value rather than half-applying it.
         assert_eq!(
             parsed("font-synthetic-style = no-bold,nope").font_synthetic_style,
@@ -4846,7 +5096,10 @@ mod tests {
         // The trap the upstream docs call out: `1` adds a pixel, it does not set
         // the value to 1.
         assert_eq!(MetricModifier::parse("1"), Some(MetricModifier::Pixels(1)));
-        assert_eq!(MetricModifier::parse("-2"), Some(MetricModifier::Pixels(-2)));
+        assert_eq!(
+            MetricModifier::parse("-2"),
+            Some(MetricModifier::Pixels(-2))
+        );
         assert_eq!(
             MetricModifier::parse("20%"),
             Some(MetricModifier::Percent(0.2))
@@ -4873,7 +5126,10 @@ mod tests {
 
     #[test]
     fn window_save_state_parses_and_only_always_restores() {
-        assert_eq!(Config::default().window_save_state, WindowSaveState::Default);
+        assert_eq!(
+            Config::default().window_save_state,
+            WindowSaveState::Default
+        );
         assert_eq!(
             parsed("window-save-state = always").window_save_state,
             WindowSaveState::Always
@@ -4901,8 +5157,14 @@ mod tests {
         assert!(f.cursor && f.title && f.path);
         assert!(!f.sudo && !f.ssh_env && !f.ssh_terminfo);
 
-        assert_eq!(parsed("shell-integration = none").shell_integration, ShellIntegration::None);
-        assert_eq!(parsed("shell-integration = zsh").shell_integration, ShellIntegration::Zsh);
+        assert_eq!(
+            parsed("shell-integration = none").shell_integration,
+            ShellIntegration::None
+        );
+        assert_eq!(
+            parsed("shell-integration = zsh").shell_integration,
+            ShellIntegration::Zsh
+        );
         assert_eq!(
             parsed("shell-integration = nushell").shell_integration,
             ShellIntegration::Nushell
@@ -4935,7 +5197,11 @@ mod tests {
                 path: false
             }
         );
-        assert!(parsed("shell-integration-features = true").shell_integration_features.ssh_terminfo);
+        assert!(
+            parsed("shell-integration-features = true")
+                .shell_integration_features
+                .ssh_terminfo
+        );
         // An unknown feature rejects the whole value.
         let f = parsed("shell-integration-features = no-cursor,bogus").shell_integration_features;
         assert!(f.cursor);
@@ -4963,8 +5229,16 @@ mod tests {
                 .abnormal_command_exit_runtime_ms,
             250
         );
-        assert_eq!(parsed("initial-command = cmd.exe").initial_command.as_deref(), Some("cmd.exe"));
-        assert_eq!(parsed("initial-command = x\ninitial-command =").initial_command, None);
+        assert_eq!(
+            parsed("initial-command = cmd.exe")
+                .initial_command
+                .as_deref(),
+            Some("cmd.exe")
+        );
+        assert_eq!(
+            parsed("initial-command = x\ninitial-command =").initial_command,
+            None
+        );
     }
 
     #[test]
@@ -4974,10 +5248,19 @@ mod tests {
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect::<Vec<_>>()
         };
-        assert_eq!(parsed("env = A=1\nenv = B=x=y").env, kv(&[("A", "1"), ("B", "x=y")]));
+        assert_eq!(
+            parsed("env = A=1\nenv = B=x=y").env,
+            kv(&[("A", "1"), ("B", "x=y")])
+        );
         // Re-setting overwrites in place; `KEY=` removes; empty resets all.
-        assert_eq!(parsed("env = A=1\nenv = B=2\nenv = A=3").env, kv(&[("A", "3"), ("B", "2")]));
-        assert_eq!(parsed("env = A=1\nenv = B=2\nenv = A=").env, kv(&[("B", "2")]));
+        assert_eq!(
+            parsed("env = A=1\nenv = B=2\nenv = A=3").env,
+            kv(&[("A", "3"), ("B", "2")])
+        );
+        assert_eq!(
+            parsed("env = A=1\nenv = B=2\nenv = A=").env,
+            kv(&[("B", "2")])
+        );
         assert!(parsed("env = A=1\nenv =").env.is_empty());
         // No `=` at all is not a pair.
         assert!(parsed("env = A").env.is_empty());
@@ -5010,9 +5293,16 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let f = dir.join("in.txt");
         std::fs::write(&f, b"FILE").unwrap();
-        let ok = [InputSource::Raw(b"a".to_vec()), InputSource::Path(f.clone()), InputSource::Raw(b"b".to_vec())];
+        let ok = [
+            InputSource::Raw(b"a".to_vec()),
+            InputSource::Path(f.clone()),
+            InputSource::Raw(b"b".to_vec()),
+        ];
         assert_eq!(resolve_input(&ok).as_deref(), Some(&b"aFILEb"[..]));
-        let bad = [InputSource::Raw(b"a".to_vec()), InputSource::Path(dir.join("missing"))];
+        let bad = [
+            InputSource::Raw(b"a".to_vec()),
+            InputSource::Path(dir.join("missing")),
+        ];
         assert_eq!(resolve_input(&bad), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -5020,9 +5310,18 @@ mod tests {
     #[test]
     fn confirm_close_surface_parses_ghostty_enum() {
         assert_eq!(Config::default().confirm_close, ConfirmClose::WhenBusy);
-        assert_eq!(parsed("confirm-close-surface = false").confirm_close, ConfirmClose::Never);
-        assert_eq!(parsed("confirm-close-surface = true").confirm_close, ConfirmClose::WhenBusy);
-        assert_eq!(parsed("confirm-close-surface = always").confirm_close, ConfirmClose::Always);
+        assert_eq!(
+            parsed("confirm-close-surface = false").confirm_close,
+            ConfirmClose::Never
+        );
+        assert_eq!(
+            parsed("confirm-close-surface = true").confirm_close,
+            ConfirmClose::WhenBusy
+        );
+        assert_eq!(
+            parsed("confirm-close-surface = always").confirm_close,
+            ConfirmClose::Always
+        );
         assert_eq!(
             parsed("confirm-close-surface = false\nconfirm-close-surface = bogus").confirm_close,
             ConfirmClose::Never
@@ -5055,8 +5354,14 @@ mod tests {
         assert_eq!(d.resize_overlay_position, ResizeOverlayPosition::Center);
         assert_eq!(d.resize_overlay_duration_ms, 750);
 
-        assert_eq!(parsed("resize-overlay = always").resize_overlay, ResizeOverlay::Always);
-        assert_eq!(parsed("resize-overlay = never").resize_overlay, ResizeOverlay::Never);
+        assert_eq!(
+            parsed("resize-overlay = always").resize_overlay,
+            ResizeOverlay::Always
+        );
+        assert_eq!(
+            parsed("resize-overlay = never").resize_overlay,
+            ResizeOverlay::Never
+        );
         assert_eq!(
             parsed("resize-overlay-position = bottom-right").resize_overlay_position,
             ResizeOverlayPosition::BottomRight
@@ -5075,7 +5380,10 @@ mod tests {
     #[test]
     fn drag_handle_parses_ghostty_values() {
         assert_eq!(Config::default().drag_handle, DragHandle::Auto);
-        assert_eq!(parsed("drag-handle = always").drag_handle, DragHandle::Always);
+        assert_eq!(
+            parsed("drag-handle = always").drag_handle,
+            DragHandle::Always
+        );
         assert_eq!(parsed("drag-handle = never").drag_handle, DragHandle::Never);
         assert_eq!(
             parsed("drag-handle = never\ndrag-handle = bogus").drag_handle,
@@ -5106,9 +5414,18 @@ mod tests {
 
     #[test]
     fn clipboard_access_keys_parse_ghostty_values() {
-        assert_eq!(parsed("clipboard-read = allow").clipboard.read, ClipboardAccess::Allow);
-        assert_eq!(parsed("clipboard-read = deny").clipboard.read, ClipboardAccess::Deny);
-        assert_eq!(parsed("clipboard-write = ask").clipboard.write, ClipboardAccess::Ask);
+        assert_eq!(
+            parsed("clipboard-read = allow").clipboard.read,
+            ClipboardAccess::Allow
+        );
+        assert_eq!(
+            parsed("clipboard-read = deny").clipboard.read,
+            ClipboardAccess::Deny
+        );
+        assert_eq!(
+            parsed("clipboard-write = ask").clipboard.write,
+            ClipboardAccess::Ask
+        );
         // Garbage keeps the current value; empty resets to the default.
         assert_eq!(
             parsed("clipboard-write = deny\nclipboard-write = maybe")
@@ -5117,7 +5434,9 @@ mod tests {
             ClipboardAccess::Deny
         );
         assert_eq!(
-            parsed("clipboard-write = deny\nclipboard-write =").clipboard.write,
+            parsed("clipboard-write = deny\nclipboard-write =")
+                .clipboard
+                .write,
             ClipboardAccess::Allow
         );
     }
@@ -5188,16 +5507,20 @@ mod tests {
             Scrollbar::Never
         );
         // …and an empty value resets to the default.
-        assert_eq!(parsed("scrollbar = never\nscrollbar =").scrollbar, Scrollbar::System);
+        assert_eq!(
+            parsed("scrollbar = never\nscrollbar =").scrollbar,
+            Scrollbar::System
+        );
     }
 
     #[test]
     fn resize_overlay_duration_parses_ghostty_grammar() {
-        let ms = |s: &str| parsed(&format!("resize-overlay-duration = {s}")).resize_overlay_duration_ms;
+        let ms =
+            |s: &str| parsed(&format!("resize-overlay-duration = {s}")).resize_overlay_duration_ms;
         assert_eq!(ms("750ms"), 750);
         assert_eq!(ms("45s"), 45_000);
         // Components add…
-        assert_eq!(ms("1h30m"), 5_400_000_u64.min(60_000));
+        assert_eq!(ms("1h30m"), 60_000);
         // …and repeat rather than overwrite (1h1h == 2h), though both clamp here.
         assert_eq!(ms("2s500ms"), 2_500);
         // A bare integer is milliseconds (a giest superset).
@@ -5253,7 +5576,10 @@ mod tests {
         let one = |body: &str| parsed(body).font_variations[0].clone();
         assert_eq!(
             one("font-variation = wght=200"),
-            vec![FontVariation { tag: *b"wght", value: 200.0 }]
+            vec![FontVariation {
+                tag: *b"wght",
+                value: 200.0
+            }]
         );
         // Upstream trims around **both** halves — unlike `font-feature`, whose
         // value is handed to rustybuzz's stricter parser.
@@ -5273,7 +5599,14 @@ mod tests {
         // An empty value resets the slot, like every other repeatable key.
         assert!(one("font-variation = wght=200\nfont-variation =").is_empty());
         // A tag must be exactly four ASCII characters, and the value a number.
-        for bad in ["wgh=200", "weight=200", "wght=heavy", "wght", "=200", "wgh†=200"] {
+        for bad in [
+            "wgh=200",
+            "weight=200",
+            "wght=heavy",
+            "wght",
+            "=200",
+            "wgh†=200",
+        ] {
             assert!(
                 one(&format!("font-variation = {bad}")).is_empty(),
                 "should reject {bad:?}"
@@ -5313,7 +5646,10 @@ mod tests {
         assert_eq!(ms("0"), 0);
         assert_eq!(ms("1y"), 31_536_000_000);
         // Garbage keeps the current value rather than resetting to the default.
-        assert_eq!(parsed("undo-timeout = 2s\nundo-timeout = later").undo_timeout_ms, 2_000);
+        assert_eq!(
+            parsed("undo-timeout = 2s\nundo-timeout = later").undo_timeout_ms,
+            2_000
+        );
     }
 
     #[test]
@@ -5331,7 +5667,10 @@ mod tests {
 
     #[test]
     fn osc_color_report_format_parses_each_value() {
-        assert_eq!(Config::default().osc_color_report_format, OscColorReportFormat::Bits16);
+        assert_eq!(
+            Config::default().osc_color_report_format,
+            OscColorReportFormat::Bits16
+        );
         assert_eq!(
             parsed("osc-color-report-format = none").osc_color_report_format,
             OscColorReportFormat::None
@@ -5382,11 +5721,17 @@ mod tests {
     fn bell_features_bool_shorthand_sets_all() {
         for v in ["true", "t", "1"] {
             let b = parsed(&format!("bell-features = {v}")).bell;
-            assert!(b.system && b.audio && b.attention && b.title && b.border, "{v}");
+            assert!(
+                b.system && b.audio && b.attention && b.title && b.border,
+                "{v}"
+            );
         }
         for v in ["false", "f", "0"] {
             let b = parsed(&format!("bell-features = {v}")).bell;
-            assert!(!b.system && !b.audio && !b.attention && !b.title && !b.border, "{v}");
+            assert!(
+                !b.system && !b.audio && !b.attention && !b.title && !b.border,
+                "{v}"
+            );
         }
         // Ghostty's packed-struct parser takes a *stricter* bool set than its
         // ordinary one, so these are unknown feature names, not booleans — and an
@@ -5420,7 +5765,9 @@ mod tests {
         assert_eq!(Config::default().bell_audio_path, None);
         assert_eq!(Config::default().bell_audio_volume, 0.5);
         assert_eq!(
-            parsed(r"bell-audio-path = C:\sounds\ding.wav").bell_audio_path.as_deref(),
+            parsed(r"bell-audio-path = C:\sounds\ding.wav")
+                .bell_audio_path
+                .as_deref(),
             Some(r"C:\sounds\ding.wav")
         );
         // Parsed and clamped even though playback can't honor it yet.
@@ -5460,10 +5807,19 @@ mod tests {
     #[test]
     fn unfocused_split_opacity_clamps_to_ghostty_range() {
         assert_eq!(Config::default().unfocused_split_opacity, 0.7);
-        assert_eq!(parsed("unfocused-split-opacity = 0.4").unfocused_split_opacity, 0.4);
+        assert_eq!(
+            parsed("unfocused-split-opacity = 0.4").unfocused_split_opacity,
+            0.4
+        );
         // The floor is 0.15, not 0 — Ghostty disallows a fully invisible split.
-        assert_eq!(parsed("unfocused-split-opacity = 0.0").unfocused_split_opacity, 0.15);
-        assert_eq!(parsed("unfocused-split-opacity = 2.0").unfocused_split_opacity, 1.0);
+        assert_eq!(
+            parsed("unfocused-split-opacity = 0.0").unfocused_split_opacity,
+            0.15
+        );
+        assert_eq!(
+            parsed("unfocused-split-opacity = 2.0").unfocused_split_opacity,
+            1.0
+        );
     }
 
     #[test]
@@ -5494,11 +5850,23 @@ mod tests {
     fn background_blur_parses_ghostty_grammar() {
         use super::BackgroundBlur;
         assert_eq!(Config::default().background_blur, BackgroundBlur::Off);
-        assert_eq!(parsed("background-blur = true").background_blur, BackgroundBlur::On);
-        assert_eq!(parsed("background-blur = false").background_blur, BackgroundBlur::Off);
+        assert_eq!(
+            parsed("background-blur = true").background_blur,
+            BackgroundBlur::On
+        );
+        assert_eq!(
+            parsed("background-blur = false").background_blur,
+            BackgroundBlur::Off
+        );
         // Ghostty's parseBool takes `0`/`1`, so those are bools — NOT radii.
-        assert_eq!(parsed("background-blur = 0").background_blur, BackgroundBlur::Off);
-        assert_eq!(parsed("background-blur = 1").background_blur, BackgroundBlur::On);
+        assert_eq!(
+            parsed("background-blur = 0").background_blur,
+            BackgroundBlur::Off
+        );
+        assert_eq!(
+            parsed("background-blur = 1").background_blur,
+            BackgroundBlur::On
+        );
         // Only 2 and up reach the numeric branch.
         assert_eq!(
             parsed("background-blur = 20").background_blur,
@@ -5535,12 +5903,21 @@ mod tests {
         // …but zero still means "let the OS decide", not "the minimum".
         assert_eq!(parsed("window-width = 0").window_width, 0);
         // Garbage keeps the current value; empty resets.
-        assert_eq!(parsed("window-width = 80\nwindow-width = wide").window_width, 80);
+        assert_eq!(
+            parsed("window-width = 80\nwindow-width = wide").window_width,
+            80
+        );
         assert_eq!(parsed("window-width = 80\nwindow-width =").window_width, 0);
 
-        assert_eq!(parsed("window-position-x = 100").window_position_x, Some(100));
+        assert_eq!(
+            parsed("window-position-x = 100").window_position_x,
+            Some(100)
+        );
         // Negative is legal: a monitor left of the primary has negative x.
-        assert_eq!(parsed("window-position-y = -40").window_position_y, Some(-40));
+        assert_eq!(
+            parsed("window-position-y = -40").window_position_y,
+            Some(-40)
+        );
         assert_eq!(
             parsed("window-position-x = 10\nwindow-position-x =").window_position_x,
             None
@@ -5559,7 +5936,8 @@ mod tests {
         assert_eq!((m.precision, m.discrete), (2.0, 2.0));
 
         // Prefixes set them independently — Ghostty's own example.
-        let m = parsed("mouse-scroll-multiplier = precision:0.1,discrete:3").mouse_scroll_multiplier;
+        let m =
+            parsed("mouse-scroll-multiplier = precision:0.1,discrete:3").mouse_scroll_multiplier;
         assert_eq!((m.precision, m.discrete), (0.1, 3.0));
 
         // One prefix leaves the other alone.
@@ -5709,7 +6087,8 @@ mod tests {
         }
         // An unknown value keeps the current setting rather than resetting.
         assert_eq!(
-            parsed("background-image-fit = cover\nbackground-image-fit = bogus").background_image_fit,
+            parsed("background-image-fit = cover\nbackground-image-fit = bogus")
+                .background_image_fit,
             BackgroundImageFit::Cover
         );
 
@@ -5734,8 +6113,10 @@ mod tests {
         }
 
         assert!(parsed("background-image-repeat = true").background_image_repeat);
-        assert!(!parsed("background-image-repeat = true\nbackground-image-repeat =")
-            .background_image_repeat);
+        assert!(
+            !parsed("background-image-repeat = true\nbackground-image-repeat =")
+                .background_image_repeat
+        );
     }
 
     #[test]
@@ -5777,7 +6158,10 @@ mod tests {
         // Blank means unset, not "the config directory".
         assert_eq!(resolve_path("   ", Some(dir)), None);
         // With no config file at all, a relative path stays relative.
-        assert_eq!(resolve_path("wall.png", None), Some(PathBuf::from("wall.png")));
+        assert_eq!(
+            resolve_path("wall.png", None),
+            Some(PathBuf::from("wall.png"))
+        );
     }
 
     #[test]
@@ -5790,14 +6174,23 @@ mod tests {
              font-feature = ss01, cv01",
         );
         assert_eq!(c.font_family, vec!["Cascadia Code"]);
-        assert_eq!(c.font_family_bold.as_deref(), Some("Cascadia Code SemiBold"));
-        assert_eq!(c.font_family_italic.as_deref(), Some("Cascadia Code Italic"));
+        assert_eq!(
+            c.font_family_bold.as_deref(),
+            Some("Cascadia Code SemiBold")
+        );
+        assert_eq!(
+            c.font_family_italic.as_deref(),
+            Some("Cascadia Code Italic")
+        );
         assert_eq!(c.font_family_bold_italic, None);
         // Repeatable; each value is a comma-separated list.
         assert_eq!(c.font_features, vec!["-calt", "ss01", "cv01"]);
         // Comma-only split (not whitespace): a feature's own value syntax keeps
         // its spaces, so `liga off` is one feature the shaper resolves to liga=0.
-        assert_eq!(parsed("font-feature = liga off").font_features, vec!["liga off"]);
+        assert_eq!(
+            parsed("font-feature = liga off").font_features,
+            vec!["liga off"]
+        );
 
         // Defaults and resets.
         assert!(Config::default().font_family.is_empty());
@@ -5814,7 +6207,11 @@ mod tests {
         );
         // Only an empty value resets; `clear` is not special (stored as a literal
         // token the shaper later drops — matching Ghostty).
-        assert!(parsed("font-feature = -calt\nfont-feature =").font_features.is_empty());
+        assert!(
+            parsed("font-feature = -calt\nfont-feature =")
+                .font_features
+                .is_empty()
+        );
         assert_eq!(
             parsed("font-feature = -calt\nfont-feature = clear").font_features,
             vec!["-calt", "clear"]
@@ -5833,7 +6230,10 @@ mod tests {
             CursorShape::Underline
         );
         // Garbage keeps the current; empty resets to default.
-        assert_eq!(parsed("cursor-style = wat").cursor_style, CursorShape::Block);
+        assert_eq!(
+            parsed("cursor-style = wat").cursor_style,
+            CursorShape::Block
+        );
         assert_eq!(parsed("cursor-style =").cursor_style, CursorShape::Block);
 
         assert_eq!(
@@ -5856,7 +6256,10 @@ mod tests {
             BoldColor::Color(Rgb::new(0xff, 0x88, 0x00))
         );
         // Deprecated alias.
-        assert_eq!(parsed("bold-is-bright = true").bold_color, BoldColor::Bright);
+        assert_eq!(
+            parsed("bold-is-bright = true").bold_color,
+            BoldColor::Bright
+        );
         assert_eq!(parsed("bold-is-bright = false").bold_color, BoldColor::None);
         // Empty resets; garbage keeps the current (default here).
         assert_eq!(parsed("bold-color =").bold_color, BoldColor::None);
@@ -5894,7 +6297,8 @@ mod tests {
 
     #[test]
     fn diagnostics_collect_unknown_keys_bad_values_and_malformed_lines() {
-        let c = parsed("frobnicate = 1\nnot a key value line\nfont-size = 15\nbell-features = bogus");
+        let c =
+            parsed("frobnicate = 1\nnot a key value line\nfont-size = 15\nbell-features = bogus");
         // Parsing otherwise proceeds exactly as before: the good line applies.
         assert_eq!(c.font_points, 15.0);
         assert_eq!(c.diagnostics.len(), 3, "{:?}", c.diagnostics);
@@ -5922,8 +6326,10 @@ mod tests {
     fn diagnostics_cover_unreadable_includes_across_files() {
         let s = Scratch::new();
         s.write("inc", "nope = 1");
-        let root =
-            s.write("config", "config-file = inc\nconfig-file = missing\nconfig-file = ?quiet");
+        let root = s.write(
+            "config",
+            "config-file = inc\nconfig-file = missing\nconfig-file = ?quiet",
+        );
         let c = Config::load_from_file(&root);
         assert_eq!(c.diagnostics.len(), 2, "{:?}", c.diagnostics);
         assert!(c.diagnostics.iter().any(|d| d.contains("'nope'")));
@@ -5944,9 +6350,8 @@ mod tests {
         let c = parsed("app-notifications = no-config-reload, clipboard-copy");
         assert!(c.app_notifications.clipboard_copy && !c.app_notifications.config_reload);
         // A second line replaces rather than accumulates.
-        let c = parsed(
-            "app-notifications = no-clipboard-copy\napp-notifications = no-config-reload",
-        );
+        let c =
+            parsed("app-notifications = no-clipboard-copy\napp-notifications = no-config-reload");
         assert!(c.app_notifications.clipboard_copy && !c.app_notifications.config_reload);
     }
 
@@ -5954,13 +6359,20 @@ mod tests {
     fn app_notifications_bool_shorthand_errors_and_reset() {
         assert_eq!(
             parsed("app-notifications = false").app_notifications,
-            AppNotifications { clipboard_copy: false, config_reload: false }
+            AppNotifications {
+                clipboard_copy: false,
+                config_reload: false
+            }
         );
         // Only the strict packed-struct booleans; `off` is an unknown flag and
         // rejects the value wholesale (the previous value stays).
         let c = parsed("app-notifications = false\napp-notifications = off");
         assert!(!c.app_notifications.clipboard_copy);
-        assert!(c.diagnostics.iter().any(|d| d.contains("app-notifications")));
+        assert!(
+            c.diagnostics
+                .iter()
+                .any(|d| d.contains("app-notifications"))
+        );
         let c = parsed("app-notifications = false\napp-notifications =");
         assert_eq!(c.app_notifications, AppNotifications::default());
     }

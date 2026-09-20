@@ -101,7 +101,10 @@ fn run_cli(cli: &cli::Cli) -> Option<i32> {
             attach_console();
             match ipc::send(&ipc::pipe_name(), &req) {
                 Ok(resp) => {
-                    println!("{}", serde_json::to_string_pretty(&resp).unwrap_or_default());
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&resp).unwrap_or_default()
+                    );
                     Some(if resp.ok { 0 } else { 1 })
                 }
                 Err(SendError::NoServer) => {
@@ -122,7 +125,10 @@ fn run_cli(cli: &cli::Cli) -> Option<i32> {
                     Ok(resp) if resp.ok => return Some(0),
                     Ok(resp) => {
                         attach_console();
-                        eprintln!("giest: {}", resp.error.unwrap_or_else(|| "request failed".into()));
+                        eprintln!(
+                            "giest: {}",
+                            resp.error.unwrap_or_else(|| "request failed".into())
+                        );
                         return Some(1);
                     }
                     Err(SendError::NoServer) if attempt == 0 => {
@@ -205,7 +211,8 @@ unsafe impl std::alloc::GlobalAlloc for CountingAlloc {
     unsafe fn alloc(&self, l: std::alloc::Layout) -> *mut u8 {
         let p = unsafe { std::alloc::System.alloc(l) };
         if !p.is_null() {
-            let live = HEAP_LIVE.fetch_add(l.size(), std::sync::atomic::Ordering::Relaxed) + l.size();
+            let live =
+                HEAP_LIVE.fetch_add(l.size(), std::sync::atomic::Ordering::Relaxed) + l.size();
             HEAP_PEAK.fetch_max(live, std::sync::atomic::Ordering::Relaxed);
         }
         p
@@ -222,7 +229,9 @@ static GLOBAL: CountingAlloc = CountingAlloc;
 /// `GIEST_HEAP_PROBE=<file>`: append `live_bytes peak_bytes` every second, so
 /// a memory investigation can read the Rust heap without a debugger.
 fn start_heap_probe() {
-    let Ok(path) = std::env::var("GIEST_HEAP_PROBE") else { return };
+    let Ok(path) = std::env::var("GIEST_HEAP_PROBE") else {
+        return;
+    };
     std::thread::spawn(move || {
         loop {
             std::thread::sleep(std::time::Duration::from_secs(1));
@@ -317,8 +326,11 @@ fn main() -> eframe::Result {
             // the user actually asked for transparency. (Vulkan-on-Windows usually
             // reports opaque-only too, which is a second reason the pin above is
             // DX12 rather than a wider set.)
-            setup.instance_descriptor.backend_options.dx12.presentation_system =
-                eframe::wgpu::Dx12SwapchainKind::DxgiFromVisual;
+            setup
+                .instance_descriptor
+                .backend_options
+                .dx12
+                .presentation_system = eframe::wgpu::Dx12SwapchainKind::DxgiFromVisual;
         }
     }
 

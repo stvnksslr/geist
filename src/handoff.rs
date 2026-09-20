@@ -68,7 +68,11 @@ pub const BACKUP_KEY: &str = r"Software\giest\DefaultTerminal";
 /// Backup value listing the parent keys `register` created.
 const CREATED_VALUE: &str = "CreatedKeys";
 /// Parents `register` may create; deepest first isn't needed (disjoint).
-const CREATED_PARENTS: [&str; 3] = [r"Software\giest", r"Software\Classes\Interface", r"Software\Classes\CLSID"];
+const CREATED_PARENTS: [&str; 3] = [
+    r"Software\giest",
+    r"Software\Classes\Interface",
+    r"Software\Classes\CLSID",
+];
 pub const DELEGATION_CONSOLE: &str = "DelegationConsole";
 pub const DELEGATION_TERMINAL: &str = "DelegationTerminal";
 
@@ -102,18 +106,46 @@ pub type Entry = (String, Option<&'static str>, String);
 pub fn class_entries(exe: &str, dll: &str) -> Vec<Entry> {
     let c = r"Software\Classes";
     vec![
-        (format!(r"{c}\CLSID\{CLSID_TERMINAL}"), None, "giest terminal handoff".into()),
-        (format!(r"{c}\CLSID\{CLSID_TERMINAL}\LocalServer32"), None, format!("\"{exe}\"")),
-        (format!(r"{c}\CLSID\{PROXY_CLSID}"), None, "giest handoff proxy/stub".into()),
-        (format!(r"{c}\CLSID\{PROXY_CLSID}\InProcServer32"), None, dll.to_string()),
-        (format!(r"{c}\CLSID\{PROXY_CLSID}\InProcServer32"), Some("ThreadingModel"), "Both".into()),
-        (format!(r"{c}\Interface\{IID_TERMINAL_HANDOFF3}"), None, "ITerminalHandoff3".into()),
+        (
+            format!(r"{c}\CLSID\{CLSID_TERMINAL}"),
+            None,
+            "giest terminal handoff".into(),
+        ),
+        (
+            format!(r"{c}\CLSID\{CLSID_TERMINAL}\LocalServer32"),
+            None,
+            format!("\"{exe}\""),
+        ),
+        (
+            format!(r"{c}\CLSID\{PROXY_CLSID}"),
+            None,
+            "giest handoff proxy/stub".into(),
+        ),
+        (
+            format!(r"{c}\CLSID\{PROXY_CLSID}\InProcServer32"),
+            None,
+            dll.to_string(),
+        ),
+        (
+            format!(r"{c}\CLSID\{PROXY_CLSID}\InProcServer32"),
+            Some("ThreadingModel"),
+            "Both".into(),
+        ),
+        (
+            format!(r"{c}\Interface\{IID_TERMINAL_HANDOFF3}"),
+            None,
+            "ITerminalHandoff3".into(),
+        ),
         (
             format!(r"{c}\Interface\{IID_TERMINAL_HANDOFF3}\ProxyStubClsid32"),
             None,
             PROXY_CLSID.into(),
         ),
-        (format!(r"{c}\Interface\{IID_CONSOLE_HANDOFF}"), None, "IConsoleHandoff".into()),
+        (
+            format!(r"{c}\Interface\{IID_CONSOLE_HANDOFF}"),
+            None,
+            "IConsoleHandoff".into(),
+        ),
         (
             format!(r"{c}\Interface\{IID_CONSOLE_HANDOFF}\ProxyStubClsid32"),
             None,
@@ -168,7 +200,10 @@ pub enum Restore {
 /// Decide the restore of one value: `current` is what is there now, `ours`
 /// what `register` wrote, `prior` what was there before.
 pub fn restore_action(current: &Prior, ours: &str, prior: &Prior) -> Restore {
-    if current.as_deref().is_none_or(|c| !c.eq_ignore_ascii_case(ours)) {
+    if current
+        .as_deref()
+        .is_none_or(|c| !c.eq_ignore_ascii_case(ours))
+    {
         return Restore::Keep;
     }
     match prior {
@@ -187,7 +222,11 @@ pub fn delegation_pair() -> [(&'static str, &'static str); 2] {
 
 /// The PE optional header's `Subsystem` (2 = GUI, 3 = console) of `image`.
 pub fn pe_subsystem(image: &[u8]) -> Option<u16> {
-    let u32_at = |o: usize| image.get(o..o + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+    let u32_at = |o: usize| {
+        image
+            .get(o..o + 4)
+            .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    };
     if image.get(0..2)? != b"MZ" {
         return None;
     }
@@ -198,7 +237,9 @@ pub fn pe_subsystem(image: &[u8]) -> Option<u16> {
     // Signature (4) + COFF header (20) + 68 bytes into the optional header
     // (the same offset for PE32 and PE32+).
     let o = pe + 24 + 68;
-    image.get(o..o + 2).map(|b| u16::from_le_bytes([b[0], b[1]]))
+    image
+        .get(o..o + 2)
+        .map(|b| u16::from_le_bytes([b[0], b[1]]))
 }
 
 /// A console-subsystem build (every debug build) must not be the COM server:
@@ -246,11 +287,18 @@ pub fn register() -> std::io::Result<String> {
     if !reg::key_exists(BACKUP_KEY) {
         // Parent keys this registration would create, so unregister can
         // remove them again (and only them).
-        let created: Vec<&str> = CREATED_PARENTS.iter().copied().filter(|k| !reg::key_exists(k)).collect();
+        let created: Vec<&str> = CREATED_PARENTS
+            .iter()
+            .copied()
+            .filter(|k| !reg::key_exists(k))
+            .collect();
         reg::set_string(BACKUP_KEY, Some(CREATED_VALUE), &created.join(";"))?;
         for (name, _) in delegation_pair() {
             let prior = reg::get_string(STARTUP_KEY, Some(name));
-            report.push_str(&format!("{name} was {}\n", prior.as_deref().unwrap_or("(absent)")));
+            report.push_str(&format!(
+                "{name} was {}\n",
+                prior.as_deref().unwrap_or("(absent)")
+            ));
             reg::set_string(BACKUP_KEY, Some(name), &encode_prior(&prior))?;
         }
     } else {
@@ -279,7 +327,10 @@ pub fn register_com_only(exe: &std::path::Path) -> std::io::Result<()> {
     check_gui_subsystem(exe)?;
     let dll = exe.with_file_name(PROXY_DLL);
     if !dll.is_file() {
-        return Err(std::io::Error::other(format!("{} not found", dll.display())));
+        return Err(std::io::Error::other(format!(
+            "{} not found",
+            dll.display()
+        )));
     }
     if let Some(k) = class_trees().iter().find(|k| reg::key_exists(k)) {
         return Err(std::io::Error::other(format!("HKCU\\{k} already exists")));
@@ -312,7 +363,8 @@ pub fn unregister() -> std::io::Result<String> {
     let mut first_err = None;
     if reg::key_exists(BACKUP_KEY) {
         for (name, ours) in delegation_pair() {
-            let Some(prior) = reg::get_string(BACKUP_KEY, Some(name)).and_then(|s| decode_prior(&s))
+            let Some(prior) =
+                reg::get_string(BACKUP_KEY, Some(name)).and_then(|s| decode_prior(&s))
             else {
                 report.push_str(&format!("{name}: no usable backup; left as is\n"));
                 continue;
@@ -417,7 +469,11 @@ pub fn log(msg: &str) {
     if std::fs::metadata(&path).is_ok_and(|m| m.len() > 256 * 1024) {
         let _ = std::fs::remove_file(&path);
     }
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
         let t = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
@@ -438,7 +494,9 @@ pub fn take_initial() -> Option<Attached> {
 }
 
 #[cfg(windows)]
-pub use imp::{adopt_remote, client_image_name, is_process_running, process_exit, process_id, serve_one};
+pub use imp::{
+    adopt_remote, client_image_name, is_process_running, process_exit, process_id, serve_one,
+};
 
 #[cfg(windows)]
 mod imp {
@@ -459,10 +517,18 @@ mod imp {
 
     const IID_IUNKNOWN: Guid = Guid(0, 0, 0, [0xc0, 0, 0, 0, 0, 0, 0, 0x46]);
     const IID_ICLASSFACTORY: Guid = Guid(1, 0, 0, [0xc0, 0, 0, 0, 0, 0, 0, 0x46]);
-    const IID_ITERMINALHANDOFF3: Guid =
-        Guid(0x6f23_da90, 0x15c5, 0x4203, [0x9d, 0xb0, 0x64, 0xe7, 0x3f, 0x1b, 0x1b, 0x00]);
-    const CLSID_TERMINAL: Guid =
-        Guid(0x2ced_21a9, 0x5236, 0x4f72, [0xb7, 0x1f, 0x10, 0xf3, 0x94, 0x92, 0x95, 0xe5]);
+    const IID_ITERMINALHANDOFF3: Guid = Guid(
+        0x6f23_da90,
+        0x15c5,
+        0x4203,
+        [0x9d, 0xb0, 0x64, 0xe7, 0x3f, 0x1b, 0x1b, 0x00],
+    );
+    const CLSID_TERMINAL: Guid = Guid(
+        0x2ced_21a9,
+        0x5236,
+        0x4f72,
+        [0xb7, 0x1f, 0x10, 0xf3, 0x94, 0x92, 0x95, 0xe5],
+    );
 
     const S_OK: HResult = 0;
     const E_NOINTERFACE: HResult = 0x8000_4002u32 as i32;
@@ -541,8 +607,12 @@ mod imp {
     #[repr(C)]
     struct FactoryVtbl {
         base: UnknownVtbl,
-        create_instance:
-            unsafe extern "system" fn(*mut c_void, *mut c_void, *const Guid, *mut *mut c_void) -> HResult,
+        create_instance: unsafe extern "system" fn(
+            *mut c_void,
+            *mut c_void,
+            *const Guid,
+            *mut *mut c_void,
+        ) -> HResult,
         lock_server: unsafe extern "system" fn(*mut c_void, i32) -> HResult,
     }
 
@@ -569,12 +639,20 @@ mod imp {
     unsafe impl<V> Sync for Object<V> {}
 
     static FACTORY: Object<FactoryVtbl> = Object(&FactoryVtbl {
-        base: UnknownVtbl { qi: factory_qi, add_ref, release },
+        base: UnknownVtbl {
+            qi: factory_qi,
+            add_ref,
+            release,
+        },
         create_instance,
         lock_server,
     });
     static HANDOFF: Object<HandoffVtbl> = Object(&HandoffVtbl {
-        base: UnknownVtbl { qi: handoff_qi, add_ref, release },
+        base: UnknownVtbl {
+            qi: handoff_qi,
+            add_ref,
+            release,
+        },
         establish,
     });
 
@@ -603,11 +681,19 @@ mod imp {
             }
         }
     }
-    unsafe extern "system" fn factory_qi(t: *mut c_void, iid: *const Guid, out: *mut *mut c_void) -> HResult {
+    unsafe extern "system" fn factory_qi(
+        t: *mut c_void,
+        iid: *const Guid,
+        out: *mut *mut c_void,
+    ) -> HResult {
         // SAFETY: forwarded COM arguments.
         unsafe { qi(t, iid, out, IID_ICLASSFACTORY) }
     }
-    unsafe extern "system" fn handoff_qi(t: *mut c_void, iid: *const Guid, out: *mut *mut c_void) -> HResult {
+    unsafe extern "system" fn handoff_qi(
+        t: *mut c_void,
+        iid: *const Guid,
+        out: *mut *mut c_void,
+    ) -> HResult {
         // SAFETY: forwarded COM arguments.
         unsafe { qi(t, iid, out, IID_ITERMINALHANDOFF3) }
     }
@@ -632,7 +718,15 @@ mod imp {
         let mut out: Handle = std::ptr::null_mut();
         // SAFETY: `h` is a handle valid for the duration of the COM call.
         let ok = unsafe {
-            DuplicateHandle(GetCurrentProcess(), h, GetCurrentProcess(), &mut out, 0, 0, DUPLICATE_SAME_ACCESS)
+            DuplicateHandle(
+                GetCurrentProcess(),
+                h,
+                GetCurrentProcess(),
+                &mut out,
+                0,
+                0,
+                DUPLICATE_SAME_ACCESS,
+            )
         };
         // SAFETY: a successful duplicate is a fresh handle we own.
         (ok != 0).then(|| unsafe { OwnedHandle::from_raw_handle(out) })
@@ -645,7 +739,12 @@ mod imp {
             return None;
         }
         // SAFETY: fresh handles we own.
-        Some(unsafe { (OwnedHandle::from_raw_handle(r), OwnedHandle::from_raw_handle(w)) })
+        Some(unsafe {
+            (
+                OwnedHandle::from_raw_handle(r),
+                OwnedHandle::from_raw_handle(w),
+            )
+        })
     }
 
     fn bstr(s: *const u16) -> String {
@@ -759,7 +858,9 @@ mod imp {
             })
             .map_err(|e| e.to_string())?;
         ready_rx.recv().map_err(|e| e.to_string())??;
-        let r = rx.recv_timeout(timeout).map_err(|_| "no handoff arrived".to_string());
+        let r = rx
+            .recv_timeout(timeout)
+            .map_err(|_| "no handoff arrived".to_string());
         let _ = done_tx.send(());
         r
     }
@@ -767,7 +868,12 @@ mod imp {
     /// Duplicate a handoff out of process `pid` (the `-Embedding` instance)
     /// into this one. The source keeps its copies; it closes them once we
     /// answer.
-    pub fn adopt_remote(pid: u32, raw: &RawHandles, title: String, show_window: u16) -> std::io::Result<Attached> {
+    pub fn adopt_remote(
+        pid: u32,
+        raw: &RawHandles,
+        title: String,
+        show_window: u16,
+    ) -> std::io::Result<Attached> {
         // SAFETY: plain call; the handle is closed by OwnedHandle.
         let proc_ = unsafe { OpenProcess(PROCESS_DUP_HANDLE, 0, pid) };
         if proc_.is_null() {
@@ -834,12 +940,15 @@ mod imp {
         let mut buf = [0u16; 1024];
         let mut len = buf.len() as u32;
         // SAFETY: valid buffer/length; a process handle with query access.
-        let ok = unsafe { QueryFullProcessImageNameW(h.as_raw_handle(), 0, buf.as_mut_ptr(), &mut len) };
+        let ok =
+            unsafe { QueryFullProcessImageNameW(h.as_raw_handle(), 0, buf.as_mut_ptr(), &mut len) };
         if ok == 0 {
             return None;
         }
         let path = String::from_utf16_lossy(&buf[..len as usize]);
-        std::path::Path::new(&path).file_name().map(|f| f.to_string_lossy().into_owned())
+        std::path::Path::new(&path)
+            .file_name()
+            .map(|f| f.to_string_lossy().into_owned())
     }
 
     impl Attached {
@@ -865,7 +974,11 @@ mod tests {
     #[test]
     fn resize_is_signal_8_then_cols_rows_little_endian() {
         assert_eq!(resize_message(120, 30), [8, 0, 120, 0, 30, 0]);
-        assert_eq!(resize_message(300, 0), [8, 0, 0x2c, 0x01, 1, 0], "zero clamps to 1");
+        assert_eq!(
+            resize_message(300, 0),
+            [8, 0, 0x2c, 0x01, 1, 0],
+            "zero clamps to 1"
+        );
     }
 
     #[test]
@@ -896,7 +1009,10 @@ mod tests {
         )));
         // Every key written lies under a tree unregister deletes.
         for (k, _, _) in &e {
-            assert!(class_trees().iter().any(|t| k.starts_with(t.as_str())), "{k}");
+            assert!(
+                class_trees().iter().any(|t| k.starts_with(t.as_str())),
+                "{k}"
+            );
         }
     }
 
@@ -916,7 +1032,11 @@ mod tests {
 
     #[test]
     fn prior_values_round_trip_including_absence() {
-        for p in [None, Some(String::new()), Some("{00000000-0000-0000-0000-000000000000}".into())] {
+        for p in [
+            None,
+            Some(String::new()),
+            Some("{00000000-0000-0000-0000-000000000000}".into()),
+        ] {
             assert_eq!(decode_prior(&encode_prior(&p)), Some(p));
         }
         assert_eq!(decode_prior("garbage"), None);
@@ -930,7 +1050,10 @@ mod tests {
             restore_action(&Some(ours.to_lowercase()), ours, &Some(zero.clone())),
             Restore::Set(zero)
         );
-        assert_eq!(restore_action(&Some(ours.into()), ours, &None), Restore::Delete);
+        assert_eq!(
+            restore_action(&Some(ours.into()), ours, &None),
+            Restore::Delete
+        );
         // The user picked something else since: leave it.
         assert_eq!(
             restore_action(&Some(CLSID_WT_OPENCONSOLE.into()), ours, &None),
@@ -943,7 +1066,9 @@ mod tests {
     fn guid_strings_match_the_binary_constants() {
         // The string forms (registry) and the proxy's dlldata.c must agree.
         let dlldata = include_str!("../vendor/terminal-handoff/dlldata.c");
-        assert!(dlldata.contains("0x4cdf6a34, 0x42c2, 0x488c, {0x84, 0xd2, 0x4b, 0xc3, 0xf5, 0x5f, 0x51, 0x9d}"));
+        assert!(dlldata.contains(
+            "0x4cdf6a34, 0x42c2, 0x488c, {0x84, 0xd2, 0x4b, 0xc3, 0xf5, 0x5f, 0x51, 0x9d}"
+        ));
         assert!(PROXY_CLSID.eq_ignore_ascii_case("{4cdf6a34-42c2-488c-84d2-4bc3f55f519d}"));
         let idl = include_str!("../vendor/terminal-handoff/ITerminalHandoff.idl");
         assert!(idl.contains(&IID_TERMINAL_HANDOFF3[1..37]));

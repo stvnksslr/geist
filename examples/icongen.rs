@@ -38,7 +38,7 @@ fn encode_png(size: u32, rgba: &[u8]) -> Vec<u8> {
 /// embedding successfully.
 fn bmp_entry(size: u32, rgba: &[u8]) -> Vec<u8> {
     let (w, h) = (size as usize, size as usize);
-    let mask_row = (w + 31) / 32 * 4;
+    let mask_row = w.div_ceil(32) * 4;
     let mut out = Vec::with_capacity(40 + w * h * 4 + h * mask_row);
     out.extend_from_slice(&40u32.to_le_bytes()); // biSize
     out.extend_from_slice(&(w as i32).to_le_bytes()); // biWidth
@@ -96,11 +96,18 @@ fn main() -> std::io::Result<()> {
         let mut witness = false;
         for p in rgba.chunks_exact(4) {
             if p[3] > 0 && p[3] < 255 {
-                assert_eq!([p[0], p[1], p[2]], tile, "non-tile color on the silhouette at size {size}");
+                assert_eq!(
+                    [p[0], p[1], p[2]],
+                    tile,
+                    "non-tile color on the silhouette at size {size}"
+                );
                 witness |= p[..3].iter().any(|&c| c > p[3]);
             }
         }
-        assert!(size != 256 || witness, "master lost its straight-alpha witness pixel");
+        assert!(
+            size != 256 || witness,
+            "master lost its straight-alpha witness pixel"
+        );
 
         if size == 256 {
             master_png = encode_png(size, &rgba);
@@ -117,6 +124,11 @@ fn main() -> std::io::Result<()> {
     let ico = build_ico(&entries);
     std::fs::write(&ico_path, &ico)?;
     println!("wrote {} ({} bytes)", png_path.display(), master_png.len());
-    println!("wrote {} ({} bytes, {} entries)", ico_path.display(), ico.len(), entries.len());
+    println!(
+        "wrote {} ({} bytes, {} entries)",
+        ico_path.display(),
+        ico.len(),
+        entries.len()
+    );
     Ok(())
 }

@@ -580,12 +580,18 @@ pub trait TerminalEngine {
     /// Idle-driven scrollback compression (Ghostty `scrollback-compression`).
     /// Call regularly; once terminal activity has been quiet for
     /// [`COMPRESS_IDLE`], runs bounded incremental steps within `budget`.
-    fn compress_tick(&mut self, now: std::time::Instant, budget: std::time::Duration) -> Result<()>;
+    fn compress_tick(&mut self, now: std::time::Instant, budget: std::time::Duration)
+    -> Result<()>;
 
     /// Ghostty `title-report` (answer `CSI 21 t`), `vt-kam-allowed` (honor ANSI
     /// mode 2, which locks the keyboard) and `grapheme-width-method = unicode`
     /// (mode 2027 on by default; `legacy` = off).
-    fn set_vt_policy(&mut self, title_report: bool, kam_allowed: bool, grapheme_unicode: bool) -> Result<()>;
+    fn set_vt_policy(
+        &mut self,
+        title_report: bool,
+        kam_allowed: bool,
+        grapheme_unicode: bool,
+    ) -> Result<()>;
 
     /// Ghostty `enquiry-response`: sent verbatim when the program emits ENQ
     /// (0x05); empty sends nothing. Only reachable when the PTY forwards ENQ,
@@ -689,7 +695,13 @@ pub trait TerminalEngine {
     /// Returns whether anything was selected. A gesture that finds nothing
     /// leaves any existing selection alone (the caller relies on this, so a
     /// stray double-click on blank space doesn't discard the user's selection).
-    fn select_semantic(&mut self, _kind: SelectKind, _x: u16, _y: u16, _word_boundaries: &[char]) -> bool {
+    fn select_semantic(
+        &mut self,
+        _kind: SelectKind,
+        _x: u16,
+        _y: u16,
+        _word_boundaries: &[char],
+    ) -> bool {
         false
     }
 

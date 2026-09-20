@@ -6,8 +6,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use anyhow::Result;
-use libghostty_vt::kitty::graphics::{Compression, ImageFormat, PlacementIterator};
 use libghostty_vt::key::{Action, Encoder, Event, Key, Mods};
+use libghostty_vt::kitty::graphics::{Compression, ImageFormat, PlacementIterator};
 use libghostty_vt::mouse;
 use libghostty_vt::paste;
 use libghostty_vt::render::{CellIteration, CellIterator, CursorVisualStyle, Dirty, RowIterator};
@@ -198,7 +198,6 @@ impl GhosttyVtEngine {
     /// Order is load-bearing: the ends are tracked **before** `set_selection`,
     /// which is a mutating call that invalidates every untracked reference —
     /// including the two inside `sel`.
-    #[expect(clippy::type_complexity, reason = "two pins, returned together")]
     fn install_selection(
         &self,
         sel: &libghostty_vt::selection::Selection<'_>,
@@ -349,7 +348,9 @@ impl GhosttyVtEngine {
         match &d.kind {
             Deferred::Write(text) => {
                 self.clip.borrow_mut().io.write_text(text);
-                self.responses.borrow_mut().extend_from_slice(&done_packet(&d.packet));
+                self.responses
+                    .borrow_mut()
+                    .extend_from_slice(&done_packet(&d.packet));
             }
             Deferred::Read { .. } => match replay_request(&d.kind, &d.packet) {
                 Some(req) => {
@@ -387,7 +388,11 @@ impl GhosttyVtEngine {
     /// The working directory the program last reported (OSC 7, OSC 9;9 or
     /// OSC 1337 CurrentDir), as the raw URI or path it sent.
     pub fn pwd(&self) -> Option<String> {
-        self.term.pwd().ok().filter(|s| !s.is_empty()).map(str::to_string)
+        self.term
+            .pwd()
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
     }
 
     /// Whether the program has turned on kitty paste events (mode 5522).
@@ -455,7 +460,10 @@ fn install_clipboard(
             Verdict::Deny => Err(ClipboardWriteError::Denied),
             Verdict::Ask => {
                 let offset = out.borrow().len();
-                st.pending.push(Pending { offset, kind: Deferred::Write(text) });
+                st.pending.push(Pending {
+                    offset,
+                    kind: Deferred::Write(text),
+                });
                 Err(ClipboardWriteError::Denied)
             }
         }
@@ -469,15 +477,19 @@ fn install_clipboard(
         let serve = |text: Option<String>| {
             Some(Ok(ClipboardReadData {
                 contents: cb::read_contents(&mimes, text.as_deref()),
-                available: if list { cb::available(text.as_deref()) } else { Vec::new() },
+                available: if list {
+                    cb::available(text.as_deref())
+                } else {
+                    Vec::new()
+                },
             }))
         };
         // The follow-up read of a paste event: the user already pasted, so it
         // is served whatever `clipboard-read` says (kitty does the same).
-        if r.granted() {
-            if let Some(text) = st.paste_text.clone() {
-                return serve(Some(text));
-            }
+        if r.granted()
+            && let Some(text) = st.paste_text.clone()
+        {
+            return serve(Some(text));
         }
         // A bare targets listing reveals only "there is text"; upstream and
         // kitty serve it without a prompt.
@@ -495,7 +507,10 @@ fn install_clipboard(
             Verdict::Ask => {
                 let offset = out.borrow().len();
                 let primary = r.location() != ClipboardLocation::Standard;
-                st.pending.push(Pending { offset, kind: Deferred::Read { mimes, primary } });
+                st.pending.push(Pending {
+                    offset,
+                    kind: Deferred::Read { mimes, primary },
+                });
                 None
             }
         }
@@ -646,7 +661,11 @@ fn walk_placements(
                 let Some(rgba) = bytes.and_then(|b| to_rgba(fmt, comp, w, h, b)) else {
                     continue;
                 };
-                let d = Arc::new(ImageData { width: w, height: h, rgba });
+                let d = Arc::new(ImageData {
+                    width: w,
+                    height: h,
+                    rgba,
+                });
                 cache.insert(image_id, (generation, d.clone()));
                 d
             }
@@ -673,7 +692,6 @@ fn walk_placements(
             visible: info.viewport_visible,
         });
     }
-    drop(it);
     // Ghostty's draw order: ascending z, ties broken by image id.
     out.sort_by_key(|p| (p.z, p.image_id));
     evict_absent(cache, seen);
@@ -760,1810 +778,6 @@ fn map_key(code: KeyCode) -> Key {
         Comma => Key::Comma,
         Period => Key::Period,
         Slash => Key::Slash,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{
-        Compression, GhosttyVtEngine, ImageFormat, RefCell, Rc, Terminal, intern_enquiry,
-        strip_osc72, to_rgba,
-    };
-    use crate::engine::{
-        GridSnapshot, KeyCode, KeyInput, KeyMods, MouseAction, MouseButton, MouseInput, Rgb,
-        SelectKind, TerminalEngine, UnderlineStyle,
-    };
-    use std::collections::HashMap;
-    use std::sync::Arc;
-
-    #[test]
-    fn apply_theme_sets_default_colors() {
-        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
-        let pal = [Rgb::new(0, 0, 0); 256];
-        eng.apply_theme(Rgb::new(200, 100, 50), Rgb::new(16, 18, 24), &pal)
-            .unwrap();
-        let mut s = GridSnapshot::default();
-        eng.snapshot(&mut s).unwrap();
-        assert_eq!(s.default_bg, Rgb::new(16, 18, 24));
-        assert_eq!(s.default_fg, Rgb::new(200, 100, 50));
-
-        // A shell clears/resets the screen on startup; the configured default
-        // background must survive SGR reset + erase.
-        eng.write(b"\x1b[0m\x1b[2J\x1b[Hhello");
-        let mut s2 = GridSnapshot::default();
-        eng.snapshot(&mut s2).unwrap();
-        assert_eq!(
-            s2.default_bg,
-            Rgb::new(16, 18, 24),
-            "default bg should survive reset/erase"
-        );
-    }
-
-    fn snap(eng: &mut GhosttyVtEngine) -> GridSnapshot {
-        let mut s = GridSnapshot::default();
-        eng.snapshot(&mut s).unwrap();
-        s
-    }
-
-    #[test]
-    fn captures_text_styles_and_color() {
-        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
-        // bold 'B', italic 'I', red 'R'.
-        eng.write(b"\x1b[1mB\x1b[0m\x1b[3mI\x1b[0m\x1b[31mR\x1b[0m");
-        let s = snap(&mut eng);
-
-        let b = s.cell(0, 0).unwrap();
-        assert_eq!(b.text, "B");
-        assert!(b.bold, "expected bold cell");
-
-        let i = s.cell(1, 0).unwrap();
-        assert!(i.italic, "expected italic cell");
-
-        let r = s.cell(2, 0).unwrap();
-        assert_eq!(r.text, "R");
-        // Default ANSI red has a dominant red channel.
-        assert!(
-            r.fg.r > r.fg.g && r.fg.r > r.fg.b,
-            "expected reddish fg, got {:?}",
-            r.fg
-        );
-    }
-
-    #[test]
-    fn captures_extended_text_attrs() {
-        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
-        // faint F, double-underline D, curly-underline C, overline O, blink K,
-        // invisible V — each style reset before the next cell.
-        eng.write(
-            b"\x1b[2mF\x1b[0m\
-              \x1b[4:2mD\x1b[0m\
-              \x1b[4:3mC\x1b[0m\
-              \x1b[53mO\x1b[0m\
-              \x1b[5mK\x1b[0m\
-              \x1b[8mV\x1b[0m",
-        );
-        let s = snap(&mut eng);
-        assert!(s.cell(0, 0).unwrap().faint, "expected faint cell");
-        assert_eq!(s.cell(1, 0).unwrap().underline, UnderlineStyle::Double);
-        assert_eq!(s.cell(2, 0).unwrap().underline, UnderlineStyle::Curly);
-        assert!(s.cell(3, 0).unwrap().overline, "expected overline cell");
-        assert!(s.cell(4, 0).unwrap().blink, "expected blink cell");
-        assert!(s.has_blink, "snapshot.has_blink set when any cell blinks");
-        assert!(s.cell(5, 0).unwrap().invisible, "expected invisible cell");
-    }
-
-    #[test]
-    fn resolves_palette_underline_color() {
-        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
-        // The render iterator resolves fg/bg but not the underline color, so the
-        // engine resolves a palette-index underline color against its palette.
-        let mut pal = [Rgb::new(0, 0, 0); 256];
-        pal[5] = Rgb::new(200, 50, 25);
-        eng.apply_theme(Rgb::new(200, 200, 200), Rgb::new(0, 0, 0), &pal)
-            .unwrap();
-        // Underline on; underline color = palette index 5 (SGR 58:5:5).
-        eng.write(b"\x1b[4m\x1b[58:5:5mU");
-        let c = snap(&mut eng).cell(0, 0).unwrap().clone();
-        assert_eq!(c.underline, UnderlineStyle::Single);
-        assert_eq!(c.underline_color, Some(Rgb::new(200, 50, 25)));
-    }
-
-    #[test]
-    fn bold_is_bright_uses_bright_palette_variant() {
-        use crate::engine::BoldColor;
-        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
-        let mut pal = [Rgb::new(0, 0, 0); 256];
-        pal[1] = Rgb::new(100, 0, 0); // ANSI red
-        pal[9] = Rgb::new(200, 50, 25); // bright red
-        eng.apply_theme(Rgb::new(200, 200, 200), Rgb::new(0, 0, 0), &pal)
-            .unwrap();
-
-        // Without the policy, bold red stays the plain ANSI red (palette 1).
-        eng.write(b"\x1b[1;31mR\x1b[0m");
-        assert_eq!(snap(&mut eng).cell(0, 0).unwrap().fg, Rgb::new(100, 0, 0));
-
-        // With bold-is-bright, bold + ANSI red (idx 1) brightens to idx 9.
-        eng.set_bold_color(BoldColor::Bright).unwrap();
-        eng.write(b"\x1b[2J\x1b[H\x1b[1;31mR\x1b[0m");
-        assert_eq!(snap(&mut eng).cell(0, 0).unwrap().fg, Rgb::new(200, 50, 25));
-    }
-
-    #[test]
-    fn bold_color_sets_fixed_color_for_default_fg() {
-        use crate::engine::BoldColor;
-        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
-        let mut pal = [Rgb::new(0, 0, 0); 256];
-        pal[1] = Rgb::new(100, 0, 0);
-        pal[9] = Rgb::new(200, 50, 25);
-        eng.apply_theme(Rgb::new(200, 200, 200), Rgb::new(0, 0, 0), &pal)
-            .unwrap();
-        eng.set_bold_color(BoldColor::Color(Rgb::new(10, 20, 30))).unwrap();
-
-        // A bold default-foreground cell takes the fixed bold color.
-        eng.write(b"\x1b[1mB\x1b[0m");
-        assert_eq!(snap(&mut eng).cell(0, 0).unwrap().fg, Rgb::new(10, 20, 30));
-
-        // A bold ANSI palette color is still brightened (not the fixed color).
-        eng.write(b"\x1b[2J\x1b[H\x1b[1;31mR\x1b[0m");
-        assert_eq!(snap(&mut eng).cell(0, 0).unwrap().fg, Rgb::new(200, 50, 25));
-    }
-
-    #[test]
-    fn bold_is_bright_tracks_osc4_palette_redefinition() {
-        use crate::engine::BoldColor;
-        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
-        let mut pal = [Rgb::new(0, 0, 0); 256];
-        pal[1] = Rgb::new(100, 0, 0);
-        pal[9] = Rgb::new(200, 50, 25);
-        eng.apply_theme(Rgb::new(200, 200, 200), Rgb::new(0, 0, 0), &pal)
-            .unwrap();
-        eng.set_bold_color(BoldColor::Bright).unwrap();
-        // Redefine bright-red (index 9) to green via OSC 4; the bold-bright bump
-        // must follow the live palette, not the static config copy.
-        eng.write(b"\x1b]4;9;rgb:00/ff/00\x1b\\");
-        eng.write(b"\x1b[1;31mR\x1b[0m");
-        assert_eq!(snap(&mut eng).cell(0, 0).unwrap().fg, Rgb::new(0, 255, 0));
-    }
-
-    #[test]
-    fn min_contrast_forced_glyph_drops_faint() {
-        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
-        eng.apply_theme(Rgb::new(30, 30, 30), Rgb::new(0, 0, 0), &[Rgb::new(0, 0, 0); 256])
-            .unwrap();
-        eng.set_min_contrast(21.0).unwrap();
-        // Faint + a low-contrast fg: min-contrast forces white, and faint is
-        // dropped so the now-readable glyph renders opaque (matching Ghostty's
-        // contrasted_color returning alpha 1.0).
-        eng.write(b"\x1b[2mX"); // SGR 2 = faint
-        let c = snap(&mut eng).cell(0, 0).unwrap().clone();
-        assert_eq!(c.fg, Rgb::new(255, 255, 255));
-        assert!(!c.faint, "faint is dropped when min-contrast forces a color");
-
-        // A faint glyph that already passes contrast keeps its faint flag
-        // (truecolor white on black easily clears the ratio).
-        eng.write(b"\x1b[2J\x1b[H\x1b[2;38;2;255;255;255mX");
-        let c2 = snap(&mut eng).cell(0, 0).unwrap().clone();
-        assert!(c2.faint, "faint kept when the cell already meets contrast");
-    }
-
-    #[test]
-    fn minimum_contrast_forces_readable_foreground() {
-        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
-        // Near-black fg on black bg: far below any real contrast ratio.
-        eng.apply_theme(Rgb::new(30, 30, 30), Rgb::new(0, 0, 0), &[Rgb::new(0, 0, 0); 256])
-            .unwrap();
-
-        // Off (ratio 1.0): the faint foreground is left untouched.
-        eng.write(b"X");
-        assert_eq!(snap(&mut eng).cell(0, 0).unwrap().fg, Rgb::new(30, 30, 30));
-
-        // With a high minimum, fg is forced to white (it contrasts black best).
-        eng.set_min_contrast(21.0).unwrap();
-        eng.write(b"\x1b[2J\x1b[HX");
-        assert_eq!(snap(&mut eng).cell(0, 0).unwrap().fg, Rgb::new(255, 255, 255));
-    }
-
-    /// An engine sized for kitty tests. `pixelSize` recovers the cell size by
-    /// dividing `width_px / cols`, so an engine that was never resized reports a
-    /// 0x0 cell and every `c=`/`r=` placement comes out zero-sized.
-    fn kitty_engine() -> GhosttyVtEngine {
-        let mut eng = GhosttyVtEngine::new(80, 24, 100).unwrap();
-        eng.set_image_storage_limit(64 * 1024 * 1024).unwrap();
-        eng.resize(80, 24, (10, 20)).unwrap();
-        eng
-    }
-
-    /// `a=T` transmit+display, `t=d` direct, `f=24` RGB, 1x2 px (6 bytes), shown
-    /// across 4x2 cells. The payload is base64 of six 0xFF bytes.
-    const KITTY_RGB_1X2: &[u8] = b"\x1b_Ga=T,t=d,f=24,i=1,p=1,s=1,v=2,c=4,r=2;////////\x1b\\";
-
-    #[test]
-    fn rgb_expands_to_opaque_rgba() {
-        let src = [1, 2, 3, 4, 5, 6];
-        let got = to_rgba(ImageFormat::Rgb, Compression::None, 2, 1, &src).unwrap();
-        assert_eq!(got, vec![1, 2, 3, 0xff, 4, 5, 6, 0xff]);
-    }
-
-    #[test]
-    fn gray_and_gray_alpha_expand_to_rgba() {
-        let got = to_rgba(ImageFormat::Gray, Compression::None, 2, 1, &[9, 200]).unwrap();
-        assert_eq!(got, vec![9, 9, 9, 0xff, 200, 200, 200, 0xff]);
-        let got = to_rgba(ImageFormat::GrayAlpha, Compression::None, 1, 1, &[9, 128]).unwrap();
-        assert_eq!(got, vec![9, 9, 9, 128]);
-    }
-
-    #[test]
-    fn rgba_is_copied_and_wrong_length_rejected() {
-        let src = [1, 2, 3, 4];
-        assert_eq!(
-            to_rgba(ImageFormat::Rgba, Compression::None, 1, 1, &src).unwrap(),
-            src.to_vec()
-        );
-        // One byte short for a 1x1 RGBA image.
-        assert!(to_rgba(ImageFormat::Rgba, Compression::None, 1, 1, &src[..3]).is_none());
-        // Dimensions that don't match the buffer at all.
-        assert!(to_rgba(ImageFormat::Rgb, Compression::None, 100, 100, &src).is_none());
-    }
-
-    #[test]
-    fn png_and_compressed_data_are_rejected() {
-        // Both are resolved by the VT engine before storage, so reaching here
-        // means something is wrong; refuse rather than misinterpret the bytes.
-        assert!(to_rgba(ImageFormat::Png, Compression::None, 1, 1, &[0; 4]).is_none());
-        assert!(
-            to_rgba(ImageFormat::Rgba, Compression::ZlibDeflate, 1, 1, &[0; 4]).is_none()
-        );
-    }
-
-    #[test]
-    fn image_storage_limit_of_zero_disables_the_protocol() {
-        // libghostty does NOT start at zero — the library default is a small
-        // non-zero limit (10 MB), so kitty graphics are live before giest sets
-        // anything. What `image-storage-limit` really controls is the budget,
-        // and specifically that **zero turns the protocol off and wipes stored
-        // images**, which is the behaviour worth pinning.
-        let mut eng = GhosttyVtEngine::new(80, 24, 100).unwrap();
-        eng.resize(80, 24, (10, 20)).unwrap();
-        assert!(
-            eng.term.kitty_image_storage_limit().unwrap() > 0,
-            "libghostty starts with a non-zero default limit"
-        );
-        eng.write(KITTY_RGB_1X2);
-        assert_eq!(snap(&mut eng).images.len(), 1);
-
-        // Zero disables the protocol and deletes everything already stored.
-        eng.set_image_storage_limit(0).unwrap();
-        assert!(snap(&mut eng).images.is_empty(), "zero wipes stored images");
-        eng.write(b"\x1b_Ga=T,t=d,f=24,i=2,p=1,s=1,v=2,c=4,r=2;////////\x1b\\");
-        assert!(snap(&mut eng).images.is_empty(), "zero refuses new images");
-
-        // …and raising it again accepts new transmissions.
-        eng.set_image_storage_limit(64 * 1024 * 1024).unwrap();
-        eng.write(b"\x1b_Ga=T,t=d,f=24,i=3,p=1,s=1,v=2,c=4,r=2;////////\x1b\\");
-        assert_eq!(snap(&mut eng).images.len(), 1, "re-enabled by a new limit");
-    }
-
-    #[test]
-    fn enquiry_response_answers_enq() {
-        let mut eng = GhosttyVtEngine::new(80, 24, 0).unwrap();
-        eng.write(b"\x05");
-        assert!(eng.take_responses().is_empty(), "default is empty: ENQ goes unanswered");
-        eng.set_enquiry_response("giest-answerback");
-        eng.write(b"a\x05b");
-        assert_eq!(eng.take_responses(), b"giest-answerback");
-        eng.set_enquiry_response("");
-        eng.write(b"\x05");
-        assert!(eng.take_responses().is_empty(), "reload back to empty stops answering");
-        assert!(std::ptr::eq(intern_enquiry("x1"), intern_enquiry("x1")), "interned once");
-    }
-
-    #[test]
-    fn kitty_dnd_is_not_advertised() {
-        let mut eng = GhosttyVtEngine::new(80, 24, 0).unwrap();
-        // Tripwire half: the engine itself does answer the query...
-        let mut raw = Terminal::new(80, 24).unwrap();
-        let got = Rc::new(RefCell::new(Vec::new()));
-        let sink = got.clone();
-        raw.on_pty_write(move |_t, d| sink.borrow_mut().extend_from_slice(d)).unwrap();
-        raw.vt_write(b"\x1b]72;t=q:i=3\x1b\\");
-        assert_eq!(&*got.borrow(), b"\x1b]72;t=q:i=3\x1b\\", "engine answers OSC 72 queries");
-        // ...and giest withholds it, since it can't deliver a drop.
-        eng.write(b"\x1b]72;t=q:i=3\x1b\\\x1b[5n\x1b]72;t=q\x07");
-        assert_eq!(eng.take_responses(), b"\x1b[0n", "only the non-OSC-72 reply survives");
-    }
-
-    #[test]
-    fn strip_osc72_handles_both_terminators_and_neighbours() {
-        let mut b = b"a\x1b]72;x\x07b\x1b]72;y\x1b\\c\x1b]52;c;?\x07".to_vec();
-        strip_osc72(&mut b);
-        assert_eq!(b, b"abc\x1b]52;c;?\x07");
-        let mut unterminated = b"z\x1b]72;t=q".to_vec();
-        strip_osc72(&mut unterminated);
-        assert_eq!(unterminated, b"z");
-    }
-
-    #[test]
-    fn glyph_protocol_is_not_advertised() {
-        let mut eng = kitty_engine();
-        eng.write(b"\x1b_25a1;s\x1b\\");
-        eng.write(b"\x1b_25a1;r;cp=e0a0;AAAAAAAAAAAAAA==\x1b\\");
-        assert!(
-            eng.take_responses().is_empty(),
-            "giest cannot render registered glyphs, so it must not answer the glyph protocol"
-        );
-    }
-
-    #[test]
-    fn kitty_retransmit_same_size_refreshes_pixels() {
-        // Same id, same 1x1 size, different colour: the old size fingerprint
-        // could not see this; the generation stamp does.
-        let mut eng = kitty_engine();
-        eng.write(b"\x1b_Ga=T,f=32,i=5,s=1,v=1,q=2;/wAA/w==\x1b\\"); // red
-        assert_eq!(snap(&mut eng).images[0].data.rgba, vec![255, 0, 0, 255]);
-        eng.write(b"\x1b_Ga=T,f=32,i=5,s=1,v=1,q=2;AAD//w==\x1b\\"); // blue
-        let s = snap(&mut eng);
-        assert!(s.images.iter().all(|p| p.data.rgba == vec![0, 0, 255, 255]));
-    }
-
-    #[test]
-    fn kitty_animation_frame_change_reaches_the_snapshot() {
-        // Client-driven animation: add frame 2 (a=f) and make it current
-        // (a=a,c=2). `image.data()` is the current frame and its generation
-        // changes, so the snapshot must carry the new pixels.
-        let mut eng = kitty_engine();
-        eng.write(b"\x1b_Ga=T,f=32,i=6,s=1,v=1,q=2;/wAA/w==\x1b\\"); // red root
-        eng.write(b"\x1b_Ga=f,f=32,i=6,s=1,v=1,q=2;AP8A/w==\x1b\\"); // green frame 2
-        eng.write(b"\x1b_Ga=a,i=6,c=2,q=2\x1b\\");
-        let s = snap(&mut eng);
-        assert_eq!(s.images.len(), 1);
-        assert_eq!(s.images[0].data.rgba, vec![0, 255, 0, 255]);
-        eng.write(b"\x1b_Ga=a,i=6,c=1,q=2\x1b\\");
-        assert_eq!(snap(&mut eng).images[0].data.rgba, vec![255, 0, 0, 255]);
-    }
-
-    #[test]
-    fn kitty_relative_placement_follows_its_parent() {
-        // Parent image 1 placement 1 at the cursor (0,0); child image 2 placed
-        // relative to it with P=1,Q=1 and a cell offset H=3,V=2.
-        let mut eng = kitty_engine();
-        eng.write(b"\x1b_Ga=T,f=32,i=1,p=1,s=1,v=1,c=2,r=1,q=2;/wAA/w==\x1b\\");
-        eng.write(b"\x1b_Ga=t,f=32,i=2,s=1,v=1,q=2;AAD//w==\x1b\\");
-        eng.write(b"\x1b_Ga=p,i=2,p=1,P=1,Q=1,H=3,V=2,c=1,r=1,q=2\x1b\\");
-        let s = snap(&mut eng);
-        let parent = s.images.iter().find(|p| p.image_id == 1).expect("parent");
-        let child = s.images.iter().find(|p| p.image_id == 2).expect("child placed");
-        assert_eq!((child.col - parent.col, child.row - parent.row), (3, 2));
-    }
-
-    #[test]
-    fn kitty_placement_selects_no_cells() {
-        let mut eng = kitty_engine();
-        eng.write(b"before\r\n");
-        eng.write(KITTY_RGB_1X2);
-        eng.write(b"\r\nafter\r\n");
-        let s = snap(&mut eng);
-        let mut sel = 0;
-        for y in 0..s.rows {
-            for x in 0..s.cols {
-                if s.cell(x, y).is_some_and(|c| c.selected) {
-                    sel += 1;
-                }
-            }
-        }
-        assert_eq!(sel, 0, "a kitty placement must not mark cells selected");    }
-
-    #[test]
-    fn kitty_transmit_and_display_yields_a_placement() {
-        let mut eng = kitty_engine();
-        eng.write(KITTY_RGB_1X2);
-        let s = snap(&mut eng);
-        assert_eq!(s.images.len(), 1);
-        let p = &s.images[0];
-        assert_eq!((p.image_id, p.placement_id), (1, 1));
-        assert_eq!((p.data.width, p.data.height), (1, 2));
-        assert_eq!(p.data.rgba.len(), 1 * 2 * 4, "RGB expanded to RGBA");
-        assert_eq!((p.grid_cols, p.grid_rows), (4, 2));
-        // 4x2 cells at a 10x20 cell size.
-        assert_eq!((p.dest_w, p.dest_h), (40, 40));
-        assert_eq!((p.col, p.row), (0, 0));
-        assert!(p.visible);
-    }
-
-    #[test]
-    fn kitty_delete_clears_placements_without_a_dirty_frame() {
-        // A delete touches only the image storage, whose dirty flag is not part
-        // of the render state's. If placements were refreshed only on a dirty
-        // frame, the deleted image would stay on screen forever.
-        let mut eng = kitty_engine();
-        eng.write(KITTY_RGB_1X2);
-        assert_eq!(snap(&mut eng).images.len(), 1);
-        // Take a second snapshot first, so the dirty-skip fast path is armed.
-        assert_eq!(snap(&mut eng).images.len(), 1);
-
-        eng.write(b"\x1b_Ga=d,d=I,i=1\x1b\\");
-        assert!(snap(&mut eng).images.is_empty(), "delete must take effect");
-    }
-
-    #[test]
-    fn kitty_png_is_decoded_by_the_installed_decoder() {
-        // `f=100` is what icat and most tools send, and libghostty rejects it
-        // outright unless a decoder is installed **on this thread**. This is the
-        // only end-to-end proof that `png_decode::install` ran here — it would
-        // fail immediately if the guard were a `Once` instead of thread-local,
-        // since every test runs on its own thread.
-        let mut eng = kitty_engine();
-        eng.write(
-            b"\x1b_Ga=T,f=100,i=7,p=1,q=1;\
-              iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAA\
-              DUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==\
-              \x1b\\",
-        );
-        let s = snap(&mut eng);
-        assert_eq!(s.images.len(), 1, "PNG rejected — decoder not installed?");
-        let p = &s.images[0];
-        assert_eq!((p.data.width, p.data.height), (1, 1));
-        assert_eq!(p.data.rgba.len(), 4);
-    }
-
-    #[test]
-    fn evict_absent_drops_unseen_ids() {
-        use super::evict_absent;
-        let mk = || (1u64, Arc::new(crate::engine::ImageData { width: 1, height: 1, rgba: vec![0; 4] }));
-        let mut cache = HashMap::from([(1, mk()), (2, mk()), (3, mk())]);
-        evict_absent(&mut cache, &[1, 3]);
-        assert_eq!(cache.len(), 2);
-        assert!(cache.contains_key(&1) && cache.contains_key(&3));
-        // Nothing seen at all clears the cache — that's a deleted-everything frame.
-        evict_absent(&mut cache, &[]);
-        assert!(cache.is_empty());
-    }
-
-    #[test]
-    fn kitty_image_pixels_are_shared_across_snapshots() {
-        // The copy out of the VT engine's storage must happen once per image id,
-        // not once per frame.
-        let mut eng = kitty_engine();
-        eng.write(KITTY_RGB_1X2);
-        let a = snap(&mut eng).images[0].data.clone();
-        let b = snap(&mut eng).images[0].data.clone();
-        assert!(Arc::ptr_eq(&a, &b), "pixels re-copied every frame");
-    }
-
-    #[test]
-    fn osc_dynamic_color_sets_apply_without_a_scanner() {
-        // libghostty applies OSC 10/11/12 *sets* internally and the snapshot
-        // reads the effective colors, so giest needs no scanner for them — only
-        // for the `?` queries, which the vt library drops. This test is the
-        // safety net for that claim.
-        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
-        let fg = Rgb::new(0xc5, 0xc8, 0xc6);
-        let bg = Rgb::new(0x10, 0x12, 0x18);
-        eng.apply_theme(fg, bg, &[Rgb::new(0, 0, 0); 256]).unwrap();
-
-        eng.write(b"\x1b]11;rgb:00/ff/00\x07");
-        assert_eq!(snap(&mut eng).default_bg, Rgb::new(0, 255, 0));
-        eng.write(b"\x1b]10;rgb:ff/00/00\x07");
-        assert_eq!(snap(&mut eng).default_fg, Rgb::new(255, 0, 0));
-
-        // OSC 110/111 reset to the configured defaults.
-        eng.write(b"\x1b]111\x07\x1b]110\x07");
-        let s = snap(&mut eng);
-        assert_eq!(s.default_bg, bg);
-        assert_eq!(s.default_fg, fg);
-    }
-
-    #[test]
-    fn dynamic_colors_reports_effective_values() {
-        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
-        eng.apply_theme(
-            Rgb::new(0xc5, 0xc8, 0xc6),
-            Rgb::new(0x10, 0x12, 0x18),
-            &[Rgb::new(0, 0, 0); 256],
-        )
-        .unwrap();
-        eng.set_cursor_color(None).unwrap();
-
-        let (fg, bg, cursor) = eng.dynamic_colors();
-        assert_eq!(fg, Rgb::new(0xc5, 0xc8, 0xc6));
-        assert_eq!(bg, Rgb::new(0x10, 0x12, 0x18));
-        assert_eq!(cursor, None, "no cursor color set");
-
-        // An OSC 11 override is reflected without any snapshot in between.
-        eng.write(b"\x1b]11;rgb:00/00/ff\x07");
-        assert_eq!(eng.dynamic_colors().1, Rgb::new(0, 0, 255));
-
-        eng.set_cursor_color(Some(Rgb::new(1, 2, 3))).unwrap();
-        assert_eq!(eng.dynamic_colors().2, Some(Rgb::new(1, 2, 3)));
-    }
-
-    #[test]
-    fn dynamic_colors_does_not_break_the_dirty_skip() {
-        // `dynamic_colors` must not consume the terminal's dirty state — doing so
-        // would make the following snapshot take the "nothing changed" fast path
-        // and render an empty grid.
-        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
-        eng.write(b"hello");
-        let _ = eng.dynamic_colors();
-        let s = snap(&mut eng);
-        assert_eq!(s.cell(0, 0).unwrap().text.as_str(), "h");
-        assert_eq!(s.cell(4, 0).unwrap().text.as_str(), "o");
-    }
-
-    #[test]
-    fn default_background_cells_are_flagged() {
-        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
-        let bg = Rgb::new(0x1d, 0x1f, 0x21);
-        let mut pal = [Rgb::new(0, 0, 0); 256];
-        pal[1] = Rgb::new(200, 0, 0); // ANSI red
-        eng.apply_theme(Rgb::new(200, 200, 200), bg, &pal).unwrap();
-
-        // 'a' default bg, 'b' on ANSI red, then back to default for ' ' and 'c'.
-        eng.write(b"a\x1b[41mb\x1b[m c");
-        let s = snap(&mut eng);
-
-        assert!(!s.cell(0, 0).unwrap().bg_explicit, "default bg is not explicit");
-        assert!(s.cell(1, 0).unwrap().bg_explicit, "SGR 41 sets an explicit bg");
-        assert_eq!(s.cell(1, 0).unwrap().bg, pal[1]);
-        assert!(!s.cell(2, 0).unwrap().bg_explicit, "SGR 0 resets to default bg");
-        assert!(!s.cell(3, 0).unwrap().bg_explicit);
-        // A cell the row iterator never yields is blanked, and a blank cell must
-        // read as default-bg — otherwise it would paint an opaque quad and punch
-        // a hole in a translucent background.
-        assert!(!s.cell(19, 2).unwrap().bg_explicit, "untouched cells stay default");
-    }
-
-    #[test]
-    fn inverse_cell_is_flagged_and_colors_swapped() {
-        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
-        let fg = Rgb::new(200, 200, 200);
-        let bg = Rgb::new(0x1d, 0x1f, 0x21);
-        eng.apply_theme(fg, bg, &[Rgb::new(0, 0, 0); 256]).unwrap();
-
-        eng.write(b"\x1b[7mX");
-        let c = snap(&mut eng).cell(0, 0).unwrap().clone();
-        assert!(c.inverse, "SGR 7 is carried through to the renderer");
-        assert_eq!(c.fg, bg, "inverse swaps fg/bg");
-        assert_eq!(c.bg, fg);
-        // The swap does not invent an explicit background: the flag reports what
-        // the *style* set, so `inverse` alone is what forces the cell opaque.
-        assert!(!c.bg_explicit);
-    }
-
-    #[test]
-    fn newline_advances_cursor_row() {
-        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
-        eng.write(b"hi\r\n");
-        let s = snap(&mut eng);
-        assert_eq!(s.cell(0, 0).unwrap().text, "h");
-        assert_eq!(s.cell(1, 0).unwrap().text, "i");
-        assert_eq!(s.cursor_y, 1);
-        assert_eq!(s.cursor_x, 0);
-    }
-
-    /// The selected text, trimmed — what a copy would put on the clipboard.
-    fn sel_text(eng: &GhosttyVtEngine) -> Option<String> {
-        eng.selected_text(true)
-    }
-
-    /// Inclusive column range marked selected on viewport row `y`, from a fresh
-    /// snapshot — i.e. what the renderer would highlight.
-    fn sel_span(eng: &mut GhosttyVtEngine, y: u16) -> Option<(u16, u16)> {
-        let s = snap(eng);
-        let cols = s.cols;
-        let mut range: Option<(u16, u16)> = None;
-        for x in 0..cols {
-            if s.cell(x, y).is_some_and(|c| c.selected) {
-                range = Some(match range {
-                    None => (x, x),
-                    Some((a, _)) => (a, x),
-                });
-            }
-        }
-        range
-    }
-
-    #[test]
-    fn select_word_uses_the_terminals_own_boundaries() {
-        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
-        eng.write(b"ls /usr/bin foo");
-        let mut word = |x: u16| {
-            assert!(eng.select_semantic(SelectKind::Word, x, 0, &[]));
-            sel_text(&eng)
-        };
-        assert_eq!(word(1).as_deref(), Some("ls"));
-        // A path selects whole — slashes are not boundaries by default, which is
-        // what makes double-clicking a path useful.
-        assert_eq!(word(6).as_deref(), Some("/usr/bin"));
-        assert_eq!(word(13).as_deref(), Some("foo"));
-        // And the highlight the renderer paints matches the text.
-        assert_eq!(sel_span(&mut eng, 0), Some((12, 14)));
-    }
-
-    #[test]
-    fn selection_word_chars_changes_where_a_word_ends() {
-        // The discriminator that the config actually threads through to the
-        // engine: with `/` as a boundary, the path splits into its components.
-        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
-        eng.write(b"ls /usr/bin foo");
-        let boundaries = ['\0', ' ', '/'];
-        assert!(eng.select_semantic(SelectKind::Word, 6, 0, &boundaries));
-        assert_eq!(
-            sel_text(&eng).as_deref(),
-            Some("usr"),
-            "bounded by the slashes"
-        );
-        // …and the same click with the defaults keeps the whole path.
-        assert!(eng.select_semantic(SelectKind::Word, 6, 0, &[]));
-        assert_eq!(sel_text(&eng).as_deref(), Some("/usr/bin"));
-    }
-
-    #[test]
-    fn select_line_unwraps_a_soft_wrapped_row() {
-        // Text longer than the grid wraps, and a triple-click has to take the
-        // whole logical line — as **one** line, not as the rows it was displayed
-        // on. That unwrapping is what the engine-side read buys.
-        let mut eng = GhosttyVtEngine::new(10, 4, 100).unwrap();
-        eng.write(b"abcdefghijKLMNO");
-        assert!(eng.select_semantic(SelectKind::Line, 2, 0, &[]));
-        assert_eq!(sel_text(&eng).as_deref(), Some("abcdefghijKLMNO"));
-        // It is highlighted across both display rows.
-        assert_eq!(sel_span(&mut eng, 0), Some((0, 9)));
-        assert_eq!(sel_span(&mut eng, 1), Some((0, 4)));
-    }
-
-    #[test]
-    fn select_output_covers_the_commands_output_not_its_prompt() {
-        // OSC 133: A = prompt start, B = command start, C = output start,
-        // D = command end. Driven as real escape sequences, like the kitty tests.
-        let mut eng = GhosttyVtEngine::new(20, 6, 100).unwrap();
-        eng.write(b"\x1b]133;A\x07$ ");
-        eng.write(b"\x1b]133;B\x07echo hi\r\n");
-        eng.write(b"\x1b]133;C\x07out1\r\nout2\r\n");
-        eng.write(b"\x1b]133;D;0\x07");
-        eng.write(b"\x1b]133;A\x07$ ");
-        // Click on the first output row.
-        assert!(eng.select_semantic(SelectKind::Output, 0, 1, &[]));
-        assert_eq!(sel_text(&eng).as_deref(), Some("out1\nout2"));
-        // Clicking the prompt row itself is not output — and a gesture that
-        // finds nothing leaves the existing selection alone.
-        assert!(!eng.select_semantic(SelectKind::Output, 0, 0, &[]));
-        assert_eq!(sel_text(&eng).as_deref(), Some("out1\nout2"));
-    }
-
-    #[test]
-    fn a_selection_starting_above_the_viewport_is_kept_whole() {
-        // The old viewport-scoped model had to **clamp** a selection that began
-        // off the top of the screen, so copy only ever saw the visible part.
-        // Tracked references have no such limit: the output selected here starts
-        // three rows above a two-row viewport and still copies in full.
-        let mut eng = GhosttyVtEngine::new(20, 2, 100).unwrap();
-        eng.write(b"\x1b]133;A\x07$ \x1b]133;B\x07cmd\r\n");
-        eng.write(b"\x1b]133;C\x07a\r\nb\r\nc\r\n");
-        assert!(eng.select_semantic(SelectKind::Output, 0, 0, &[]));
-        assert_eq!(sel_text(&eng).as_deref(), Some("a\nb\nc"));
-    }
-
-    /// A clipboard the tests can inspect, so nothing touches the real one.
-    #[derive(Clone, Default)]
-    struct FakeClip(std::rc::Rc<std::cell::RefCell<Option<String>>>);
-    impl crate::clipboard::ClipboardIo for FakeClip {
-        fn read_text(&mut self) -> Option<String> {
-            self.0.borrow().clone()
-        }
-        fn write_text(&mut self, text: &str) {
-            *self.0.borrow_mut() = Some(text.to_string());
-        }
-    }
-
-    fn clip_engine(
-        read: crate::config::ClipboardAccess,
-        write: crate::config::ClipboardAccess,
-        limit: Option<usize>,
-    ) -> (GhosttyVtEngine, FakeClip) {
-        let mut eng = GhosttyVtEngine::new(20, 5, 100_000).unwrap();
-        let clip = FakeClip::default();
-        eng.set_clipboard_io(Box::new(clip.clone()));
-        eng.set_clipboard_policy(&crate::config::ClipboardPolicy {
-            read,
-            write,
-            trim_trailing_spaces: false,
-            write_limit: limit,
-            ..crate::config::Config::default().clipboard
-        });
-        (eng, clip)
-    }
-
-    fn resp(eng: &mut GhosttyVtEngine) -> String {
-        String::from_utf8_lossy(&eng.take_responses()).into_owned()
-    }
-
-    use crate::config::ClipboardAccess::{Allow, Ask, Deny};
-
-    #[test]
-    fn osc52_write_goes_through_the_engine_callback() {
-        let (mut eng, clip) = clip_engine(Deny, Allow, None);
-        eng.write(b"\x1b]52;c;aGk=\x07");
-        assert_eq!(clip.0.borrow().as_deref(), Some("hi"));
-        assert_eq!(resp(&mut eng), "", "OSC 52 writes have no acknowledgement");
-        // Chunked across writes, ST-terminated.
-        eng.write(b"\x1b]52;c;aGV");
-        eng.write(b"sbG8=\x1b\\");
-        assert_eq!(clip.0.borrow().as_deref(), Some("hello"));
-    }
-
-    #[test]
-    fn osc52_read_is_answered_when_allowed_and_empty_when_denied() {
-        let (mut eng, clip) = clip_engine(Allow, Deny, None);
-        *clip.0.borrow_mut() = Some("hi".into());
-        eng.write(b"\x1b]52;c;?\x1b\\");
-        assert!(resp(&mut eng).contains("\x1b]52;c;aGk="));
-        let (mut eng, clip) = clip_engine(Deny, Deny, None);
-        *clip.0.borrow_mut() = Some("hi".into());
-        eng.write(b"\x1b]52;c;?\x1b\\");
-        assert!(!resp(&mut eng).contains("aGk="));
-    }
-
-    #[test]
-    fn kitty_write_transaction_is_acknowledged() {
-        let (mut eng, clip) = clip_engine(Deny, Allow, None);
-        eng.write(b"\x1b]5522;type=write:id=c1\x1b\\");
-        eng.write(b"\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;R2hvc3Q=\x1b\\");
-        eng.write(b"\x1b]5522;type=wdata:mime=dGV4dC9odG1s;PGI+aGk8L2I+\x1b\\");
-        eng.write(b"\x1b]5522;type=wdata\x1b\\");
-        assert_eq!(clip.0.borrow().as_deref(), Some("Ghost"), "the text rep wins; html is dropped");
-        assert_eq!(resp(&mut eng), "\x1b]5522;type=write:status=DONE:id=c1\x1b\\");
-    }
-
-    #[test]
-    fn kitty_write_of_only_non_text_is_unsupported() {
-        let (mut eng, clip) = clip_engine(Deny, Allow, None);
-        eng.write(b"\x1b]5522;type=write:id=c2\x1b\\");
-        eng.write(b"\x1b]5522;type=wdata:mime=aW1hZ2UvcG5n;AAAA\x1b\\");
-        eng.write(b"\x1b]5522;type=wdata\x1b\\");
-        assert_eq!(*clip.0.borrow(), None);
-        assert_eq!(resp(&mut eng), "\x1b]5522;type=write:status=ENOSYS:id=c2\x1b\\");
-    }
-
-    #[test]
-    fn kitty_write_over_the_limit_is_refused() {
-        let (mut eng, clip) = clip_engine(Deny, Allow, Some(3));
-        eng.write(b"\x1b]5522;type=write:id=c3\x1b\\");
-        eng.write(b"\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;R2hvc3Q=\x1b\\");
-        eng.write(b"\x1b]5522;type=wdata\x1b\\");
-        assert_eq!(*clip.0.borrow(), None);
-        assert_eq!(resp(&mut eng), "\x1b]5522;type=write:status=EPERM:id=c3\x1b\\");
-    }
-
-    #[test]
-    fn kitty_read_serves_text_and_refuses_when_denied() {
-        let (mut eng, clip) = clip_engine(Allow, Deny, None);
-        *clip.0.borrow_mut() = Some("hello".into());
-        eng.write(b"\x1b]5522;type=read:id=r2;dGV4dC9wbGFpbg==\x1b\\");
-        assert_eq!(
-            resp(&mut eng),
-            "\x1b]5522;type=read:status=OK:id=r2\x1b\\\
-             \x1b]5522;type=read:status=DATA:id=r2:mime=dGV4dC9wbGFpbg==;aGVsbG8=\x1b\\\
-             \x1b]5522;type=read:status=DONE:id=r2\x1b\\"
-        );
-        let (mut eng, _) = clip_engine(Deny, Deny, None);
-        eng.write(b"\x1b]5522;type=read:id=r1;dGV4dC9wbGFpbg==\x1b\\");
-        assert_eq!(resp(&mut eng), "\x1b]5522;type=read:status=EPERM:id=r1\x1b\\");
-    }
-
-    #[test]
-    fn kitty_targets_listing_needs_no_permission() {
-        let (mut eng, clip) = clip_engine(Deny, Deny, None);
-        *clip.0.borrow_mut() = Some("x".into());
-        eng.write(b"\x1b]5522;type=read:id=t;Lg==\x1b\\"); // "."
-        let r = resp(&mut eng);
-        assert!(r.contains("status=OK"), "{r:?}");
-        assert!(r.contains(&base64_of("text/plain
-")), "lists text/plain: {r:?}");
-    }
-
-    fn base64_of(s: &str) -> String {
-        use base64::Engine as _;
-        base64::engine::general_purpose::STANDARD.encode(s)
-    }
-
-    #[test]
-    fn an_asked_kitty_read_waits_for_the_user_then_replays() {
-        let (mut eng, clip) = clip_engine(Ask, Deny, None);
-        *clip.0.borrow_mut() = Some("hello".into());
-        eng.write(b"\x1b]5522;type=read:id=r3;dGV4dC9wbGFpbg==\x1b\\");
-        assert_eq!(resp(&mut eng), "", "the engine's refusal is held back while we ask");
-        let mut d = eng.take_clipboard_deferrals();
-        assert_eq!(d.len(), 1);
-        assert_eq!(d[0].packet, b"\x1b]5522;type=read:status=EPERM:id=r3\x1b\\");
-        eng.resolve_clipboard_deferral(d.remove(0), true);
-        assert_eq!(
-            resp(&mut eng),
-            "\x1b]5522;type=read:status=OK:id=r3\x1b\\\
-             \x1b]5522;type=read:status=DATA:id=r3:mime=dGV4dC9wbGFpbg==;aGVsbG8=\x1b\\\
-             \x1b]5522;type=read:status=DONE:id=r3\x1b\\"
-        );
-        // The grant was one-shot: the next read asks again.
-        eng.write(b"\x1b]5522;type=read:id=r4;dGV4dC9wbGFpbg==\x1b\\");
-        assert_eq!(resp(&mut eng), "");
-        let d = eng.take_clipboard_deferrals().remove(0);
-        eng.resolve_clipboard_deferral(d, false);
-        assert_eq!(resp(&mut eng), "\x1b]5522;type=read:status=EPERM:id=r4\x1b\\");
-    }
-
-    #[test]
-    fn an_asked_osc52_read_replays_with_its_target() {
-        let (mut eng, clip) = clip_engine(Ask, Deny, None);
-        *clip.0.borrow_mut() = Some("hi".into());
-        eng.write(b"\x1b[5n\x1b]52;c;?\x07\x1b[5n");
-        // The surrounding DSR replies survive the cut, in order.
-        assert_eq!(resp(&mut eng), "\x1b[0n\x1b[0n");
-        let d = eng.take_clipboard_deferrals().remove(0);
-        eng.resolve_clipboard_deferral(d, true);
-        assert!(resp(&mut eng).contains("\x1b]52;c;aGk="));
-    }
-
-    #[test]
-    fn an_asked_write_is_performed_and_acknowledged_on_approval() {
-        let (mut eng, clip) = clip_engine(Deny, Ask, None);
-        eng.write(b"\x1b]5522;type=write:id=w\x1b\\\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;aGk=\x1b\\\x1b]5522;type=wdata\x1b\\");
-        assert_eq!(resp(&mut eng), "");
-        assert_eq!(*clip.0.borrow(), None, "nothing is written before the user answers");
-        let d = eng.take_clipboard_deferrals().remove(0);
-        assert_eq!(d.kind, crate::clipboard::Deferred::Write("hi".into()));
-        eng.resolve_clipboard_deferral(d, true);
-        assert_eq!(clip.0.borrow().as_deref(), Some("hi"));
-        assert_eq!(resp(&mut eng), "\x1b]5522;type=write:status=DONE:id=w\x1b\\");
-        // OSC 52 has no acknowledgement, so there's no packet to hold.
-        eng.write(b"\x1b]52;c;eW8=\x07");
-        let d = eng.take_clipboard_deferrals().remove(0);
-        assert!(d.packet.is_empty());
-        eng.resolve_clipboard_deferral(d, false);
-        assert_eq!(resp(&mut eng), "");
-        assert_eq!(clip.0.borrow().as_deref(), Some("hi"));
-    }
-
-    #[test]
-    fn a_paste_event_serves_the_pasted_text_to_its_follow_up_read() {
-        let (mut eng, clip) = clip_engine(Deny, Deny, None);
-        *clip.0.borrow_mut() = Some("clipboard".into());
-        assert!(!eng.paste_events());
-        eng.write(b"\x1b[?5522h");
-        assert!(eng.paste_events());
-        assert!(eng.paste_event("pasted"));
-        let ev = resp(&mut eng);
-        assert!(ev.starts_with("\x1b]5522;type=read:status=OK"), "{ev:?}");
-        assert!(!ev.contains(&base64_of("pasted")), "an event carries no data: {ev:?}");
-        let pw = ev
-            .split(':')
-            .find_map(|kv| kv.strip_prefix("pw="))
-            .map(|v| v.split(['\x1b', ';', '\x07']).next().unwrap().to_string())
-            .expect("the event carries a one-time password");
-        eng.write(format!("\x1b]5522;type=read:pw={pw}:name=UGFzdGUgZXZlbnQ=;dGV4dC9wbGFpbg==\x1b\\").as_bytes());
-        let r = resp(&mut eng);
-        assert!(r.contains(&base64_of("pasted")), "granted despite clipboard-read = deny: {r:?}");
-    }
-
-    #[test]
-    fn pwd_comes_from_the_engine() {
-        // Pins the retirement of `osc7.rs`: lib-vt's full stream (unlike the
-        // read-only one of the old pin) now keeps OSC 7.
-        let mut eng = GhosttyVtEngine::new(20, 5, 100_000).unwrap();
-        assert_eq!(eng.pwd(), None);
-        eng.write(b"\x1b]7;file://HOST/C:/Users/foo\x07");
-        assert_eq!(eng.pwd().as_deref(), Some("file://HOST/C:/Users/foo"));
-        eng.write(b"\x1b]7;file://h/C:/a%20b");
-        eng.write(b"/c\x1b\\");
-        assert_eq!(eng.pwd().as_deref(), Some("file://h/C:/a%20b/c"));
-        // WSL's scripts report Linux paths; kept verbatim for `osc7_to_path`.
-        eng.write(b"\x1b]7;file://box/mnt/c/x\x07");
-        assert_eq!(eng.pwd().as_deref(), Some("file://box/mnt/c/x"));
-    }
-
-    #[test]
-    fn engine_osc_color_query_replies() {
-        // Pins who answers `OSC 11 ?`: `osc_color.rs` does. Upstream (14c8298) can
-        // answer in lib-vt behind a callback giest doesn't install; if a bump ever
-        // makes it answer by default, every query would get two replies.
-        let mut eng = GhosttyVtEngine::new(20, 5, 100_000).unwrap();
-        eng.write(b"\x1b]11;?\x07");
-        let r = String::from_utf8_lossy(&eng.take_responses()).into_owned();
-        assert!(!r.contains("]11;"), "engine now answers itself; drop osc_color.rs: {r:?}");
-    }
-
-    #[test]
-    fn vt_policy_title_report_and_kam() {
-        let mut eng = GhosttyVtEngine::new(20, 5, 100_000).unwrap();
-        eng.write(b"\x1b]2;secret\x07\x1b[21t");
-        assert!(eng.take_responses().is_empty(), "title reports must be off by default");
-        eng.set_vt_policy(true, false, true).unwrap();
-        eng.write(b"\x1b[21t");
-        let r = String::from_utf8_lossy(&eng.take_responses()).into_owned();
-        assert!(r.contains("secret"), "title report enabled but got {r:?}");
-
-        eng.write(b"\x1b[2h"); // KAM: lock the keyboard
-        assert!(!eng.term.mode(libghostty_vt::terminal::Mode::KAM).unwrap(), "KAM must be refused by default");
-        eng.set_vt_policy(false, true, true).unwrap();
-        eng.write(b"\x1b[2h");
-        assert!(eng.term.mode(libghostty_vt::terminal::Mode::KAM).unwrap());
-    }
-
-    #[test]
-    fn engine_paste_matches_the_legacy_encoder_and_keeps_pending_replies() {
-        let cases = ["hello", "line1\nline2\r\nline3", "tab\there", "", "x\x1b[201~y"];
-        for bracketed in [false, true] {
-            let mut eng = GhosttyVtEngine::new(20, 5, 100_000).unwrap();
-            if bracketed {
-                eng.write(b"\x1b[?2004h");
-            }
-            for text in cases {
-                let got = eng.encode_paste(text);
-                let want = super::encode_paste_legacy(bracketed, text);
-                assert_eq!(got, want, "bracketed={bracketed} {text:?}");
-            }
-            // An unsent reply (DA1) must survive a paste in between.
-            eng.write(b"\x1b[c");
-            let _ = eng.encode_paste("x");
-            assert!(!eng.take_responses().is_empty(), "pending reply lost");
-        }
-    }
-
-    #[test]
-    fn a_cursor_only_move_reaches_the_snapshot() {
-        let mut eng = GhosttyVtEngine::new(20, 6, 100_000).unwrap();
-        let mut s = GridSnapshot::default();
-        eng.write(b"hello");
-        eng.snapshot(&mut s).unwrap();
-        eng.snapshot(&mut s).unwrap(); // settle: next one may take the clean path
-        eng.write(b"\x1b[4;7H");
-        eng.snapshot(&mut s).unwrap();
-        assert_eq!((s.cursor_x, s.cursor_y), (6, 3));
-        eng.write(b"\x1b[?25l");
-        eng.snapshot(&mut s).unwrap();
-        assert!(!s.cursor_visible, "cursor hide must reach the snapshot");
-        // Palette text is stored resolved, so an OSC 4 with no cell edit must
-        // still re-resolve it.
-        eng.write(b"\x1b[1;1H\x1b[31mX\x1b[0m");
-        eng.snapshot(&mut s).unwrap();
-        eng.snapshot(&mut s).unwrap();
-        eng.write(b"\x1b]4;1;#00ff00\x07");
-        eng.snapshot(&mut s).unwrap();
-        assert_eq!(s.cells[0].fg, Rgb::new(0, 0xff, 0));
-    }
-
-    #[test]
-    fn partial_snapshots_match_a_full_one() {
-        // Snapshot after every step, so the dirty-row path is taken; then the
-        // result must equal a fresh engine's full snapshot of the same bytes.
-        let steps: &[&[u8]] = &[
-            b"row0 \x1b[1mbold\x1b[0m\r\nrow1\r\nrow2 \x1b[5mblink\x1b[0m\r\nrow3",
-            b"\x1b[2;1Hchanged",           // one row
-            b"\x1b[3;1H\x1b[2K",           // erase the blink row
-            b"\x1b[5;3H\x1b[41mred\x1b[0m", // colour on another row
-            b"\x1b[1;1H\x1b[K",            // erase row 0
-        ];
-        let cell_key = |c: &crate::engine::Cell| {
-            (c.text.to_string(), c.fg, c.bg, c.bg_explicit, c.bold, c.blink, c.underline)
-        };
-        let mut inc = GhosttyVtEngine::new(20, 6, 100_000).unwrap();
-        let mut s_inc = GridSnapshot::default();
-        inc.snapshot(&mut s_inc).unwrap();
-        let mut all = Vec::new();
-        for step in steps {
-            inc.write(step);
-            inc.snapshot(&mut s_inc).unwrap();
-            all.extend_from_slice(step);
-            let mut fresh = GhosttyVtEngine::new(20, 6, 100_000).unwrap();
-            fresh.write(&all);
-            let mut s_full = GridSnapshot::default();
-            fresh.snapshot(&mut s_full).unwrap();
-            let a: Vec<_> = s_inc.cells.iter().map(cell_key).collect();
-            let b: Vec<_> = s_full.cells.iter().map(cell_key).collect();
-            assert_eq!(a, b, "diverged after {:?}", String::from_utf8_lossy(step));
-            assert_eq!(s_inc.has_blink, s_full.has_blink);
-        }
-    }
-
-    #[test]
-    fn compression_waits_for_idle_and_keeps_contents() {
-        use std::time::{Duration, Instant};
-        let mut eng = GhosttyVtEngine::new(40, 5, 10_000_000).unwrap();
-        for i in 0..3_000 {
-            eng.write(format!("line {i} lorem ipsum dolor sit amet\r\n").as_bytes());
-        }
-        let rows = eng.scrollback_rows();
-        let t0 = Instant::now();
-        eng.compress_tick(t0, Duration::from_secs(1)).unwrap(); // records activity
-        assert!(!eng.compress_done, "must not compress before the idle delay");
-        let later = t0 + crate::engine::COMPRESS_IDLE + Duration::from_millis(1);
-        for _ in 0..1_000 {
-            eng.compress_tick(later, Duration::from_secs(1)).unwrap();
-            if eng.compress_done {
-                break;
-            }
-        }
-        assert!(eng.compress_done, "compression pass never completed");
-        assert_eq!(eng.scrollback_rows(), rows, "compression changed history size");
-        // Writing is activity: the next tick restarts the idle clock.
-        eng.write(b"more\r\n");
-        eng.compress_tick(later, Duration::from_secs(1)).unwrap();
-        assert!(!eng.compress_done);
-    }
-
-    #[test]
-    fn scrollback_line_cap_bounds_history() {
-        // `scrollback-limit-lines` rounds up to whole pages, so assert a bound
-        // well under the uncapped count rather than the exact figure.
-        let lines = |cap| {
-            let mut eng = GhosttyVtEngine::new(20, 5, 10_000_000).unwrap();
-            eng.set_scrollback_lines(cap).unwrap();
-            for i in 0..4_000 {
-                eng.write(format!("{i}\r\n").as_bytes());
-            }
-            eng.scrollback_rows()
-        };
-        let (capped, uncapped) = (lines(Some(50)), lines(None));
-        assert!(uncapped >= 3_900, "uncapped kept {uncapped}");
-        assert!(capped < uncapped / 2, "capped kept {capped} of {uncapped}");
-    }
-
-    #[test]
-    fn a_drag_selection_survives_scrolling_and_scrollback() {
-        // The core of the migration: the anchor is a tracked reference, so a
-        // selection made at the bottom of the screen still reads correctly after
-        // enough output to push it into scrollback. Viewport (col,row) pairs
-        // silently addressed *different* cells after a scroll.
-        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
-        eng.write(b"alpha\r\n");
-        eng.selection_begin(0, 0, false);
-        eng.selection_update(4, 0, false);
-        assert_eq!(sel_text(&eng).as_deref(), Some("alpha"));
-
-        for _ in 0..10 {
-            eng.write(b"filler\r\n");
-        }
-        assert_eq!(
-            sel_text(&eng).as_deref(),
-            Some("alpha"),
-            "the tracked anchor followed its row into scrollback"
-        );
-    }
-
-    #[test]
-    fn a_selection_survives_a_resize_that_reflows_the_text() {
-        // Reflow is where a tracked reference differs most from a coordinate: a
-        // narrower grid rewraps rows, so every cell moves. The old model had no
-        // answer at all — `fit_grid` simply left the anchor pointing at whatever
-        // was now at that (col,row).
-        let mut eng = GhosttyVtEngine::new(20, 4, 100).unwrap();
-        eng.write(b"hello wonderful world");
-        eng.select_semantic(SelectKind::Word, 6, 0, &[]);
-        assert_eq!(sel_text(&eng).as_deref(), Some("wonderful"));
-
-        eng.resize(10, 6, (8, 16)).unwrap();
-        assert_eq!(
-            sel_text(&eng).as_deref(),
-            Some("wonderful"),
-            "the selection followed its cells through the rewrap"
-        );
-    }
-
-    #[test]
-    fn select_all_spans_scrollback_not_just_the_viewport() {
-        // The old `select_all` was `(0,0)..(cols-1, rows-1)` — the viewport and
-        // nothing else. This is the behaviour change.
-        let mut eng = GhosttyVtEngine::new(20, 2, 100).unwrap();
-        eng.write(b"one\r\ntwo\r\nthree\r\n");
-        assert!(eng.select_all());
-        let text = sel_text(&eng).expect("a selection");
-        assert!(text.contains("one"), "scrolled-off rows are included: {text:?}");
-        assert!(text.contains("three"), "as is the live row: {text:?}");
-    }
-
-    #[test]
-    fn trailing_space_trim_is_configurable() {
-        // Ghostty `clipboard-trim-trailing-spaces`: off, the selection carries
-        // the grid's own padding, which is what you want for column-aligned
-        // output and noise the rest of the time.
-        // The spaces are *written*, not just unwritten cells: the formatter emits
-        // only as far as a row was actually filled, so trailing blanks have to
-        // exist for there to be anything to trim.
-        let mut eng = GhosttyVtEngine::new(6, 2, 100).unwrap();
-        eng.write(b"hi    ");
-        eng.selection_begin(0, 0, false);
-        eng.selection_update(5, 0, false);
-        assert_eq!(eng.selected_text(true).as_deref(), Some("hi"));
-        assert_eq!(eng.selected_text(false).as_deref(), Some("hi    "));
-    }
-
-    #[test]
-    fn adjust_selection_moves_the_free_end_and_leaves_the_anchor() {
-        use crate::engine::SelectionAdjust as A;
-
-        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
-        eng.write(b"hello world");
-        eng.selection_begin(0, 0, false);
-        eng.selection_update(4, 0, false); // "hello"
-        assert_eq!(sel_text(&eng).as_deref(), Some("hello"));
-
-        // Read untrimmed here: trimming would hide the space the selection picks
-        // up as it crosses the gap, which is the thing being measured.
-        let raw = |e: &GhosttyVtEngine| e.selected_text(false);
-
-        // Right extends; the anchor stays put.
-        assert!(eng.selection_adjust(A::Right).is_some());
-        assert_eq!(raw(&eng).as_deref(), Some("hello "));
-        assert!(eng.selection_adjust(A::Right).is_some());
-        assert_eq!(raw(&eng).as_deref(), Some("hello w"));
-        // Left takes it back.
-        assert!(eng.selection_adjust(A::Left).is_some());
-        assert_eq!(raw(&eng).as_deref(), Some("hello "));
-        // End of line reaches the last cell of the row.
-        assert!(eng.selection_adjust(A::EndOfLine).is_some());
-        assert_eq!(sel_text(&eng).as_deref(), Some("hello world"));
-    }
-
-    #[test]
-    fn a_rectangle_drag_selects_a_block_not_a_run_of_text() {
-        // The discriminator: over three rows of text, a linear selection from
-        // (2,0) to (4,2) takes everything in between, while a block takes only
-        // columns 2..4 of each row.
-        let mut eng = GhosttyVtEngine::new(8, 3, 100).unwrap();
-        eng.write(b"abcdefg\r\nhijklmn\r\nopqrstu");
-
-        eng.selection_begin(2, 0, false);
-        eng.selection_update(4, 2, false);
-        assert_eq!(sel_text(&eng).as_deref(), Some("cdefg\nhijklmn\nopqrs"));
-
-        eng.selection_begin(2, 0, true);
-        eng.selection_update(4, 2, true);
-        assert_eq!(sel_text(&eng).as_deref(), Some("cde\njkl\nqrs"));
-
-        // The highlight the renderer paints agrees: three equal spans, not one
-        // long run.
-        assert_eq!(sel_span(&mut eng, 0), Some((2, 4)));
-        assert_eq!(sel_span(&mut eng, 1), Some((2, 4)));
-        assert_eq!(sel_span(&mut eng, 2), Some((2, 4)));
-    }
-
-    #[test]
-    fn a_rectangle_survives_adjust_and_a_word_select_clears_it() {
-        // `adjust_selection` rebuilds the selection, so the block flag has to be
-        // remembered or a shift+arrow would silently turn a block back into a
-        // run of text.
-        let mut eng = GhosttyVtEngine::new(8, 3, 100).unwrap();
-        eng.write(b"abcdefg\r\nhijklmn\r\nopqrstu");
-        eng.selection_begin(2, 0, true);
-        eng.selection_update(4, 2, true);
-        assert!(eng.selection_adjust(crate::engine::SelectionAdjust::Right).is_some());
-        let text = sel_text(&eng).expect("still selected");
-        assert!(
-            text.lines().count() == 3 && text.lines().all(|l| l.len() == 4),
-            "still a block, one column wider: {text:?}"
-        );
-
-        // A semantic selection is a run of text, so the flag must reset.
-        assert!(eng.select_semantic(SelectKind::Line, 0, 0, &[]));
-        assert_eq!(sel_text(&eng).as_deref(), Some("abcdefg"));
-    }
-
-    #[test]
-    fn adjust_selection_does_nothing_without_a_selection() {
-        // Upstream returns "not performed" so the key falls through to the
-        // shell; giest's `performable:` gate keys off exactly this `None`.
-        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
-        eng.write(b"hello");
-        assert_eq!(eng.selection_adjust(crate::engine::SelectionAdjust::Right), None);
-        assert!(!eng.selection_active());
-    }
-
-    #[test]
-    fn clearing_a_selection_leaves_no_text_and_no_highlight() {
-        let mut eng = GhosttyVtEngine::new(10, 2, 100).unwrap();
-        eng.write(b"hello");
-        eng.selection_begin(0, 0, false);
-        eng.selection_update(4, 0, false);
-        assert!(eng.selection_active());
-        assert_eq!(sel_span(&mut eng, 0), Some((0, 4)));
-
-        eng.selection_clear();
-        assert!(!eng.selection_active());
-        assert_eq!(sel_text(&eng), None);
-        assert_eq!(sel_span(&mut eng, 0), None);
-    }
-
-    // --- Selection gesture (upstream `SelectionGesture`) -------------------
-    //
-    // Cells are 10x20 px. `gpt(col, frac, row)` is a pointer `frac` pixels into
-    // column `col` — the threshold is round(10 * 0.6) = 6.
-
-    const GCW: f64 = 10.0;
-    const GCH: f64 = 20.0;
-
-    fn gpt(col: u16, frac: f64, row: u16) -> crate::engine::GesturePoint {
-        crate::engine::GesturePoint {
-            px: (col as f64 * GCW + frac, row as f64 * GCH + GCH / 2.0),
-            cell: (col, row),
-        }
-    }
-
-    fn ggeo(rows: u32) -> crate::engine::GestureGeometry {
-        crate::engine::GestureGeometry { cols: 20, cell_w: GCW as u32, height: rows * GCH as u32 }
-    }
-
-    /// Press at `at`, `ms` milliseconds into a monotonic clock.
-    fn gpress(eng: &mut GhosttyVtEngine, at: crate::engine::GesturePoint, ms: u64, output: bool) -> u8 {
-        use std::time::Duration;
-        eng.gesture_press(
-            crate::engine::GesturePress {
-                at,
-                time: Duration::from_millis(1_000 + ms),
-                repeat_interval: Duration::from_millis(500),
-                repeat_distance: GCW,
-                triple: if output { SelectKind::Output } else { SelectKind::Line },
-            },
-            &[],
-        )
-    }
-
-    #[test]
-    fn gesture_single_click_drag_honours_the_60_percent_threshold() {
-        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
-        eng.write(b"hello world");
-        let geo = ggeo(3);
-
-        // Pressed in the left 60% of `e`, released in the left 60% of the
-        // second `l`: the pressed cell is in, the cell dragged onto is not.
-        assert_eq!(gpress(&mut eng, gpt(1, 2.0, 0), 0, false), 1);
-        eng.gesture_drag(gpt(3, 2.0, 0), geo, false, &[]);
-        assert_eq!(sel_text(&eng).as_deref(), Some("el"));
-        eng.gesture_release(Some((3, 0)));
-
-        // Pressed past the threshold of `e`, dragged past the threshold of the
-        // second `l`: the pressed cell is out, the dragged-onto cell is in.
-        gpress(&mut eng, gpt(1, 8.0, 0), 5_000, false);
-        eng.gesture_drag(gpt(3, 8.0, 0), geo, false, &[]);
-        assert_eq!(sel_text(&eng).as_deref(), Some("ll"));
-        eng.gesture_release(Some((3, 0)));
-
-        // Within one cell: nothing until the drag crosses the threshold...
-        gpress(&mut eng, gpt(1, 1.0, 0), 10_000, false);
-        assert!(!eng.selection_active(), "a single-click press clears");
-        eng.gesture_drag(gpt(1, 4.0, 0), geo, false, &[]);
-        assert!(!eng.selection_active(), "not across the threshold yet");
-        // ...then the one cell, and the gesture counts as a drag.
-        eng.gesture_drag(gpt(1, 7.0, 0), geo, false, &[]);
-        assert_eq!(sel_text(&eng).as_deref(), Some("e"));
-        assert!(eng.gesture_release(Some((1, 0))), "a threshold crossing is a drag");
-    }
-
-    #[test]
-    fn gesture_single_click_drag_backwards_mirrors_the_threshold() {
-        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
-        eng.write(b"hello world");
-        let geo = ggeo(3);
-        // Backwards: the pressed cell is in if pressed *past* its threshold,
-        // the dragged-onto cell is in if the pointer is *before* its threshold.
-        gpress(&mut eng, gpt(4, 8.0, 0), 0, false);
-        eng.gesture_drag(gpt(1, 2.0, 0), geo, false, &[]);
-        assert_eq!(sel_text(&eng).as_deref(), Some("ello"));
-    }
-
-    #[test]
-    fn gesture_double_click_drag_snaps_to_words_in_both_directions() {
-        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
-        eng.write(b"hello world again");
-        let geo = ggeo(3);
-
-        // Double-click `hello`, drag forward into the middle of `world`.
-        assert_eq!(gpress(&mut eng, gpt(1, 3.0, 0), 0, false), 1);
-        eng.gesture_release(Some((1, 0)));
-        assert_eq!(gpress(&mut eng, gpt(1, 3.0, 0), 100, false), 2);
-        assert_eq!(sel_text(&eng).as_deref(), Some("hello"), "the press selects the word");
-        eng.gesture_drag(gpt(8, 3.0, 0), geo, false, &[]);
-        assert_eq!(sel_text(&eng).as_deref(), Some("hello world"), "snapped to whole words");
-        eng.gesture_release(Some((8, 0)));
-
-        // Double-click `again`, drag backward into the middle of `hello`: the
-        // anchor word stays whole and the far end snaps to its word's start.
-        gpress(&mut eng, gpt(14, 3.0, 0), 5_000, false);
-        eng.gesture_release(Some((14, 0)));
-        assert_eq!(gpress(&mut eng, gpt(14, 3.0, 0), 5_100, false), 2);
-        eng.gesture_drag(gpt(2, 3.0, 0), geo, false, &[]);
-        assert_eq!(sel_text(&eng).as_deref(), Some("hello world again"));
-    }
-
-    #[test]
-    fn gesture_double_click_drag_honours_selection_word_chars() {
-        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
-        eng.write(b"a.b c");
-        let geo = ggeo(3);
-        let dots: &[char] = &[' ', '.'];
-        let press = |eng: &mut GhosttyVtEngine, ms: u64| {
-            eng.gesture_press(
-                crate::engine::GesturePress {
-                    at: gpt(0, 3.0, 0),
-                    time: std::time::Duration::from_millis(1_000 + ms),
-                    repeat_interval: std::time::Duration::from_millis(500),
-                    repeat_distance: GCW,
-                    triple: SelectKind::Line,
-                },
-                dots,
-            )
-        };
-        press(&mut eng, 0);
-        eng.gesture_release(Some((0, 0)));
-        press(&mut eng, 100);
-        assert_eq!(sel_text(&eng).as_deref(), Some("a"), "`.` splits words");
-        eng.gesture_drag(gpt(2, 3.0, 0), geo, false, dots);
-        assert_eq!(sel_text(&eng).as_deref(), Some("a.b"));
-    }
-
-    #[test]
-    fn gesture_triple_click_drag_snaps_to_whole_lines() {
-        let mut eng = GhosttyVtEngine::new(20, 4, 100).unwrap();
-        eng.write(b"first line\r\nsecond line\r\nthird");
-        let geo = ggeo(4);
-        for (i, ms) in [0u64, 100, 200].into_iter().enumerate() {
-            assert_eq!(gpress(&mut eng, gpt(2, 3.0, 0), ms, false) as usize, i + 1);
-            if i < 2 {
-                eng.gesture_release(Some((2, 0)));
-            }
-        }
-        assert_eq!(sel_text(&eng).as_deref(), Some("first line"));
-        // Drag to the middle of the next row: the whole of that line joins.
-        eng.gesture_drag(gpt(3, 3.0, 1), geo, false, &[]);
-        assert_eq!(sel_text(&eng).as_deref(), Some("first line\nsecond line"));
-    }
-
-    #[test]
-    fn gesture_repeat_clicks_reset_when_too_slow_or_too_far() {
-        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
-        eng.write(b"hello world");
-        assert_eq!(gpress(&mut eng, gpt(1, 3.0, 0), 0, false), 1);
-        eng.gesture_release(Some((1, 0)));
-        assert_eq!(gpress(&mut eng, gpt(1, 3.0, 0), 900, false), 1, "past the interval");
-        eng.gesture_release(Some((1, 0)));
-        assert_eq!(gpress(&mut eng, gpt(8, 3.0, 0), 1_000, false), 1, "too far away");
-        assert!(!eng.selection_active());
-    }
-
-    #[test]
-    fn gesture_rectangle_drag_selects_a_block() {
-        let mut eng = GhosttyVtEngine::new(20, 4, 100).unwrap();
-        eng.write(b"abcde\r\nfghij\r\nklmno");
-        let geo = ggeo(4);
-        gpress(&mut eng, gpt(1, 1.0, 0), 0, false);
-        eng.gesture_drag(gpt(3, 8.0, 2), geo, true, &[]);
-        assert_eq!(sel_text(&eng).as_deref(), Some("bcd\nghi\nlmn"));
-        // Shift+click extension and adjust_selection keep it a block.
-        assert!(eng.sel_rectangle);
-    }
-
-    #[test]
-    fn gesture_drag_past_an_edge_requests_autoscroll() {
-        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
-        eng.write(b"hello");
-        let geo = ggeo(3);
-        gpress(&mut eng, gpt(1, 1.0, 1), 0, false);
-        let mut at = gpt(2, 1.0, 0);
-        at.px.1 = 0.0;
-        assert_eq!(eng.gesture_drag(at, geo, false, &[]), -1, "at the top edge");
-        at.px.1 = -30.0;
-        assert_eq!(eng.gesture_drag(at, geo, false, &[]), -1, "above the pane");
-        let mut at = gpt(2, 1.0, 2);
-        at.px.1 = 60.0;
-        assert_eq!(eng.gesture_drag(at, geo, false, &[]), 1, "at the bottom edge");
-        assert_eq!(eng.gesture_drag(gpt(2, 1.0, 1), geo, false, &[]), 0, "inside");
-        // Release stops it; a drag without a press does nothing.
-        eng.gesture_release(None);
-        eng.gesture_reset();
-        assert_eq!(eng.gesture_drag(at, geo, false, &[]), 0);
-    }
-
-    #[test]
-    fn gesture_single_press_clears_but_a_reset_leaves_the_selection() {
-        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
-        eng.write(b"hello world");
-        assert!(eng.select_all());
-        eng.gesture_reset();
-        assert!(eng.selection_active(), "reset is not a clear");
-        gpress(&mut eng, gpt(1, 1.0, 0), 0, false);
-        assert!(!eng.selection_active(), "a single-click press clears, as upstream");
-    }
-
-    #[test]
-    fn an_update_without_an_anchor_selects_nothing() {
-        // `update_selection` can arrive without a `begin` (a drag that started
-        // outside the pane). It must not install a selection from a stale or
-        // absent anchor.
-        let mut eng = GhosttyVtEngine::new(10, 2, 100).unwrap();
-        eng.write(b"hello");
-        eng.selection_update(4, 0, false);
-        assert!(!eng.selection_active());
-        assert_eq!(sel_text(&eng), None);
-    }
-
-    #[test]
-    fn screen_text_marks_soft_wrapped_rows_so_search_can_join_them() {
-        // The flag search relies on, read off a real wrap rather than assumed:
-        // 10 columns, 15 characters, so row 0 continues onto row 1.
-        let mut eng = GhosttyVtEngine::new(10, 4, 100).unwrap();
-        eng.write(b"hello wonderful");
-        let rows = eng.screen_text();
-        assert!(rows[0].wrapped, "row 0 continues onto row 1");
-        assert!(!rows[1].wrapped, "row 1 does not");
-
-        // And the join actually finds a query straddling the edge.
-        let m = crate::search::search_rows(&rows, "wonderful", false);
-        assert_eq!(m.len(), 1, "found across the wrap");
-        assert_eq!((m[0].row, m[0].end_row), (0, 1), "spanning both rows");
-    }
-
-    #[test]
-    fn a_wide_char_pushed_over_a_wrap_leaves_no_gap_in_the_text() {
-        // When a wide character doesn't fit at the end of a row it moves to the
-        // next one, leaving a `SpacerHead` blank behind. Emitting a space for it
-        // would put one *inside* the wrapped word and a query spanning the wrap
-        // would not match.
-        let mut eng = GhosttyVtEngine::new(6, 3, 100).unwrap();
-        // 5 narrow cells then a wide char: it cannot fit in the last column.
-        eng.write("abcde世".as_bytes());
-        let rows = eng.screen_text();
-        let joined: String = rows
-            .iter()
-            .take(2)
-            .flat_map(|r| r.chars.iter().copied())
-            .collect();
-        assert_eq!(joined, "abcde世", "no spacer leaked into the text");
-        assert_eq!(
-            crate::search::search_rows(&rows, "e世", false).len(),
-            1,
-            "and a query across the wrap matches"
-        );
-    }
-
-    #[test]
-    fn the_row_anchor_reports_where_a_row_moved_to_after_eviction() {
-        // The drift fix. A 10-row scrollback plus a 2-row viewport holds 12 rows,
-        // so writing past that evicts the oldest and renumbers the screen.
-        let mut eng = GhosttyVtEngine::new(10, 2, 10).unwrap();
-        for i in 0..12 {
-            eng.write(format!("row{i}\r\n").as_bytes());
-        }
-
-        // Anchor a row with known text on it — that text is the oracle. Wherever
-        // the anchor says the row is now, that row must still read the same.
-        let find = |eng: &GhosttyVtEngine, want: &str| -> Option<u32> {
-            eng.screen_text()
-                .into_iter()
-                .find(|r| r.chars.iter().collect::<String>() == want)
-                .map(|r| r.row)
-        };
-        let captured = find(&eng, "row11").expect("the row we just wrote");
-        eng.set_row_anchor(Some(captured));
-        assert_eq!(eng.row_anchor_now(), Some(captured), "no drift yet");
-
-        // Measured, not assumed: libghostty frees scrollback a **page** at a
-        // time, so a few lines past the limit prune nothing and every row keeps
-        // its number. Drift therefore arrives in jumps, and until one lands the
-        // anchor keeps reporting the same row — which is correct, and is why the
-        // correction is free in the common case.
-        for i in 12..200 {
-            eng.write(format!("row{i}\r\n").as_bytes());
-        }
-        let now = eng.row_anchor_now().expect("nothing pruned yet");
-        assert_eq!(
-            find(&eng, "row11"),
-            Some(now),
-            "the anchor names the row that line is actually on"
-        );
-        assert_eq!(crate::search::row_shift(captured, now), 0, "no drift yet");
-
-        // Clearing the anchor stops the tracking.
-        eng.set_row_anchor(None);
-        assert_eq!(eng.row_anchor_now(), None);
-    }
-
-    #[test]
-    #[ignore = "writes ~12k lines to force a scrollback prune; ~8s"]
-    fn a_pruned_row_anchor_reports_no_value_rather_than_a_stale_row() {
-        // The case that would otherwise silently mis-highlight: upstream moves a
-        // destroyed pin to the screen's **top-left**, so reading its point
-        // without checking `has_value` comes back as a confident "row 0" — a
-        // zero drift correction at exactly the moment the correction is needed.
-        //
-        // Ignored only because forcing a real prune is expensive: libghostty
-        // frees scrollback a page at a time, and `max_scrollback = 10` still
-        // retained ~7k rows at 20k lines written (measured, not assumed).
-        let mut eng = GhosttyVtEngine::new(10, 2, 10).unwrap();
-        for i in 0..12 {
-            eng.write(format!("row{i}\r\n").as_bytes());
-        }
-        eng.set_row_anchor(Some(11));
-        assert_eq!(eng.row_anchor_now(), Some(11));
-
-        for i in 12..12_000 {
-            eng.write(format!("row{i}\r\n").as_bytes());
-        }
-        assert_eq!(eng.row_anchor_now(), None, "the anchored row was pruned");
-    }
-
-    #[test]
-    fn screen_text_reads_rows_with_column_mapping() {
-        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
-        eng.write(b"hello\r\nworld\r\n");
-        let rows = eng.screen_text();
-        assert_eq!(rows.len(), 3, "scrollback(0) + 3 viewport rows");
-        assert_eq!(rows[0].chars.iter().collect::<String>(), "hello");
-        assert_eq!(rows[0].cols, vec![0, 1, 2, 3, 4], "each char maps to its column");
-        assert_eq!(rows[0].row, 0);
-        assert_eq!(rows[1].chars.iter().collect::<String>(), "world");
-        // The empty cursor row trims to nothing.
-        assert!(rows[2].chars.is_empty());
-    }
-
-    #[test]
-    fn screen_text_skips_wide_char_tail_cells() {
-        // Wide (CJK) chars occupy two columns; their empty spacer-tail cell must
-        // be skipped so the codepoints stay adjacent (searchable), with columns
-        // reflecting physical placement (世 at col 0, 界 at col 2, x at col 4).
-        let mut eng = GhosttyVtEngine::new(20, 2, 100).unwrap();
-        eng.write("世界x".as_bytes());
-        let rows = eng.screen_text();
-        assert_eq!(rows[0].chars.iter().collect::<String>(), "世界x");
-        assert_eq!(rows[0].cols, vec![0, 2, 4]);
-    }
-
-    #[test]
-    fn osc_sets_window_title() {
-        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
-        eng.write(b"\x1b]2;hello\x07");
-        assert_eq!(eng.title().as_deref(), Some("hello"));
-    }
-
-    #[test]
-    fn prompt_rows_mark_input_cells_after_b() {
-        // `cursor-click-to-move` walks input cells: everything typed after the
-        // `B` mark is input, the prompt text before it is not.
-        let mut eng = GhosttyVtEngine::new(20, 4, 100).unwrap();
-        eng.write(b"\x1b]133;A;cl=line\x1b\\> \x1b]133;B\x1b\\abc");
-        assert_eq!(eng.cursor_at_prompt(), Some(true));
-        let rows = eng.prompt_rows();
-        assert_eq!(rows.len(), 4);
-        assert_eq!(rows[0].prompt, crate::engine::RowPrompt::Prompt);
-        let input: Vec<usize> = (0..20).filter(|&x| rows[0].input[x]).collect();
-        assert_eq!(input, vec![2, 3, 4]);
-        // Cursor after `abc` at col 5; a click on `a` is three lefts.
-        assert_eq!(crate::prompt_click::line_move(&rows, (5, 0), (2, 0)), (3, 0));
-    }
-
-    #[test]
-    fn jump_to_prompt_finds_marked_prompts() {
-        // Without OSC 133 marks there is nothing to jump to, even with scrollback.
-        let mut eng = GhosttyVtEngine::new(20, 4, 100).unwrap();
-        eng.write(b"plain\r\noutput\r\nlines\r\nhere\r\nmore\r\n");
-        assert_eq!(eng.jump_to_prompt(-1), None);
-
-        // Three OSC 133 A prompt marks separated by output; with rows = 4 the
-        // earliest prompts spill into scrollback above the live viewport.
-        let mut eng = GhosttyVtEngine::new(20, 4, 100).unwrap();
-        let mark = b"\x1b]133;A\x1b\\";
-        let mut data = Vec::new();
-        for body in [&b"p1\r\na\r\nb\r\n"[..], &b"p2\r\nc\r\nd\r\n"[..], &b"p3"[..]] {
-            data.extend_from_slice(mark);
-            data.extend_from_slice(body);
-        }
-        eng.write(&data);
-        // From the live bottom, a previous prompt sits above the viewport top.
-        let up = eng.jump_to_prompt(-1);
-        assert!(up.is_some_and(|n| n >= 1), "expected a prompt above, got {up:?}");
-    }
-
-    #[test]
-    fn bell_sets_one_shot_flag() {
-        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
-        assert!(!eng.take_bell(), "no bell yet");
-        eng.write(b"a\x07b");
-        assert!(eng.take_bell(), "BEL (0x07) should set the bell flag");
-        assert!(!eng.take_bell(), "the flag is one-shot and clears on read");
-    }
-
-    #[test]
-    fn reads_osc8_hyperlink_uri() {
-        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
-        // OSC 8 hyperlink: start (empty params, URI), display text "LINK", end.
-        // ST is ESC '\'. The link covers the four cells of "LINK".
-        eng.write(b"\x1b]8;;https://example.com\x1b\\LINK\x1b]8;;\x1b\\");
-        assert_eq!(
-            eng.hyperlink_at(0, 0).as_deref(),
-            Some("https://example.com")
-        );
-        assert_eq!(
-            eng.hyperlink_at(3, 0).as_deref(),
-            Some("https://example.com")
-        );
-        // A cell past the link text carries no hyperlink.
-        assert_eq!(eng.hyperlink_at(10, 0), None);
-    }
-
-    /// giest reconstructs the scrollbar's `{total, offset, len}` from
-    /// `scrollback_rows()` + the viewport height instead of calling the
-    /// binding's `Terminal::scrollbar()` (expensive at arbitrary pins, and its
-    /// integer `offset` can't carry a sub-line position). That's only valid if
-    /// the two agree — so compare them directly, and catch it here rather than
-    /// as a subtly skewed thumb if upstream ever changes the arithmetic.
-    #[test]
-    fn scrollbar_state_matches_the_reconstruction_from_scrollback_rows() {
-        const ROWS: u16 = 24;
-        let mut eng = GhosttyVtEngine::new(80, ROWS, 1000).unwrap();
-        for i in 0..200 {
-            eng.write(format!("line {i}\r\n").as_bytes());
-        }
-        let scrollback = eng.scrollback_rows();
-        assert!(scrollback > 0, "200 lines into a 24-row grid must scroll off");
-
-        let bar = eng.term.scrollbar().unwrap();
-        assert_eq!(bar.len as usize, ROWS as usize, "len is the viewport height");
-        assert_eq!(
-            bar.total as usize,
-            scrollback + ROWS as usize,
-            "total is scrollback plus the viewport"
-        );
-        // Parked at the live bottom, so the viewport starts at the last page.
-        assert_eq!(bar.offset as usize, scrollback);
-
-        // And it tracks the pin: scrolling up 10 lines moves `offset` by 10.
-        eng.scroll(-10);
-        assert_eq!(eng.term.scrollbar().unwrap().offset as usize, scrollback - 10);
-    }
-
-    #[test]
-    fn enter_key_encodes_carriage_return() {
-        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
-        let bytes = eng.encode_key(&KeyInput {
-            code: KeyCode::Enter,
-            text: None,
-            mods: KeyMods::default(),
-            press: true,
-        });
-        assert_eq!(bytes, b"\r");
-    }
-
-    #[test]
-    fn paste_normalizes_newlines_when_not_bracketed() {
-        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
-        // Default: bracketed paste off → newlines become carriage returns.
-        assert_eq!(eng.encode_paste("a\nb"), b"a\rb");
-    }
-
-    /// Paste protection needs the mode *before* encoding, so it reads it
-    /// through its own accessor rather than inferring it from the output.
-    #[test]
-    fn bracketed_paste_mode_is_reported() {
-        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
-        assert!(!eng.bracketed_paste(), "off until the program asks");
-        eng.write(b"\x1b[?2004h");
-        assert!(eng.bracketed_paste(), "DECSET 2004 enables it");
-        eng.write(b"\x1b[?2004l");
-        assert!(!eng.bracketed_paste(), "DECRST 2004 disables it");
-    }
-
-    #[test]
-    fn paste_wraps_in_brackets_when_enabled() {
-        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
-        // Enable bracketed paste (DEC mode 2004) the way an app would.
-        eng.write(b"\x1b[?2004h");
-        let out = eng.encode_paste("hi");
-        assert_eq!(out, b"\x1b[200~hi\x1b[201~");
-    }
-
-    #[test]
-    fn mouse_left_press_sgr() {
-        let mut eng = GhosttyVtEngine::new(80, 24, 100).unwrap();
-        // Enable button tracking (1000) + SGR extended mode (1006).
-        eng.write(b"\x1b[?1000h\x1b[?1006h");
-        assert!(eng.is_mouse_tracking());
-        let out = eng.encode_mouse(&MouseInput {
-            action: MouseAction::Press,
-            button: Some(MouseButton::Left),
-            pos_px: (25, 30),
-            cell_px: (10, 20),
-            screen_px: (800, 480),
-            mods: KeyMods::default(),
-        });
-        // Cell (col 2, row 1) 0-based → SGR 1-based col 3, row 2; button 0; press 'M'.
-        assert_eq!(out, b"\x1b[<0;3;2M");
-    }
-
-    #[test]
-    fn ctrl_c_encodes_etx() {
-        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
-        let bytes = eng.encode_key(&KeyInput {
-            code: KeyCode::C,
-            text: None,
-            mods: KeyMods {
-                ctrl: true,
-                ..Default::default()
-            },
-            press: true,
-        });
-        assert_eq!(bytes, b"\x03");
-    }
-
-    // --- Encode integration: verify giest drives libghostty's encoder with the
-    // live terminal modes (these assert standard xterm sequences, not a
-    // re-derivation of the protocol — that's libghostty's own test surface). ---
-
-    fn key(eng: &mut GhosttyVtEngine, code: KeyCode, mods: KeyMods) -> Vec<u8> {
-        eng.encode_key(&KeyInput {
-            code,
-            text: None,
-            mods,
-            press: true,
-        })
-    }
-
-    #[test]
-    fn arrows_normal_mode() {
-        let mut eng = GhosttyVtEngine::new(80, 24, 100).unwrap();
-        let none = KeyMods::default();
-        assert_eq!(key(&mut eng, KeyCode::ArrowUp, none), b"\x1b[A");
-        assert_eq!(key(&mut eng, KeyCode::ArrowDown, none), b"\x1b[B");
-        assert_eq!(key(&mut eng, KeyCode::ArrowRight, none), b"\x1b[C");
-        assert_eq!(key(&mut eng, KeyCode::ArrowLeft, none), b"\x1b[D");
-    }
-
-    #[test]
-    fn arrows_application_cursor_mode() {
-        let mut eng = GhosttyVtEngine::new(80, 24, 100).unwrap();
-        // DECCKM (application cursor keys) switches CSI to SS3 form.
-        eng.write(b"\x1b[?1h");
-        assert_eq!(
-            key(&mut eng, KeyCode::ArrowUp, KeyMods::default()),
-            b"\x1bOA"
-        );
-        assert_eq!(
-            key(&mut eng, KeyCode::ArrowRight, KeyMods::default()),
-            b"\x1bOC"
-        );
-    }
-
-    #[test]
-    fn modified_arrows_emit_csi_modifier() {
-        let mut eng = GhosttyVtEngine::new(80, 24, 100).unwrap();
-        let shift = KeyMods {
-            shift: true,
-            ..Default::default()
-        };
-        let ctrl = KeyMods {
-            ctrl: true,
-            ..Default::default()
-        };
-        let alt = KeyMods {
-            alt: true,
-            ..Default::default()
-        };
-        // xterm modifier params: shift=2, alt=3, ctrl=5 (param-1 bitmask + 1).
-        assert_eq!(key(&mut eng, KeyCode::ArrowRight, shift), b"\x1b[1;2C");
-        assert_eq!(key(&mut eng, KeyCode::ArrowRight, alt), b"\x1b[1;3C");
-        assert_eq!(key(&mut eng, KeyCode::ArrowRight, ctrl), b"\x1b[1;5C");
-    }
-
-    #[test]
-    fn mouse_release_and_large_position_sgr() {
-        let mut eng = GhosttyVtEngine::new(200, 60, 100).unwrap();
-        eng.write(b"\x1b[?1000h\x1b[?1006h");
-        let out = eng.encode_mouse(&MouseInput {
-            action: MouseAction::Release,
-            button: Some(MouseButton::Left),
-            // 1005/10 = col 100 → 1-based 101; 1190/20 = row 59 → 1-based 60.
-            pos_px: (1005, 1190),
-            cell_px: (10, 20),
-            screen_px: (2000, 1200),
-            mods: KeyMods::default(),
-        });
-        // Release in SGR mode terminates with 'm' (press would be 'M').
-        assert_eq!(out, b"\x1b[<0;101;60m");
     }
 }
 
@@ -2953,7 +1167,8 @@ impl TerminalEngine for GhosttyVtEngine {
         }
         self.term.set_default_fg_color(Some(to_c(fg)))?;
         self.term.set_default_bg_color(Some(to_c(bg)))?;
-        self.term.set_default_color_palette(Some(libghostty_vt::style::Palette(pal)))?;
+        self.term
+            .set_default_color_palette(Some(libghostty_vt::style::Palette(pal)))?;
         Ok(())
     }
 
@@ -2996,7 +1211,7 @@ impl TerminalEngine for GhosttyVtEngine {
                     .grid_ref(Point::Viewport(PointCoordinate { x: 0, y }))
                     .ok();
                 let row = row_ref.as_ref().and_then(|gr| gr.row().ok());
-                let input = (0..cols as u16)
+                let input = (0..cols)
                     .map(|x| {
                         self.term
                             .grid_ref(Point::Viewport(PointCoordinate { x, y }))
@@ -3009,7 +1224,8 @@ impl TerminalEngine for GhosttyVtEngine {
                 super::PromptRowInfo {
                     input,
                     wrap: row.is_some_and(|r| r.is_wrapped().unwrap_or(false)),
-                    wrap_continuation: row.is_some_and(|r| r.is_wrap_continuation().unwrap_or(false)),
+                    wrap_continuation: row
+                        .is_some_and(|r| r.is_wrap_continuation().unwrap_or(false)),
                     prompt: match row.and_then(|r| r.semantic_prompt().ok()) {
                         Some(RowSemanticPrompt::Prompt) => super::RowPrompt::Prompt,
                         Some(RowSemanticPrompt::Continuation) => super::RowPrompt::Continuation,
@@ -3062,11 +1278,18 @@ impl TerminalEngine for GhosttyVtEngine {
         Ok(())
     }
 
-    fn set_vt_policy(&mut self, title_report: bool, kam_allowed: bool, grapheme_unicode: bool) -> Result<()> {
+    fn set_vt_policy(
+        &mut self,
+        title_report: bool,
+        kam_allowed: bool,
+        grapheme_unicode: bool,
+    ) -> Result<()> {
         self.term.set_title_report_enabled(title_report)?;
         self.kam_allowed = kam_allowed;
-        self.term.set_default_mode(Mode::GRAPHEME_CLUSTER, grapheme_unicode)?;
-        self.term.set_mode(Mode::GRAPHEME_CLUSTER, grapheme_unicode)?;
+        self.term
+            .set_default_mode(Mode::GRAPHEME_CLUSTER, grapheme_unicode)?;
+        self.term
+            .set_mode(Mode::GRAPHEME_CLUSTER, grapheme_unicode)?;
         Ok(())
     }
 
@@ -3079,7 +1302,11 @@ impl TerminalEngine for GhosttyVtEngine {
         Ok(())
     }
 
-    fn compress_tick(&mut self, now: std::time::Instant, budget: std::time::Duration) -> Result<()> {
+    fn compress_tick(
+        &mut self,
+        now: std::time::Instant,
+        budget: std::time::Duration,
+    ) -> Result<()> {
         use libghostty_vt::terminal::{CompressionMode, CompressionResult};
         let activity = self.term.compression_activity()?;
         if self.compress_activity != Some(activity) {
@@ -3311,13 +1538,16 @@ impl TerminalEngine for GhosttyVtEngine {
         if configured.is_err() {
             return 0;
         }
-        let Ok(gr) = self
-            .term
-            .grid_ref(Point::Viewport(PointCoordinate { x: p.at.cell.0, y: p.at.cell.1 as u32 }))
-        else {
+        let Ok(gr) = self.term.grid_ref(Point::Viewport(PointCoordinate {
+            x: p.at.cell.0,
+            y: p.at.cell.1 as u32,
+        })) else {
             return 0;
         };
-        let installed = match self.gesture_press_ev.apply(&mut self.gesture, &self.term, gr) {
+        let installed = match self
+            .gesture_press_ev
+            .apply(&mut self.gesture, &self.term, gr)
+        {
             Ok(Some(sel)) => self.install_selection(&sel),
             _ => None,
         };
@@ -3356,16 +1586,17 @@ impl TerminalEngine for GhosttyVtEngine {
             } else {
                 ev.set_word_boundary_codepoints(word_boundaries)?;
             }
-            ev.set_position(at.px.0, at.px.1)?.set_rectangle(rectangle)?;
+            ev.set_position(at.px.0, at.px.1)?
+                .set_rectangle(rectangle)?;
             Ok(())
         })();
         if configured.is_err() {
             return 0;
         }
-        let Ok(gr) = self
-            .term
-            .grid_ref(Point::Viewport(PointCoordinate { x: at.cell.0, y: at.cell.1 as u32 }))
-        else {
+        let Ok(gr) = self.term.grid_ref(Point::Viewport(PointCoordinate {
+            x: at.cell.0,
+            y: at.cell.1 as u32,
+        })) else {
             return 0;
         };
         let geo = gesture::Geometry {
@@ -3374,7 +1605,9 @@ impl TerminalEngine for GhosttyVtEngine {
             padding_left: 0,
             screen_height: geometry.height.max(1),
         };
-        let sel = self.gesture_drag_ev.apply(&mut self.gesture, &self.term, gr, geo);
+        let sel = self
+            .gesture_drag_ev
+            .apply(&mut self.gesture, &self.term, gr, geo);
         let installed = match sel {
             Ok(Some(sel)) => {
                 let rect = sel.is_rectangle();
@@ -3404,7 +1637,9 @@ impl TerminalEngine for GhosttyVtEngine {
                 .grid_ref(Point::Viewport(PointCoordinate { x, y: y as u32 }))
                 .ok()
         });
-        let _ = self.gesture_release_ev.apply(&mut self.gesture, &self.term, gr);
+        let _ = self
+            .gesture_release_ev
+            .apply(&mut self.gesture, &self.term, gr);
         self.gesture.dragged(&self.term).unwrap_or(false)
     }
 
@@ -3484,7 +1719,11 @@ impl TerminalEngine for GhosttyVtEngine {
         }
         let h = self.sel_head.as_ref()?;
         let end = h.snapshot(&self.term).ok()??;
-        self.term.point_from_grid_ref(&end, PointSpace::Screen).ok().flatten().map(|p| p.y)
+        self.term
+            .point_from_grid_ref(&end, PointSpace::Screen)
+            .ok()
+            .flatten()
+            .map(|p| p.y)
     }
 
     fn selected_text(&self, trim: bool) -> Option<String> {
@@ -3798,7 +2037,9 @@ impl TerminalEngine for GhosttyVtEngine {
             }
             let row_start = y * cols as usize;
             if partial {
-                out.cells[row_start..row_start + cols as usize].iter_mut().for_each(blank_cell);
+                out.cells[row_start..row_start + cols as usize]
+                    .iter_mut()
+                    .for_each(blank_cell);
             }
             let mut row_has_blink = false;
             let sel = row.selection().ok().flatten();
@@ -3819,8 +2060,8 @@ impl TerminalEngine for GhosttyVtEngine {
                     min_contrast,
                     &mut out.cells[idx],
                 )?;
-                out.cells[idx].selected = sel
-                    .is_some_and(|s| x >= s.start_x as usize && x <= s.end_x as usize);
+                out.cells[idx].selected =
+                    sel.is_some_and(|s| x >= s.start_x as usize && x <= s.end_x as usize);
                 row_has_blink |= out.cells[idx].blink;
                 x += 1;
             }
@@ -3835,5 +2076,2015 @@ impl TerminalEngine for GhosttyVtEngine {
         snapshot.set_dirty(Dirty::Clean)?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        Compression, GhosttyVtEngine, ImageFormat, Rc, RefCell, Terminal, intern_enquiry,
+        strip_osc72, to_rgba,
+    };
+    use crate::engine::{
+        GridSnapshot, KeyCode, KeyInput, KeyMods, MouseAction, MouseButton, MouseInput, Rgb,
+        SelectKind, TerminalEngine, UnderlineStyle,
+    };
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    #[test]
+    fn apply_theme_sets_default_colors() {
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        let pal = [Rgb::new(0, 0, 0); 256];
+        eng.apply_theme(Rgb::new(200, 100, 50), Rgb::new(16, 18, 24), &pal)
+            .unwrap();
+        let mut s = GridSnapshot::default();
+        eng.snapshot(&mut s).unwrap();
+        assert_eq!(s.default_bg, Rgb::new(16, 18, 24));
+        assert_eq!(s.default_fg, Rgb::new(200, 100, 50));
+
+        // A shell clears/resets the screen on startup; the configured default
+        // background must survive SGR reset + erase.
+        eng.write(b"\x1b[0m\x1b[2J\x1b[Hhello");
+        let mut s2 = GridSnapshot::default();
+        eng.snapshot(&mut s2).unwrap();
+        assert_eq!(
+            s2.default_bg,
+            Rgb::new(16, 18, 24),
+            "default bg should survive reset/erase"
+        );
+    }
+
+    fn snap(eng: &mut GhosttyVtEngine) -> GridSnapshot {
+        let mut s = GridSnapshot::default();
+        eng.snapshot(&mut s).unwrap();
+        s
+    }
+
+    #[test]
+    fn captures_text_styles_and_color() {
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        // bold 'B', italic 'I', red 'R'.
+        eng.write(b"\x1b[1mB\x1b[0m\x1b[3mI\x1b[0m\x1b[31mR\x1b[0m");
+        let s = snap(&mut eng);
+
+        let b = s.cell(0, 0).unwrap();
+        assert_eq!(b.text, "B");
+        assert!(b.bold, "expected bold cell");
+
+        let i = s.cell(1, 0).unwrap();
+        assert!(i.italic, "expected italic cell");
+
+        let r = s.cell(2, 0).unwrap();
+        assert_eq!(r.text, "R");
+        // Default ANSI red has a dominant red channel.
+        assert!(
+            r.fg.r > r.fg.g && r.fg.r > r.fg.b,
+            "expected reddish fg, got {:?}",
+            r.fg
+        );
+    }
+
+    #[test]
+    fn captures_extended_text_attrs() {
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        // faint F, double-underline D, curly-underline C, overline O, blink K,
+        // invisible V — each style reset before the next cell.
+        eng.write(
+            b"\x1b[2mF\x1b[0m\
+              \x1b[4:2mD\x1b[0m\
+              \x1b[4:3mC\x1b[0m\
+              \x1b[53mO\x1b[0m\
+              \x1b[5mK\x1b[0m\
+              \x1b[8mV\x1b[0m",
+        );
+        let s = snap(&mut eng);
+        assert!(s.cell(0, 0).unwrap().faint, "expected faint cell");
+        assert_eq!(s.cell(1, 0).unwrap().underline, UnderlineStyle::Double);
+        assert_eq!(s.cell(2, 0).unwrap().underline, UnderlineStyle::Curly);
+        assert!(s.cell(3, 0).unwrap().overline, "expected overline cell");
+        assert!(s.cell(4, 0).unwrap().blink, "expected blink cell");
+        assert!(s.has_blink, "snapshot.has_blink set when any cell blinks");
+        assert!(s.cell(5, 0).unwrap().invisible, "expected invisible cell");
+    }
+
+    #[test]
+    fn resolves_palette_underline_color() {
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        // The render iterator resolves fg/bg but not the underline color, so the
+        // engine resolves a palette-index underline color against its palette.
+        let mut pal = [Rgb::new(0, 0, 0); 256];
+        pal[5] = Rgb::new(200, 50, 25);
+        eng.apply_theme(Rgb::new(200, 200, 200), Rgb::new(0, 0, 0), &pal)
+            .unwrap();
+        // Underline on; underline color = palette index 5 (SGR 58:5:5).
+        eng.write(b"\x1b[4m\x1b[58:5:5mU");
+        let c = snap(&mut eng).cell(0, 0).unwrap().clone();
+        assert_eq!(c.underline, UnderlineStyle::Single);
+        assert_eq!(c.underline_color, Some(Rgb::new(200, 50, 25)));
+    }
+
+    #[test]
+    fn bold_is_bright_uses_bright_palette_variant() {
+        use crate::engine::BoldColor;
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        let mut pal = [Rgb::new(0, 0, 0); 256];
+        pal[1] = Rgb::new(100, 0, 0); // ANSI red
+        pal[9] = Rgb::new(200, 50, 25); // bright red
+        eng.apply_theme(Rgb::new(200, 200, 200), Rgb::new(0, 0, 0), &pal)
+            .unwrap();
+
+        // Without the policy, bold red stays the plain ANSI red (palette 1).
+        eng.write(b"\x1b[1;31mR\x1b[0m");
+        assert_eq!(snap(&mut eng).cell(0, 0).unwrap().fg, Rgb::new(100, 0, 0));
+
+        // With bold-is-bright, bold + ANSI red (idx 1) brightens to idx 9.
+        eng.set_bold_color(BoldColor::Bright).unwrap();
+        eng.write(b"\x1b[2J\x1b[H\x1b[1;31mR\x1b[0m");
+        assert_eq!(snap(&mut eng).cell(0, 0).unwrap().fg, Rgb::new(200, 50, 25));
+    }
+
+    #[test]
+    fn bold_color_sets_fixed_color_for_default_fg() {
+        use crate::engine::BoldColor;
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        let mut pal = [Rgb::new(0, 0, 0); 256];
+        pal[1] = Rgb::new(100, 0, 0);
+        pal[9] = Rgb::new(200, 50, 25);
+        eng.apply_theme(Rgb::new(200, 200, 200), Rgb::new(0, 0, 0), &pal)
+            .unwrap();
+        eng.set_bold_color(BoldColor::Color(Rgb::new(10, 20, 30)))
+            .unwrap();
+
+        // A bold default-foreground cell takes the fixed bold color.
+        eng.write(b"\x1b[1mB\x1b[0m");
+        assert_eq!(snap(&mut eng).cell(0, 0).unwrap().fg, Rgb::new(10, 20, 30));
+
+        // A bold ANSI palette color is still brightened (not the fixed color).
+        eng.write(b"\x1b[2J\x1b[H\x1b[1;31mR\x1b[0m");
+        assert_eq!(snap(&mut eng).cell(0, 0).unwrap().fg, Rgb::new(200, 50, 25));
+    }
+
+    #[test]
+    fn bold_is_bright_tracks_osc4_palette_redefinition() {
+        use crate::engine::BoldColor;
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        let mut pal = [Rgb::new(0, 0, 0); 256];
+        pal[1] = Rgb::new(100, 0, 0);
+        pal[9] = Rgb::new(200, 50, 25);
+        eng.apply_theme(Rgb::new(200, 200, 200), Rgb::new(0, 0, 0), &pal)
+            .unwrap();
+        eng.set_bold_color(BoldColor::Bright).unwrap();
+        // Redefine bright-red (index 9) to green via OSC 4; the bold-bright bump
+        // must follow the live palette, not the static config copy.
+        eng.write(b"\x1b]4;9;rgb:00/ff/00\x1b\\");
+        eng.write(b"\x1b[1;31mR\x1b[0m");
+        assert_eq!(snap(&mut eng).cell(0, 0).unwrap().fg, Rgb::new(0, 255, 0));
+    }
+
+    #[test]
+    fn min_contrast_forced_glyph_drops_faint() {
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        eng.apply_theme(
+            Rgb::new(30, 30, 30),
+            Rgb::new(0, 0, 0),
+            &[Rgb::new(0, 0, 0); 256],
+        )
+        .unwrap();
+        eng.set_min_contrast(21.0).unwrap();
+        // Faint + a low-contrast fg: min-contrast forces white, and faint is
+        // dropped so the now-readable glyph renders opaque (matching Ghostty's
+        // contrasted_color returning alpha 1.0).
+        eng.write(b"\x1b[2mX"); // SGR 2 = faint
+        let c = snap(&mut eng).cell(0, 0).unwrap().clone();
+        assert_eq!(c.fg, Rgb::new(255, 255, 255));
+        assert!(
+            !c.faint,
+            "faint is dropped when min-contrast forces a color"
+        );
+
+        // A faint glyph that already passes contrast keeps its faint flag
+        // (truecolor white on black easily clears the ratio).
+        eng.write(b"\x1b[2J\x1b[H\x1b[2;38;2;255;255;255mX");
+        let c2 = snap(&mut eng).cell(0, 0).unwrap().clone();
+        assert!(c2.faint, "faint kept when the cell already meets contrast");
+    }
+
+    #[test]
+    fn minimum_contrast_forces_readable_foreground() {
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        // Near-black fg on black bg: far below any real contrast ratio.
+        eng.apply_theme(
+            Rgb::new(30, 30, 30),
+            Rgb::new(0, 0, 0),
+            &[Rgb::new(0, 0, 0); 256],
+        )
+        .unwrap();
+
+        // Off (ratio 1.0): the faint foreground is left untouched.
+        eng.write(b"X");
+        assert_eq!(snap(&mut eng).cell(0, 0).unwrap().fg, Rgb::new(30, 30, 30));
+
+        // With a high minimum, fg is forced to white (it contrasts black best).
+        eng.set_min_contrast(21.0).unwrap();
+        eng.write(b"\x1b[2J\x1b[HX");
+        assert_eq!(
+            snap(&mut eng).cell(0, 0).unwrap().fg,
+            Rgb::new(255, 255, 255)
+        );
+    }
+
+    /// An engine sized for kitty tests. `pixelSize` recovers the cell size by
+    /// dividing `width_px / cols`, so an engine that was never resized reports a
+    /// 0x0 cell and every `c=`/`r=` placement comes out zero-sized.
+    fn kitty_engine() -> GhosttyVtEngine {
+        let mut eng = GhosttyVtEngine::new(80, 24, 100).unwrap();
+        eng.set_image_storage_limit(64 * 1024 * 1024).unwrap();
+        eng.resize(80, 24, (10, 20)).unwrap();
+        eng
+    }
+
+    /// `a=T` transmit+display, `t=d` direct, `f=24` RGB, 1x2 px (6 bytes), shown
+    /// across 4x2 cells. The payload is base64 of six 0xFF bytes.
+    const KITTY_RGB_1X2: &[u8] = b"\x1b_Ga=T,t=d,f=24,i=1,p=1,s=1,v=2,c=4,r=2;////////\x1b\\";
+
+    #[test]
+    fn rgb_expands_to_opaque_rgba() {
+        let src = [1, 2, 3, 4, 5, 6];
+        let got = to_rgba(ImageFormat::Rgb, Compression::None, 2, 1, &src).unwrap();
+        assert_eq!(got, vec![1, 2, 3, 0xff, 4, 5, 6, 0xff]);
+    }
+
+    #[test]
+    fn gray_and_gray_alpha_expand_to_rgba() {
+        let got = to_rgba(ImageFormat::Gray, Compression::None, 2, 1, &[9, 200]).unwrap();
+        assert_eq!(got, vec![9, 9, 9, 0xff, 200, 200, 200, 0xff]);
+        let got = to_rgba(ImageFormat::GrayAlpha, Compression::None, 1, 1, &[9, 128]).unwrap();
+        assert_eq!(got, vec![9, 9, 9, 128]);
+    }
+
+    #[test]
+    fn rgba_is_copied_and_wrong_length_rejected() {
+        let src = [1, 2, 3, 4];
+        assert_eq!(
+            to_rgba(ImageFormat::Rgba, Compression::None, 1, 1, &src).unwrap(),
+            src.to_vec()
+        );
+        // One byte short for a 1x1 RGBA image.
+        assert!(to_rgba(ImageFormat::Rgba, Compression::None, 1, 1, &src[..3]).is_none());
+        // Dimensions that don't match the buffer at all.
+        assert!(to_rgba(ImageFormat::Rgb, Compression::None, 100, 100, &src).is_none());
+    }
+
+    #[test]
+    fn png_and_compressed_data_are_rejected() {
+        // Both are resolved by the VT engine before storage, so reaching here
+        // means something is wrong; refuse rather than misinterpret the bytes.
+        assert!(to_rgba(ImageFormat::Png, Compression::None, 1, 1, &[0; 4]).is_none());
+        assert!(to_rgba(ImageFormat::Rgba, Compression::ZlibDeflate, 1, 1, &[0; 4]).is_none());
+    }
+
+    #[test]
+    fn image_storage_limit_of_zero_disables_the_protocol() {
+        // libghostty does NOT start at zero — the library default is a small
+        // non-zero limit (10 MB), so kitty graphics are live before giest sets
+        // anything. What `image-storage-limit` really controls is the budget,
+        // and specifically that **zero turns the protocol off and wipes stored
+        // images**, which is the behaviour worth pinning.
+        let mut eng = GhosttyVtEngine::new(80, 24, 100).unwrap();
+        eng.resize(80, 24, (10, 20)).unwrap();
+        assert!(
+            eng.term.kitty_image_storage_limit().unwrap() > 0,
+            "libghostty starts with a non-zero default limit"
+        );
+        eng.write(KITTY_RGB_1X2);
+        assert_eq!(snap(&mut eng).images.len(), 1);
+
+        // Zero disables the protocol and deletes everything already stored.
+        eng.set_image_storage_limit(0).unwrap();
+        assert!(snap(&mut eng).images.is_empty(), "zero wipes stored images");
+        eng.write(b"\x1b_Ga=T,t=d,f=24,i=2,p=1,s=1,v=2,c=4,r=2;////////\x1b\\");
+        assert!(snap(&mut eng).images.is_empty(), "zero refuses new images");
+
+        // …and raising it again accepts new transmissions.
+        eng.set_image_storage_limit(64 * 1024 * 1024).unwrap();
+        eng.write(b"\x1b_Ga=T,t=d,f=24,i=3,p=1,s=1,v=2,c=4,r=2;////////\x1b\\");
+        assert_eq!(snap(&mut eng).images.len(), 1, "re-enabled by a new limit");
+    }
+
+    #[test]
+    fn enquiry_response_answers_enq() {
+        let mut eng = GhosttyVtEngine::new(80, 24, 0).unwrap();
+        eng.write(b"\x05");
+        assert!(
+            eng.take_responses().is_empty(),
+            "default is empty: ENQ goes unanswered"
+        );
+        eng.set_enquiry_response("giest-answerback");
+        eng.write(b"a\x05b");
+        assert_eq!(eng.take_responses(), b"giest-answerback");
+        eng.set_enquiry_response("");
+        eng.write(b"\x05");
+        assert!(
+            eng.take_responses().is_empty(),
+            "reload back to empty stops answering"
+        );
+        assert!(
+            std::ptr::eq(intern_enquiry("x1"), intern_enquiry("x1")),
+            "interned once"
+        );
+    }
+
+    #[test]
+    fn kitty_dnd_is_not_advertised() {
+        let mut eng = GhosttyVtEngine::new(80, 24, 0).unwrap();
+        // Tripwire half: the engine itself does answer the query...
+        let mut raw = Terminal::new(80, 24).unwrap();
+        let got = Rc::new(RefCell::new(Vec::new()));
+        let sink = got.clone();
+        raw.on_pty_write(move |_t, d| sink.borrow_mut().extend_from_slice(d))
+            .unwrap();
+        raw.vt_write(b"\x1b]72;t=q:i=3\x1b\\");
+        assert_eq!(
+            &*got.borrow(),
+            b"\x1b]72;t=q:i=3\x1b\\",
+            "engine answers OSC 72 queries"
+        );
+        // ...and giest withholds it, since it can't deliver a drop.
+        eng.write(b"\x1b]72;t=q:i=3\x1b\\\x1b[5n\x1b]72;t=q\x07");
+        assert_eq!(
+            eng.take_responses(),
+            b"\x1b[0n",
+            "only the non-OSC-72 reply survives"
+        );
+    }
+
+    #[test]
+    fn strip_osc72_handles_both_terminators_and_neighbours() {
+        let mut b = b"a\x1b]72;x\x07b\x1b]72;y\x1b\\c\x1b]52;c;?\x07".to_vec();
+        strip_osc72(&mut b);
+        assert_eq!(b, b"abc\x1b]52;c;?\x07");
+        let mut unterminated = b"z\x1b]72;t=q".to_vec();
+        strip_osc72(&mut unterminated);
+        assert_eq!(unterminated, b"z");
+    }
+
+    #[test]
+    fn glyph_protocol_is_not_advertised() {
+        let mut eng = kitty_engine();
+        eng.write(b"\x1b_25a1;s\x1b\\");
+        eng.write(b"\x1b_25a1;r;cp=e0a0;AAAAAAAAAAAAAA==\x1b\\");
+        assert!(
+            eng.take_responses().is_empty(),
+            "giest cannot render registered glyphs, so it must not answer the glyph protocol"
+        );
+    }
+
+    #[test]
+    fn kitty_retransmit_same_size_refreshes_pixels() {
+        // Same id, same 1x1 size, different colour: the old size fingerprint
+        // could not see this; the generation stamp does.
+        let mut eng = kitty_engine();
+        eng.write(b"\x1b_Ga=T,f=32,i=5,s=1,v=1,q=2;/wAA/w==\x1b\\"); // red
+        assert_eq!(snap(&mut eng).images[0].data.rgba, vec![255, 0, 0, 255]);
+        eng.write(b"\x1b_Ga=T,f=32,i=5,s=1,v=1,q=2;AAD//w==\x1b\\"); // blue
+        let s = snap(&mut eng);
+        assert!(s.images.iter().all(|p| p.data.rgba == vec![0, 0, 255, 255]));
+    }
+
+    #[test]
+    fn kitty_animation_frame_change_reaches_the_snapshot() {
+        // Client-driven animation: add frame 2 (a=f) and make it current
+        // (a=a,c=2). `image.data()` is the current frame and its generation
+        // changes, so the snapshot must carry the new pixels.
+        let mut eng = kitty_engine();
+        eng.write(b"\x1b_Ga=T,f=32,i=6,s=1,v=1,q=2;/wAA/w==\x1b\\"); // red root
+        eng.write(b"\x1b_Ga=f,f=32,i=6,s=1,v=1,q=2;AP8A/w==\x1b\\"); // green frame 2
+        eng.write(b"\x1b_Ga=a,i=6,c=2,q=2\x1b\\");
+        let s = snap(&mut eng);
+        assert_eq!(s.images.len(), 1);
+        assert_eq!(s.images[0].data.rgba, vec![0, 255, 0, 255]);
+        eng.write(b"\x1b_Ga=a,i=6,c=1,q=2\x1b\\");
+        assert_eq!(snap(&mut eng).images[0].data.rgba, vec![255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn kitty_relative_placement_follows_its_parent() {
+        // Parent image 1 placement 1 at the cursor (0,0); child image 2 placed
+        // relative to it with P=1,Q=1 and a cell offset H=3,V=2.
+        let mut eng = kitty_engine();
+        eng.write(b"\x1b_Ga=T,f=32,i=1,p=1,s=1,v=1,c=2,r=1,q=2;/wAA/w==\x1b\\");
+        eng.write(b"\x1b_Ga=t,f=32,i=2,s=1,v=1,q=2;AAD//w==\x1b\\");
+        eng.write(b"\x1b_Ga=p,i=2,p=1,P=1,Q=1,H=3,V=2,c=1,r=1,q=2\x1b\\");
+        let s = snap(&mut eng);
+        let parent = s.images.iter().find(|p| p.image_id == 1).expect("parent");
+        let child = s
+            .images
+            .iter()
+            .find(|p| p.image_id == 2)
+            .expect("child placed");
+        assert_eq!((child.col - parent.col, child.row - parent.row), (3, 2));
+    }
+
+    #[test]
+    fn kitty_placement_selects_no_cells() {
+        let mut eng = kitty_engine();
+        eng.write(b"before\r\n");
+        eng.write(KITTY_RGB_1X2);
+        eng.write(b"\r\nafter\r\n");
+        let s = snap(&mut eng);
+        let mut sel = 0;
+        for y in 0..s.rows {
+            for x in 0..s.cols {
+                if s.cell(x, y).is_some_and(|c| c.selected) {
+                    sel += 1;
+                }
+            }
+        }
+        assert_eq!(sel, 0, "a kitty placement must not mark cells selected");
+    }
+
+    #[test]
+    fn kitty_transmit_and_display_yields_a_placement() {
+        let mut eng = kitty_engine();
+        eng.write(KITTY_RGB_1X2);
+        let s = snap(&mut eng);
+        assert_eq!(s.images.len(), 1);
+        let p = &s.images[0];
+        assert_eq!((p.image_id, p.placement_id), (1, 1));
+        assert_eq!((p.data.width, p.data.height), (1, 2));
+        assert_eq!(p.data.rgba.len(), 2 * 4, "RGB expanded to RGBA");
+        assert_eq!((p.grid_cols, p.grid_rows), (4, 2));
+        // 4x2 cells at a 10x20 cell size.
+        assert_eq!((p.dest_w, p.dest_h), (40, 40));
+        assert_eq!((p.col, p.row), (0, 0));
+        assert!(p.visible);
+    }
+
+    #[test]
+    fn kitty_delete_clears_placements_without_a_dirty_frame() {
+        // A delete touches only the image storage, whose dirty flag is not part
+        // of the render state's. If placements were refreshed only on a dirty
+        // frame, the deleted image would stay on screen forever.
+        let mut eng = kitty_engine();
+        eng.write(KITTY_RGB_1X2);
+        assert_eq!(snap(&mut eng).images.len(), 1);
+        // Take a second snapshot first, so the dirty-skip fast path is armed.
+        assert_eq!(snap(&mut eng).images.len(), 1);
+
+        eng.write(b"\x1b_Ga=d,d=I,i=1\x1b\\");
+        assert!(snap(&mut eng).images.is_empty(), "delete must take effect");
+    }
+
+    #[test]
+    fn kitty_png_is_decoded_by_the_installed_decoder() {
+        // `f=100` is what icat and most tools send, and libghostty rejects it
+        // outright unless a decoder is installed **on this thread**. This is the
+        // only end-to-end proof that `png_decode::install` ran here — it would
+        // fail immediately if the guard were a `Once` instead of thread-local,
+        // since every test runs on its own thread.
+        let mut eng = kitty_engine();
+        eng.write(
+            b"\x1b_Ga=T,f=100,i=7,p=1,q=1;\
+              iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAA\
+              DUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==\
+              \x1b\\",
+        );
+        let s = snap(&mut eng);
+        assert_eq!(s.images.len(), 1, "PNG rejected — decoder not installed?");
+        let p = &s.images[0];
+        assert_eq!((p.data.width, p.data.height), (1, 1));
+        assert_eq!(p.data.rgba.len(), 4);
+    }
+
+    #[test]
+    fn evict_absent_drops_unseen_ids() {
+        use super::evict_absent;
+        let mk = || {
+            (
+                1u64,
+                Arc::new(crate::engine::ImageData {
+                    width: 1,
+                    height: 1,
+                    rgba: vec![0; 4],
+                }),
+            )
+        };
+        let mut cache = HashMap::from([(1, mk()), (2, mk()), (3, mk())]);
+        evict_absent(&mut cache, &[1, 3]);
+        assert_eq!(cache.len(), 2);
+        assert!(cache.contains_key(&1) && cache.contains_key(&3));
+        // Nothing seen at all clears the cache — that's a deleted-everything frame.
+        evict_absent(&mut cache, &[]);
+        assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn kitty_image_pixels_are_shared_across_snapshots() {
+        // The copy out of the VT engine's storage must happen once per image id,
+        // not once per frame.
+        let mut eng = kitty_engine();
+        eng.write(KITTY_RGB_1X2);
+        let a = snap(&mut eng).images[0].data.clone();
+        let b = snap(&mut eng).images[0].data.clone();
+        assert!(Arc::ptr_eq(&a, &b), "pixels re-copied every frame");
+    }
+
+    #[test]
+    fn osc_dynamic_color_sets_apply_without_a_scanner() {
+        // libghostty applies OSC 10/11/12 *sets* internally and the snapshot
+        // reads the effective colors, so giest needs no scanner for them — only
+        // for the `?` queries, which the vt library drops. This test is the
+        // safety net for that claim.
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        let fg = Rgb::new(0xc5, 0xc8, 0xc6);
+        let bg = Rgb::new(0x10, 0x12, 0x18);
+        eng.apply_theme(fg, bg, &[Rgb::new(0, 0, 0); 256]).unwrap();
+
+        eng.write(b"\x1b]11;rgb:00/ff/00\x07");
+        assert_eq!(snap(&mut eng).default_bg, Rgb::new(0, 255, 0));
+        eng.write(b"\x1b]10;rgb:ff/00/00\x07");
+        assert_eq!(snap(&mut eng).default_fg, Rgb::new(255, 0, 0));
+
+        // OSC 110/111 reset to the configured defaults.
+        eng.write(b"\x1b]111\x07\x1b]110\x07");
+        let s = snap(&mut eng);
+        assert_eq!(s.default_bg, bg);
+        assert_eq!(s.default_fg, fg);
+    }
+
+    #[test]
+    fn dynamic_colors_reports_effective_values() {
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        eng.apply_theme(
+            Rgb::new(0xc5, 0xc8, 0xc6),
+            Rgb::new(0x10, 0x12, 0x18),
+            &[Rgb::new(0, 0, 0); 256],
+        )
+        .unwrap();
+        eng.set_cursor_color(None).unwrap();
+
+        let (fg, bg, cursor) = eng.dynamic_colors();
+        assert_eq!(fg, Rgb::new(0xc5, 0xc8, 0xc6));
+        assert_eq!(bg, Rgb::new(0x10, 0x12, 0x18));
+        assert_eq!(cursor, None, "no cursor color set");
+
+        // An OSC 11 override is reflected without any snapshot in between.
+        eng.write(b"\x1b]11;rgb:00/00/ff\x07");
+        assert_eq!(eng.dynamic_colors().1, Rgb::new(0, 0, 255));
+
+        eng.set_cursor_color(Some(Rgb::new(1, 2, 3))).unwrap();
+        assert_eq!(eng.dynamic_colors().2, Some(Rgb::new(1, 2, 3)));
+    }
+
+    #[test]
+    fn dynamic_colors_does_not_break_the_dirty_skip() {
+        // `dynamic_colors` must not consume the terminal's dirty state — doing so
+        // would make the following snapshot take the "nothing changed" fast path
+        // and render an empty grid.
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        eng.write(b"hello");
+        let _ = eng.dynamic_colors();
+        let s = snap(&mut eng);
+        assert_eq!(s.cell(0, 0).unwrap().text.as_str(), "h");
+        assert_eq!(s.cell(4, 0).unwrap().text.as_str(), "o");
+    }
+
+    #[test]
+    fn default_background_cells_are_flagged() {
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        let bg = Rgb::new(0x1d, 0x1f, 0x21);
+        let mut pal = [Rgb::new(0, 0, 0); 256];
+        pal[1] = Rgb::new(200, 0, 0); // ANSI red
+        eng.apply_theme(Rgb::new(200, 200, 200), bg, &pal).unwrap();
+
+        // 'a' default bg, 'b' on ANSI red, then back to default for ' ' and 'c'.
+        eng.write(b"a\x1b[41mb\x1b[m c");
+        let s = snap(&mut eng);
+
+        assert!(
+            !s.cell(0, 0).unwrap().bg_explicit,
+            "default bg is not explicit"
+        );
+        assert!(
+            s.cell(1, 0).unwrap().bg_explicit,
+            "SGR 41 sets an explicit bg"
+        );
+        assert_eq!(s.cell(1, 0).unwrap().bg, pal[1]);
+        assert!(
+            !s.cell(2, 0).unwrap().bg_explicit,
+            "SGR 0 resets to default bg"
+        );
+        assert!(!s.cell(3, 0).unwrap().bg_explicit);
+        // A cell the row iterator never yields is blanked, and a blank cell must
+        // read as default-bg — otherwise it would paint an opaque quad and punch
+        // a hole in a translucent background.
+        assert!(
+            !s.cell(19, 2).unwrap().bg_explicit,
+            "untouched cells stay default"
+        );
+    }
+
+    #[test]
+    fn inverse_cell_is_flagged_and_colors_swapped() {
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        let fg = Rgb::new(200, 200, 200);
+        let bg = Rgb::new(0x1d, 0x1f, 0x21);
+        eng.apply_theme(fg, bg, &[Rgb::new(0, 0, 0); 256]).unwrap();
+
+        eng.write(b"\x1b[7mX");
+        let c = snap(&mut eng).cell(0, 0).unwrap().clone();
+        assert!(c.inverse, "SGR 7 is carried through to the renderer");
+        assert_eq!(c.fg, bg, "inverse swaps fg/bg");
+        assert_eq!(c.bg, fg);
+        // The swap does not invent an explicit background: the flag reports what
+        // the *style* set, so `inverse` alone is what forces the cell opaque.
+        assert!(!c.bg_explicit);
+    }
+
+    #[test]
+    fn newline_advances_cursor_row() {
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        eng.write(b"hi\r\n");
+        let s = snap(&mut eng);
+        assert_eq!(s.cell(0, 0).unwrap().text, "h");
+        assert_eq!(s.cell(1, 0).unwrap().text, "i");
+        assert_eq!(s.cursor_y, 1);
+        assert_eq!(s.cursor_x, 0);
+    }
+
+    /// The selected text, trimmed — what a copy would put on the clipboard.
+    fn sel_text(eng: &GhosttyVtEngine) -> Option<String> {
+        eng.selected_text(true)
+    }
+
+    /// Inclusive column range marked selected on viewport row `y`, from a fresh
+    /// snapshot — i.e. what the renderer would highlight.
+    fn sel_span(eng: &mut GhosttyVtEngine, y: u16) -> Option<(u16, u16)> {
+        let s = snap(eng);
+        let cols = s.cols;
+        let mut range: Option<(u16, u16)> = None;
+        for x in 0..cols {
+            if s.cell(x, y).is_some_and(|c| c.selected) {
+                range = Some(match range {
+                    None => (x, x),
+                    Some((a, _)) => (a, x),
+                });
+            }
+        }
+        range
+    }
+
+    #[test]
+    fn select_word_uses_the_terminals_own_boundaries() {
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        eng.write(b"ls /usr/bin foo");
+        let mut word = |x: u16| {
+            assert!(eng.select_semantic(SelectKind::Word, x, 0, &[]));
+            sel_text(&eng)
+        };
+        assert_eq!(word(1).as_deref(), Some("ls"));
+        // A path selects whole — slashes are not boundaries by default, which is
+        // what makes double-clicking a path useful.
+        assert_eq!(word(6).as_deref(), Some("/usr/bin"));
+        assert_eq!(word(13).as_deref(), Some("foo"));
+        // And the highlight the renderer paints matches the text.
+        assert_eq!(sel_span(&mut eng, 0), Some((12, 14)));
+    }
+
+    #[test]
+    fn selection_word_chars_changes_where_a_word_ends() {
+        // The discriminator that the config actually threads through to the
+        // engine: with `/` as a boundary, the path splits into its components.
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        eng.write(b"ls /usr/bin foo");
+        let boundaries = ['\0', ' ', '/'];
+        assert!(eng.select_semantic(SelectKind::Word, 6, 0, &boundaries));
+        assert_eq!(
+            sel_text(&eng).as_deref(),
+            Some("usr"),
+            "bounded by the slashes"
+        );
+        // …and the same click with the defaults keeps the whole path.
+        assert!(eng.select_semantic(SelectKind::Word, 6, 0, &[]));
+        assert_eq!(sel_text(&eng).as_deref(), Some("/usr/bin"));
+    }
+
+    #[test]
+    fn select_line_unwraps_a_soft_wrapped_row() {
+        // Text longer than the grid wraps, and a triple-click has to take the
+        // whole logical line — as **one** line, not as the rows it was displayed
+        // on. That unwrapping is what the engine-side read buys.
+        let mut eng = GhosttyVtEngine::new(10, 4, 100).unwrap();
+        eng.write(b"abcdefghijKLMNO");
+        assert!(eng.select_semantic(SelectKind::Line, 2, 0, &[]));
+        assert_eq!(sel_text(&eng).as_deref(), Some("abcdefghijKLMNO"));
+        // It is highlighted across both display rows.
+        assert_eq!(sel_span(&mut eng, 0), Some((0, 9)));
+        assert_eq!(sel_span(&mut eng, 1), Some((0, 4)));
+    }
+
+    #[test]
+    fn select_output_covers_the_commands_output_not_its_prompt() {
+        // OSC 133: A = prompt start, B = command start, C = output start,
+        // D = command end. Driven as real escape sequences, like the kitty tests.
+        let mut eng = GhosttyVtEngine::new(20, 6, 100).unwrap();
+        eng.write(b"\x1b]133;A\x07$ ");
+        eng.write(b"\x1b]133;B\x07echo hi\r\n");
+        eng.write(b"\x1b]133;C\x07out1\r\nout2\r\n");
+        eng.write(b"\x1b]133;D;0\x07");
+        eng.write(b"\x1b]133;A\x07$ ");
+        // Click on the first output row.
+        assert!(eng.select_semantic(SelectKind::Output, 0, 1, &[]));
+        assert_eq!(sel_text(&eng).as_deref(), Some("out1\nout2"));
+        // Clicking the prompt row itself is not output — and a gesture that
+        // finds nothing leaves the existing selection alone.
+        assert!(!eng.select_semantic(SelectKind::Output, 0, 0, &[]));
+        assert_eq!(sel_text(&eng).as_deref(), Some("out1\nout2"));
+    }
+
+    #[test]
+    fn a_selection_starting_above_the_viewport_is_kept_whole() {
+        // The old viewport-scoped model had to **clamp** a selection that began
+        // off the top of the screen, so copy only ever saw the visible part.
+        // Tracked references have no such limit: the output selected here starts
+        // three rows above a two-row viewport and still copies in full.
+        let mut eng = GhosttyVtEngine::new(20, 2, 100).unwrap();
+        eng.write(b"\x1b]133;A\x07$ \x1b]133;B\x07cmd\r\n");
+        eng.write(b"\x1b]133;C\x07a\r\nb\r\nc\r\n");
+        assert!(eng.select_semantic(SelectKind::Output, 0, 0, &[]));
+        assert_eq!(sel_text(&eng).as_deref(), Some("a\nb\nc"));
+    }
+
+    /// A clipboard the tests can inspect, so nothing touches the real one.
+    #[derive(Clone, Default)]
+    struct FakeClip(std::rc::Rc<std::cell::RefCell<Option<String>>>);
+    impl crate::clipboard::ClipboardIo for FakeClip {
+        fn read_text(&mut self) -> Option<String> {
+            self.0.borrow().clone()
+        }
+        fn write_text(&mut self, text: &str) {
+            *self.0.borrow_mut() = Some(text.to_string());
+        }
+    }
+
+    fn clip_engine(
+        read: crate::config::ClipboardAccess,
+        write: crate::config::ClipboardAccess,
+        limit: Option<usize>,
+    ) -> (GhosttyVtEngine, FakeClip) {
+        let mut eng = GhosttyVtEngine::new(20, 5, 100_000).unwrap();
+        let clip = FakeClip::default();
+        eng.set_clipboard_io(Box::new(clip.clone()));
+        eng.set_clipboard_policy(&crate::config::ClipboardPolicy {
+            read,
+            write,
+            trim_trailing_spaces: false,
+            write_limit: limit,
+            ..crate::config::Config::default().clipboard
+        });
+        (eng, clip)
+    }
+
+    fn resp(eng: &mut GhosttyVtEngine) -> String {
+        String::from_utf8_lossy(&eng.take_responses()).into_owned()
+    }
+
+    use crate::config::ClipboardAccess::{Allow, Ask, Deny};
+
+    #[test]
+    fn osc52_write_goes_through_the_engine_callback() {
+        let (mut eng, clip) = clip_engine(Deny, Allow, None);
+        eng.write(b"\x1b]52;c;aGk=\x07");
+        assert_eq!(clip.0.borrow().as_deref(), Some("hi"));
+        assert_eq!(resp(&mut eng), "", "OSC 52 writes have no acknowledgement");
+        // Chunked across writes, ST-terminated.
+        eng.write(b"\x1b]52;c;aGV");
+        eng.write(b"sbG8=\x1b\\");
+        assert_eq!(clip.0.borrow().as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn osc52_read_is_answered_when_allowed_and_empty_when_denied() {
+        let (mut eng, clip) = clip_engine(Allow, Deny, None);
+        *clip.0.borrow_mut() = Some("hi".into());
+        eng.write(b"\x1b]52;c;?\x1b\\");
+        assert!(resp(&mut eng).contains("\x1b]52;c;aGk="));
+        let (mut eng, clip) = clip_engine(Deny, Deny, None);
+        *clip.0.borrow_mut() = Some("hi".into());
+        eng.write(b"\x1b]52;c;?\x1b\\");
+        assert!(!resp(&mut eng).contains("aGk="));
+    }
+
+    #[test]
+    fn kitty_write_transaction_is_acknowledged() {
+        let (mut eng, clip) = clip_engine(Deny, Allow, None);
+        eng.write(b"\x1b]5522;type=write:id=c1\x1b\\");
+        eng.write(b"\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;R2hvc3Q=\x1b\\");
+        eng.write(b"\x1b]5522;type=wdata:mime=dGV4dC9odG1s;PGI+aGk8L2I+\x1b\\");
+        eng.write(b"\x1b]5522;type=wdata\x1b\\");
+        assert_eq!(
+            clip.0.borrow().as_deref(),
+            Some("Ghost"),
+            "the text rep wins; html is dropped"
+        );
+        assert_eq!(
+            resp(&mut eng),
+            "\x1b]5522;type=write:status=DONE:id=c1\x1b\\"
+        );
+    }
+
+    #[test]
+    fn kitty_write_of_only_non_text_is_unsupported() {
+        let (mut eng, clip) = clip_engine(Deny, Allow, None);
+        eng.write(b"\x1b]5522;type=write:id=c2\x1b\\");
+        eng.write(b"\x1b]5522;type=wdata:mime=aW1hZ2UvcG5n;AAAA\x1b\\");
+        eng.write(b"\x1b]5522;type=wdata\x1b\\");
+        assert_eq!(*clip.0.borrow(), None);
+        assert_eq!(
+            resp(&mut eng),
+            "\x1b]5522;type=write:status=ENOSYS:id=c2\x1b\\"
+        );
+    }
+
+    #[test]
+    fn kitty_write_over_the_limit_is_refused() {
+        let (mut eng, clip) = clip_engine(Deny, Allow, Some(3));
+        eng.write(b"\x1b]5522;type=write:id=c3\x1b\\");
+        eng.write(b"\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;R2hvc3Q=\x1b\\");
+        eng.write(b"\x1b]5522;type=wdata\x1b\\");
+        assert_eq!(*clip.0.borrow(), None);
+        assert_eq!(
+            resp(&mut eng),
+            "\x1b]5522;type=write:status=EPERM:id=c3\x1b\\"
+        );
+    }
+
+    #[test]
+    fn kitty_read_serves_text_and_refuses_when_denied() {
+        let (mut eng, clip) = clip_engine(Allow, Deny, None);
+        *clip.0.borrow_mut() = Some("hello".into());
+        eng.write(b"\x1b]5522;type=read:id=r2;dGV4dC9wbGFpbg==\x1b\\");
+        assert_eq!(
+            resp(&mut eng),
+            "\x1b]5522;type=read:status=OK:id=r2\x1b\\\
+             \x1b]5522;type=read:status=DATA:id=r2:mime=dGV4dC9wbGFpbg==;aGVsbG8=\x1b\\\
+             \x1b]5522;type=read:status=DONE:id=r2\x1b\\"
+        );
+        let (mut eng, _) = clip_engine(Deny, Deny, None);
+        eng.write(b"\x1b]5522;type=read:id=r1;dGV4dC9wbGFpbg==\x1b\\");
+        assert_eq!(
+            resp(&mut eng),
+            "\x1b]5522;type=read:status=EPERM:id=r1\x1b\\"
+        );
+    }
+
+    #[test]
+    fn kitty_targets_listing_needs_no_permission() {
+        let (mut eng, clip) = clip_engine(Deny, Deny, None);
+        *clip.0.borrow_mut() = Some("x".into());
+        eng.write(b"\x1b]5522;type=read:id=t;Lg==\x1b\\"); // "."
+        let r = resp(&mut eng);
+        assert!(r.contains("status=OK"), "{r:?}");
+        assert!(
+            r.contains(&base64_of(
+                "text/plain
+"
+            )),
+            "lists text/plain: {r:?}"
+        );
+    }
+
+    fn base64_of(s: &str) -> String {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.encode(s)
+    }
+
+    #[test]
+    fn an_asked_kitty_read_waits_for_the_user_then_replays() {
+        let (mut eng, clip) = clip_engine(Ask, Deny, None);
+        *clip.0.borrow_mut() = Some("hello".into());
+        eng.write(b"\x1b]5522;type=read:id=r3;dGV4dC9wbGFpbg==\x1b\\");
+        assert_eq!(
+            resp(&mut eng),
+            "",
+            "the engine's refusal is held back while we ask"
+        );
+        let mut d = eng.take_clipboard_deferrals();
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].packet, b"\x1b]5522;type=read:status=EPERM:id=r3\x1b\\");
+        eng.resolve_clipboard_deferral(d.remove(0), true);
+        assert_eq!(
+            resp(&mut eng),
+            "\x1b]5522;type=read:status=OK:id=r3\x1b\\\
+             \x1b]5522;type=read:status=DATA:id=r3:mime=dGV4dC9wbGFpbg==;aGVsbG8=\x1b\\\
+             \x1b]5522;type=read:status=DONE:id=r3\x1b\\"
+        );
+        // The grant was one-shot: the next read asks again.
+        eng.write(b"\x1b]5522;type=read:id=r4;dGV4dC9wbGFpbg==\x1b\\");
+        assert_eq!(resp(&mut eng), "");
+        let d = eng.take_clipboard_deferrals().remove(0);
+        eng.resolve_clipboard_deferral(d, false);
+        assert_eq!(
+            resp(&mut eng),
+            "\x1b]5522;type=read:status=EPERM:id=r4\x1b\\"
+        );
+    }
+
+    #[test]
+    fn an_asked_osc52_read_replays_with_its_target() {
+        let (mut eng, clip) = clip_engine(Ask, Deny, None);
+        *clip.0.borrow_mut() = Some("hi".into());
+        eng.write(b"\x1b[5n\x1b]52;c;?\x07\x1b[5n");
+        // The surrounding DSR replies survive the cut, in order.
+        assert_eq!(resp(&mut eng), "\x1b[0n\x1b[0n");
+        let d = eng.take_clipboard_deferrals().remove(0);
+        eng.resolve_clipboard_deferral(d, true);
+        assert!(resp(&mut eng).contains("\x1b]52;c;aGk="));
+    }
+
+    #[test]
+    fn an_asked_write_is_performed_and_acknowledged_on_approval() {
+        let (mut eng, clip) = clip_engine(Deny, Ask, None);
+        eng.write(b"\x1b]5522;type=write:id=w\x1b\\\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;aGk=\x1b\\\x1b]5522;type=wdata\x1b\\");
+        assert_eq!(resp(&mut eng), "");
+        assert_eq!(
+            *clip.0.borrow(),
+            None,
+            "nothing is written before the user answers"
+        );
+        let d = eng.take_clipboard_deferrals().remove(0);
+        assert_eq!(d.kind, crate::clipboard::Deferred::Write("hi".into()));
+        eng.resolve_clipboard_deferral(d, true);
+        assert_eq!(clip.0.borrow().as_deref(), Some("hi"));
+        assert_eq!(
+            resp(&mut eng),
+            "\x1b]5522;type=write:status=DONE:id=w\x1b\\"
+        );
+        // OSC 52 has no acknowledgement, so there's no packet to hold.
+        eng.write(b"\x1b]52;c;eW8=\x07");
+        let d = eng.take_clipboard_deferrals().remove(0);
+        assert!(d.packet.is_empty());
+        eng.resolve_clipboard_deferral(d, false);
+        assert_eq!(resp(&mut eng), "");
+        assert_eq!(clip.0.borrow().as_deref(), Some("hi"));
+    }
+
+    #[test]
+    fn a_paste_event_serves_the_pasted_text_to_its_follow_up_read() {
+        let (mut eng, clip) = clip_engine(Deny, Deny, None);
+        *clip.0.borrow_mut() = Some("clipboard".into());
+        assert!(!eng.paste_events());
+        eng.write(b"\x1b[?5522h");
+        assert!(eng.paste_events());
+        assert!(eng.paste_event("pasted"));
+        let ev = resp(&mut eng);
+        assert!(ev.starts_with("\x1b]5522;type=read:status=OK"), "{ev:?}");
+        assert!(
+            !ev.contains(&base64_of("pasted")),
+            "an event carries no data: {ev:?}"
+        );
+        let pw = ev
+            .split(':')
+            .find_map(|kv| kv.strip_prefix("pw="))
+            .map(|v| v.split(['\x1b', ';', '\x07']).next().unwrap().to_string())
+            .expect("the event carries a one-time password");
+        eng.write(
+            format!("\x1b]5522;type=read:pw={pw}:name=UGFzdGUgZXZlbnQ=;dGV4dC9wbGFpbg==\x1b\\")
+                .as_bytes(),
+        );
+        let r = resp(&mut eng);
+        assert!(
+            r.contains(&base64_of("pasted")),
+            "granted despite clipboard-read = deny: {r:?}"
+        );
+    }
+
+    #[test]
+    fn pwd_comes_from_the_engine() {
+        // Pins the retirement of `osc7.rs`: lib-vt's full stream (unlike the
+        // read-only one of the old pin) now keeps OSC 7.
+        let mut eng = GhosttyVtEngine::new(20, 5, 100_000).unwrap();
+        assert_eq!(eng.pwd(), None);
+        eng.write(b"\x1b]7;file://HOST/C:/Users/foo\x07");
+        assert_eq!(eng.pwd().as_deref(), Some("file://HOST/C:/Users/foo"));
+        eng.write(b"\x1b]7;file://h/C:/a%20b");
+        eng.write(b"/c\x1b\\");
+        assert_eq!(eng.pwd().as_deref(), Some("file://h/C:/a%20b/c"));
+        // WSL's scripts report Linux paths; kept verbatim for `osc7_to_path`.
+        eng.write(b"\x1b]7;file://box/mnt/c/x\x07");
+        assert_eq!(eng.pwd().as_deref(), Some("file://box/mnt/c/x"));
+    }
+
+    #[test]
+    fn engine_osc_color_query_replies() {
+        // Pins who answers `OSC 11 ?`: `osc_color.rs` does. Upstream (14c8298) can
+        // answer in lib-vt behind a callback giest doesn't install; if a bump ever
+        // makes it answer by default, every query would get two replies.
+        let mut eng = GhosttyVtEngine::new(20, 5, 100_000).unwrap();
+        eng.write(b"\x1b]11;?\x07");
+        let r = String::from_utf8_lossy(&eng.take_responses()).into_owned();
+        assert!(
+            !r.contains("]11;"),
+            "engine now answers itself; drop osc_color.rs: {r:?}"
+        );
+    }
+
+    #[test]
+    fn vt_policy_title_report_and_kam() {
+        let mut eng = GhosttyVtEngine::new(20, 5, 100_000).unwrap();
+        eng.write(b"\x1b]2;secret\x07\x1b[21t");
+        assert!(
+            eng.take_responses().is_empty(),
+            "title reports must be off by default"
+        );
+        eng.set_vt_policy(true, false, true).unwrap();
+        eng.write(b"\x1b[21t");
+        let r = String::from_utf8_lossy(&eng.take_responses()).into_owned();
+        assert!(r.contains("secret"), "title report enabled but got {r:?}");
+
+        eng.write(b"\x1b[2h"); // KAM: lock the keyboard
+        assert!(
+            !eng.term.mode(libghostty_vt::terminal::Mode::KAM).unwrap(),
+            "KAM must be refused by default"
+        );
+        eng.set_vt_policy(false, true, true).unwrap();
+        eng.write(b"\x1b[2h");
+        assert!(eng.term.mode(libghostty_vt::terminal::Mode::KAM).unwrap());
+    }
+
+    #[test]
+    fn engine_paste_matches_the_legacy_encoder_and_keeps_pending_replies() {
+        let cases = [
+            "hello",
+            "line1\nline2\r\nline3",
+            "tab\there",
+            "",
+            "x\x1b[201~y",
+        ];
+        for bracketed in [false, true] {
+            let mut eng = GhosttyVtEngine::new(20, 5, 100_000).unwrap();
+            if bracketed {
+                eng.write(b"\x1b[?2004h");
+            }
+            for text in cases {
+                let got = eng.encode_paste(text);
+                let want = super::encode_paste_legacy(bracketed, text);
+                assert_eq!(got, want, "bracketed={bracketed} {text:?}");
+            }
+            // An unsent reply (DA1) must survive a paste in between.
+            eng.write(b"\x1b[c");
+            let _ = eng.encode_paste("x");
+            assert!(!eng.take_responses().is_empty(), "pending reply lost");
+        }
+    }
+
+    #[test]
+    fn a_cursor_only_move_reaches_the_snapshot() {
+        let mut eng = GhosttyVtEngine::new(20, 6, 100_000).unwrap();
+        let mut s = GridSnapshot::default();
+        eng.write(b"hello");
+        eng.snapshot(&mut s).unwrap();
+        eng.snapshot(&mut s).unwrap(); // settle: next one may take the clean path
+        eng.write(b"\x1b[4;7H");
+        eng.snapshot(&mut s).unwrap();
+        assert_eq!((s.cursor_x, s.cursor_y), (6, 3));
+        eng.write(b"\x1b[?25l");
+        eng.snapshot(&mut s).unwrap();
+        assert!(!s.cursor_visible, "cursor hide must reach the snapshot");
+        // Palette text is stored resolved, so an OSC 4 with no cell edit must
+        // still re-resolve it.
+        eng.write(b"\x1b[1;1H\x1b[31mX\x1b[0m");
+        eng.snapshot(&mut s).unwrap();
+        eng.snapshot(&mut s).unwrap();
+        eng.write(b"\x1b]4;1;#00ff00\x07");
+        eng.snapshot(&mut s).unwrap();
+        assert_eq!(s.cells[0].fg, Rgb::new(0, 0xff, 0));
+    }
+
+    #[test]
+    fn partial_snapshots_match_a_full_one() {
+        // Snapshot after every step, so the dirty-row path is taken; then the
+        // result must equal a fresh engine's full snapshot of the same bytes.
+        let steps: &[&[u8]] = &[
+            b"row0 \x1b[1mbold\x1b[0m\r\nrow1\r\nrow2 \x1b[5mblink\x1b[0m\r\nrow3",
+            b"\x1b[2;1Hchanged",            // one row
+            b"\x1b[3;1H\x1b[2K",            // erase the blink row
+            b"\x1b[5;3H\x1b[41mred\x1b[0m", // colour on another row
+            b"\x1b[1;1H\x1b[K",             // erase row 0
+        ];
+        let cell_key = |c: &crate::engine::Cell| {
+            (
+                c.text.to_string(),
+                c.fg,
+                c.bg,
+                c.bg_explicit,
+                c.bold,
+                c.blink,
+                c.underline,
+            )
+        };
+        let mut inc = GhosttyVtEngine::new(20, 6, 100_000).unwrap();
+        let mut s_inc = GridSnapshot::default();
+        inc.snapshot(&mut s_inc).unwrap();
+        let mut all = Vec::new();
+        for step in steps {
+            inc.write(step);
+            inc.snapshot(&mut s_inc).unwrap();
+            all.extend_from_slice(step);
+            let mut fresh = GhosttyVtEngine::new(20, 6, 100_000).unwrap();
+            fresh.write(&all);
+            let mut s_full = GridSnapshot::default();
+            fresh.snapshot(&mut s_full).unwrap();
+            let a: Vec<_> = s_inc.cells.iter().map(cell_key).collect();
+            let b: Vec<_> = s_full.cells.iter().map(cell_key).collect();
+            assert_eq!(a, b, "diverged after {:?}", String::from_utf8_lossy(step));
+            assert_eq!(s_inc.has_blink, s_full.has_blink);
+        }
+    }
+
+    #[test]
+    fn compression_waits_for_idle_and_keeps_contents() {
+        use std::time::{Duration, Instant};
+        let mut eng = GhosttyVtEngine::new(40, 5, 10_000_000).unwrap();
+        for i in 0..3_000 {
+            eng.write(format!("line {i} lorem ipsum dolor sit amet\r\n").as_bytes());
+        }
+        let rows = eng.scrollback_rows();
+        let t0 = Instant::now();
+        eng.compress_tick(t0, Duration::from_secs(1)).unwrap(); // records activity
+        assert!(
+            !eng.compress_done,
+            "must not compress before the idle delay"
+        );
+        let later = t0 + crate::engine::COMPRESS_IDLE + Duration::from_millis(1);
+        for _ in 0..1_000 {
+            eng.compress_tick(later, Duration::from_secs(1)).unwrap();
+            if eng.compress_done {
+                break;
+            }
+        }
+        assert!(eng.compress_done, "compression pass never completed");
+        assert_eq!(
+            eng.scrollback_rows(),
+            rows,
+            "compression changed history size"
+        );
+        // Writing is activity: the next tick restarts the idle clock.
+        eng.write(b"more\r\n");
+        eng.compress_tick(later, Duration::from_secs(1)).unwrap();
+        assert!(!eng.compress_done);
+    }
+
+    #[test]
+    fn scrollback_line_cap_bounds_history() {
+        // `scrollback-limit-lines` rounds up to whole pages, so assert a bound
+        // well under the uncapped count rather than the exact figure.
+        let lines = |cap| {
+            let mut eng = GhosttyVtEngine::new(20, 5, 10_000_000).unwrap();
+            eng.set_scrollback_lines(cap).unwrap();
+            for i in 0..4_000 {
+                eng.write(format!("{i}\r\n").as_bytes());
+            }
+            eng.scrollback_rows()
+        };
+        let (capped, uncapped) = (lines(Some(50)), lines(None));
+        assert!(uncapped >= 3_900, "uncapped kept {uncapped}");
+        assert!(capped < uncapped / 2, "capped kept {capped} of {uncapped}");
+    }
+
+    #[test]
+    fn a_drag_selection_survives_scrolling_and_scrollback() {
+        // The core of the migration: the anchor is a tracked reference, so a
+        // selection made at the bottom of the screen still reads correctly after
+        // enough output to push it into scrollback. Viewport (col,row) pairs
+        // silently addressed *different* cells after a scroll.
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        eng.write(b"alpha\r\n");
+        eng.selection_begin(0, 0, false);
+        eng.selection_update(4, 0, false);
+        assert_eq!(sel_text(&eng).as_deref(), Some("alpha"));
+
+        for _ in 0..10 {
+            eng.write(b"filler\r\n");
+        }
+        assert_eq!(
+            sel_text(&eng).as_deref(),
+            Some("alpha"),
+            "the tracked anchor followed its row into scrollback"
+        );
+    }
+
+    #[test]
+    fn a_selection_survives_a_resize_that_reflows_the_text() {
+        // Reflow is where a tracked reference differs most from a coordinate: a
+        // narrower grid rewraps rows, so every cell moves. The old model had no
+        // answer at all — `fit_grid` simply left the anchor pointing at whatever
+        // was now at that (col,row).
+        let mut eng = GhosttyVtEngine::new(20, 4, 100).unwrap();
+        eng.write(b"hello wonderful world");
+        eng.select_semantic(SelectKind::Word, 6, 0, &[]);
+        assert_eq!(sel_text(&eng).as_deref(), Some("wonderful"));
+
+        eng.resize(10, 6, (8, 16)).unwrap();
+        assert_eq!(
+            sel_text(&eng).as_deref(),
+            Some("wonderful"),
+            "the selection followed its cells through the rewrap"
+        );
+    }
+
+    #[test]
+    fn select_all_spans_scrollback_not_just_the_viewport() {
+        // The old `select_all` was `(0,0)..(cols-1, rows-1)` — the viewport and
+        // nothing else. This is the behaviour change.
+        let mut eng = GhosttyVtEngine::new(20, 2, 100).unwrap();
+        eng.write(b"one\r\ntwo\r\nthree\r\n");
+        assert!(eng.select_all());
+        let text = sel_text(&eng).expect("a selection");
+        assert!(
+            text.contains("one"),
+            "scrolled-off rows are included: {text:?}"
+        );
+        assert!(text.contains("three"), "as is the live row: {text:?}");
+    }
+
+    #[test]
+    fn trailing_space_trim_is_configurable() {
+        // Ghostty `clipboard-trim-trailing-spaces`: off, the selection carries
+        // the grid's own padding, which is what you want for column-aligned
+        // output and noise the rest of the time.
+        // The spaces are *written*, not just unwritten cells: the formatter emits
+        // only as far as a row was actually filled, so trailing blanks have to
+        // exist for there to be anything to trim.
+        let mut eng = GhosttyVtEngine::new(6, 2, 100).unwrap();
+        eng.write(b"hi    ");
+        eng.selection_begin(0, 0, false);
+        eng.selection_update(5, 0, false);
+        assert_eq!(eng.selected_text(true).as_deref(), Some("hi"));
+        assert_eq!(eng.selected_text(false).as_deref(), Some("hi    "));
+    }
+
+    #[test]
+    fn adjust_selection_moves_the_free_end_and_leaves_the_anchor() {
+        use crate::engine::SelectionAdjust as A;
+
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        eng.write(b"hello world");
+        eng.selection_begin(0, 0, false);
+        eng.selection_update(4, 0, false); // "hello"
+        assert_eq!(sel_text(&eng).as_deref(), Some("hello"));
+
+        // Read untrimmed here: trimming would hide the space the selection picks
+        // up as it crosses the gap, which is the thing being measured.
+        let raw = |e: &GhosttyVtEngine| e.selected_text(false);
+
+        // Right extends; the anchor stays put.
+        assert!(eng.selection_adjust(A::Right).is_some());
+        assert_eq!(raw(&eng).as_deref(), Some("hello "));
+        assert!(eng.selection_adjust(A::Right).is_some());
+        assert_eq!(raw(&eng).as_deref(), Some("hello w"));
+        // Left takes it back.
+        assert!(eng.selection_adjust(A::Left).is_some());
+        assert_eq!(raw(&eng).as_deref(), Some("hello "));
+        // End of line reaches the last cell of the row.
+        assert!(eng.selection_adjust(A::EndOfLine).is_some());
+        assert_eq!(sel_text(&eng).as_deref(), Some("hello world"));
+    }
+
+    #[test]
+    fn a_rectangle_drag_selects_a_block_not_a_run_of_text() {
+        // The discriminator: over three rows of text, a linear selection from
+        // (2,0) to (4,2) takes everything in between, while a block takes only
+        // columns 2..4 of each row.
+        let mut eng = GhosttyVtEngine::new(8, 3, 100).unwrap();
+        eng.write(b"abcdefg\r\nhijklmn\r\nopqrstu");
+
+        eng.selection_begin(2, 0, false);
+        eng.selection_update(4, 2, false);
+        assert_eq!(sel_text(&eng).as_deref(), Some("cdefg\nhijklmn\nopqrs"));
+
+        eng.selection_begin(2, 0, true);
+        eng.selection_update(4, 2, true);
+        assert_eq!(sel_text(&eng).as_deref(), Some("cde\njkl\nqrs"));
+
+        // The highlight the renderer paints agrees: three equal spans, not one
+        // long run.
+        assert_eq!(sel_span(&mut eng, 0), Some((2, 4)));
+        assert_eq!(sel_span(&mut eng, 1), Some((2, 4)));
+        assert_eq!(sel_span(&mut eng, 2), Some((2, 4)));
+    }
+
+    #[test]
+    fn a_rectangle_survives_adjust_and_a_word_select_clears_it() {
+        // `adjust_selection` rebuilds the selection, so the block flag has to be
+        // remembered or a shift+arrow would silently turn a block back into a
+        // run of text.
+        let mut eng = GhosttyVtEngine::new(8, 3, 100).unwrap();
+        eng.write(b"abcdefg\r\nhijklmn\r\nopqrstu");
+        eng.selection_begin(2, 0, true);
+        eng.selection_update(4, 2, true);
+        assert!(
+            eng.selection_adjust(crate::engine::SelectionAdjust::Right)
+                .is_some()
+        );
+        let text = sel_text(&eng).expect("still selected");
+        assert!(
+            text.lines().count() == 3 && text.lines().all(|l| l.len() == 4),
+            "still a block, one column wider: {text:?}"
+        );
+
+        // A semantic selection is a run of text, so the flag must reset.
+        assert!(eng.select_semantic(SelectKind::Line, 0, 0, &[]));
+        assert_eq!(sel_text(&eng).as_deref(), Some("abcdefg"));
+    }
+
+    #[test]
+    fn adjust_selection_does_nothing_without_a_selection() {
+        // Upstream returns "not performed" so the key falls through to the
+        // shell; giest's `performable:` gate keys off exactly this `None`.
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        eng.write(b"hello");
+        assert_eq!(
+            eng.selection_adjust(crate::engine::SelectionAdjust::Right),
+            None
+        );
+        assert!(!eng.selection_active());
+    }
+
+    #[test]
+    fn clearing_a_selection_leaves_no_text_and_no_highlight() {
+        let mut eng = GhosttyVtEngine::new(10, 2, 100).unwrap();
+        eng.write(b"hello");
+        eng.selection_begin(0, 0, false);
+        eng.selection_update(4, 0, false);
+        assert!(eng.selection_active());
+        assert_eq!(sel_span(&mut eng, 0), Some((0, 4)));
+
+        eng.selection_clear();
+        assert!(!eng.selection_active());
+        assert_eq!(sel_text(&eng), None);
+        assert_eq!(sel_span(&mut eng, 0), None);
+    }
+
+    // --- Selection gesture (upstream `SelectionGesture`) -------------------
+    //
+    // Cells are 10x20 px. `gpt(col, frac, row)` is a pointer `frac` pixels into
+    // column `col` — the threshold is round(10 * 0.6) = 6.
+
+    const GCW: f64 = 10.0;
+    const GCH: f64 = 20.0;
+
+    fn gpt(col: u16, frac: f64, row: u16) -> crate::engine::GesturePoint {
+        crate::engine::GesturePoint {
+            px: (col as f64 * GCW + frac, row as f64 * GCH + GCH / 2.0),
+            cell: (col, row),
+        }
+    }
+
+    fn ggeo(rows: u32) -> crate::engine::GestureGeometry {
+        crate::engine::GestureGeometry {
+            cols: 20,
+            cell_w: GCW as u32,
+            height: rows * GCH as u32,
+        }
+    }
+
+    /// Press at `at`, `ms` milliseconds into a monotonic clock.
+    fn gpress(
+        eng: &mut GhosttyVtEngine,
+        at: crate::engine::GesturePoint,
+        ms: u64,
+        output: bool,
+    ) -> u8 {
+        use std::time::Duration;
+        eng.gesture_press(
+            crate::engine::GesturePress {
+                at,
+                time: Duration::from_millis(1_000 + ms),
+                repeat_interval: Duration::from_millis(500),
+                repeat_distance: GCW,
+                triple: if output {
+                    SelectKind::Output
+                } else {
+                    SelectKind::Line
+                },
+            },
+            &[],
+        )
+    }
+
+    #[test]
+    fn gesture_single_click_drag_honours_the_60_percent_threshold() {
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        eng.write(b"hello world");
+        let geo = ggeo(3);
+
+        // Pressed in the left 60% of `e`, released in the left 60% of the
+        // second `l`: the pressed cell is in, the cell dragged onto is not.
+        assert_eq!(gpress(&mut eng, gpt(1, 2.0, 0), 0, false), 1);
+        eng.gesture_drag(gpt(3, 2.0, 0), geo, false, &[]);
+        assert_eq!(sel_text(&eng).as_deref(), Some("el"));
+        eng.gesture_release(Some((3, 0)));
+
+        // Pressed past the threshold of `e`, dragged past the threshold of the
+        // second `l`: the pressed cell is out, the dragged-onto cell is in.
+        gpress(&mut eng, gpt(1, 8.0, 0), 5_000, false);
+        eng.gesture_drag(gpt(3, 8.0, 0), geo, false, &[]);
+        assert_eq!(sel_text(&eng).as_deref(), Some("ll"));
+        eng.gesture_release(Some((3, 0)));
+
+        // Within one cell: nothing until the drag crosses the threshold...
+        gpress(&mut eng, gpt(1, 1.0, 0), 10_000, false);
+        assert!(!eng.selection_active(), "a single-click press clears");
+        eng.gesture_drag(gpt(1, 4.0, 0), geo, false, &[]);
+        assert!(!eng.selection_active(), "not across the threshold yet");
+        // ...then the one cell, and the gesture counts as a drag.
+        eng.gesture_drag(gpt(1, 7.0, 0), geo, false, &[]);
+        assert_eq!(sel_text(&eng).as_deref(), Some("e"));
+        assert!(
+            eng.gesture_release(Some((1, 0))),
+            "a threshold crossing is a drag"
+        );
+    }
+
+    #[test]
+    fn gesture_single_click_drag_backwards_mirrors_the_threshold() {
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        eng.write(b"hello world");
+        let geo = ggeo(3);
+        // Backwards: the pressed cell is in if pressed *past* its threshold,
+        // the dragged-onto cell is in if the pointer is *before* its threshold.
+        gpress(&mut eng, gpt(4, 8.0, 0), 0, false);
+        eng.gesture_drag(gpt(1, 2.0, 0), geo, false, &[]);
+        assert_eq!(sel_text(&eng).as_deref(), Some("ello"));
+    }
+
+    #[test]
+    fn gesture_double_click_drag_snaps_to_words_in_both_directions() {
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        eng.write(b"hello world again");
+        let geo = ggeo(3);
+
+        // Double-click `hello`, drag forward into the middle of `world`.
+        assert_eq!(gpress(&mut eng, gpt(1, 3.0, 0), 0, false), 1);
+        eng.gesture_release(Some((1, 0)));
+        assert_eq!(gpress(&mut eng, gpt(1, 3.0, 0), 100, false), 2);
+        assert_eq!(
+            sel_text(&eng).as_deref(),
+            Some("hello"),
+            "the press selects the word"
+        );
+        eng.gesture_drag(gpt(8, 3.0, 0), geo, false, &[]);
+        assert_eq!(
+            sel_text(&eng).as_deref(),
+            Some("hello world"),
+            "snapped to whole words"
+        );
+        eng.gesture_release(Some((8, 0)));
+
+        // Double-click `again`, drag backward into the middle of `hello`: the
+        // anchor word stays whole and the far end snaps to its word's start.
+        gpress(&mut eng, gpt(14, 3.0, 0), 5_000, false);
+        eng.gesture_release(Some((14, 0)));
+        assert_eq!(gpress(&mut eng, gpt(14, 3.0, 0), 5_100, false), 2);
+        eng.gesture_drag(gpt(2, 3.0, 0), geo, false, &[]);
+        assert_eq!(sel_text(&eng).as_deref(), Some("hello world again"));
+    }
+
+    #[test]
+    fn gesture_double_click_drag_honours_selection_word_chars() {
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        eng.write(b"a.b c");
+        let geo = ggeo(3);
+        let dots: &[char] = &[' ', '.'];
+        let press = |eng: &mut GhosttyVtEngine, ms: u64| {
+            eng.gesture_press(
+                crate::engine::GesturePress {
+                    at: gpt(0, 3.0, 0),
+                    time: std::time::Duration::from_millis(1_000 + ms),
+                    repeat_interval: std::time::Duration::from_millis(500),
+                    repeat_distance: GCW,
+                    triple: SelectKind::Line,
+                },
+                dots,
+            )
+        };
+        press(&mut eng, 0);
+        eng.gesture_release(Some((0, 0)));
+        press(&mut eng, 100);
+        assert_eq!(sel_text(&eng).as_deref(), Some("a"), "`.` splits words");
+        eng.gesture_drag(gpt(2, 3.0, 0), geo, false, dots);
+        assert_eq!(sel_text(&eng).as_deref(), Some("a.b"));
+    }
+
+    #[test]
+    fn gesture_triple_click_drag_snaps_to_whole_lines() {
+        let mut eng = GhosttyVtEngine::new(20, 4, 100).unwrap();
+        eng.write(b"first line\r\nsecond line\r\nthird");
+        let geo = ggeo(4);
+        for (i, ms) in [0u64, 100, 200].into_iter().enumerate() {
+            assert_eq!(gpress(&mut eng, gpt(2, 3.0, 0), ms, false) as usize, i + 1);
+            if i < 2 {
+                eng.gesture_release(Some((2, 0)));
+            }
+        }
+        assert_eq!(sel_text(&eng).as_deref(), Some("first line"));
+        // Drag to the middle of the next row: the whole of that line joins.
+        eng.gesture_drag(gpt(3, 3.0, 1), geo, false, &[]);
+        assert_eq!(sel_text(&eng).as_deref(), Some("first line\nsecond line"));
+    }
+
+    #[test]
+    fn gesture_repeat_clicks_reset_when_too_slow_or_too_far() {
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        eng.write(b"hello world");
+        assert_eq!(gpress(&mut eng, gpt(1, 3.0, 0), 0, false), 1);
+        eng.gesture_release(Some((1, 0)));
+        assert_eq!(
+            gpress(&mut eng, gpt(1, 3.0, 0), 900, false),
+            1,
+            "past the interval"
+        );
+        eng.gesture_release(Some((1, 0)));
+        assert_eq!(
+            gpress(&mut eng, gpt(8, 3.0, 0), 1_000, false),
+            1,
+            "too far away"
+        );
+        assert!(!eng.selection_active());
+    }
+
+    #[test]
+    fn gesture_rectangle_drag_selects_a_block() {
+        let mut eng = GhosttyVtEngine::new(20, 4, 100).unwrap();
+        eng.write(b"abcde\r\nfghij\r\nklmno");
+        let geo = ggeo(4);
+        gpress(&mut eng, gpt(1, 1.0, 0), 0, false);
+        eng.gesture_drag(gpt(3, 8.0, 2), geo, true, &[]);
+        assert_eq!(sel_text(&eng).as_deref(), Some("bcd\nghi\nlmn"));
+        // Shift+click extension and adjust_selection keep it a block.
+        assert!(eng.sel_rectangle);
+    }
+
+    #[test]
+    fn gesture_drag_past_an_edge_requests_autoscroll() {
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        eng.write(b"hello");
+        let geo = ggeo(3);
+        gpress(&mut eng, gpt(1, 1.0, 1), 0, false);
+        let mut at = gpt(2, 1.0, 0);
+        at.px.1 = 0.0;
+        assert_eq!(eng.gesture_drag(at, geo, false, &[]), -1, "at the top edge");
+        at.px.1 = -30.0;
+        assert_eq!(eng.gesture_drag(at, geo, false, &[]), -1, "above the pane");
+        let mut at = gpt(2, 1.0, 2);
+        at.px.1 = 60.0;
+        assert_eq!(
+            eng.gesture_drag(at, geo, false, &[]),
+            1,
+            "at the bottom edge"
+        );
+        assert_eq!(
+            eng.gesture_drag(gpt(2, 1.0, 1), geo, false, &[]),
+            0,
+            "inside"
+        );
+        // Release stops it; a drag without a press does nothing.
+        eng.gesture_release(None);
+        eng.gesture_reset();
+        assert_eq!(eng.gesture_drag(at, geo, false, &[]), 0);
+    }
+
+    #[test]
+    fn gesture_single_press_clears_but_a_reset_leaves_the_selection() {
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        eng.write(b"hello world");
+        assert!(eng.select_all());
+        eng.gesture_reset();
+        assert!(eng.selection_active(), "reset is not a clear");
+        gpress(&mut eng, gpt(1, 1.0, 0), 0, false);
+        assert!(
+            !eng.selection_active(),
+            "a single-click press clears, as upstream"
+        );
+    }
+
+    #[test]
+    fn an_update_without_an_anchor_selects_nothing() {
+        // `update_selection` can arrive without a `begin` (a drag that started
+        // outside the pane). It must not install a selection from a stale or
+        // absent anchor.
+        let mut eng = GhosttyVtEngine::new(10, 2, 100).unwrap();
+        eng.write(b"hello");
+        eng.selection_update(4, 0, false);
+        assert!(!eng.selection_active());
+        assert_eq!(sel_text(&eng), None);
+    }
+
+    #[test]
+    fn screen_text_marks_soft_wrapped_rows_so_search_can_join_them() {
+        // The flag search relies on, read off a real wrap rather than assumed:
+        // 10 columns, 15 characters, so row 0 continues onto row 1.
+        let mut eng = GhosttyVtEngine::new(10, 4, 100).unwrap();
+        eng.write(b"hello wonderful");
+        let rows = eng.screen_text();
+        assert!(rows[0].wrapped, "row 0 continues onto row 1");
+        assert!(!rows[1].wrapped, "row 1 does not");
+
+        // And the join actually finds a query straddling the edge.
+        let m = crate::search::search_rows(&rows, "wonderful", false);
+        assert_eq!(m.len(), 1, "found across the wrap");
+        assert_eq!((m[0].row, m[0].end_row), (0, 1), "spanning both rows");
+    }
+
+    #[test]
+    fn a_wide_char_pushed_over_a_wrap_leaves_no_gap_in_the_text() {
+        // When a wide character doesn't fit at the end of a row it moves to the
+        // next one, leaving a `SpacerHead` blank behind. Emitting a space for it
+        // would put one *inside* the wrapped word and a query spanning the wrap
+        // would not match.
+        let mut eng = GhosttyVtEngine::new(6, 3, 100).unwrap();
+        // 5 narrow cells then a wide char: it cannot fit in the last column.
+        eng.write("abcde世".as_bytes());
+        let rows = eng.screen_text();
+        let joined: String = rows
+            .iter()
+            .take(2)
+            .flat_map(|r| r.chars.iter().copied())
+            .collect();
+        assert_eq!(joined, "abcde世", "no spacer leaked into the text");
+        assert_eq!(
+            crate::search::search_rows(&rows, "e世", false).len(),
+            1,
+            "and a query across the wrap matches"
+        );
+    }
+
+    #[test]
+    fn the_row_anchor_reports_where_a_row_moved_to_after_eviction() {
+        // The drift fix. A 10-row scrollback plus a 2-row viewport holds 12 rows,
+        // so writing past that evicts the oldest and renumbers the screen.
+        let mut eng = GhosttyVtEngine::new(10, 2, 10).unwrap();
+        for i in 0..12 {
+            eng.write(format!("row{i}\r\n").as_bytes());
+        }
+
+        // Anchor a row with known text on it — that text is the oracle. Wherever
+        // the anchor says the row is now, that row must still read the same.
+        let find = |eng: &GhosttyVtEngine, want: &str| -> Option<u32> {
+            eng.screen_text()
+                .into_iter()
+                .find(|r| r.chars.iter().collect::<String>() == want)
+                .map(|r| r.row)
+        };
+        let captured = find(&eng, "row11").expect("the row we just wrote");
+        eng.set_row_anchor(Some(captured));
+        assert_eq!(eng.row_anchor_now(), Some(captured), "no drift yet");
+
+        // Measured, not assumed: libghostty frees scrollback a **page** at a
+        // time, so a few lines past the limit prune nothing and every row keeps
+        // its number. Drift therefore arrives in jumps, and until one lands the
+        // anchor keeps reporting the same row — which is correct, and is why the
+        // correction is free in the common case.
+        for i in 12..200 {
+            eng.write(format!("row{i}\r\n").as_bytes());
+        }
+        let now = eng.row_anchor_now().expect("nothing pruned yet");
+        assert_eq!(
+            find(&eng, "row11"),
+            Some(now),
+            "the anchor names the row that line is actually on"
+        );
+        assert_eq!(crate::search::row_shift(captured, now), 0, "no drift yet");
+
+        // Clearing the anchor stops the tracking.
+        eng.set_row_anchor(None);
+        assert_eq!(eng.row_anchor_now(), None);
+    }
+
+    #[test]
+    #[ignore = "writes ~12k lines to force a scrollback prune; ~8s"]
+    fn a_pruned_row_anchor_reports_no_value_rather_than_a_stale_row() {
+        // The case that would otherwise silently mis-highlight: upstream moves a
+        // destroyed pin to the screen's **top-left**, so reading its point
+        // without checking `has_value` comes back as a confident "row 0" — a
+        // zero drift correction at exactly the moment the correction is needed.
+        //
+        // Ignored only because forcing a real prune is expensive: libghostty
+        // frees scrollback a page at a time, and `max_scrollback = 10` still
+        // retained ~7k rows at 20k lines written (measured, not assumed).
+        let mut eng = GhosttyVtEngine::new(10, 2, 10).unwrap();
+        for i in 0..12 {
+            eng.write(format!("row{i}\r\n").as_bytes());
+        }
+        eng.set_row_anchor(Some(11));
+        assert_eq!(eng.row_anchor_now(), Some(11));
+
+        for i in 12..12_000 {
+            eng.write(format!("row{i}\r\n").as_bytes());
+        }
+        assert_eq!(eng.row_anchor_now(), None, "the anchored row was pruned");
+    }
+
+    #[test]
+    fn screen_text_reads_rows_with_column_mapping() {
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        eng.write(b"hello\r\nworld\r\n");
+        let rows = eng.screen_text();
+        assert_eq!(rows.len(), 3, "scrollback(0) + 3 viewport rows");
+        assert_eq!(rows[0].chars.iter().collect::<String>(), "hello");
+        assert_eq!(
+            rows[0].cols,
+            vec![0, 1, 2, 3, 4],
+            "each char maps to its column"
+        );
+        assert_eq!(rows[0].row, 0);
+        assert_eq!(rows[1].chars.iter().collect::<String>(), "world");
+        // The empty cursor row trims to nothing.
+        assert!(rows[2].chars.is_empty());
+    }
+
+    #[test]
+    fn screen_text_skips_wide_char_tail_cells() {
+        // Wide (CJK) chars occupy two columns; their empty spacer-tail cell must
+        // be skipped so the codepoints stay adjacent (searchable), with columns
+        // reflecting physical placement (世 at col 0, 界 at col 2, x at col 4).
+        let mut eng = GhosttyVtEngine::new(20, 2, 100).unwrap();
+        eng.write("世界x".as_bytes());
+        let rows = eng.screen_text();
+        assert_eq!(rows[0].chars.iter().collect::<String>(), "世界x");
+        assert_eq!(rows[0].cols, vec![0, 2, 4]);
+    }
+
+    #[test]
+    fn osc_sets_window_title() {
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        eng.write(b"\x1b]2;hello\x07");
+        assert_eq!(eng.title().as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn prompt_rows_mark_input_cells_after_b() {
+        // `cursor-click-to-move` walks input cells: everything typed after the
+        // `B` mark is input, the prompt text before it is not.
+        let mut eng = GhosttyVtEngine::new(20, 4, 100).unwrap();
+        eng.write(b"\x1b]133;A;cl=line\x1b\\> \x1b]133;B\x1b\\abc");
+        assert_eq!(eng.cursor_at_prompt(), Some(true));
+        let rows = eng.prompt_rows();
+        assert_eq!(rows.len(), 4);
+        assert_eq!(rows[0].prompt, crate::engine::RowPrompt::Prompt);
+        let input: Vec<usize> = (0..20).filter(|&x| rows[0].input[x]).collect();
+        assert_eq!(input, vec![2, 3, 4]);
+        // Cursor after `abc` at col 5; a click on `a` is three lefts.
+        assert_eq!(
+            crate::prompt_click::line_move(&rows, (5, 0), (2, 0)),
+            (3, 0)
+        );
+    }
+
+    #[test]
+    fn jump_to_prompt_finds_marked_prompts() {
+        // Without OSC 133 marks there is nothing to jump to, even with scrollback.
+        let mut eng = GhosttyVtEngine::new(20, 4, 100).unwrap();
+        eng.write(b"plain\r\noutput\r\nlines\r\nhere\r\nmore\r\n");
+        assert_eq!(eng.jump_to_prompt(-1), None);
+
+        // Three OSC 133 A prompt marks separated by output; with rows = 4 the
+        // earliest prompts spill into scrollback above the live viewport.
+        let mut eng = GhosttyVtEngine::new(20, 4, 100).unwrap();
+        let mark = b"\x1b]133;A\x1b\\";
+        let mut data = Vec::new();
+        for body in [
+            &b"p1\r\na\r\nb\r\n"[..],
+            &b"p2\r\nc\r\nd\r\n"[..],
+            &b"p3"[..],
+        ] {
+            data.extend_from_slice(mark);
+            data.extend_from_slice(body);
+        }
+        eng.write(&data);
+        // From the live bottom, a previous prompt sits above the viewport top.
+        let up = eng.jump_to_prompt(-1);
+        assert!(
+            up.is_some_and(|n| n >= 1),
+            "expected a prompt above, got {up:?}"
+        );
+    }
+
+    #[test]
+    fn bell_sets_one_shot_flag() {
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        assert!(!eng.take_bell(), "no bell yet");
+        eng.write(b"a\x07b");
+        assert!(eng.take_bell(), "BEL (0x07) should set the bell flag");
+        assert!(!eng.take_bell(), "the flag is one-shot and clears on read");
+    }
+
+    #[test]
+    fn reads_osc8_hyperlink_uri() {
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        // OSC 8 hyperlink: start (empty params, URI), display text "LINK", end.
+        // ST is ESC '\'. The link covers the four cells of "LINK".
+        eng.write(b"\x1b]8;;https://example.com\x1b\\LINK\x1b]8;;\x1b\\");
+        assert_eq!(
+            eng.hyperlink_at(0, 0).as_deref(),
+            Some("https://example.com")
+        );
+        assert_eq!(
+            eng.hyperlink_at(3, 0).as_deref(),
+            Some("https://example.com")
+        );
+        // A cell past the link text carries no hyperlink.
+        assert_eq!(eng.hyperlink_at(10, 0), None);
+    }
+
+    /// giest reconstructs the scrollbar's `{total, offset, len}` from
+    /// `scrollback_rows()` + the viewport height instead of calling the
+    /// binding's `Terminal::scrollbar()` (expensive at arbitrary pins, and its
+    /// integer `offset` can't carry a sub-line position). That's only valid if
+    /// the two agree — so compare them directly, and catch it here rather than
+    /// as a subtly skewed thumb if upstream ever changes the arithmetic.
+    #[test]
+    fn scrollbar_state_matches_the_reconstruction_from_scrollback_rows() {
+        const ROWS: u16 = 24;
+        let mut eng = GhosttyVtEngine::new(80, ROWS, 1000).unwrap();
+        for i in 0..200 {
+            eng.write(format!("line {i}\r\n").as_bytes());
+        }
+        let scrollback = eng.scrollback_rows();
+        assert!(
+            scrollback > 0,
+            "200 lines into a 24-row grid must scroll off"
+        );
+
+        let bar = eng.term.scrollbar().unwrap();
+        assert_eq!(
+            bar.len as usize, ROWS as usize,
+            "len is the viewport height"
+        );
+        assert_eq!(
+            bar.total as usize,
+            scrollback + ROWS as usize,
+            "total is scrollback plus the viewport"
+        );
+        // Parked at the live bottom, so the viewport starts at the last page.
+        assert_eq!(bar.offset as usize, scrollback);
+
+        // And it tracks the pin: scrolling up 10 lines moves `offset` by 10.
+        eng.scroll(-10);
+        assert_eq!(
+            eng.term.scrollbar().unwrap().offset as usize,
+            scrollback - 10
+        );
+    }
+
+    #[test]
+    fn enter_key_encodes_carriage_return() {
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        let bytes = eng.encode_key(&KeyInput {
+            code: KeyCode::Enter,
+            text: None,
+            mods: KeyMods::default(),
+            press: true,
+        });
+        assert_eq!(bytes, b"\r");
+    }
+
+    #[test]
+    fn paste_normalizes_newlines_when_not_bracketed() {
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        // Default: bracketed paste off → newlines become carriage returns.
+        assert_eq!(eng.encode_paste("a\nb"), b"a\rb");
+    }
+
+    /// Paste protection needs the mode *before* encoding, so it reads it
+    /// through its own accessor rather than inferring it from the output.
+    #[test]
+    fn bracketed_paste_mode_is_reported() {
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        assert!(!eng.bracketed_paste(), "off until the program asks");
+        eng.write(b"\x1b[?2004h");
+        assert!(eng.bracketed_paste(), "DECSET 2004 enables it");
+        eng.write(b"\x1b[?2004l");
+        assert!(!eng.bracketed_paste(), "DECRST 2004 disables it");
+    }
+
+    #[test]
+    fn paste_wraps_in_brackets_when_enabled() {
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        // Enable bracketed paste (DEC mode 2004) the way an app would.
+        eng.write(b"\x1b[?2004h");
+        let out = eng.encode_paste("hi");
+        assert_eq!(out, b"\x1b[200~hi\x1b[201~");
+    }
+
+    #[test]
+    fn mouse_left_press_sgr() {
+        let mut eng = GhosttyVtEngine::new(80, 24, 100).unwrap();
+        // Enable button tracking (1000) + SGR extended mode (1006).
+        eng.write(b"\x1b[?1000h\x1b[?1006h");
+        assert!(eng.is_mouse_tracking());
+        let out = eng.encode_mouse(&MouseInput {
+            action: MouseAction::Press,
+            button: Some(MouseButton::Left),
+            pos_px: (25, 30),
+            cell_px: (10, 20),
+            screen_px: (800, 480),
+            mods: KeyMods::default(),
+        });
+        // Cell (col 2, row 1) 0-based → SGR 1-based col 3, row 2; button 0; press 'M'.
+        assert_eq!(out, b"\x1b[<0;3;2M");
+    }
+
+    #[test]
+    fn ctrl_c_encodes_etx() {
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        let bytes = eng.encode_key(&KeyInput {
+            code: KeyCode::C,
+            text: None,
+            mods: KeyMods {
+                ctrl: true,
+                ..Default::default()
+            },
+            press: true,
+        });
+        assert_eq!(bytes, b"\x03");
+    }
+
+    // --- Encode integration: verify giest drives libghostty's encoder with the
+    // live terminal modes (these assert standard xterm sequences, not a
+    // re-derivation of the protocol — that's libghostty's own test surface). ---
+
+    fn key(eng: &mut GhosttyVtEngine, code: KeyCode, mods: KeyMods) -> Vec<u8> {
+        eng.encode_key(&KeyInput {
+            code,
+            text: None,
+            mods,
+            press: true,
+        })
+    }
+
+    #[test]
+    fn arrows_normal_mode() {
+        let mut eng = GhosttyVtEngine::new(80, 24, 100).unwrap();
+        let none = KeyMods::default();
+        assert_eq!(key(&mut eng, KeyCode::ArrowUp, none), b"\x1b[A");
+        assert_eq!(key(&mut eng, KeyCode::ArrowDown, none), b"\x1b[B");
+        assert_eq!(key(&mut eng, KeyCode::ArrowRight, none), b"\x1b[C");
+        assert_eq!(key(&mut eng, KeyCode::ArrowLeft, none), b"\x1b[D");
+    }
+
+    #[test]
+    fn arrows_application_cursor_mode() {
+        let mut eng = GhosttyVtEngine::new(80, 24, 100).unwrap();
+        // DECCKM (application cursor keys) switches CSI to SS3 form.
+        eng.write(b"\x1b[?1h");
+        assert_eq!(
+            key(&mut eng, KeyCode::ArrowUp, KeyMods::default()),
+            b"\x1bOA"
+        );
+        assert_eq!(
+            key(&mut eng, KeyCode::ArrowRight, KeyMods::default()),
+            b"\x1bOC"
+        );
+    }
+
+    #[test]
+    fn modified_arrows_emit_csi_modifier() {
+        let mut eng = GhosttyVtEngine::new(80, 24, 100).unwrap();
+        let shift = KeyMods {
+            shift: true,
+            ..Default::default()
+        };
+        let ctrl = KeyMods {
+            ctrl: true,
+            ..Default::default()
+        };
+        let alt = KeyMods {
+            alt: true,
+            ..Default::default()
+        };
+        // xterm modifier params: shift=2, alt=3, ctrl=5 (param-1 bitmask + 1).
+        assert_eq!(key(&mut eng, KeyCode::ArrowRight, shift), b"\x1b[1;2C");
+        assert_eq!(key(&mut eng, KeyCode::ArrowRight, alt), b"\x1b[1;3C");
+        assert_eq!(key(&mut eng, KeyCode::ArrowRight, ctrl), b"\x1b[1;5C");
+    }
+
+    #[test]
+    fn mouse_release_and_large_position_sgr() {
+        let mut eng = GhosttyVtEngine::new(200, 60, 100).unwrap();
+        eng.write(b"\x1b[?1000h\x1b[?1006h");
+        let out = eng.encode_mouse(&MouseInput {
+            action: MouseAction::Release,
+            button: Some(MouseButton::Left),
+            // 1005/10 = col 100 → 1-based 101; 1190/20 = row 59 → 1-based 60.
+            pos_px: (1005, 1190),
+            cell_px: (10, 20),
+            screen_px: (2000, 1200),
+            mods: KeyMods::default(),
+        });
+        // Release in SGR mode terminates with 'm' (press would be 'M').
+        assert_eq!(out, b"\x1b[<0;101;60m");
     }
 }

@@ -37,7 +37,11 @@ fn row_text(snap: &GridSnapshot, y: u16) -> (String, Vec<usize>) {
     let mut starts = Vec::with_capacity(snap.cols as usize);
     for x in 0..snap.cols {
         starts.push(s.len());
-        match snap.cell(x, y).map(|c| c.text.as_str()).filter(|t| !t.is_empty()) {
+        match snap
+            .cell(x, y)
+            .map(|c| c.text.as_str())
+            .filter(|t| !t.is_empty())
+        {
             Some(t) => s.push_str(t),
             None => s.push(' '),
         }
@@ -75,7 +79,11 @@ mod tests {
             let mut n = 0;
             for ch in r.chars() {
                 s.cells.push(Cell {
-                    text: if ch == ' ' { "".into() } else { ch.to_string().into() },
+                    text: if ch == ' ' {
+                        "".into()
+                    } else {
+                        ch.to_string().into()
+                    },
                     ..Default::default()
                 });
                 n += 1;
@@ -92,7 +100,10 @@ mod tests {
         let s = snap(&["see JIRA-123 and JIRA-7 now"]);
         let rules = [Regex::new(r"JIRA-\d+").unwrap()];
         assert_eq!(rule_match_at(&s, 4, 0, &rules).as_deref(), Some("JIRA-123"));
-        assert_eq!(rule_match_at(&s, 11, 0, &rules).as_deref(), Some("JIRA-123"));
+        assert_eq!(
+            rule_match_at(&s, 11, 0, &rules).as_deref(),
+            Some("JIRA-123")
+        );
         assert_eq!(rule_match_at(&s, 12, 0, &rules), None, "the space after it");
         assert_eq!(rule_match_at(&s, 17, 0, &rules).as_deref(), Some("JIRA-7"));
         assert_eq!(rule_match_at(&s, 0, 0, &rules), None);
@@ -101,12 +112,24 @@ mod tests {
     #[test]
     fn earlier_rules_win() {
         let s = snap(&["path /tmp/abc.log"]);
-        let rules = [Regex::new(r"/tmp/\S+").unwrap(), Regex::new(r"\S+\.log").unwrap()];
-        assert_eq!(rule_match_at(&s, 8, 0, &rules).as_deref(), Some("/tmp/abc.log"));
-        let rules = [Regex::new(r"abc\.log").unwrap(), Regex::new(r"/tmp/\S+").unwrap()];
+        let rules = [
+            Regex::new(r"/tmp/\S+").unwrap(),
+            Regex::new(r"\S+\.log").unwrap(),
+        ];
+        assert_eq!(
+            rule_match_at(&s, 8, 0, &rules).as_deref(),
+            Some("/tmp/abc.log")
+        );
+        let rules = [
+            Regex::new(r"abc\.log").unwrap(),
+            Regex::new(r"/tmp/\S+").unwrap(),
+        ];
         assert_eq!(rule_match_at(&s, 12, 0, &rules).as_deref(), Some("abc.log"));
         // Outside the first rule's match, the second still applies.
-        assert_eq!(rule_match_at(&s, 6, 0, &rules).as_deref(), Some("/tmp/abc.log"));
+        assert_eq!(
+            rule_match_at(&s, 6, 0, &rules).as_deref(),
+            Some("/tmp/abc.log")
+        );
     }
 
     #[test]

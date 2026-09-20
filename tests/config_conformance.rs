@@ -197,7 +197,10 @@ fn copy_on_select_enum_values() {
     // the true/false aliases (true = clipboard off Linux).
     assert_eq!(cfg("copy-on-select = false").copy_on_select, C::None);
     assert_eq!(cfg("copy-on-select = true").copy_on_select, C::Clipboard);
-    assert_eq!(cfg("copy-on-select = clipboard").copy_on_select, C::Clipboard);
+    assert_eq!(
+        cfg("copy-on-select = clipboard").copy_on_select,
+        C::Clipboard
+    );
     // Windows has no system PRIMARY: `primary` writes giest's emulated one.
     assert_eq!(cfg("copy-on-select = primary").copy_on_select, C::Primary);
     assert_eq!(cfg("copy-on-select = both").copy_on_select, C::Both);
@@ -206,13 +209,11 @@ fn copy_on_select_enum_values() {
 #[test]
 fn background_image_key_family() {
     // A Ghostty config block, verbatim from its documented value names.
-    let c = cfg(
-        "background-image = wallpaper.png\n\
+    let c = cfg("background-image = wallpaper.png\n\
          background-image-opacity = 0.4\n\
          background-image-position = bottom-right\n\
          background-image-fit = cover\n\
-         background-image-repeat = true\n",
-    );
+         background-image-repeat = true\n");
     assert_eq!(c.background_image.as_deref(), Some("wallpaper.png"));
     assert_eq!(c.background_image_opacity, 0.4);
     assert_eq!(
@@ -260,7 +261,10 @@ fn custom_shader_is_repeatable_and_ordered() {
     // Ghostty runs multiple shaders in the order given, so the list must keep
     // its order — a reversed chain silently produces a different image.
     let c = cfg("custom-shader = a.glsl\ncustom-shader = b.glsl\n");
-    assert_eq!(c.custom_shaders, vec!["a.glsl".to_string(), "b.glsl".to_string()]);
+    assert_eq!(
+        c.custom_shaders,
+        vec!["a.glsl".to_string(), "b.glsl".to_string()]
+    );
     // An empty value resets the whole list, like `font-feature`.
     assert!(
         cfg("custom-shader = a.glsl\ncustom-shader =")
@@ -274,8 +278,14 @@ fn custom_shader_is_repeatable_and_ordered() {
 fn custom_shader_animation_values() {
     use giest::config::CustomShaderAnimation as A;
     assert_eq!(cfg("").custom_shader_animation, A::True);
-    assert_eq!(cfg("custom-shader-animation = false").custom_shader_animation, A::False);
-    assert_eq!(cfg("custom-shader-animation = always").custom_shader_animation, A::Always);
+    assert_eq!(
+        cfg("custom-shader-animation = false").custom_shader_animation,
+        A::False
+    );
+    assert_eq!(
+        cfg("custom-shader-animation = always").custom_shader_animation,
+        A::Always
+    );
     // The focus gate: `true` animates only when focused, `always` regardless.
     assert!(A::True.animates(true));
     assert!(!A::True.animates(false));
@@ -486,7 +496,10 @@ fn keybind_payloads_survive_the_config_pipeline() {
     let km = Keymap::from_config(&c.keybinds);
     let at = |t: &str| km.lookup(&parse_chord(t).expect("chord"));
 
-    assert_eq!(at("ctrl+alt+a"), Some(Action::SendText("hello world".into())));
+    assert_eq!(
+        at("ctrl+alt+a"),
+        Some(Action::SendText("hello world".into()))
+    );
     assert_eq!(
         at("ctrl+alt+b"),
         Some(Action::SendText("a=b".into())),

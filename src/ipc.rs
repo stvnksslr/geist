@@ -299,7 +299,13 @@ fn serve_one(mut conn: impl std::io::Read + std::io::Write, tx: &Sender<Incoming
             Err(e) => Response::err(e),
             Ok(request) => {
                 let (rtx, rrx) = std::sync::mpsc::channel();
-                if tx.send(Incoming { request, reply: rtx }).is_err() {
+                if tx
+                    .send(Incoming {
+                        request,
+                        reply: rtx,
+                    })
+                    .is_err()
+                {
                     Response::err("giest is shutting down")
                 } else {
                     wake();
@@ -407,7 +413,10 @@ mod imp {
     }
 
     fn wide(s: &str) -> Vec<u16> {
-        std::ffi::OsStr::new(s).encode_wide().chain(Some(0)).collect()
+        std::ffi::OsStr::new(s)
+            .encode_wide()
+            .chain(Some(0))
+            .collect()
     }
 
     /// The string SID of the user a process runs as.
@@ -458,14 +467,13 @@ mod imp {
     /// `\\.\pipe\giest-<SID>-<session>`, or `$GIEST_IPC_PIPE` (tests and
     /// side-by-side builds).
     pub fn pipe_name() -> String {
-        if let Ok(n) = std::env::var("GIEST_IPC_PIPE") {
-            if !n.trim().is_empty() {
-                return format!(r"\\.\pipe\{}", n.trim());
-            }
+        if let Ok(n) = std::env::var("GIEST_IPC_PIPE")
+            && !n.trim().is_empty()
+        {
+            return format!(r"\\.\pipe\{}", n.trim());
         }
-        let sid = current_user_sid().unwrap_or_else(|| {
-            std::env::var("USERNAME").unwrap_or_else(|_| "user".into())
-        });
+        let sid = current_user_sid()
+            .unwrap_or_else(|| std::env::var("USERNAME").unwrap_or_else(|_| "user".into()));
         let mut session = 0u32;
         // SAFETY: valid out-pointer.
         unsafe {
@@ -497,7 +505,12 @@ mod imp {
             inherit_handle: 0,
         };
         let name = wide(name);
-        let mode = PIPE_ACCESS_DUPLEX | if first { FILE_FLAG_FIRST_PIPE_INSTANCE } else { 0 };
+        let mode = PIPE_ACCESS_DUPLEX
+            | if first {
+                FILE_FLAG_FIRST_PIPE_INSTANCE
+            } else {
+                0
+            };
         // SAFETY: all pointers are valid for the call.
         let h = unsafe {
             CreateNamedPipeW(
@@ -551,9 +564,12 @@ mod imp {
                         },
                     };
                     // SAFETY: a valid pipe handle; blocking connect.
-                    let ok = unsafe { ConnectNamedPipe(pipe.as_raw_handle() as Handle, std::ptr::null_mut()) };
+                    let ok = unsafe {
+                        ConnectNamedPipe(pipe.as_raw_handle() as Handle, std::ptr::null_mut())
+                    };
                     if ok == 0
-                        && std::io::Error::last_os_error().raw_os_error() != Some(ERROR_PIPE_CONNECTED)
+                        && std::io::Error::last_os_error().raw_os_error()
+                            != Some(ERROR_PIPE_CONNECTED)
                     {
                         continue;
                     }
@@ -571,7 +587,11 @@ mod imp {
     fn connect(name: &str) -> Result<File, SendError> {
         let wname = wide(name);
         for _ in 0..20 {
-            match std::fs::OpenOptions::new().read(true).write(true).open(name) {
+            match std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(name)
+            {
                 Ok(f) => return Ok(f),
                 Err(e) if e.raw_os_error() == Some(ERROR_FILE_NOT_FOUND) => {
                     return Err(SendError::NoServer);
@@ -594,7 +614,9 @@ mod imp {
         let mut pid = 0u32;
         // SAFETY: valid pipe handle and out-pointer.
         if unsafe { GetNamedPipeServerProcessId(conn.as_raw_handle() as Handle, &mut pid) } == 0 {
-            return Err(SendError::Failed("cannot identify the pipe's server".into()));
+            return Err(SendError::Failed(
+                "cannot identify the pipe's server".into(),
+            ));
         }
         // A pipe name is guessable. Refuse to talk to a server that isn't us.
         // SAFETY: OpenProcess with a query-only right; closed below.
@@ -637,7 +659,10 @@ mod imp {
         String::new()
     }
     pub fn bind(_name: &str) -> std::io::Result<std::fs::File> {
-        Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "no IPC"))
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "no IPC",
+        ))
     }
     pub fn serve(_first: std::fs::File, _name: String, _tx: Sender<Incoming>) {}
     pub fn send(_name: &str, _req: &Request) -> Result<Response, SendError> {
@@ -671,7 +696,10 @@ mod tests {
     #[test]
     fn requests_round_trip_through_the_wire_format() {
         let cases = [
-            Request::NewWindow { cwd: None, command: None },
+            Request::NewWindow {
+                cwd: None,
+                command: None,
+            },
             Request::NewTab {
                 cwd: Some(r"C:\src".into()),
                 command: Some(CommandSpec::Line("pwsh".into())),
@@ -679,17 +707,35 @@ mod tests {
             },
             Request::NewTab {
                 cwd: None,
-                command: Some(CommandSpec::Argv(vec!["cmd.exe".into(), "/k".into(), "dir".into()])),
+                command: Some(CommandSpec::Argv(vec![
+                    "cmd.exe".into(),
+                    "/k".into(),
+                    "dir".into(),
+                ])),
                 window: None,
             },
-            Request::Focus { window: Some(1), tab: Some(2), pane: Some(3) },
-            Request::InputText { text: "echo hi\r\n".into(), window: None, pane: Some(4) },
-            Request::RunAction { action: "new_split:right".into(), window: None },
+            Request::Focus {
+                window: Some(1),
+                tab: Some(2),
+                pane: Some(3),
+            },
+            Request::InputText {
+                text: "echo hi\r\n".into(),
+                window: None,
+                pane: Some(4),
+            },
+            Request::RunAction {
+                action: "new_split:right".into(),
+                window: None,
+            },
             Request::List,
         ];
         for r in cases {
             let line = encode_request(&r);
-            assert!(line.ends_with('\n') && !line[..line.len() - 1].contains('\n'), "{line}");
+            assert!(
+                line.ends_with('\n') && !line[..line.len() - 1].contains('\n'),
+                "{line}"
+            );
             assert_eq!(decode_request(&line).unwrap(), r, "{line}");
         }
     }
@@ -704,7 +750,10 @@ mod tests {
                 window: None
             }
         );
-        assert_eq!(decode_request(r#"{"v":1,"type":"list"}"#).unwrap(), Request::List);
+        assert_eq!(
+            decode_request(r#"{"v":1,"type":"list"}"#).unwrap(),
+            Request::List
+        );
         // Unknown fields are ignored: optional additions need no version bump.
         assert_eq!(
             decode_request(r#"{"v":1,"type":"list","future":true}"#).unwrap(),
@@ -714,7 +763,11 @@ mod tests {
 
     #[test]
     fn version_is_required_and_a_newer_one_is_refused() {
-        assert!(decode_request(r#"{"type":"list"}"#).unwrap_err().contains("version"));
+        assert!(
+            decode_request(r#"{"type":"list"}"#)
+                .unwrap_err()
+                .contains("version")
+        );
         let e = decode_request(r#"{"v":99,"type":"list"}"#).unwrap_err();
         assert!(e.contains("unsupported protocol version 99"), "{e}");
     }
@@ -723,7 +776,10 @@ mod tests {
     fn junk_and_unknown_types_are_errors_not_panics() {
         assert!(decode_request("not json").is_err());
         assert!(decode_request(r#"{"v":1,"type":"format_c"}"#).is_err());
-        assert!(decode_request(r#"{"v":1,"type":"input_text"}"#).is_err(), "text is required");
+        assert!(
+            decode_request(r#"{"v":1,"type":"input_text"}"#).is_err(),
+            "text is required"
+        );
     }
 
     #[test]
@@ -741,13 +797,24 @@ mod tests {
                     id: 2,
                     title: "x".into(),
                     active: true,
-                    panes: vec![PaneInfo { id: 2, title: "x".into(), focused: true, cwd: None }],
+                    panes: vec![PaneInfo {
+                        id: 2,
+                        title: "x".into(),
+                        focused: true,
+                        cwd: None,
+                    }],
                 }],
             }]),
             ..Response::ok()
         };
         assert_eq!(decode_response(&encode_response(&full)).unwrap(), full);
-        assert_eq!(decode_response(&encode_response(&Response::err("no"))).unwrap().error.as_deref(), Some("no"));
+        assert_eq!(
+            decode_response(&encode_response(&Response::err("no")))
+                .unwrap()
+                .error
+                .as_deref(),
+            Some("no")
+        );
     }
 
     #[test]
@@ -788,9 +855,15 @@ mod tests {
         let h = std::thread::spawn(move || {
             let inc = rx.recv().unwrap();
             assert_eq!(inc.request, Request::List);
-            inc.respond(Response { window: Some(9), ..Response::ok() });
+            inc.respond(Response {
+                window: Some(9),
+                ..Response::ok()
+            });
         });
-        let mut c = Conn(std::io::Cursor::new(encode_request(&Request::List).into_bytes()), Vec::new());
+        let mut c = Conn(
+            std::io::Cursor::new(encode_request(&Request::List).into_bytes()),
+            Vec::new(),
+        );
         serve_one(&mut c, &tx);
         h.join().unwrap();
         let r = decode_response(std::str::from_utf8(&c.1).unwrap()).unwrap();

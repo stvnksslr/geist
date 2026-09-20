@@ -15,9 +15,6 @@ concurrency:
   cancel-in-progress: false # never cancel a release mid-upload
 
 env:
-  # Keep in sync with the pinned commit in
-  # vendor/libghostty-rs/crates/libghostty-vt-sys/build.rs
-  GHOSTTY_COMMIT: b869a6e5ab0a50ce01e8eb5aa408a02b3cbe4f3a
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
 
@@ -41,6 +38,25 @@ jobs:
         with:
           fetch-depth: 1
 
+      # The ghostty commit and the Zig version are pinned in the tree, not here:
+      # a second copy in this file silently drifted out of sync once already and
+      # cost a full Windows run to discover (the prefetched source was 876
+      # commits behind the binding, so the build only failed at link time with
+      # 37 unresolved ghostty_* externals). Read both from their one source of
+      # truth instead. Later steps see these via the `env` context.
+      - name: Resolve the pinned ghostty commit and Zig version
+        shell: bash
+        run: |
+          set -euo pipefail
+          commit=$(sed -n 's/^const GHOSTTY_COMMIT: &str = "\([0-9a-f]\{40\}\)";$/\1/p' \
+            vendor/libghostty-rs/crates/libghostty-vt-sys/build.rs)
+          zig=$(sed -n 's/^zig = "\([0-9][0-9.]*\)"$/\1/p' mise.toml)
+          test -n "$commit" || { echo "::error::could not read GHOSTTY_COMMIT from build.rs"; exit 1; }
+          test -n "$zig"    || { echo "::error::could not read the zig version from mise.toml"; exit 1; }
+          echo "Ghostty $commit, Zig $zig"
+          echo "GHOSTTY_COMMIT=$commit" >> "$GITHUB_ENV"
+          echo "ZIG_VERSION=$zig" >> "$GITHUB_ENV"
+
       # ARM64 cross-link needs the ARM64 MSVC toolchain environment on the x64 runner.
       - name: Set up ARM64 MSVC environment
         if: matrix.target == 'aarch64-pc-windows-msvc'
@@ -50,7 +66,7 @@ jobs:
 
       - uses: mlugg/setup-zig@v2
         with:
-          version: 0.15.2
+          version: ${{ env.ZIG_VERSION }}
 
       - uses: dtolnay/rust-toolchain@1.96
         with:

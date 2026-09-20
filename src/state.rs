@@ -220,14 +220,29 @@ fn parse_frame(rest: &str) -> Option<WindowFrame> {
     let mut num = || f.next()?.parse::<f32>().ok().filter(|v| v.is_finite());
     let (x, y, w, h) = (num()?, num()?, num()?, num()?);
     let maximized = num().is_some_and(|m| m != 0.0);
-    (w >= 50.0 && h >= 50.0 && w <= 100_000.0 && h <= 100_000.0 && x.abs() <= 100_000.0 && y.abs() <= 100_000.0)
-        .then_some(WindowFrame { x, y, w, h, maximized })
+    (w >= 50.0
+        && h >= 50.0
+        && w <= 100_000.0
+        && h <= 100_000.0
+        && x.abs() <= 100_000.0
+        && y.abs() <= 100_000.0)
+        .then_some(WindowFrame {
+            x,
+            y,
+            w,
+            h,
+            maximized,
+        })
 }
 
 /// Parse the file format. Returns an empty state for anything unrecognized —
 /// never an error, since a bad state file must not block startup.
 pub fn parse(text: &str) -> SavedState {
-    let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
     let mut state = SavedState::default();
     let mut lines = lines.iter().peekable();
     match lines.next() {
@@ -306,7 +321,10 @@ pub fn save(state: &SavedState) {
         let _ = std::fs::create_dir_all(dir);
     }
     if let Err(e) = std::fs::write(&path, serialize(state)) {
-        eprintln!("giest: could not save window state to {}: {e}", path.display());
+        eprintln!(
+            "giest: could not save window state to {}: {e}",
+            path.display()
+        );
     }
 }
 
@@ -366,7 +384,13 @@ mod tests {
                         },
                     ],
                     active_tab: 1,
-                    frame: Some(WindowFrame { x: -12.5, y: 40.0, w: 960.0, h: 600.0, maximized: true }),
+                    frame: Some(WindowFrame {
+                        x: -12.5,
+                        y: 40.0,
+                        w: 960.0,
+                        h: 600.0,
+                        maximized: true,
+                    }),
                 },
                 SavedWindow {
                     tabs: vec![SavedTab {
@@ -392,7 +416,14 @@ mod tests {
         let body: Vec<&str> = text.lines().skip(1).take(6).collect();
         assert_eq!(
             body,
-            ["W", "F -12.5 40 960 600 1", "T 0 build logs", "S v 0.3", "L 0 C:\\src\\giest", "S h 0.5"]
+            [
+                "W",
+                "F -12.5 40 960 600 1",
+                "T 0 build logs",
+                "S v 0.3",
+                "L 0 C:\\src\\giest",
+                "S h 0.5"
+            ]
         );
     }
 
@@ -403,7 +434,10 @@ mod tests {
         // dropping the layout.
         for line in ["S v", "S v nonsense", "S v 1.5", "S v 0", "S v NaN"] {
             let s = parse(&format!("giest-state 1\nW\nT 1 -\n{line}\nL 1 -\nL 0 -\n"));
-            let SavedNode::Split { vertical, ratio, .. } = &s.windows[0].tabs[0].tree else {
+            let SavedNode::Split {
+                vertical, ratio, ..
+            } = &s.windows[0].tabs[0].tree
+            else {
                 panic!("{line}: expected a split");
             };
             assert!(*vertical, "{line}");
@@ -421,7 +455,13 @@ mod tests {
         let s = parse("giest-state 1\nW\nF 10 -20.5 800 500 1\nT 1 -\nL 1 -\n");
         assert_eq!(
             s.windows[0].frame,
-            Some(WindowFrame { x: 10.0, y: -20.5, w: 800.0, h: 500.0, maximized: true })
+            Some(WindowFrame {
+                x: 10.0,
+                y: -20.5,
+                w: 800.0,
+                h: 500.0,
+                maximized: true
+            })
         );
         // Missing maximized flag reads as not maximized.
         let s = parse("giest-state 1\nW\nF 1 2 300 400\nT 1 -\nL 1 -\n");
@@ -430,7 +470,13 @@ mod tests {
 
     #[test]
     fn an_implausible_frame_is_dropped_but_the_window_kept() {
-        for f in ["F 0 0 1 1 0", "F x 0 800 600 0", "F 0 0 NaN 600 0", "F 0 0 800", "F 1e9 0 800 600 0"] {
+        for f in [
+            "F 0 0 1 1 0",
+            "F x 0 800 600 0",
+            "F 0 0 NaN 600 0",
+            "F 0 0 800",
+            "F 1e9 0 800 600 0",
+        ] {
             let s = parse(&format!("giest-state 1\nW\n{f}\nT 1 -\nL 1 -\n"));
             assert_eq!(s.windows[0].frame, None, "{f}");
             assert_eq!(s.windows[0].tabs.len(), 1, "{f}");
@@ -484,10 +530,12 @@ mod tests {
     #[test]
     fn an_empty_state_is_reported_empty_so_it_deletes_rather_than_writes() {
         assert!(SavedState::default().is_empty());
-        assert!(SavedState {
-            windows: vec![SavedWindow::default()]
-        }
-        .is_empty());
+        assert!(
+            SavedState {
+                windows: vec![SavedWindow::default()]
+            }
+            .is_empty()
+        );
         assert!(!sample().is_empty());
     }
 }

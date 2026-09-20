@@ -9,9 +9,11 @@ use eframe::egui;
 use eframe::egui_wgpu;
 
 use crate::command::{self, Action, PaletteState};
-use crate::config::{Config, CopyOnSelect, MiddleClickAction, ResizeOverlayPosition, RightClickAction};
-use crate::profiles::{self, Profile};
+use crate::config::{
+    Config, CopyOnSelect, MiddleClickAction, ResizeOverlayPosition, RightClickAction,
+};
 use crate::keybind::{Chord, Keymap};
+use crate::profiles::{self, Profile};
 use crate::render::{self, BgImageFrame, PaneFrame, TermFrame};
 use crate::scrollbar;
 use crate::session::{self, Session};
@@ -176,9 +178,7 @@ impl<T> Node<T> {
     fn find_leaf(&self, f: &mut impl FnMut(&T) -> bool) -> Option<u64> {
         match self {
             Node::Leaf { id, payload } => f(payload).then_some(*id),
-            Node::Split { first, second, .. } => {
-                first.find_leaf(f).or_else(|| second.find_leaf(f))
-            }
+            Node::Split { first, second, .. } => first.find_leaf(f).or_else(|| second.find_leaf(f)),
             Node::Empty => None,
         }
     }
@@ -380,7 +380,11 @@ impl<T> Node<T> {
         match self {
             Node::Leaf { id, .. } if *id == target => {
                 let old = std::mem::replace(self, Node::Empty);
-                let (first, second) = if zone.before() { (node, old) } else { (old, node) };
+                let (first, second) = if zone.before() {
+                    (node, old)
+                } else {
+                    (old, node)
+                };
                 *self = Node::Split {
                     vertical: zone.vertical(),
                     ratio: 0.5,
@@ -607,7 +611,11 @@ impl<T> Node<T> {
         if len <= 0.0 {
             return false;
         }
-        let sign = if matches!(dir, Dir::Left | Dir::Up) { -1.0 } else { 1.0 };
+        let sign = if matches!(dir, Dir::Left | Dir::Up) {
+            -1.0
+        } else {
+            1.0
+        };
         let r = (*ratio + sign * points / len).clamp(RESIZE_RATIO_MIN, 1.0 - RESIZE_RATIO_MIN);
         *ratio = clamp_ratio(r, len, min_len);
         true
@@ -920,7 +928,11 @@ impl Grab {
 #[derive(Clone, Debug, PartialEq)]
 enum Dest {
     /// Back into the slot a pane was detached from (the undo of a move).
-    Slot { window: u64, tab: u64, slot: PaneSlot },
+    Slot {
+        window: u64,
+        tab: u64,
+        slot: PaneSlot,
+    },
     /// Beside a pane, on one side of it (a drop on a pane's drop zone).
     Beside {
         window: u64,
@@ -931,15 +943,17 @@ enum Dest {
     /// As a new tab at `index` (a drop on a tab strip).
     NewTab { window: u64, index: usize },
     /// In a new window, placed at `geom` (outer position, inner size) if known.
-    NewWindow { geom: Option<(egui::Pos2, egui::Vec2)> },
+    NewWindow {
+        geom: Option<(egui::Pos2, egui::Vec2)>,
+    },
 }
 
 impl Dest {
     fn window(&self) -> Option<u64> {
         match self {
-            Dest::Slot { window, .. } | Dest::Beside { window, .. } | Dest::NewTab { window, .. } => {
-                Some(*window)
-            }
+            Dest::Slot { window, .. }
+            | Dest::Beside { window, .. }
+            | Dest::NewTab { window, .. } => Some(*window),
             Dest::NewWindow { .. } => None,
         }
     }
@@ -1115,7 +1129,10 @@ fn put_grab<T>(
             let id = tab.id;
             tabs.insert(idx, tab);
             *active = idx;
-            Ok(Grab::Tab { window: *window, tab: id })
+            Ok(Grab::Tab {
+                window: *window,
+                tab: id,
+            })
         }
         Dest::NewWindow { .. } => Err(moved),
     }
@@ -1196,7 +1213,10 @@ struct InspectorFacts {
 /// coordinates and hex colors line up down the column.
 fn fact_row(ui: &mut egui::Ui, key: &str, value: &str, mono: &egui::FontId) {
     ui.horizontal(|ui| {
-        ui.add_sized([130.0, 0.0], egui::Label::new(egui::RichText::new(key).weak()));
+        ui.add_sized(
+            [130.0, 0.0],
+            egui::Label::new(egui::RichText::new(key).weak()),
+        );
         ui.label(egui::RichText::new(value).font(mono.clone()));
     });
 }
@@ -1460,8 +1480,13 @@ struct PaneDrag {
 /// What this window should highlight under a drag.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum DropHint {
-    Pane { leaf: u64, zone: crate::panedrag::Zone },
-    Strip { index: usize },
+    Pane {
+        leaf: u64,
+        zone: crate::panedrag::Zone,
+    },
+    Strip {
+        index: usize,
+    },
 }
 
 /// The tab overview's state: the highlighted tab (by id, so a reap under the
@@ -1490,7 +1515,6 @@ struct QuickAnim {
     showing: bool,
 }
 
-
 /// Process-wide one-slot cache of the decoded `background-image`, keyed by its
 /// resolved path.
 ///
@@ -1500,8 +1524,9 @@ struct QuickAnim {
 /// `Arc`s of the same file would each see the other's texture as foreign and
 /// re-upload it every frame, forever. Handing out one `Arc` per path makes that
 /// impossible, and makes a reload that doesn't change the path free.
-static BG_IMAGE_CACHE: std::sync::Mutex<Option<(std::path::PathBuf, Arc<crate::bgimage::BgImage>)>> =
-    std::sync::Mutex::new(None);
+static BG_IMAGE_CACHE: std::sync::Mutex<
+    Option<(std::path::PathBuf, Arc<crate::bgimage::BgImage>)>,
+> = std::sync::Mutex::new(None);
 
 /// Load and translate every configured `custom-shader`.
 ///
@@ -1531,7 +1556,10 @@ fn load_custom_shaders(cfg: &Config) -> Arc<Vec<render::CustomShader>> {
                     path.display()
                 ),
             },
-            Err(e) => eprintln!("giest: could not read custom-shader {}: {e}", path.display()),
+            Err(e) => eprintln!(
+                "giest: could not read custom-shader {}: {e}",
+                path.display()
+            ),
         }
     }
     Arc::new(out)
@@ -1561,7 +1589,10 @@ fn load_bg_image(cfg: &Config) -> Option<Arc<crate::bgimage::BgImage>> {
             Some(img)
         }
         Err(e) => {
-            eprintln!("giest: could not load background-image {}: {e}", path.display());
+            eprintln!(
+                "giest: could not load background-image {}: {e}",
+                path.display()
+            );
             // Drop any previously cached image so its VRAM is released once the
             // renderer swaps to the placeholder.
             *cache = None;
@@ -1663,7 +1694,9 @@ enum AppRequest {
     /// `undoable` is false for the one path that must never be reversible: a
     /// window whose last shell *exited*. There is nothing to restore — the
     /// processes are gone — and an undo entry would hold a window of dead panes.
-    CloseWindow { undoable: bool },
+    CloseWindow {
+        undoable: bool,
+    },
     /// Show or hide the quick terminal, creating it on first use.
     ToggleQuickTerminal,
     /// File `op` as the reverse of a change this window just made.
@@ -1732,7 +1765,11 @@ pub struct App {
     hidden: bool,
     /// The window count and titlebar colors last pushed to DWM, so the
     /// `EnumThreadWindows` sweep runs only when one of them changes.
-    titlebar_applied: Option<(usize, Option<crate::engine::Rgb>, Option<crate::engine::Rgb>)>,
+    titlebar_applied: Option<(
+        usize,
+        Option<crate::engine::Rgb>,
+        Option<crate::engine::Rgb>,
+    )>,
     /// Requests from other `giest` processes (`ipc.rs`), when this process is
     /// the single instance.
     ipc_rx: Option<std::sync::mpsc::Receiver<crate::ipc::Incoming>>,
@@ -1891,11 +1928,7 @@ fn highlight_job(
         }
         let _ = ch;
     }
-    job.append(
-        &text[run_start..],
-        0.0,
-        if run_hit { lit } else { plain },
-    );
+    job.append(&text[run_start..], 0.0, if run_hit { lit } else { plain });
     job
 }
 
@@ -1913,7 +1946,12 @@ fn toast_id(window_id: u64) -> egui::Id {
 /// Show `msg` as this window's toast, replacing any current one. Callers check
 /// the relevant `app-notifications` flag.
 fn push_toast(ctx: &egui::Context, window_id: u64, msg: &str) {
-    ctx.data_mut(|d| d.insert_temp(toast_id(window_id), (msg.to_string(), std::time::Instant::now())));
+    ctx.data_mut(|d| {
+        d.insert_temp(
+            toast_id(window_id),
+            (msg.to_string(), std::time::Instant::now()),
+        )
+    });
     ctx.request_repaint();
 }
 
@@ -2017,7 +2055,8 @@ impl Window {
         theme::install(&cc.egui_ctx, &config);
         let ppp = cc.egui_ctx.pixels_per_point().max(1.0);
         let px = (config.font_points * ppp).round();
-        let (cell_w, cell_h) = render::init(render_state, px, config.text_gamma, &font_spec(&config));
+        let (cell_w, cell_h) =
+            render::init(render_state, px, config.text_gamma, &font_spec(&config));
 
         let (profiles, default_profile) = profiles::detect(config.shell.as_deref());
         // The very first session predates the `Window`, so it resolves
@@ -2189,21 +2228,22 @@ impl Window {
         if bell.system {
             crate::bell::system_alert();
         }
-        if bell.audio {
-            if let Some(raw) = self.config.bell_audio_path.as_deref() {
-                let dir = crate::config::config_path();
-                let dir = dir.as_deref().and_then(|p| p.parent());
-                if let Some(path) = crate::bell::resolve_audio_path(raw, dir) {
-                    crate::bell::play_audio(&path);
-                }
+        if bell.audio
+            && let Some(raw) = self.config.bell_audio_path.as_deref()
+        {
+            let dir = crate::config::config_path();
+            let dir = dir.as_deref().and_then(|p| p.parent());
+            if let Some(path) = crate::bell::resolve_audio_path(raw, dir) {
+                crate::bell::play_audio(&path);
             }
         }
         // Ghostty requests attention only when the window is *unfocused* — a
         // taskbar flash on the window you're already looking at is just noise.
-        if bell.attention && !ctx.input(|i| i.focused) {
-            if let Some(hwnd) = self.hwnd {
-                crate::bell::request_attention(hwnd);
-            }
+        if bell.attention
+            && !ctx.input(|i| i.focused)
+            && let Some(hwnd) = self.hwnd
+        {
+            crate::bell::request_attention(hwnd);
         }
         if bell.title {
             self.bell_title = true;
@@ -2315,7 +2355,11 @@ impl Window {
                         self.title_override = (!val.is_empty()).then(|| text.clone());
                     }
                     TitlePrompt::Surface => {
-                        let t = if val.is_empty() { String::new() } else { text.clone() };
+                        let t = if val.is_empty() {
+                            String::new()
+                        } else {
+                            text.clone()
+                        };
                         if let Some(s) = self.focused_session_mut() {
                             s.set_title_override(&t);
                         }
@@ -2362,9 +2406,7 @@ impl Window {
                     .id_salt(self.id("config-errors-list"))
                     .show(ui, |ui| {
                         for d in diags {
-                            ui.add(
-                                egui::Label::new(egui::RichText::new(d).monospace()).wrap(),
-                            );
+                            ui.add(egui::Label::new(egui::RichText::new(d).monospace()).wrap());
                         }
                     });
             });
@@ -2412,7 +2454,8 @@ impl Window {
                     .on_hover_text("Copy the version and commit, for a bug report")
                     .clicked()
                 {
-                    ui.ctx().copy_text(format!("giest {}", crate::about::version_line()));
+                    ui.ctx()
+                        .copy_text(format!("giest {}", crate::about::version_line()));
                 }
                 ui.add_space(8.0);
                 for (label, url) in crate::about::LINKS {
@@ -2524,7 +2567,9 @@ impl Window {
                     mods: session::key_mods(modifiers),
                     code,
                 };
-                if self.keymap.lookup_in(&self.key_tables, &chord) == Some(Action::ToggleTabOverview) {
+                if self.keymap.lookup_in(&self.key_tables, &chord)
+                    == Some(Action::ToggleTabOverview)
+                {
                     close = true;
                     consume.push((*modifiers, *key));
                 }
@@ -2625,8 +2670,7 @@ impl Window {
     /// over its last few hundred milliseconds.
     fn render_toast(&mut self, ctx: &egui::Context) {
         let id = toast_id(self.window_id);
-        let Some((msg, at)) = ctx.data(|d| d.get_temp::<(String, std::time::Instant)>(id))
-        else {
+        let Some((msg, at)) = ctx.data(|d| d.get_temp::<(String, std::time::Instant)>(id)) else {
             return;
         };
         let age = at.elapsed().as_secs_f32();
@@ -2715,10 +2759,10 @@ impl Window {
         if modal.should_close() {
             decision = Some(false);
         }
-        if let Some(allow) = decision {
-            if let Some(s) = self.tabs[active].root.payload_mut(leaf_id) {
-                s.resolve_clipboard(allow);
-            }
+        if let Some(allow) = decision
+            && let Some(s) = self.tabs[active].root.payload_mut(leaf_id)
+        {
+            s.resolve_clipboard(allow);
         }
     }
 
@@ -2768,16 +2812,16 @@ impl Window {
                     modifiers,
                     ..
                 } = event
+                    && modifiers.ctrl
+                    && !modifiers.shift
                 {
-                    if modifiers.ctrl && !modifiers.shift {
-                        match key {
-                            egui::Key::Equals | egui::Key::Plus => {
-                                target = Some(self.font_points + 1.0)
-                            }
-                            egui::Key::Minus => target = Some(self.font_points - 1.0),
-                            egui::Key::Num0 => target = Some(self.config.font_points),
-                            _ => {}
+                    match key {
+                        egui::Key::Equals | egui::Key::Plus => {
+                            target = Some(self.font_points + 1.0)
                         }
+                        egui::Key::Minus => target = Some(self.font_points - 1.0),
+                        egui::Key::Num0 => target = Some(self.config.font_points),
+                        _ => {}
                     }
                 }
             }
@@ -3089,7 +3133,7 @@ impl Window {
 
     /// Whether the quick terminal is showing or sliding in (not sliding out).
     fn quick_shown(&self) -> bool {
-        self.quick_visible && !self.quick_anim.is_some_and(|a| !a.showing)
+        self.quick_visible && self.quick_anim.is_none_or(|a| a.showing)
     }
 
     /// Show or hide the quick terminal, sliding when
@@ -3100,9 +3144,15 @@ impl Window {
             && self.config.quick_terminal_position != crate::quickterm::Position::Center;
         if show {
             self.quick_visible = true;
-            self.quick_anim = animate.then_some(QuickAnim { start: now, showing: true });
+            self.quick_anim = animate.then_some(QuickAnim {
+                start: now,
+                showing: true,
+            });
         } else if animate && self.quick_visible {
-            self.quick_anim = Some(QuickAnim { start: now, showing: false });
+            self.quick_anim = Some(QuickAnim {
+                start: now,
+                showing: false,
+            });
         } else {
             self.quick_visible = false;
             self.quick_anim = None;
@@ -3237,7 +3287,11 @@ impl Window {
 
     /// IPC `new_tab`: a tab running `profile` (else the default) in exactly
     /// `cwd` — an explicit request, so nothing is inherited.
-    fn open_tab(&mut self, profile: Option<&Profile>, cwd: Option<&std::path::Path>) -> Option<u64> {
+    fn open_tab(
+        &mut self,
+        profile: Option<&Profile>,
+        cwd: Option<&std::path::Path>,
+    ) -> Option<u64> {
         let s = match profile {
             Some(p) => self.spawn_profile(p, cwd)?,
             None => self.spawn_session(self.default_profile, cwd)?,
@@ -3331,7 +3385,10 @@ impl Window {
             .collect();
         crate::ipc::WindowInfo {
             id: self.window_id,
-            title: self.last_window_title.clone().unwrap_or_else(|| "giest".into()),
+            title: self
+                .last_window_title
+                .clone()
+                .unwrap_or_else(|| "giest".into()),
             focused,
             tabs,
         }
@@ -3473,24 +3530,28 @@ impl Window {
             }
             PendingClose::Tab(i) => {
                 if let Some(tab) = self.tabs.get_mut(i) {
-                    tab.root.for_each_mut(&mut |s: &mut Session| out.push(s.looks_busy()));
+                    tab.root
+                        .for_each_mut(&mut |s: &mut Session| out.push(s.looks_busy()));
                 }
             }
             PendingClose::OtherTabs(keep) => {
                 for (i, tab) in self.tabs.iter_mut().enumerate() {
                     if i != keep {
-                        tab.root.for_each_mut(&mut |s: &mut Session| out.push(s.looks_busy()));
+                        tab.root
+                            .for_each_mut(&mut |s: &mut Session| out.push(s.looks_busy()));
                     }
                 }
             }
             PendingClose::TabsToRight(from) => {
                 for tab in self.tabs.iter_mut().skip(from + 1) {
-                    tab.root.for_each_mut(&mut |s: &mut Session| out.push(s.looks_busy()));
+                    tab.root
+                        .for_each_mut(&mut |s: &mut Session| out.push(s.looks_busy()));
                 }
             }
             PendingClose::Window => {
                 for tab in &mut self.tabs {
-                    tab.root.for_each_mut(&mut |s: &mut Session| out.push(s.looks_busy()));
+                    tab.root
+                        .for_each_mut(&mut |s: &mut Session| out.push(s.looks_busy()));
                 }
             }
         }
@@ -3533,7 +3594,8 @@ impl Window {
                 // come straight back as another `close_requested()` and re-open
                 // this dialog forever.
                 self.closing = true;
-                self.requests.push(AppRequest::CloseWindow { undoable: true });
+                self.requests
+                    .push(AppRequest::CloseWindow { undoable: true });
             }
         }
     }
@@ -3566,7 +3628,8 @@ impl Window {
             // The last pane of a tab *is* the tab; one path, one undo entry.
             self.close_tab(self.active_tab);
         } else {
-            self.requests.push(AppRequest::CloseWindow { undoable: true });
+            self.requests
+                .push(AppRequest::CloseWindow { undoable: true });
         }
     }
 
@@ -3670,7 +3733,8 @@ impl Window {
         // the tab still in place, so the undo entry is one restorable window
         // rather than a tab pointing at a window that no longer exists.
         if self.tabs.len() == 1 {
-            self.requests.push(AppRequest::CloseWindow { undoable: true });
+            self.requests
+                .push(AppRequest::CloseWindow { undoable: true });
             return;
         }
         let active = self.active_tab;
@@ -3714,7 +3778,8 @@ impl Window {
             reap_tabs(tabs, self.active_tab, &mut |s: &Session| s.should_reap());
         self.tabs = survivors;
         if self.tabs.is_empty() {
-            self.requests.push(AppRequest::CloseWindow { undoable: false });
+            self.requests
+                .push(AppRequest::CloseWindow { undoable: false });
             return false;
         }
         if self.tabs.len() != before {
@@ -3736,7 +3801,10 @@ impl Window {
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
         // Mid-composition every key belongs to the IME; a chord reaching us here
         // must not fire a binding the user was typing *through*.
-        if self.focused_session().is_some_and(|s| s.preedit().is_some()) {
+        if self
+            .focused_session()
+            .is_some_and(|s| s.preedit().is_some())
+        {
             return;
         }
         let events = ctx.input(|i| i.events.clone());
@@ -3879,18 +3947,15 @@ impl Window {
         // A counter, not a clock: two captures in the same second would collide
         // on a timestamp alone.
         self.write_file_seq = self.write_file_seq.wrapping_add(1);
-        let path = match crate::writefile::write(
-            &std::env::temp_dir(),
-            scope,
-            self.write_file_seq,
-            &text,
-        ) {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("giest: {e:#}");
-                return;
-            }
-        };
+        let path =
+            match crate::writefile::write(&std::env::temp_dir(), scope, self.write_file_seq, &text)
+            {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("giest: {e:#}");
+                    return;
+                }
+            };
         let display = path.display().to_string();
         match what {
             WriteAction::Copy => self.egui_ctx.copy_text(display),
@@ -4029,7 +4094,8 @@ impl Window {
     fn reload_config(&mut self, render_state: Option<&egui_wgpu::RenderState>) {
         let cfg = Config::load();
         for tab in &mut self.tabs {
-            tab.root.for_each_mut(&mut |s: &mut Session| s.apply_config(&cfg));
+            tab.root
+                .for_each_mut(&mut |s: &mut Session| s.apply_config(&cfg));
         }
         let new_font = cfg.font_points;
         self.keymap = Keymap::from_config(&cfg.keybinds);
@@ -4090,7 +4156,10 @@ impl Window {
             // Bound, and deliberately does nothing (see `Action::Noop`).
             Action::Noop(_) => {}
             Action::PromptSurfaceTitle => {
-                let cur = self.focused_session().and_then(|s| s.title()).unwrap_or_default();
+                let cur = self
+                    .focused_session()
+                    .and_then(|s| s.title())
+                    .unwrap_or_default();
                 self.title_prompt = Some((TitlePrompt::Surface, cur));
             }
             Action::PromptWindowTitle => {
@@ -4117,9 +4186,8 @@ impl Window {
             }
             Action::ToggleVisibility => self.requests.push(AppRequest::ToggleVisibility),
             Action::ShowOnScreenKeyboard => crate::winchrome::show_on_screen_keyboard(),
-            Action::CheckForUpdates => {
-                crate::update::global().check(crate::update::Settings::from_config(&self.config), true)
-            }
+            Action::CheckForUpdates => crate::update::global()
+                .check(crate::update::Settings::from_config(&self.config), true),
             Action::ToggleWindowDecorations => self.decorated = !self.decorated,
             Action::GotoWindowNext => self.requests.push(AppRequest::FocusWindow(1)),
             Action::GotoWindowPrev => self.requests.push(AppRequest::FocusWindow(-1)),
@@ -4235,9 +4303,7 @@ impl Window {
             Action::CloseWindow => self.request_close(PendingClose::Window),
             Action::NewTabWithProfile(i) => self.new_tab(i),
             Action::CloseTab => self.request_close(PendingClose::Tab(self.active_tab)),
-            Action::CloseOtherTabs => {
-                self.request_close(PendingClose::OtherTabs(self.active_tab))
-            }
+            Action::CloseOtherTabs => self.request_close(PendingClose::OtherTabs(self.active_tab)),
             Action::CloseTabsToRight => {
                 self.request_close(PendingClose::TabsToRight(self.active_tab))
             }
@@ -4245,9 +4311,7 @@ impl Window {
             Action::PrevTab => self.prev_tab(),
             Action::GotoTab(i) => self.goto_tab(i as usize),
             Action::LastTab => self.goto_tab(self.tabs.len().saturating_sub(1)),
-            Action::TogglePalette => {
-                self.palette = Some(PaletteState::new(self.build_catalog()))
-            }
+            Action::TogglePalette => self.palette = Some(PaletteState::new(self.build_catalog())),
             Action::WriteFile(scope, what) => self.write_terminal_file(scope, what),
             Action::ClearScreen => {
                 if let Some(s) = self.focused_session_mut() {
@@ -4297,7 +4361,9 @@ impl Window {
             // *window* close is one of the things it can take back.
             Action::Undo => self.requests.push(AppRequest::Undo),
             Action::Redo => self.requests.push(AppRequest::Redo),
-            Action::Quit => self.requests.push(AppRequest::CloseWindow { undoable: true }),
+            Action::Quit => self
+                .requests
+                .push(AppRequest::CloseWindow { undoable: true }),
             Action::PromptTabTitle => {
                 let i = self.active_tab;
                 if let Some(t) = self.tabs.get(i) {
@@ -4436,9 +4502,7 @@ impl Window {
             Action::ToggleFullscreen => self.toggle_fullscreen(ctx),
             // App-level: there is one quick terminal for the process, and it may
             // not exist yet.
-            Action::ToggleQuickTerminal => {
-                self.requests.push(AppRequest::ToggleQuickTerminal)
-            }
+            Action::ToggleQuickTerminal => self.requests.push(AppRequest::ToggleQuickTerminal),
             Action::FocusSplitLeft => self.focus_dir(Dir::Left),
             Action::FocusSplitRight => self.focus_dir(Dir::Right),
             Action::FocusSplitUp => self.focus_dir(Dir::Up),
@@ -4451,31 +4515,31 @@ impl Window {
             Action::Copy => {
                 let toast = self.config.app_notifications.clipboard_copy;
                 let win_id = self.window_id;
-                if let Some(s) = self.focused_session_mut() {
-                    if let Some(text) = s.copy_text() {
-                        ctx.copy_text(text);
-                        s.clear_selection();
-                        if toast {
-                            push_toast(ctx, win_id, "Copied to clipboard");
-                        }
+                if let Some(s) = self.focused_session_mut()
+                    && let Some(text) = s.copy_text()
+                {
+                    ctx.copy_text(text);
+                    s.clear_selection();
+                    if toast {
+                        push_toast(ctx, win_id, "Copied to clipboard");
                     }
                 }
             }
             Action::Paste => {
-                if let Some(text) = session::read_clipboard() {
-                    if let Some(s) = self.focused_session_mut() {
-                        s.paste_str(&text);
-                    }
+                if let Some(text) = session::read_clipboard()
+                    && let Some(s) = self.focused_session_mut()
+                {
+                    s.paste_str(&text);
                 }
             }
             // Strictly the emulated PRIMARY: unlike middle-click's default it
             // does not fall back to the clipboard, since `paste_from_clipboard`
             // already exists for that.
             Action::PasteFromSelection => {
-                if let Some(text) = crate::primary::get() {
-                    if let Some(s) = self.focused_session_mut() {
-                        s.paste_str(&text);
-                    }
+                if let Some(text) = crate::primary::get()
+                    && let Some(s) = self.focused_session_mut()
+                {
+                    s.paste_str(&text);
                 }
             }
             Action::SelectAll => {
@@ -4571,7 +4635,10 @@ impl Window {
         let width = 700.0_f32.min(screen.width() - 80.0);
         egui::Area::new(self.id("palette"))
             .order(egui::Order::Foreground)
-            .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, screen.height() * 0.12))
+            .anchor(
+                egui::Align2::CENTER_TOP,
+                egui::vec2(0.0, screen.height() * 0.12),
+            )
             .show(ctx, |ui| {
                 egui::Frame::popup(ui.style())
                     .inner_margin(egui::Margin::same(10))
@@ -4709,18 +4776,20 @@ impl Window {
                                     // picked out. `fuzzy_match_indices` has
                                     // always returned these; nothing in the UI
                                     // used them until now.
-                                    let matched = command::fuzzy_match_indices(
-                                        &state.query,
-                                        &cmd.title,
-                                    )
-                                    .map(|(_, ix)| ix)
-                                    .unwrap_or_default();
+                                    let matched =
+                                        command::fuzzy_match_indices(&state.query, &cmd.title)
+                                            .map(|(_, ix)| ix)
+                                            .unwrap_or_default();
                                     let job = highlight_job(
                                         &cmd.title,
                                         &matched,
                                         title_font.clone(),
                                         ink,
-                                        if selected { chrome.on_accent } else { chrome.accent },
+                                        if selected {
+                                            chrome.on_accent
+                                        } else {
+                                            chrome.accent
+                                        },
                                     );
                                     let galley = ui.painter().layout_job(job);
                                     ui.painter().galley(
@@ -4734,7 +4803,9 @@ impl Window {
                                     ui.painter().text(
                                         egui::pos2(rect.left() + 12.0, rect.bottom() - 8.0),
                                         egui::Align2::LEFT_BOTTOM,
-                                        cmd.description.clone().unwrap_or_else(|| cmd.action.name()),
+                                        cmd.description
+                                            .clone()
+                                            .unwrap_or_else(|| cmd.action.name()),
                                         sub_font.clone(),
                                         dim,
                                     );
@@ -4893,13 +4964,14 @@ impl Window {
     fn render_inspector(&mut self, ctx: &egui::Context) {
         self.inspector_rect = None;
         let focus = self.tabs.get(self.active_tab).map(|t| t.focus);
-        let Some(pane) = focus.and_then(|f| self.last_layout.iter().find(|(id, _)| *id == f)) else {
+        let Some(pane) = focus.and_then(|f| self.last_layout.iter().find(|(id, _)| *id == f))
+        else {
             return;
         };
         let pane = pane.1;
-        if !self
+        if self
             .focused_session()
-            .is_some_and(|s| s.inspector().is_some())
+            .is_none_or(|s| s.inspector().is_none())
         {
             return;
         }
@@ -4933,7 +5005,11 @@ impl Window {
                         clear = true;
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("\u{00d7}").on_hover_text("Close (Ctrl+Shift+I)").clicked() {
+                        if ui
+                            .button("\u{00d7}")
+                            .on_hover_text("Close (Ctrl+Shift+I)")
+                            .clicked()
+                        {
                             close = true;
                         }
                     });
@@ -4975,9 +5051,7 @@ impl Window {
                                     );
                                     ui.weak(k.outcome.label());
                                     if !k.bytes.is_empty() {
-                                        ui.label(
-                                            egui::RichText::new(&k.bytes).font(mono.clone()),
-                                        );
+                                        ui.label(egui::RichText::new(&k.bytes).font(mono.clone()));
                                     }
                                 });
                             }
@@ -5079,7 +5153,11 @@ impl Window {
                     snap.cursor_y,
                     snap.cursor_shape,
                     if snap.cursor_visible { "" } else { " hidden" },
-                    if snap.cursor_blinking { " blinking" } else { "" },
+                    if snap.cursor_blinking {
+                        " blinking"
+                    } else {
+                        ""
+                    },
                 ),
             ),
             ("Scrollback".into(), format!("{} rows", s.scrollback_rows())),
@@ -5099,10 +5177,7 @@ impl Window {
             ("Selection".into(), yes_no(s.has_selection()).into()),
             ("Read-only".into(), yes_no(s.readonly()).into()),
             ("Images".into(), format!("{} placements", snap.images.len())),
-            (
-                "Title".into(),
-                s.title().unwrap_or_else(|| "(none)".into()),
-            ),
+            ("Title".into(), s.title().unwrap_or_else(|| "(none)".into())),
             (
                 "Working directory".into(),
                 s.pwd()
@@ -5192,10 +5267,8 @@ impl Window {
                             // the text box, that would win its clicks.
                             // Painted dots, not a glyph: the chrome font has
                             // no reliable "grip" character.
-                            let (grip_rect, grip) = ui.allocate_exact_size(
-                                egui::vec2(10.0, 20.0),
-                                egui::Sense::drag(),
-                            );
+                            let (grip_rect, grip) =
+                                ui.allocate_exact_size(egui::vec2(10.0, 20.0), egui::Sense::drag());
                             let dot = ui.visuals().weak_text_color();
                             for row in 0..3 {
                                 for col in 0..2 {
@@ -5356,7 +5429,11 @@ impl Window {
         use crate::winchrome::{CAPTION_BUTTON_W, CaptionHit, CaptionMetrics, caption_buttons};
         let (inner, native_ppp, maximized) = ctx.input(|i| {
             let v = i.viewport();
-            (v.inner_rect, v.native_pixels_per_point.unwrap_or(1.0), v.maximized.unwrap_or(false))
+            (
+                v.inner_rect,
+                v.native_pixels_per_point.unwrap_or(1.0),
+                v.maximized.unwrap_or(false),
+            )
         });
         let m = CaptionMetrics {
             strip_h: strip.height(),
@@ -5372,8 +5449,10 @@ impl Window {
                 r.max.y * native_ppp,
             ])
         });
-        let painter =
-            ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, self.id("caption-buttons")));
+        let painter = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Middle,
+            self.id("caption-buttons"),
+        ));
         let chrome = self.chrome;
         for (hit, [x0, y0, x1, y1]) in caption_buttons(strip.width(), m) {
             let rect = egui::Rect::from_min_max(
@@ -5383,12 +5462,14 @@ impl Window {
             let state = hover.filter(|(h, _)| *h == hit).map(|(_, pressed)| pressed);
             // Windows 11's own caption colours: close goes red on hover.
             let (fill, ink) = match (hit, state) {
-                (CaptionHit::Close, Some(false)) => {
-                    (egui::Color32::from_rgb(0xC4, 0x2B, 0x1C), egui::Color32::WHITE)
-                }
-                (CaptionHit::Close, Some(true)) => {
-                    (egui::Color32::from_rgb(0xB2, 0x27, 0x1A), egui::Color32::WHITE)
-                }
+                (CaptionHit::Close, Some(false)) => (
+                    egui::Color32::from_rgb(0xC4, 0x2B, 0x1C),
+                    egui::Color32::WHITE,
+                ),
+                (CaptionHit::Close, Some(true)) => (
+                    egui::Color32::from_rgb(0xB2, 0x27, 0x1A),
+                    egui::Color32::WHITE,
+                ),
                 (_, Some(false)) => (chrome.fill_hover, chrome.text),
                 (_, Some(true)) => (chrome.fill_active, chrome.text),
                 (_, None) => (egui::Color32::TRANSPARENT, chrome.text),
@@ -5403,7 +5484,8 @@ impl Window {
             let stroke = egui::Stroke::new(1.0_f32, ink);
             match hit {
                 CaptionHit::Min => {
-                    painter.line_segment([egui::pos2(c.x - s, c.y), egui::pos2(c.x + s, c.y)], stroke);
+                    painter
+                        .line_segment([egui::pos2(c.x - s, c.y), egui::pos2(c.x + s, c.y)], stroke);
                 }
                 CaptionHit::Max if maximized => {
                     // Restore: two offset squares.
@@ -5413,11 +5495,15 @@ impl Window {
                     );
                     let front = back.translate(egui::vec2(-2.0, 2.0));
                     painter.rect_stroke(back, 1.0, stroke, egui::StrokeKind::Inside);
-                    painter.rect_filled(front, 1.0, if fill == egui::Color32::TRANSPARENT {
-                        chrome.panel_fill
-                    } else {
-                        fill
-                    });
+                    painter.rect_filled(
+                        front,
+                        1.0,
+                        if fill == egui::Color32::TRANSPARENT {
+                            chrome.panel_fill
+                        } else {
+                            fill
+                        },
+                    );
                     painter.rect_stroke(front, 1.0, stroke, egui::StrokeKind::Inside);
                 }
                 CaptionHit::Max => {
@@ -5483,9 +5569,13 @@ impl Window {
             0.0
         } else {
             ui.fonts_mut(|f| {
-                f.layout_no_wrap(pill_text.clone(), egui::FontId::proportional(12.0), egui::Color32::WHITE)
-                    .size()
-                    .x
+                f.layout_no_wrap(
+                    pill_text.clone(),
+                    egui::FontId::proportional(12.0),
+                    egui::Color32::WHITE,
+                )
+                .size()
+                .x
             }) + 20.0
                 + theme::TAB_GAP
         };
@@ -5495,9 +5585,13 @@ impl Window {
         // Windows Terminal leaves), painted over it by `paint_caption_buttons`.
         let caption = !self.quick
             && crate::winchrome::caption_style() == crate::winchrome::CaptionStyle::Tabs;
-        let caption_w = if caption { 3.0 * crate::winchrome::CAPTION_BUTTON_W + 40.0 } else { 0.0 };
-        let client_caption =
-            !self.quick && crate::winchrome::caption_style() != crate::winchrome::CaptionStyle::Native;
+        let caption_w = if caption {
+            3.0 * crate::winchrome::CAPTION_BUTTON_W + 40.0
+        } else {
+            0.0
+        };
+        let client_caption = !self.quick
+            && crate::winchrome::caption_style() != crate::winchrome::CaptionStyle::Native;
         let ctl_w = 30.0 + 26.0 + theme::TAB_GAP + pill_w + caption_w;
 
         let row = ui.horizontal(|ui| {
@@ -5520,9 +5614,7 @@ impl Window {
                         // keeps its offset) is *not* viewport-keyed, so two
                         // windows would share one scroll position.
                         .id_salt(self.id("tab-scroll"))
-                        .scroll_bar_visibility(
-                            egui::scroll_area::ScrollBarVisibility::AlwaysHidden,
-                        )
+                        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                         .auto_shrink([false, false])
                         // Drag-to-scroll would claim the empty strip space
                         // the client-drawn caption moves the window with.
@@ -5541,8 +5633,11 @@ impl Window {
                                     .or_else(|| tab.focused_payload().title())
                                     .unwrap_or_else(|| format!("shell {}", i + 1));
                                 let count = tab.leaf_count();
-                                let suffix =
-                                    if count > 1 { format!(" [{count}]") } else { String::new() };
+                                let suffix = if count > 1 {
+                                    format!(" [{count}]")
+                                } else {
+                                    String::new()
+                                };
                                 let editing = matches!(&renaming, Some((ri, _)) if *ri == i);
                                 let is_active = i == active;
 
@@ -5602,9 +5697,7 @@ impl Window {
                                 );
 
                                 let show_close = is_active || resp.hovered();
-                                let fill = if is_active {
-                                    chrome.fill_active
-                                } else if resp.is_pointer_button_down_on() {
+                                let fill = if is_active || resp.is_pointer_button_down_on() {
                                     chrome.fill_active
                                 } else if resp.hovered() {
                                     chrome.fill_hover
@@ -5627,7 +5720,10 @@ impl Window {
                                 if let Some(tint) = tab.color {
                                     p.rect_filled(
                                         egui::Rect::from_min_max(
-                                            egui::pos2(rect.left(), rect.bottom() - theme::TAB_TINT_H),
+                                            egui::pos2(
+                                                rect.left(),
+                                                rect.bottom() - theme::TAB_TINT_H,
+                                            ),
                                             rect.max,
                                         ),
                                         egui::CornerRadius {
@@ -5668,15 +5764,16 @@ impl Window {
                                 let progress = tab
                                     .root
                                     .find_leaf(&mut |s: &Session| {
-                                        s.progress().is_some_and(|p| {
-                                            p != crate::taskbar::Progress::None
-                                        })
+                                        s.progress()
+                                            .is_some_and(|p| p != crate::taskbar::Progress::None)
                                     })
                                     .and_then(|id| tab.root.payload(id))
                                     .and_then(Session::progress);
                                 if let Some(prog) = progress {
                                     let now = ui.input(|i| i.time);
-                                    if let Some((a, b)) = crate::indicators::progress_span(prog, now) {
+                                    if let Some((a, b)) =
+                                        crate::indicators::progress_span(prog, now)
+                                    {
                                         let col = match prog {
                                             crate::taskbar::Progress::Error(_) => chrome.danger,
                                             crate::taskbar::Progress::Paused(_) => {
@@ -5684,7 +5781,8 @@ impl Window {
                                             }
                                             _ => chrome.accent,
                                         };
-                                        let x = |f: f32| rect.left() + 3.0 + f * (rect.width() - 6.0);
+                                        let x =
+                                            |f: f32| rect.left() + 3.0 + f * (rect.width() - 6.0);
                                         p.rect_filled(
                                             egui::Rect::from_min_max(
                                                 egui::pos2(x(a), rect.top()),
@@ -5714,7 +5812,11 @@ impl Window {
                                     egui::TextStyle::Button.resolve(ui.style()).size,
                                     egui::FontFamily::Name(TITLE_FONT.into()),
                                 );
-                                let ink = if is_active { chrome.text } else { chrome.weak_text };
+                                let ink = if is_active {
+                                    chrome.text
+                                } else {
+                                    chrome.weak_text
+                                };
                                 let label = {
                                     let p = ui.painter();
                                     let f = font.clone();
@@ -5780,7 +5882,11 @@ impl Window {
                                         egui::Align2::CENTER_CENTER,
                                         "×",
                                         egui::TextStyle::Body.resolve(ui.style()),
-                                        if cr.hovered() { chrome.text } else { chrome.weak_text },
+                                        if cr.hovered() {
+                                            chrome.text
+                                        } else {
+                                            chrome.weak_text
+                                        },
                                     );
                                     crate::a11y::name_widget(
                                         &cr,
@@ -5832,7 +5938,10 @@ impl Window {
                                         ui.close();
                                     }
                                     if ui
-                                        .add_enabled(ntabs > 1, egui::Button::new("Close Other Tabs"))
+                                        .add_enabled(
+                                            ntabs > 1,
+                                            egui::Button::new("Close Other Tabs"),
+                                        )
                                         .clicked()
                                     {
                                         want_close_others = Some(i);
@@ -5864,25 +5973,26 @@ impl Window {
                 want_new = Some(default_profile);
             }
             // Profile picker: open a tab running a chosen shell.
-            let picker = ui.menu_button("⏷", |ui| {
-                if ui.button("New Tab").clicked() {
-                    want_new = Some(default_profile);
-                    ui.close();
-                }
-                ui.separator();
-                for (pi, name) in profile_names.iter().enumerate() {
-                    if ui.button(name).clicked() {
-                        want_new = Some(pi);
+            let picker = ui
+                .menu_button("⏷", |ui| {
+                    if ui.button("New Tab").clicked() {
+                        want_new = Some(default_profile);
                         ui.close();
                     }
-                }
-                ui.separator();
-                if ui.button("About giest").clicked() {
-                    want_about = true;
-                    ui.close();
-                }
-            })
-            .response;
+                    ui.separator();
+                    for (pi, name) in profile_names.iter().enumerate() {
+                        if ui.button(name).clicked() {
+                            want_new = Some(pi);
+                            ui.close();
+                        }
+                    }
+                    ui.separator();
+                    if ui.button("About giest").clicked() {
+                        want_about = true;
+                        ui.close();
+                    }
+                })
+                .response;
             crate::a11y::name_widget(
                 &picker,
                 egui::accesskit::Role::Button,
@@ -6004,9 +6114,7 @@ impl Window {
                     .expand2(egui::vec2(TAB_TEAR_PT, TAB_TEAR_PT))
                     .contains(p)
             });
-            let screen = ptr
-                .zip(self.screen_origin)
-                .map(|(p, o)| o + p.to_vec2());
+            let screen = ptr.zip(self.screen_origin).map(|(p, o)| o + p.to_vec2());
             let grab = self.tabs.get(from).map(|t| Grab::Tab {
                 window: self.window_id,
                 tab: t.id,
@@ -6053,15 +6161,15 @@ impl Window {
         if let Some(i) = switch_to {
             self.active_tab = i;
         }
-        if let Some((i, col)) = want_color {
-            if let Some(t) = self.tabs.get_mut(i) {
-                t.color = col;
-            }
+        if let Some((i, col)) = want_color
+            && let Some(t) = self.tabs.get_mut(i)
+        {
+            t.color = col;
         }
-        if let Some((i, val)) = commit_rename {
-            if let Some(t) = self.tabs.get_mut(i) {
-                t.name = val;
-            }
+        if let Some((i, val)) = commit_rename
+            && let Some(t) = self.tabs.get_mut(i)
+        {
+            t.name = val;
         }
         if let Some(i) = want_rename {
             let cur = self
@@ -6147,8 +6255,7 @@ impl Window {
         // `Ui::request_focus` is unconditional — so the pane's per-frame focus
         // grab has to be suppressed explicitly, or typing would still reach the
         // shell behind the confirmation dialog.
-        let palette_open =
-            self.palette.is_some()
+        let palette_open = self.palette.is_some()
                 || self.confirm.is_some()
                 || self.clipboard_prompt().is_some()
                 || self.config_errors_open()
@@ -6164,9 +6271,9 @@ impl Window {
         // withheld where it is, or a click on its Pause button also starts a
         // text selection underneath. Last frame's rect, since the window is
         // drawn after this (the `last_layout` idiom).
-        let over_inspector = self.inspector_rect.is_some_and(|r| {
-            ctx.pointer_latest_pos().is_some_and(|p| r.contains(p))
-        });
+        let over_inspector = self
+            .inspector_rect
+            .is_some_and(|r| ctx.pointer_latest_pos().is_some_and(|p| r.contains(p)));
 
         // Fill the whole area (including the per-pane padding band and the split
         // gutters) with the focused pane's background. This single rect is what
@@ -6245,7 +6352,8 @@ impl Window {
         self.last_split_area = Some(full_area);
         let mut dividers: Vec<Divider> = Vec::new();
         if zoomed.is_none() {
-            tab.root.dividers(full_area, ppp, &mut Vec::new(), &mut dividers);
+            tab.root
+                .dividers(full_area, ppp, &mut Vec::new(), &mut dividers);
         }
         let min_pane = egui::vec2(cw, ch) * MIN_SPLIT_CELLS / ppp;
         let (ptr_pos, ptr_pressed, ptr_down, ptr_double) = ctx.input(|i| {
@@ -6334,24 +6442,21 @@ impl Window {
             // macOS: hidden only for a lone pane in a fullscreen window.
             crate::config::DragHandle::Auto => !(self.fullscreen && pane_rects.len() < 2),
         };
-        let hovered_handle = if !handles_enabled
-            || palette_open
-            || over_inspector
-            || self.divider_drag.is_some()
+        let hovered_handle =
+            if !handles_enabled || palette_open || over_inspector || self.divider_drag.is_some() {
+                None
+            } else {
+                ptr_pos.and_then(|p| {
+                    pane_rects
+                        .iter()
+                        .find(|(_, r)| crate::panedrag::handle_rect(*r).contains(p))
+                        .map(|(id, _)| *id)
+                })
+            };
+        if (self.pane_drag.is_some() || self.tab_drag.is_some())
+            && let Some(p) = ptr_pos
         {
-            None
-        } else {
-            ptr_pos.and_then(|p| {
-                pane_rects
-                    .iter()
-                    .find(|(_, r)| crate::panedrag::handle_rect(*r).contains(p))
-                    .map(|(id, _)| *id)
-            })
-        };
-        if self.pane_drag.is_some() || self.tab_drag.is_some() {
-            if let Some(p) = ptr_pos {
-                self.drag_ptr = Some(p);
-            }
+            self.drag_ptr = Some(p);
         }
         // A drag whose pane left this tab (reaped, or the tab switched) is over.
         if self
@@ -6497,11 +6602,15 @@ impl Window {
         let cur_idx = leaves.iter().position(|l| l.id == focus_id).unwrap();
         let search_open = leaves[cur_idx].payload.search_active();
         // Suppress the click-focus while search is modal (`None` = don't move).
-        let click_pos = if search_open || over_divider { None } else { press_pos };
-        if let Some(pos) = click_pos {
-            if let Some(l) = leaves.iter().find(|l| l.rect.contains(pos)) {
-                focus_id = l.id;
-            }
+        let click_pos = if search_open || over_divider {
+            None
+        } else {
+            press_pos
+        };
+        if let Some(pos) = click_pos
+            && let Some(l) = leaves.iter().find(|l| l.rect.contains(pos))
+        {
+            focus_id = l.id;
         }
         let (link_osc8, link_url) = (self.config.link_osc8, self.config.link_url);
         // `focus-follows-mouse`: hovering a split focuses it, no click needed.
@@ -6599,10 +6708,8 @@ impl Window {
             // Visual bell: advance/drain this pane's flash every frame (so a BEL
             // isn't lost even if its snapshot transiently fails below).
             let flash = session.bell_flash_alpha(now);
-            if bell_border {
-                if let Some(a) = flash {
-                    bell_flashes.push((leaf_rect, a));
-                }
+            if bell_border && let Some(a) = flash {
+                bell_flashes.push((leaf_rect, a));
             }
             if let Some(a) = session.highlight_alpha(now) {
                 highlights.push((leaf_rect, a));
@@ -6669,8 +6776,7 @@ impl Window {
                 let snap = &session.snapshot;
                 let (cwp, chp) = (cw / ppp, ch / ppp);
                 let cell = egui::Rect::from_min_size(
-                    prect.min
-                        + egui::vec2(snap.cursor_x as f32 * cwp, snap.cursor_y as f32 * chp),
+                    prect.min + egui::vec2(snap.cursor_x as f32 * cwp, snap.cursor_y as f32 * chp),
                     egui::vec2(cwp, chp),
                 );
                 ctx.output_mut(|o| {
@@ -6710,7 +6816,9 @@ impl Window {
                     )
                 });
 
-                session.hover_cell = resp.hover_pos().map(|p| session.pos_to_cell(p, prect, ppp, cw, ch));
+                session.hover_cell = resp
+                    .hover_pos()
+                    .map(|p| session.pos_to_cell(p, prect, ppp, cw, ch));
                 // The URL banner (macOS `URLHoverBanner`), per `link-previews`.
                 if let Some(c) = session.hover_cell
                     && let Some((url, src)) = session.link_at(c, link_osc8, link_url)
@@ -6782,7 +6890,10 @@ impl Window {
                             gesture_released = true;
                         }
                     }
-                    if resp.clicked() && (gesture_dragged || session.gesture_clicks() > 1) && !mods.shift {
+                    if resp.clicked()
+                        && (gesture_dragged || session.gesture_clicks() > 1)
+                        && !mods.shift
+                    {
                         // A double/triple click or a threshold-crossing drag
                         // inside one cell: not a click (upstream skips links
                         // and click-to-move when the gesture dragged).
@@ -6827,14 +6938,15 @@ impl Window {
                     // on every drag step. `primary`/`both` feed the emulated
                     // PRIMARY buffer that middle-click and
                     // `paste_from_selection` read.
-                    if copy_on_select != CopyOnSelect::None && gesture_released {
-                        if let Some(text) = session.copy_text() {
-                            if copy_on_select.primary() {
-                                crate::primary::set(&text);
-                            }
-                            if copy_on_select.clipboard() {
-                                ctx.copy_text(text);
-                            }
+                    if copy_on_select != CopyOnSelect::None
+                        && gesture_released
+                        && let Some(text) = session.copy_text()
+                    {
+                        if copy_on_select.primary() {
+                            crate::primary::set(&text);
+                        }
+                        if copy_on_select.clipboard() {
+                            ctx.copy_text(text);
                         }
                     }
 
@@ -6880,7 +6992,12 @@ impl Window {
                                             ui.separator();
                                             false
                                         }
-                                        MenuItem::Item { label, enabled, checked, .. } => {
+                                        MenuItem::Item {
+                                            label,
+                                            enabled,
+                                            checked,
+                                            ..
+                                        } => {
                                             let text = if checked {
                                                 format!("\u{2713} {label}")
                                             } else {
@@ -6894,7 +7011,9 @@ impl Window {
                                         continue;
                                     }
                                     ui.close();
-                                    let MenuItem::Item { id, .. } = item else { continue };
+                                    let MenuItem::Item { id, .. } = item else {
+                                        continue;
+                                    };
                                     use crate::menu::MenuId;
                                     match id {
                                         // Local: they act on this pane, which
@@ -7052,7 +7171,8 @@ impl Window {
                 egui::pos2(right - SCROLLBAR_TRACK_W, leaf_rect.top() + SCROLLBAR_INSET),
                 egui::pos2(right, leaf_rect.bottom() - SCROLLBAR_INSET),
             );
-            let Some(thumb) = scrollbar::thumb(track.height(), state.total, state.offset, state.len)
+            let Some(thumb) =
+                scrollbar::thumb(track.height(), state.total, state.offset, state.len)
             else {
                 continue;
             };
@@ -7100,20 +7220,21 @@ impl Window {
             // which fires a frame later — by then the pointer has already moved
             // past the drag threshold, and that displacement would be baked into
             // the grab offset as a permanent few-pixel error.
-            if primary_down && resp.is_pointer_button_down_on() && session.scrollbar_grab().is_none()
+            if primary_down
+                && resp.is_pointer_button_down_on()
+                && session.scrollbar_grab().is_none()
+                && let Some(pos) = resp.interact_pointer_pos()
             {
-                if let Some(pos) = resp.interact_pointer_pos() {
-                    let y = pos.y - track.top();
-                    match scrollbar::track_click_page(y, &thumb) {
-                        0 => session.set_scrollbar_grab(Some(y - thumb.top)),
-                        dir => {
-                            // Click in the track pages toward the pointer, eased.
-                            // `scroll_lines` takes a negative delta to move *up*
-                            // into history, which is the same sign convention
-                            // `track_click_page` uses (-1 = above the thumb).
-                            let page = session.page_lines();
-                            session.scroll_lines(dir as isize * page, ch);
-                        }
+                let y = pos.y - track.top();
+                match scrollbar::track_click_page(y, &thumb) {
+                    0 => session.set_scrollbar_grab(Some(y - thumb.top)),
+                    dir => {
+                        // Click in the track pages toward the pointer, eased.
+                        // `scroll_lines` takes a negative delta to move *up*
+                        // into history, which is the same sign convention
+                        // `track_click_page` uses (-1 = above the thumb).
+                        let page = session.page_lines();
+                        session.scroll_lines(dir as isize * page, ch);
                     }
                 }
             }
@@ -7152,7 +7273,11 @@ impl Window {
         let (hovering_files, dropped): (bool, Vec<std::path::PathBuf>) = ctx.input(|i| {
             (
                 !i.raw.hovered_files.is_empty(),
-                i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect(),
+                i.raw
+                    .dropped_files
+                    .iter()
+                    .filter_map(|f| f.path.clone())
+                    .collect(),
             )
         });
         let drop_idx = ptr_pos
@@ -7242,7 +7367,10 @@ impl Window {
             let (typed, moved) = ctx.input(|i| {
                 (
                     i.events.iter().any(|e| {
-                        matches!(e, egui::Event::Key { pressed: true, .. } | egui::Event::Text(_))
+                        matches!(
+                            e,
+                            egui::Event::Key { pressed: true, .. } | egui::Event::Text(_)
+                        )
                     }),
                     i.pointer.velocity() != egui::Vec2::ZERO,
                 )
@@ -7267,14 +7395,26 @@ impl Window {
             let screen = ctx.viewport_rect();
             let now = self.shader_epoch.elapsed().as_secs_f32();
             let mut g = crate::shader::Globals::default();
-            g.set_resolution((screen.width() * ppp).round(), (screen.height() * ppp).round());
+            g.set_resolution(
+                (screen.width() * ppp).round(),
+                (screen.height() * ppp).round(),
+            );
             g.set_time(now);
             g.time_delta = (now - self.shader_last_time).max(0.0);
-            g.frame_rate = if g.time_delta > 0.0 { 1.0 / g.time_delta } else { 0.0 };
+            g.frame_rate = if g.time_delta > 0.0 {
+                1.0 / g.time_delta
+            } else {
+                0.0
+            };
             g.frame = self.shader_frame;
             g.focus = i32::from(window_focused);
             let rgb = |c: crate::engine::Rgb| {
-                [c.r as f32 / 255.0, c.g as f32 / 255.0, c.b as f32 / 255.0, 1.0]
+                [
+                    c.r as f32 / 255.0,
+                    c.g as f32 / 255.0,
+                    c.b as f32 / 255.0,
+                    1.0,
+                ]
             };
             g.background_color = rgb(bg);
             g.foreground_color = rgb(self.config.fg);
@@ -7333,7 +7473,11 @@ impl Window {
         // the same alpha an explicit-background cell does (`bg_alpha`), so
         // they read as the cells they extend.
         if !padding_fills.is_empty() {
-            let a = if background_opacity_cells { background_opacity } else { 1.0 };
+            let a = if background_opacity_cells {
+                background_opacity
+            } else {
+                1.0
+            };
             let a8 = (a * 255.0).round() as u8;
             for (rect, c) in &padding_fills {
                 ui.painter().rect_filled(
@@ -7425,8 +7569,10 @@ impl Window {
             ctx.request_repaint();
             for (rect, a) in &highlights {
                 let c = self.chrome.accent;
-                let wash = egui::Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), (a * 40.0) as u8);
-                let edge = egui::Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), (a * 230.0) as u8);
+                let wash =
+                    egui::Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), (a * 40.0) as u8);
+                let edge =
+                    egui::Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), (a * 230.0) as u8);
                 ui.painter().rect_filled(*rect, 0.0, wash);
                 ui.painter().rect_stroke(
                     *rect,
@@ -7465,8 +7611,7 @@ impl Window {
                     egui::Stroke::new(stroke_w(1.0), fade(self.chrome.divider, 220.0)),
                     egui::StrokeKind::Inside,
                 );
-                ui.painter()
-                    .galley(text_rect.min, galley, self.chrome.text);
+                ui.painter().galley(text_rect.min, galley, self.chrome.text);
             }
         }
 
@@ -7481,12 +7626,9 @@ impl Window {
             } else {
                 (self.chrome.window_fill, self.chrome.text)
             };
-            let galley = ui.painter().layout(
-                msg.clone(),
-                font,
-                text,
-                (rect.width() - 24.0).max(40.0),
-            );
+            let galley =
+                ui.painter()
+                    .layout(msg.clone(), font, text, (rect.width() - 24.0).max(40.0));
             let h = galley.size().y + 12.0;
             let bar = egui::Rect::from_min_max(
                 egui::pos2(rect.left(), rect.bottom() - h),
@@ -7510,15 +7652,19 @@ impl Window {
         if let Some((rect, url)) = &link_preview {
             let font = egui::FontId::proportional(12.0);
             let max_w = (rect.width() * 0.6).max(80.0);
-            let galley = ui.painter().layout(url.clone(), font, self.chrome.text, max_w);
+            let galley = ui
+                .painter()
+                .layout(url.clone(), font, self.chrome.text, max_w);
             let inset = egui::vec2(8.0, -8.0);
-            let left = egui::Align2::LEFT_BOTTOM.anchor_size(rect.left_bottom() + inset, galley.size());
-            let text_rect = if ptr_pos.is_some_and(|p| left.expand2(egui::vec2(12.0, 8.0)).contains(p)) {
-                let anchor = rect.right_bottom() + egui::vec2(-(SCROLLBAR_HOT_W + 8.0), -8.0);
-                egui::Align2::RIGHT_BOTTOM.anchor_size(anchor, galley.size())
-            } else {
-                left
-            };
+            let left =
+                egui::Align2::LEFT_BOTTOM.anchor_size(rect.left_bottom() + inset, galley.size());
+            let text_rect =
+                if ptr_pos.is_some_and(|p| left.expand2(egui::vec2(12.0, 8.0)).contains(p)) {
+                    let anchor = rect.right_bottom() + egui::vec2(-(SCROLLBAR_HOT_W + 8.0), -8.0);
+                    egui::Align2::RIGHT_BOTTOM.anchor_size(anchor, galley.size())
+                } else {
+                    left
+                };
             let pill = text_rect.expand2(egui::vec2(7.0, 3.0));
             let r = egui::CornerRadius::same(theme::RADIUS_MD);
             ui.painter().rect_filled(pill, r, self.chrome.window_fill);
@@ -7537,7 +7683,9 @@ impl Window {
         // invisible and the next key looks like it vanished.
         if let Some(label) = &key_state {
             let font = egui::FontId::proportional(13.0);
-            let galley = ui.painter().layout_no_wrap(label.clone(), font, self.chrome.text);
+            let galley = ui
+                .painter()
+                .layout_no_wrap(label.clone(), font, self.chrome.text);
             let anchor = full_area.center_bottom() + egui::vec2(0.0, -10.0);
             let text_rect = egui::Align2::CENTER_BOTTOM.anchor_size(anchor, galley.size());
             let pill = text_rect.expand2(egui::vec2(10.0, 4.0));
@@ -7563,10 +7711,13 @@ impl Window {
                 self.chrome.on_accent,
                 (full_area.width() - 64.0).clamp(120.0, 560.0),
             );
-            let text_rect = egui::Align2::CENTER_CENTER.anchor_size(full_area.center(), galley.size());
+            let text_rect =
+                egui::Align2::CENTER_CENTER.anchor_size(full_area.center(), galley.size());
             let r = egui::CornerRadius::same(theme::RADIUS_MD);
-            ui.painter().rect_filled(text_rect.expand(14.0), r, self.chrome.danger);
-            ui.painter().galley(text_rect.min, galley, self.chrome.on_accent);
+            ui.painter()
+                .rect_filled(text_rect.expand(14.0), r, self.chrome.danger);
+            ui.painter()
+                .galley(text_rect.min, galley, self.chrome.on_accent);
         }
 
         // Where a file drag would land.
@@ -7585,11 +7736,9 @@ impl Window {
         // scrollbar's right edge band. No repaint request — nothing animates.
         for rect in &readonly_panes {
             let font = egui::FontId::proportional(12.0);
-            let galley = ui.painter().layout_no_wrap(
-                "READ-ONLY".to_string(),
-                font,
-                self.chrome.on_accent,
-            );
+            let galley =
+                ui.painter()
+                    .layout_no_wrap("READ-ONLY".to_string(), font, self.chrome.on_accent);
             // Inset past the scrollbar's hot band so the two never overlap.
             let anchor = rect.right_bottom() + egui::vec2(-(SCROLLBAR_HOT_W + 8.0), -8.0);
             let text_rect = egui::Align2::RIGHT_BOTTOM.anchor_size(anchor, galley.size());
@@ -7665,7 +7814,10 @@ impl Window {
                 ui.painter().rect_stroke(
                     knob.expand(1.0),
                     radius,
-                    egui::Stroke::new(stroke_w(1.0), a8(egui::Color32::from_rgb(bg.r, bg.g, bg.b), peak)),
+                    egui::Stroke::new(
+                        stroke_w(1.0),
+                        a8(egui::Color32::from_rgb(bg.r, bg.g, bg.b), peak),
+                    ),
                     egui::StrokeKind::Inside,
                 );
                 ui.painter().rect_filled(knob, radius, a8(fill, peak));
@@ -7721,11 +7873,20 @@ impl Window {
                         .filter(|n| {
                             // Kitty `o=unfocused` / `o=invisible`: nothing to
                             // tell a user who is already looking at this window.
-                            present && (n.occasion == crate::osc_notify::Occasion::Always || !focused)
+                            present
+                                && (n.occasion == crate::osc_notify::Occasion::Always || !focused)
                         })
-                        .map(|note| PendingNotification { note, window, pane: pane_id }),
+                        .map(|note| PendingNotification {
+                            note,
+                            window,
+                            pane: pane_id,
+                        }),
                 );
-                finished.extend(pane.take_command_finishes().into_iter().map(|f| (f, pane_id)));
+                finished.extend(
+                    pane.take_command_finishes()
+                        .into_iter()
+                        .map(|f| (f, pane_id)),
+                );
                 progress_changed |= pane.take_progress().is_some();
             });
             // Marked only where nobody is looking: a background tab, or any
@@ -7919,7 +8080,8 @@ impl Window {
                     ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 }
                 self.closing = true;
-                self.requests.push(AppRequest::CloseWindow { undoable: true });
+                self.requests
+                    .push(AppRequest::CloseWindow { undoable: true });
             }
         }
 
@@ -7964,15 +8126,28 @@ impl Window {
                 .title_override
                 .clone()
                 .or_else(|| self.config.title.clone())
-                .or_else(|| self.tabs.get(self.active_tab).and_then(|t| t.focused_payload().title()))
+                .or_else(|| {
+                    self.tabs
+                        .get(self.active_tab)
+                        .and_then(|t| t.focused_payload().title())
+                })
                 .unwrap_or_else(|| "giest".to_string());
             // `window-subtitle = working-directory`. A Windows caption has one
             // line, so the subtitle rides after the title.
-            let base = match self.config.window_subtitle.then(|| self.focused_pwd()).flatten() {
+            let base = match self
+                .config
+                .window_subtitle
+                .then(|| self.focused_pwd())
+                .flatten()
+            {
                 Some(dir) => format!("{base} \u{2014} {}", dir.display()),
                 None => base,
             };
-            if self.bell_title { format!("🔔 {base}") } else { base }
+            if self.bell_title {
+                format!("🔔 {base}")
+            } else {
+                base
+            }
         };
         if Some(&shown) != self.last_window_title.as_ref() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(shown.clone()));
@@ -8008,47 +8183,48 @@ impl Window {
             }
         }
         if show_strip {
-        let strip_resp = egui::Panel::top(self.id("tabs"))
-            .frame(
-                egui::Frame::side_top_panel(&ctx.global_style())
-                    // A stable margin: the default `(8, 2)` leaves the tabs
-                    // touching the strip's edges once they have a real height.
-                    .inner_margin(egui::Margin::symmetric(6, 3))
-                    .fill(egui::Color32::from_rgba_unmultiplied(
-                        strip.r(),
-                        strip.g(),
-                        strip.b(),
-                        a8,
-                    )),
-            )
-            .show_inside(ui, |ui| {
-                // Registered *before* the tabs so every tab and button (later,
-                // hence on top in egui's hit test) wins; what is left is the
-                // empty strip, which moves and maximizes the window.
-                let drag = (caption != crate::winchrome::CaptionStyle::Native).then(|| {
-                    ui.interact(
-                        ui.max_rect().expand2(egui::vec2(6.0, 3.0)),
-                        self.id("caption-drag"),
-                        egui::Sense::click_and_drag(),
-                    )
-                });
-                self.tab_bar(ui);
-                if let Some(drag) = drag {
-                    if drag.double_clicked() {
-                        let max = ui.input(|i| i.viewport().maximized.unwrap_or(false));
-                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(!max));
-                    } else if drag.drag_started() {
-                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+            let strip_resp = egui::Panel::top(self.id("tabs"))
+                .frame(
+                    egui::Frame::side_top_panel(&ctx.global_style())
+                        // A stable margin: the default `(8, 2)` leaves the tabs
+                        // touching the strip's edges once they have a real height.
+                        .inner_margin(egui::Margin::symmetric(6, 3))
+                        .fill(egui::Color32::from_rgba_unmultiplied(
+                            strip.r(),
+                            strip.g(),
+                            strip.b(),
+                            a8,
+                        )),
+                )
+                .show_inside(ui, |ui| {
+                    // Registered *before* the tabs so every tab and button (later,
+                    // hence on top in egui's hit test) wins; what is left is the
+                    // empty strip, which moves and maximizes the window.
+                    let drag = (caption != crate::winchrome::CaptionStyle::Native).then(|| {
+                        ui.interact(
+                            ui.max_rect().expand2(egui::vec2(6.0, 3.0)),
+                            self.id("caption-drag"),
+                            egui::Sense::click_and_drag(),
+                        )
+                    });
+                    self.tab_bar(ui);
+                    if let Some(drag) = drag {
+                        if drag.double_clicked() {
+                            let max = ui.input(|i| i.viewport().maximized.unwrap_or(false));
+                            ui.ctx()
+                                .send_viewport_cmd(egui::ViewportCommand::Maximized(!max));
+                        } else if drag.drag_started() {
+                            ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                        }
                     }
+                });
+            if caption != crate::winchrome::CaptionStyle::Native {
+                let strip_rect = strip_resp.response.rect;
+                crate::winchrome::set_caption_height(strip_rect.height());
+                if caption == crate::winchrome::CaptionStyle::Tabs {
+                    self.paint_caption_buttons(&ctx, strip_rect);
                 }
-            });
-        if caption != crate::winchrome::CaptionStyle::Native {
-            let strip_rect = strip_resp.response.rect;
-            crate::winchrome::set_caption_height(strip_rect.height());
-            if caption == crate::winchrome::CaptionStyle::Tabs {
-                self.paint_caption_buttons(&ctx, strip_rect);
             }
-        }
         }
 
         // No fill here: `render_active` paints the window background across this
@@ -8233,7 +8409,10 @@ impl App {
         if self.windows.is_empty() {
             if matches!(
                 action,
-                Action::NewWindow | Action::NewTab | Action::ToggleVisibility | Action::ToggleQuickTerminal
+                Action::NewWindow
+                    | Action::NewTab
+                    | Action::ToggleVisibility
+                    | Action::ToggleQuickTerminal
             ) {
                 self.wake(ctx, None);
             }
@@ -8250,7 +8429,9 @@ impl App {
         // Everything else is a *window* action, and the focused window is the
         // only sensible default target — including when giest isn't focused at
         // all, where "the window you last used" is what a user means.
-        let idx = target.unwrap_or(self.focused).min(self.windows.len().saturating_sub(1));
+        let idx = target
+            .unwrap_or(self.focused)
+            .min(self.windows.len().saturating_sub(1));
         if let Some(w) = self.windows.get_mut(idx) {
             w.execute_action(ctx, render_state, action);
         }
@@ -8360,7 +8541,12 @@ impl App {
         self.save_state();
         match crate::update::spawn_restart() {
             Ok(()) => {
-                if let Some(hwnd) = self.windows.first().or(self.dormant.as_ref()).and_then(|w| w.hwnd) {
+                if let Some(hwnd) = self
+                    .windows
+                    .first()
+                    .or(self.dormant.as_ref())
+                    .and_then(|w| w.hwnd)
+                {
                     crate::notify::shutdown(hwnd);
                 }
                 std::process::exit(0);
@@ -8401,7 +8587,10 @@ impl App {
     fn update_progress(&mut self) {
         use crate::taskbar::Progress;
 
-        let dirty = self.windows.iter_mut().any(|w| std::mem::take(&mut w.progress_dirty));
+        let dirty = self
+            .windows
+            .iter_mut()
+            .any(|w| std::mem::take(&mut w.progress_dirty));
         if !dirty {
             return;
         }
@@ -8471,7 +8660,11 @@ impl App {
         let Some(hwnd) = self.windows.first().and_then(|w| w.hwnd) else {
             return;
         };
-        for n in notifications.iter().filter(|n| !n.note.is_empty()).take(MAX_BURST) {
+        for n in notifications
+            .iter()
+            .filter(|n| !n.note.is_empty())
+            .take(MAX_BURST)
+        {
             crate::notify::show(hwnd, &n.note.title, &n.note.body);
             self.notify_origin = Some((n.window, n.pane));
         }
@@ -8535,7 +8728,9 @@ impl App {
                 let target = if self.windows.iter().any(|w| w.window_id == window) {
                     window
                 } else {
-                    self.windows.get(self.focused).map_or(window, |w| w.window_id)
+                    self.windows
+                        .get(self.focused)
+                        .map_or(window, |w| w.window_id)
                 };
                 push_toast(ctx, target, &crate::indicators::undo_toast(kind, redo));
             }
@@ -8713,7 +8908,7 @@ impl App {
                 } else {
                     back
                 };
-                if let Err(lost) = self.put_moved(ctx, src, moved, &home) {
+                if let Err(lost) = self.put_moved(ctx, src, *moved, &home) {
                     // Unreachable in practice (the source window is still
                     // there); never drop live shells silently, though.
                     let w = &mut self.windows[si];
@@ -8732,7 +8927,7 @@ impl App {
         from: u64,
         moved: Moved<Session>,
         dest: &Dest,
-    ) -> Result<Grab, Moved<Session>> {
+    ) -> Result<Grab, Box<Moved<Session>>> {
         if let Dest::NewWindow { geom } = dest {
             let Some(src) = self
                 .windows
@@ -8740,7 +8935,7 @@ impl App {
                 .find(|w| w.window_id == from)
                 .or_else(|| self.windows.first())
             else {
-                return Err(moved);
+                return Err(Box::new(moved));
             };
             // A fresh window numbers its panes from 1.
             let mut next_id = 1;
@@ -8771,10 +8966,10 @@ impl App {
             });
         }
         let Some(dw) = dest.window() else {
-            return Err(moved);
+            return Err(Box::new(moved));
         };
         let Some(w) = self.windows.iter_mut().find(|w| w.window_id == dw) else {
-            return Err(moved);
+            return Err(Box::new(moved));
         };
         let r = put_grab(
             &mut w.tabs,
@@ -8790,7 +8985,7 @@ impl App {
             let vp = w.viewport_id();
             ctx.send_viewport_cmd_to(vp, egui::ViewportCommand::Focus);
         }
-        r
+        r.map_err(Box::new)
     }
 
     /// A pane or tab drag was released at `screen`: work out what it landed
@@ -8910,17 +9105,18 @@ impl App {
         });
         for w in &mut self.windows {
             w.drop_hint = match &hint {
-                Some((grab, DropTarget::Pane { window, leaf, zone, .. }))
-                    if *window == w.window_id && matches!(grab, Grab::Pane { .. }) =>
-                {
-                    match grab {
-                        Grab::Pane { leaf: l, .. } if l == leaf => None,
-                        _ => Some(DropHint::Pane {
-                            leaf: *leaf,
-                            zone: *zone,
-                        }),
-                    }
-                }
+                Some((
+                    grab,
+                    DropTarget::Pane {
+                        window, leaf, zone, ..
+                    },
+                )) if *window == w.window_id && matches!(grab, Grab::Pane { .. }) => match grab {
+                    Grab::Pane { leaf: l, .. } if l == leaf => None,
+                    _ => Some(DropHint::Pane {
+                        leaf: *leaf,
+                        zone: *zone,
+                    }),
+                },
                 Some((_, DropTarget::Strip { window, index })) if *window == w.window_id => {
                     Some(DropHint::Strip { index: *index })
                 }
@@ -8954,7 +9150,10 @@ impl App {
             .map(|ms| now + ms as f64 / 1000.0);
         self.dormant = Some(w);
         self.focused = 0;
-        ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Visible(false));
+        ctx.send_viewport_cmd_to(
+            egui::ViewportId::ROOT,
+            egui::ViewportCommand::Visible(false),
+        );
     }
 
     /// Leave the dormant state: open a window from the template into the root
@@ -8982,7 +9181,10 @@ impl App {
                 self.focused = 0;
                 self.quit_at = None;
                 self.hidden = false;
-                ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Visible(true));
+                ctx.send_viewport_cmd_to(
+                    egui::ViewportId::ROOT,
+                    egui::ViewportCommand::Visible(true),
+                );
                 ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
                 ctx.request_repaint();
                 Some(id)
@@ -9033,7 +9235,10 @@ impl App {
             if self.windows[i].quick {
                 continue;
             }
-            ctx.send_viewport_cmd_to(self.viewport_of(i), egui::ViewportCommand::Visible(!self.hidden));
+            ctx.send_viewport_cmd_to(
+                self.viewport_of(i),
+                egui::ViewportCommand::Visible(!self.hidden),
+            );
         }
         if !self.hidden {
             let f = self.focused.min(self.windows.len() - 1);
@@ -9067,7 +9272,10 @@ impl App {
         crate::winchrome::sync_caption();
         crate::winchrome::sync_window_flags(cfg.hidden_from_taskbar, cfg.window_shadow);
         if let Some(icon) = crate::icon::configure(cfg) {
-            ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Icon(Some(icon)));
+            ctx.send_viewport_cmd_to(
+                egui::ViewportId::ROOT,
+                egui::ViewportCommand::Icon(Some(icon)),
+            );
         }
     }
 
@@ -9081,8 +9289,8 @@ impl App {
         // terminal background (upstream's "the titlebar lets the background
         // come through"), unless a titlebar colour is set explicitly. Read
         // from the config, not live OSC 11 changes.
-        let tint = (cfg.titlebar_style == crate::config::TitlebarStyle::Transparent)
-            .then_some(cfg.bg);
+        let tint =
+            (cfg.titlebar_style == crate::config::TitlebarStyle::Transparent).then_some(cfg.bg);
         let key = (
             self.windows.len(),
             cfg.window_titlebar_background.or(tint),
@@ -9092,7 +9300,9 @@ impl App {
             return;
         }
         // Nothing configured and nothing previously set: leave DWM alone.
-        let was_set = self.titlebar_applied.is_some_and(|k| k.1.is_some() || k.2.is_some());
+        let was_set = self
+            .titlebar_applied
+            .is_some_and(|k| k.1.is_some() || k.2.is_some());
         if key.1.is_some() || key.2.is_some() || was_set {
             crate::winchrome::apply_titlebar_colors(key.1, key.2);
         }
@@ -9194,7 +9404,10 @@ impl App {
         use crate::ipc::Response;
         if self.windows.is_empty() {
             return match self.wake_with(ctx, None, None) {
-                Some(id) => Response { window: Some(id), ..Response::ok() },
+                Some(id) => Response {
+                    window: Some(id),
+                    ..Response::ok()
+                },
                 None => Response::err("could not open a window"),
             };
         }
@@ -9248,8 +9461,14 @@ impl App {
             }
             let profile = match command {
                 Some(c) => {
-                    let profiles = app.any_window().map(|w| w.profiles.as_slice()).unwrap_or(&[]);
-                    Some(profile_for_spec(profiles, c).ok_or_else(|| Response::err("empty command"))?)
+                    let profiles = app
+                        .any_window()
+                        .map(|w| w.profiles.as_slice())
+                        .unwrap_or(&[]);
+                    Some(
+                        profile_for_spec(profiles, c)
+                            .ok_or_else(|| Response::err("empty command"))?,
+                    )
                 }
                 None => None,
             };
@@ -9281,7 +9500,11 @@ impl App {
                     None => Response::err("could not start a shell"),
                 }
             }
-            Request::NewTab { cwd, command, window } => {
+            Request::NewTab {
+                cwd,
+                command,
+                window,
+            } => {
                 let (cwd, profile) = match resolve(self, cwd, command) {
                     Ok(v) => v,
                     Err(r) => return r,
@@ -9323,14 +9546,24 @@ impl App {
                     None => Response::err("could not start a shell"),
                 }
             }
-            Request::Handoff { pid, handles, title, show_window } => {
+            Request::Handoff {
+                pid,
+                handles,
+                title,
+                show_window,
+            } => {
                 // Resident with no window: refuse, and the `-Embedding`
                 // process shows the session in a window of its own.
                 let i = match self.window_slot(None) {
                     Ok(i) => i,
                     Err(r) => return r,
                 };
-                let a = match crate::handoff::adopt_remote(*pid, handles, title.clone(), *show_window) {
+                let a = match crate::handoff::adopt_remote(
+                    *pid,
+                    handles,
+                    title.clone(),
+                    *show_window,
+                ) {
                     Ok(a) => a,
                     Err(e) => return Response::err(format!("could not adopt the handoff: {e}")),
                 };
@@ -9378,7 +9611,8 @@ impl App {
                 if window.is_some() && self.window_slot(*window).is_err() {
                     return self.window_slot(*window).unwrap_err();
                 }
-                let target = window.and_then(|id| self.windows.iter().position(|w| w.window_id == id));
+                let target =
+                    window.and_then(|id| self.windows.iter().position(|w| w.window_id == id));
                 self.run_app_action(ctx, render_state, a, target);
                 ctx.request_repaint();
                 Response::ok()
@@ -9448,7 +9682,9 @@ impl App {
         self.snapshot_state();
         // Remember where the surviving root-slot window is on screen *before*
         // the move, so a rehost can put the root native window there.
-        let rehost_to = (idx == 0).then(|| self.windows.get(1).and_then(|w| w.geom)).flatten();
+        let rehost_to = (idx == 0)
+            .then(|| self.windows.get(1).and_then(|w| w.geom))
+            .flatten();
 
         let windows = std::mem::take(&mut self.windows);
         let (windows, focused, removed) = retire_window(windows, idx, self.focused);
@@ -9456,11 +9692,11 @@ impl App {
         self.focused = focused;
 
         if self.windows.is_empty() {
-            let Some(mut last) = removed else {
-                return None;
-            };
+            let mut last = removed?;
             let cfg = &last.config;
-            if cfg.quit_after_last_window_closed && cfg.quit_after_last_window_closed_delay_ms.is_none() {
+            if cfg.quit_after_last_window_closed
+                && cfg.quit_after_last_window_closed_delay_ms.is_none()
+            {
                 // The last window went: closing the root viewport ends the process.
                 ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Close);
                 return Some(last);
@@ -9531,7 +9767,12 @@ impl eframe::App for App {
             self.snapshot_state();
         }
         self.save_state();
-        if let Some(hwnd) = self.windows.first().or(self.dormant.as_ref()).and_then(|w| w.hwnd) {
+        if let Some(hwnd) = self
+            .windows
+            .first()
+            .or(self.dormant.as_ref())
+            .and_then(|w| w.hwnd)
+        {
             crate::notify::shutdown(hwnd);
         }
     }
@@ -9657,11 +9898,7 @@ impl eframe::App for App {
 
         // Track which window has focus, for `new_window`'s cwd inheritance.
         // Recomputed every pass — a retire renumbers the slots.
-        if let Some(i) = self
-            .windows
-            .iter()
-            .position(|w| w.was_focused)
-        {
+        if let Some(i) = self.windows.iter().position(|w| w.was_focused) {
             self.focused = i;
         }
 
@@ -9710,11 +9947,7 @@ fn take_active_tab<T>(tabs: &mut Vec<T>, active: usize) -> Option<(T, usize)> {
 /// Split out from [`App`] — like `reap_tabs` and `reorder_tabs` — so the
 /// reselection logic is testable without spawning a shell. Out-of-range `idx` is
 /// a no-op rather than a panic, matching the other window/tab helpers.
-fn retire_window<W>(
-    mut windows: Vec<W>,
-    idx: usize,
-    focused: usize,
-) -> (Vec<W>, usize, Option<W>) {
+fn retire_window<W>(mut windows: Vec<W>, idx: usize, focused: usize) -> (Vec<W>, usize, Option<W>) {
     if idx >= windows.len() {
         return (windows, focused, None);
     }
@@ -9786,7 +10019,10 @@ const OVERVIEW_CARD_W: f32 = 260.0;
 /// `cols` characters.
 fn overview_thumb(text: &str, rows: usize, cols: usize) -> String {
     let lines: Vec<&str> = text.lines().map(|l| l.trim_end()).collect();
-    let end = lines.iter().rposition(|l| !l.is_empty()).map_or(0, |i| i + 1);
+    let end = lines
+        .iter()
+        .rposition(|l| !l.is_empty())
+        .map_or(0, |i| i + 1);
     let start = end.saturating_sub(rows);
     lines[start..end]
         .iter()
@@ -9954,10 +10190,14 @@ fn install_ui_fallback_font(ctx: &egui::Context, title_family: Option<&str>) {
             Some((bytes, index)) => {
                 let mut data = egui::FontData::from_static(bytes);
                 data.index = index;
-                fonts.font_data.insert("giest-title".to_owned(), Arc::new(data));
+                fonts
+                    .font_data
+                    .insert("giest-title".to_owned(), Arc::new(data));
                 title.insert(0, "giest-title".to_owned());
             }
-            None => eprintln!("giest: window-title-font-family '{name}' not found; using the default"),
+            None => {
+                eprintln!("giest: window-title-font-family '{name}' not found; using the default")
+            }
         }
     }
     fonts
@@ -10215,10 +10455,9 @@ fn truncate_to_width(title: &str, suffix: &str, max: f32, w: impl Fn(&str) -> f3
 mod tests {
     use super::{
         Dir, Node, Tab, capture_node_with, cycle_pick, dim_alpha, drop_index, highlight_job,
-        keep_only_tab, nav_dir, new_tab_index,
-        overlay_anchor, preview_text, reap_tabs, reinsert_tabs, remove_tabs_by_id, reorder_tabs,
-        retire_window, split_rect, take_active_tab, zoom_after_nav,
-        truncate_tabs_to_right, truncate_to_width,
+        keep_only_tab, nav_dir, new_tab_index, overlay_anchor, preview_text, reap_tabs,
+        reinsert_tabs, remove_tabs_by_id, reorder_tabs, retire_window, split_rect, take_active_tab,
+        truncate_tabs_to_right, truncate_to_width, zoom_after_nav,
     };
     use crate::config::ResizeOverlayPosition as P;
     use eframe::egui;
@@ -10327,7 +10566,8 @@ mod tests {
             (NewSurface::Split, "split"),
         ];
         for (what, key) in cases {
-            let cfg = Config::from_ghostty_config(&format!("{key}-inherit-working-directory = false"));
+            let cfg =
+                Config::from_ghostty_config(&format!("{key}-inherit-working-directory = false"));
             assert!(!should_inherit_cwd(what, &cfg), "{what:?} reads {key}-*");
             for (other, other_key) in cases {
                 if other != what {
@@ -10445,8 +10685,16 @@ mod tests {
             (P::TopCenter, egui::pos2(100.0, 10.0), Align2::CENTER_TOP),
             (P::TopRight, egui::pos2(190.0, 10.0), Align2::RIGHT_TOP),
             (P::BottomLeft, egui::pos2(10.0, 90.0), Align2::LEFT_BOTTOM),
-            (P::BottomCenter, egui::pos2(100.0, 90.0), Align2::CENTER_BOTTOM),
-            (P::BottomRight, egui::pos2(190.0, 90.0), Align2::RIGHT_BOTTOM),
+            (
+                P::BottomCenter,
+                egui::pos2(100.0, 90.0),
+                Align2::CENTER_BOTTOM,
+            ),
+            (
+                P::BottomRight,
+                egui::pos2(190.0, 90.0),
+                Align2::RIGHT_BOTTOM,
+            ),
         ];
         for (pos, want_at, want_align) in cases {
             let (at, align) = overlay_anchor(pane, pos, m);
@@ -10631,10 +10879,18 @@ mod tests {
     fn split_left_and_up_put_the_new_pane_first() {
         let mut root = leaf(1, 1);
         assert!(root.split_leaf_at(1, true, true, 2, 1));
-        assert_eq!(root.first_leaf_id(), 2, "new_split:left lands before the old pane");
+        assert_eq!(
+            root.first_leaf_id(),
+            2,
+            "new_split:left lands before the old pane"
+        );
         let mut root = leaf(1, 1);
         assert!(root.split_leaf_at(1, false, false, 2, 1));
-        assert_eq!(root.first_leaf_id(), 1, "new_split:down keeps the old pane first");
+        assert_eq!(
+            root.first_leaf_id(),
+            1,
+            "new_split:down keeps the old pane first"
+        );
     }
 
     #[test]
@@ -10689,8 +10945,8 @@ mod tests {
         // The layout changed under the undo entry: the path names a split that
         // is now a bare leaf. Restoring in the wrong place beats dropping a
         // running shell, so it attaches where it can.
-        let (after, taken) = split(true, leaf(1, 1), split(false, leaf(2, 1), leaf(3, 1)))
-            .detach_leaf(2);
+        let (after, taken) =
+            split(true, leaf(1, 1), split(false, leaf(2, 1), leaf(3, 1))).detach_leaf(2);
         let (slot, node) = taken.expect("the closed pane");
         let mut other = split(true, leaf(9, 1), leaf(8, 1));
         drop(after);
@@ -11139,7 +11395,10 @@ mod tests {
         assert_eq!(survivors[0].focus, 2); // the kept tab's leaf id
         // What was closed comes back with the slot each tab came from, in
         // ascending order — the shape `undo` re-inserts from.
-        assert_eq!(closed.iter().map(|(i, t)| (*i, t.id)).collect::<Vec<_>>(), vec![(0, 1), (2, 3)]);
+        assert_eq!(
+            closed.iter().map(|(i, t)| (*i, t.id)).collect::<Vec<_>>(),
+            vec![(0, 1), (2, 3)]
+        );
     }
 
     #[test]
@@ -11163,7 +11422,10 @@ mod tests {
         let (survivors, active, closed) = truncate_tabs_to_right(tabs, 1, 3);
         assert_eq!(survivors.len(), 2);
         assert_eq!(active, 1);
-        assert_eq!(closed.iter().map(|(i, t)| (*i, t.id)).collect::<Vec<_>>(), vec![(2, 3), (3, 4)]);
+        assert_eq!(
+            closed.iter().map(|(i, t)| (*i, t.id)).collect::<Vec<_>>(),
+            vec![(2, 3), (3, 4)]
+        );
     }
 
     #[test]
@@ -11345,8 +11607,8 @@ mod tests {
     // --- Pane / tab drag-and-drop ---------------------------------------
 
     use super::{
-        Dest, Grab, Moved, OverviewKey, overview_columns, overview_step, overview_thumb,
-        put_grab, take_grab,
+        Dest, Grab, Moved, OverviewKey, overview_columns, overview_step, overview_thumb, put_grab,
+        take_grab,
     };
     use crate::panedrag::Zone;
 
@@ -11416,23 +11678,47 @@ mod tests {
         )];
         *tabs[0].root.split_at_mut(&[]).unwrap().0 = 0.7;
         let (mut active, mut next) = (0, 100);
-        let grab = Grab::Pane { window: 1, tab: 10, leaf: 2 };
+        let grab = Grab::Pane {
+            window: 1,
+            tab: 10,
+            leaf: 2,
+        };
         let (moved, back) = take_grab(&mut tabs, &mut active, &grab).unwrap();
         // The sibling collapsed into the parent's place; focus moved into it.
         assert_eq!(shape(&tabs[0].root), "(1|3)");
         assert_eq!(tabs[0].focus, 3);
-        assert_eq!(ratio_at(&mut tabs[0].root, &[]), 0.7, "the surviving split keeps its ratio");
-        let dest = Dest::Beside { window: 1, tab: 10, leaf: 1, zone: Zone::Left };
-        let landed = put_grab(&mut tabs, &mut active, &mut next, false, moved, &dest).ok().unwrap();
+        assert_eq!(
+            ratio_at(&mut tabs[0].root, &[]),
+            0.7,
+            "the surviving split keeps its ratio"
+        );
+        let dest = Dest::Beside {
+            window: 1,
+            tab: 10,
+            leaf: 1,
+            zone: Zone::Left,
+        };
+        let landed = put_grab(&mut tabs, &mut active, &mut next, false, moved, &dest)
+            .ok()
+            .unwrap();
         assert_eq!(shape(&tabs[0].root), "((2|1)|3)");
         assert_eq!(tabs[0].focus, 2, "focus follows the moved pane");
-        assert_eq!(landed, Grab::Pane { window: 1, tab: 10, leaf: 2 });
+        assert_eq!(
+            landed,
+            Grab::Pane {
+                window: 1,
+                tab: 10,
+                leaf: 2
+            }
+        );
         assert_eq!(next, 100, "no ids spent within a window");
 
         // The inverse — pick it up where it landed, put it back in its old
         // slot — restores the original tree, ratio included.
         let (moved, _) = take_grab(&mut tabs, &mut active, &landed).unwrap();
-        put_grab(&mut tabs, &mut active, &mut next, false, moved, &back).ok().unwrap();
+        put_grab(&mut tabs, &mut active, &mut next, false, moved, &back)
+            .ok()
+            .unwrap();
         assert_eq!(shape(&tabs[0].root), "(1|(2/3))");
         assert_eq!(ratio_at(&mut tabs[0].root, &[]), 0.7);
         assert_eq!(tabs[0].focus, 2);
@@ -11440,18 +11726,35 @@ mod tests {
 
     #[test]
     fn taking_a_lone_pane_takes_its_tab_and_remembers_the_index() {
-        let mut tabs: Vec<Tab<u32>> =
-            (1..=3).map(|i| tab_of(i, leaf(i * 10, i as u32), i * 10)).collect();
+        let mut tabs: Vec<Tab<u32>> = (1..=3)
+            .map(|i| tab_of(i, leaf(i * 10, i as u32), i * 10))
+            .collect();
         let mut active = 2;
-        let (moved, back) =
-            take_grab(&mut tabs, &mut active, &Grab::Pane { window: 1, tab: 2, leaf: 20 }).unwrap();
+        let (moved, back) = take_grab(
+            &mut tabs,
+            &mut active,
+            &Grab::Pane {
+                window: 1,
+                tab: 2,
+                leaf: 20,
+            },
+        )
+        .unwrap();
         assert!(matches!(moved, Moved::Tab(ref t) if t.id == 2));
-        assert_eq!(back, Dest::NewTab { window: 1, index: 1 });
+        assert_eq!(
+            back,
+            Dest::NewTab {
+                window: 1,
+                index: 1
+            }
+        );
         assert_eq!(tabs.iter().map(|t| t.id).collect::<Vec<_>>(), vec![1, 3]);
         assert_eq!(active, 1, "the same tab (3) stays selected");
         // Putting it back at that index restores the order and selects it.
         let mut next = 50;
-        put_grab(&mut tabs, &mut active, &mut next, false, moved, &back).ok().unwrap();
+        put_grab(&mut tabs, &mut active, &mut next, false, moved, &back)
+            .ok()
+            .unwrap();
         assert_eq!(tabs.iter().map(|t| t.id).collect::<Vec<_>>(), vec![1, 2, 3]);
         assert_eq!(active, 1);
         // Removing the active last tab selects the new last one.
@@ -11464,15 +11767,26 @@ mod tests {
     fn a_split_pane_dropped_on_a_strip_becomes_its_own_tab() {
         let mut tabs = vec![tab_of(1, split(true, leaf(2, 2), leaf(3, 3)), 3)];
         let (mut active, mut next) = (0, 4);
-        let (moved, _) =
-            take_grab(&mut tabs, &mut active, &Grab::Pane { window: 1, tab: 1, leaf: 3 }).unwrap();
+        let (moved, _) = take_grab(
+            &mut tabs,
+            &mut active,
+            &Grab::Pane {
+                window: 1,
+                tab: 1,
+                leaf: 3,
+            },
+        )
+        .unwrap();
         let landed = put_grab(
             &mut tabs,
             &mut active,
             &mut next,
             false,
             moved,
-            &Dest::NewTab { window: 1, index: 1 },
+            &Dest::NewTab {
+                window: 1,
+                index: 1,
+            },
         )
         .ok()
         .unwrap();
@@ -11490,12 +11804,34 @@ mod tests {
         let mut src = vec![tab_of(1, split(true, leaf(1, 111), leaf(2, 222)), 2)];
         let mut dst = vec![tab_of(1, leaf(1, 999), 1)];
         let (mut sa, mut da, mut dnext) = (0, 0, 2);
-        let (moved, back) =
-            take_grab(&mut src, &mut sa, &Grab::Pane { window: 1, tab: 1, leaf: 2 }).unwrap();
-        let dest = Dest::Beside { window: 2, tab: 1, leaf: 1, zone: Zone::Right };
-        let landed = put_grab(&mut dst, &mut da, &mut dnext, true, moved, &dest).ok().unwrap();
+        let (moved, back) = take_grab(
+            &mut src,
+            &mut sa,
+            &Grab::Pane {
+                window: 1,
+                tab: 1,
+                leaf: 2,
+            },
+        )
+        .unwrap();
+        let dest = Dest::Beside {
+            window: 2,
+            tab: 1,
+            leaf: 1,
+            zone: Zone::Right,
+        };
+        let landed = put_grab(&mut dst, &mut da, &mut dnext, true, moved, &dest)
+            .ok()
+            .unwrap();
         // The moved pane got a fresh id from the destination's counter...
-        assert_eq!(landed, Grab::Pane { window: 2, tab: 1, leaf: 2 });
+        assert_eq!(
+            landed,
+            Grab::Pane {
+                window: 2,
+                tab: 1,
+                leaf: 2
+            }
+        );
         assert_eq!(payloads(&dst[0].root), vec![(1, 999), (2, 222)]);
         assert_eq!(dnext, 3);
         assert_eq!(dst[0].focus, 2);
@@ -11505,8 +11841,17 @@ mod tests {
         // Undo moves it back, renumbered again from the source's counter.
         let mut snext = 3;
         let (moved, _) = take_grab(&mut dst, &mut da, &landed).unwrap();
-        let home = put_grab(&mut src, &mut sa, &mut snext, true, moved, &back).ok().unwrap();
-        assert_eq!(home, Grab::Pane { window: 1, tab: 1, leaf: 3 });
+        let home = put_grab(&mut src, &mut sa, &mut snext, true, moved, &back)
+            .ok()
+            .unwrap();
+        assert_eq!(
+            home,
+            Grab::Pane {
+                window: 1,
+                tab: 1,
+                leaf: 3
+            }
+        );
         assert_eq!(payloads(&src[0].root), vec![(1, 111), (3, 222)]);
         assert_eq!(shape(&src[0].root), "(1|3)");
         assert_eq!(payloads(&dst[0].root), vec![(1, 999)]);
@@ -11521,7 +11866,13 @@ mod tests {
         let mut dst = vec![tab_of(1, leaf(1, 9), 1)];
         let (mut sa, mut da, mut dnext) = (1, 0, 2);
         let (moved, back) = take_grab(&mut src, &mut sa, &Grab::Tab { window: 1, tab: 2 }).unwrap();
-        assert_eq!(back, Dest::NewTab { window: 1, index: 1 });
+        assert_eq!(
+            back,
+            Dest::NewTab {
+                window: 1,
+                index: 1
+            }
+        );
         assert_eq!(sa, 0);
         let landed = put_grab(
             &mut dst,
@@ -11529,7 +11880,10 @@ mod tests {
             &mut dnext,
             true,
             moved,
-            &Dest::NewTab { window: 2, index: 9 },
+            &Dest::NewTab {
+                window: 2,
+                index: 9,
+            },
         )
         .ok()
         .unwrap();
@@ -11545,7 +11899,12 @@ mod tests {
         let mut tabs = vec![tab_of(1, leaf(1, 1), 1)];
         let (mut active, mut next) = (0, 2);
         let moved = Moved::Node(leaf(5, 55));
-        let gone = Dest::Beside { window: 1, tab: 1, leaf: 42, zone: Zone::Left };
+        let gone = Dest::Beside {
+            window: 1,
+            tab: 1,
+            leaf: 42,
+            zone: Zone::Left,
+        };
         let back = put_grab(&mut tabs, &mut active, &mut next, false, moved, &gone);
         let Err(Moved::Node(n)) = back else {
             panic!("the pane must come back");
@@ -11554,9 +11913,24 @@ mod tests {
         let missing_tab = Dest::Slot {
             window: 1,
             tab: 99,
-            slot: super::PaneSlot { path: vec![], vertical: true, ratio: 0.5, first: true },
+            slot: super::PaneSlot {
+                path: vec![],
+                vertical: true,
+                ratio: 0.5,
+                first: true,
+            },
         };
-        assert!(put_grab(&mut tabs, &mut active, &mut next, false, Moved::Node(n), &missing_tab).is_err());
+        assert!(
+            put_grab(
+                &mut tabs,
+                &mut active,
+                &mut next,
+                false,
+                Moved::Node(n),
+                &missing_tab
+            )
+            .is_err()
+        );
         assert_eq!(shape(&tabs[0].root), "1", "the target is untouched");
     }
 
@@ -11564,7 +11938,18 @@ mod tests {
     fn take_grab_declines_unknown_targets() {
         let mut tabs = vec![tab_of(1, split(true, leaf(1, 1), leaf(2, 2)), 1)];
         let mut active = 0;
-        assert!(take_grab(&mut tabs, &mut active, &Grab::Pane { window: 1, tab: 1, leaf: 9 }).is_none());
+        assert!(
+            take_grab(
+                &mut tabs,
+                &mut active,
+                &Grab::Pane {
+                    window: 1,
+                    tab: 1,
+                    leaf: 9
+                }
+            )
+            .is_none()
+        );
         assert!(take_grab(&mut tabs, &mut active, &Grab::Tab { window: 1, tab: 9 }).is_none());
         assert_eq!(shape(&tabs[0].root), "(1|2)");
     }
@@ -11578,7 +11963,11 @@ mod tests {
         assert_eq!(overview_step(0, 5, 3, OverviewKey::Left), 4);
         assert_eq!(overview_step(4, 5, 3, OverviewKey::Right), 0);
         assert_eq!(overview_step(1, 5, 3, OverviewKey::Down), 4);
-        assert_eq!(overview_step(2, 5, 3, OverviewKey::Down), 2, "no card below");
+        assert_eq!(
+            overview_step(2, 5, 3, OverviewKey::Down),
+            2,
+            "no card below"
+        );
         assert_eq!(overview_step(4, 5, 3, OverviewKey::Up), 1);
         assert_eq!(overview_step(1, 5, 3, OverviewKey::Up), 1);
         assert_eq!(overview_step(3, 5, 3, OverviewKey::First), 0);

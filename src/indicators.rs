@@ -50,7 +50,11 @@ pub fn closest_corner(center: egui::Pos2, container: egui::Rect) -> Corner {
 /// selected match, empty with no query, `0/0` when nothing matched.
 pub fn search_count_label(count: usize, current: usize, query_empty: bool) -> String {
     if count == 0 {
-        if query_empty { String::new() } else { "0/0".to_string() }
+        if query_empty {
+            String::new()
+        } else {
+            "0/0".to_string()
+        }
     } else {
         format!("{}/{}", current.min(count - 1) + 1, count)
     }
@@ -60,7 +64,12 @@ pub fn search_count_label(count: usize, current: usize, query_empty: bool) -> St
 pub fn chord_label(chord: &Chord) -> String {
     let mut s = String::new();
     let m = chord.mods;
-    for (on, name) in [(m.ctrl, "ctrl"), (m.alt, "alt"), (m.shift, "shift"), (m.sup, "super")] {
+    for (on, name) in [
+        (m.ctrl, "ctrl"),
+        (m.alt, "alt"),
+        (m.shift, "shift"),
+        (m.sup, "super"),
+    ] {
         if on {
             s.push_str(name);
             s.push('+');
@@ -123,7 +132,13 @@ pub enum UndoKind {
 /// The toast text for applying `kind` as an undo (`redo == false`) or a redo.
 pub fn undo_toast(kind: UndoKind, redo: bool) -> String {
     let verb = if redo { "Redo" } else { "Undo" };
-    let tabs = |n: usize| if n == 1 { "tab".to_string() } else { format!("{n} tabs") };
+    let tabs = |n: usize| {
+        if n == 1 {
+            "tab".to_string()
+        } else {
+            format!("{n} tabs")
+        }
+    };
     let what = match kind {
         UndoKind::ReopenSplit => "reopened split".to_string(),
         UndoKind::CloseSplit => "closed split".to_string(),
@@ -146,8 +161,14 @@ mod tests {
         let r = egui::Rect::from_min_size(egui::pos2(100.0, 50.0), egui::vec2(400.0, 200.0));
         assert_eq!(closest_corner(egui::pos2(110.0, 60.0), r), Corner::TopLeft);
         assert_eq!(closest_corner(egui::pos2(490.0, 60.0), r), Corner::TopRight);
-        assert_eq!(closest_corner(egui::pos2(110.0, 240.0), r), Corner::BottomLeft);
-        assert_eq!(closest_corner(egui::pos2(490.0, 240.0), r), Corner::BottomRight);
+        assert_eq!(
+            closest_corner(egui::pos2(110.0, 240.0), r),
+            Corner::BottomLeft
+        );
+        assert_eq!(
+            closest_corner(egui::pos2(490.0, 240.0), r),
+            Corner::BottomRight
+        );
         // The exact centre is not "less than" either midline.
         assert_eq!(closest_corner(r.center(), r), Corner::BottomRight);
     }
@@ -173,7 +194,11 @@ mod tests {
 
     fn chord(ctrl: bool, shift: bool, code: KeyCode) -> Chord {
         Chord {
-            mods: KeyMods { ctrl, shift, ..Default::default() },
+            mods: KeyMods {
+                ctrl,
+                shift,
+                ..Default::default()
+            },
             code,
         }
     }
@@ -181,7 +206,10 @@ mod tests {
     #[test]
     fn chords_read_in_config_spelling() {
         assert_eq!(chord_label(&chord(true, false, KeyCode::A)), "ctrl+a");
-        assert_eq!(chord_label(&chord(true, true, KeyCode::ArrowLeft)), "ctrl+shift+left");
+        assert_eq!(
+            chord_label(&chord(true, true, KeyCode::ArrowLeft)),
+            "ctrl+shift+left"
+        );
         assert_eq!(chord_label(&chord(false, false, KeyCode::Enter)), "enter");
     }
 
@@ -189,8 +217,14 @@ mod tests {
     fn key_state_shows_tables_and_pending_leaders() {
         assert_eq!(key_state_label(&[], &[]), None);
         let tables = vec![
-            TableEntry { name: "resize".into(), once: false },
-            TableEntry { name: "fine".into(), once: true },
+            TableEntry {
+                name: "resize".into(),
+                once: false,
+            },
+            TableEntry {
+                name: "fine".into(),
+                once: true,
+            },
         ];
         assert_eq!(key_state_label(&[], &tables).unwrap(), "[resize › fine]");
         let pending = [chord(true, false, KeyCode::A)];
@@ -217,9 +251,18 @@ mod tests {
 
     #[test]
     fn undo_toasts_name_the_operation() {
-        assert_eq!(undo_toast(UndoKind::ReopenTabs(1), false), "Undo: reopened tab");
-        assert_eq!(undo_toast(UndoKind::ReopenTabs(3), false), "Undo: reopened 3 tabs");
+        assert_eq!(
+            undo_toast(UndoKind::ReopenTabs(1), false),
+            "Undo: reopened tab"
+        );
+        assert_eq!(
+            undo_toast(UndoKind::ReopenTabs(3), false),
+            "Undo: reopened 3 tabs"
+        );
         assert_eq!(undo_toast(UndoKind::CloseSplit, true), "Redo: closed split");
-        assert_eq!(undo_toast(UndoKind::ReopenWindow, false), "Undo: reopened window");
+        assert_eq!(
+            undo_toast(UndoKind::ReopenWindow, false),
+            "Undo: reopened window"
+        );
     }
 }

@@ -53,9 +53,10 @@ pub fn mode_from_options(opts: &str) -> Option<ClickMode> {
 /// The row the cursor's prompt starts on: the nearest [`RowPrompt::Prompt`]
 /// at or above the cursor (upstream's `promptIterator(.left_up)`).
 pub fn prompt_row(rows: &[PromptRowInfo], cursor_y: u16) -> Option<u16> {
-    (0..=cursor_y)
-        .rev()
-        .find(|&y| rows.get(y as usize).is_some_and(|r| r.prompt == RowPrompt::Prompt))
+    (0..=cursor_y).rev().find(|&y| {
+        rows.get(y as usize)
+            .is_some_and(|r| r.prompt == RowPrompt::Prompt)
+    })
 }
 
 /// Arrow presses (`left`, `right`) that move the cursor to `click`.
@@ -68,7 +69,11 @@ pub fn line_move(rows: &[PromptRowInfo], cursor: (u16, u16), click: (u16, u16)) 
     if (cx, cy) == (kx, ky) {
         return (0, 0);
     }
-    let cursor_on_input = rows.get(cy).and_then(|r| r.input.get(cx)).copied().unwrap_or(false);
+    let cursor_on_input = rows
+        .get(cy)
+        .and_then(|r| r.input.get(cx))
+        .copied()
+        .unwrap_or(false);
     if (cy, cx) < (ky, kx) {
         // Right: walk forward from just after the cursor.
         let mut count = 0;
@@ -107,7 +112,11 @@ pub fn line_move(rows: &[PromptRowInfo], cursor: (u16, u16), click: (u16, u16)) 
     let mut count = 0;
     for y in (ky..=cy).rev() {
         let Some(row) = rows.get(y) else { break };
-        let end = if y == cy { cx.min(row.input.len()) } else { row.input.len() };
+        let end = if y == cy {
+            cx.min(row.input.len())
+        } else {
+            row.input.len()
+        };
         for x in (0..end).rev() {
             if !row.input[x] {
                 continue;
@@ -162,7 +171,10 @@ mod tests {
             Some(ClickMode::ClickEvents { relative: false })
         );
         // click_events=0 is not an opt-in; fall back to cl.
-        assert_eq!(mode_from_options("click_events=0;cl=line"), Some(ClickMode::Arrows));
+        assert_eq!(
+            mode_from_options("click_events=0;cl=line"),
+            Some(ClickMode::Arrows)
+        );
         assert_eq!(mode_from_options("aid=3"), None);
         assert_eq!(mode_from_options("cl=bogus"), None);
     }

@@ -296,7 +296,10 @@ mod tests {
             for area in [(800.0, 600.0), (300.0, 900.0), (500.0, 500.0)] {
                 let [x, y, w, h] = dest_rect(area, tex, F::Cover, P::Center);
                 assert!(x <= 1e-3 && y <= 1e-3, "{tex:?} {area:?}");
-                assert!(x + w >= area.0 - 1e-3 && y + h >= area.1 - 1e-3, "{tex:?} {area:?}");
+                assert!(
+                    x + w >= area.0 - 1e-3 && y + h >= area.1 - 1e-3,
+                    "{tex:?} {area:?}"
+                );
             }
         }
     }
@@ -307,7 +310,10 @@ mod tests {
             for area in [(800.0, 600.0), (300.0, 900.0)] {
                 let [x, y, w, h] = dest_rect(area, tex, F::Contain, P::Center);
                 assert!(x >= -1e-3 && y >= -1e-3, "{tex:?} {area:?}");
-                assert!(x + w <= area.0 + 1e-3 && y + h <= area.1 + 1e-3, "{tex:?} {area:?}");
+                assert!(
+                    x + w <= area.0 + 1e-3 && y + h <= area.1 + 1e-3,
+                    "{tex:?} {area:?}"
+                );
             }
         }
     }
@@ -373,7 +379,8 @@ mod tests {
             enc.set_color(png::ColorType::Rgb);
             enc.set_depth(png::BitDepth::Eight);
             let mut w = enc.write_header().unwrap();
-            w.write_image_data(&[0xff, 0x00, 0x00, 0x00, 0x00, 0xff]).unwrap();
+            w.write_image_data(&[0xff, 0x00, 0x00, 0x00, 0x00, 0xff])
+                .unwrap();
         }
         out
     }

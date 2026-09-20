@@ -83,7 +83,9 @@ fn decode(bytes: &[u8]) -> Option<egui::IconData> {
         return None;
     }
 
-    let len = (info.width as usize).checked_mul(info.height as usize)?.checked_mul(4)?;
+    let len = (info.width as usize)
+        .checked_mul(info.height as usize)?
+        .checked_mul(4)?;
     if buf.len() < len {
         return None;
     }
@@ -125,7 +127,10 @@ mod tests {
             let a = p[3];
             a > 0 && a < 255 && p[..3].iter().any(|&c| c > a)
         });
-        assert!(found, "icon.png looks premultiplied (or has no antialiased edge)");
+        assert!(
+            found,
+            "icon.png looks premultiplied (or has no antialiased edge)"
+        );
     }
 }
 
@@ -169,7 +174,13 @@ pub fn frame_rgb(f: IconFrame) -> [u8; 3] {
 /// to the official icon when that is unset or unreadable.
 pub fn source_for(cfg: &Config) -> Source {
     let pal = |tile: &[[u8; 3]], glyph: [u8; 3], cursor: [u8; 3], rim: Option<[u8; 3]>| {
-        Source::Palette(Palette { tile: tile.to_vec(), tile_alpha: 255, glyph, cursor, rim })
+        Source::Palette(Palette {
+            tile: tile.to_vec(),
+            tile_alpha: 255,
+            glyph,
+            cursor,
+            rim,
+        })
     };
     match cfg.app_icon {
         AppIcon::Official => Source::Official,
@@ -253,7 +264,11 @@ fn draw(src: &Source) -> Option<Arc<egui::IconData>> {
         Source::Official => ICON.get_or_init(|| decode(ICON_PNG).map(Arc::new)).clone(),
         Source::Palette(p) => {
             let rgba = crate::iconart::render(256, p, RUNTIME_SS)?;
-            Some(Arc::new(egui::IconData { rgba, width: 256, height: 256 }))
+            Some(Arc::new(egui::IconData {
+                rgba,
+                width: 256,
+                height: 256,
+            }))
         }
         Source::File(path) => {
             let img = match crate::bgimage::load(std::path::Path::new(path)) {
@@ -264,7 +279,11 @@ fn draw(src: &Source) -> Option<Arc<egui::IconData>> {
                 }
             };
             let (w, h, rgba) = fit_256(img.width, img.height, img.rgba);
-            Some(Arc::new(egui::IconData { rgba, width: w, height: h }))
+            Some(Arc::new(egui::IconData {
+                rgba,
+                width: w,
+                height: h,
+            }))
         }
     }
 }
@@ -333,7 +352,9 @@ mod runtime_tests {
                      macos-icon-ghost-color = #ff0000\n\
                      macos-icon-screen-color = #000010, #0000f0\n\
                      macos-icon-frame = plastic");
-        let Source::Palette(p) = source_for(&c) else { panic!("palette") };
+        let Source::Palette(p) = source_for(&c) else {
+            panic!("palette")
+        };
         assert_eq!(p.glyph, [0xFF, 0, 0]);
         assert_eq!(p.tile, vec![[0, 0, 0x10], [0, 0, 0xF0]]);
         assert_eq!(p.rim, Some(frame_rgb(IconFrame::Plastic)));
@@ -343,7 +364,14 @@ mod runtime_tests {
     fn every_preset_draws_a_256_icon_distinct_from_official() {
         let official = decode_master().unwrap().rgba;
         for name in [
-            "blueprint", "chalkboard", "microchip", "glass", "holographic", "paper", "retro", "xray",
+            "blueprint",
+            "chalkboard",
+            "microchip",
+            "glass",
+            "holographic",
+            "paper",
+            "retro",
+            "xray",
         ] {
             let src = source_for(&cfg(&format!("macos-icon = {name}")));
             let icon = draw(&src).expect(name);

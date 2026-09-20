@@ -47,13 +47,22 @@ fn run(cmd: &mut Command) -> Output {
 }
 
 fn text(o: &Output) -> String {
-    format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr))
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&o.stdout),
+        String::from_utf8_lossy(&o.stderr)
+    )
 }
 
 fn snapshot() -> String {
     WATCHED
         .iter()
-        .map(|k| format!("== {k}\n{}", text(&run(Command::new("reg").args(["query", k, "/s"])))))
+        .map(|k| {
+            format!(
+                "== {k}\n{}",
+                text(&run(Command::new("reg").args(["query", k, "/s"])))
+            )
+        })
         .collect()
 }
 
@@ -83,7 +92,8 @@ impl Drop for Guard {
             for (name, v) in &self.prior {
                 match v {
                     Some(v) => {
-                        run(Command::new("reg").args(["add", STARTUP, "/v", name, "/t", "REG_SZ", "/d", v, "/f"]));
+                        run(Command::new("reg")
+                            .args(["add", STARTUP, "/v", name, "/t", "REG_SZ", "/d", v, "/f"]));
                     }
                     None => {
                         run(Command::new("reg").args(["delete", STARTUP, "/v", name, "/f"]));
@@ -110,7 +120,10 @@ fn giest_running() -> bool {
 #[test]
 #[ignore = "registers giest as the default terminal (HKCU) for a few seconds"]
 fn console_launch_is_handed_to_giest() {
-    assert!(!giest_running(), "close every giest first: the handoff would go to it");
+    assert!(
+        !giest_running(),
+        "close every giest first: the handoff would go to it"
+    );
     let before = snapshot();
     eprintln!("before:\n{before}");
     let mut guard = Guard {
@@ -146,13 +159,19 @@ fn console_launch_is_handed_to_giest() {
     let o = run(Command::new(GIEST).arg("+unregister-default-terminal"));
     eprintln!("early unregister: {}", text(&o).trim());
     eprintln!("+list: {listed}");
-    assert!(listed.contains(&marker), "no handed-off pane titled {marker}");
+    assert!(
+        listed.contains(&marker),
+        "no handed-off pane titled {marker}"
+    );
 
     // Input: a typed command runs in the client and its effect comes back.
     let typed = format!("TYPED_{}", std::process::id());
     let o = run(Command::new(GIEST).arg(format!("+input=title {typed}\r")));
     assert!(o.status.success(), "{}", text(&o));
-    assert!(wait_listed(&typed, 10).contains(&typed), "typed input never ran in the client");
+    assert!(
+        wait_listed(&typed, 10).contains(&typed),
+        "typed input never ran in the client"
+    );
 
     // Exit detection: `exit` ends cmd, the pane is reaped, the instance goes.
     // The reply is not asserted: the instance can exit before writing it.

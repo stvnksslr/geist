@@ -87,22 +87,44 @@ mod imp {
     #[repr(C)]
     struct Guid(u32, u16, u16, [u8; 8]);
 
-    const CLSID_DESTINATION_LIST: Guid =
-        Guid(0x77f1_0cf0, 0x3db5, 0x4966, [0xb5, 0x20, 0xb7, 0xc5, 0x4f, 0xd3, 0x5e, 0xd6]);
-    const IID_ICUSTOM_DESTINATION_LIST: Guid =
-        Guid(0x6332_debf, 0x87b5, 0x4670, [0x90, 0xc0, 0x5e, 0x57, 0xb4, 0x08, 0xa4, 0x9e]);
-    const CLSID_ENUMERABLE_OBJECT_COLLECTION: Guid =
-        Guid(0x2d34_68c1, 0x36a7, 0x43b6, [0xac, 0x24, 0xd3, 0xf0, 0x2f, 0xd9, 0x60, 0x7a]);
-    const IID_IOBJECT_COLLECTION: Guid =
-        Guid(0x5632_b1a4, 0xe38a, 0x400a, [0x92, 0x8a, 0xd4, 0xcd, 0x63, 0x23, 0x02, 0x95]);
-    const IID_IOBJECT_ARRAY: Guid =
-        Guid(0x92ca_9dcd, 0x5622, 0x4bba, [0xa8, 0x05, 0x5e, 0x9f, 0x54, 0x1b, 0xd8, 0xc9]);
-    const CLSID_SHELL_LINK: Guid =
-        Guid(0x0002_1401, 0, 0, [0xc0, 0, 0, 0, 0, 0, 0, 0x46]);
-    const IID_ISHELL_LINK_W: Guid =
-        Guid(0x0002_14f9, 0, 0, [0xc0, 0, 0, 0, 0, 0, 0, 0x46]);
-    const IID_IPROPERTY_STORE: Guid =
-        Guid(0x886d_8eeb, 0x8cf2, 0x4446, [0x8d, 0x02, 0xcd, 0xba, 0x1d, 0xbd, 0xcf, 0x99]);
+    const CLSID_DESTINATION_LIST: Guid = Guid(
+        0x77f1_0cf0,
+        0x3db5,
+        0x4966,
+        [0xb5, 0x20, 0xb7, 0xc5, 0x4f, 0xd3, 0x5e, 0xd6],
+    );
+    const IID_ICUSTOM_DESTINATION_LIST: Guid = Guid(
+        0x6332_debf,
+        0x87b5,
+        0x4670,
+        [0x90, 0xc0, 0x5e, 0x57, 0xb4, 0x08, 0xa4, 0x9e],
+    );
+    const CLSID_ENUMERABLE_OBJECT_COLLECTION: Guid = Guid(
+        0x2d34_68c1,
+        0x36a7,
+        0x43b6,
+        [0xac, 0x24, 0xd3, 0xf0, 0x2f, 0xd9, 0x60, 0x7a],
+    );
+    const IID_IOBJECT_COLLECTION: Guid = Guid(
+        0x5632_b1a4,
+        0xe38a,
+        0x400a,
+        [0x92, 0x8a, 0xd4, 0xcd, 0x63, 0x23, 0x02, 0x95],
+    );
+    const IID_IOBJECT_ARRAY: Guid = Guid(
+        0x92ca_9dcd,
+        0x5622,
+        0x4bba,
+        [0xa8, 0x05, 0x5e, 0x9f, 0x54, 0x1b, 0xd8, 0xc9],
+    );
+    const CLSID_SHELL_LINK: Guid = Guid(0x0002_1401, 0, 0, [0xc0, 0, 0, 0, 0, 0, 0, 0x46]);
+    const IID_ISHELL_LINK_W: Guid = Guid(0x0002_14f9, 0, 0, [0xc0, 0, 0, 0, 0, 0, 0, 0x46]);
+    const IID_IPROPERTY_STORE: Guid = Guid(
+        0x886d_8eeb,
+        0x8cf2,
+        0x4446,
+        [0x8d, 0x02, 0xcd, 0xba, 0x1d, 0xbd, 0xcf, 0x99],
+    );
 
     /// `PKEY_Title`: {F29F85E0-4FF9-1068-AB91-08002B27B3D9}, pid 2.
     #[repr(C)]
@@ -111,7 +133,12 @@ mod imp {
         pid: u32,
     }
     const PKEY_TITLE: PropertyKey = PropertyKey {
-        fmtid: Guid(0xf29f_85e0, 0x4ff9, 0x1068, [0xab, 0x91, 0x08, 0x00, 0x2b, 0x27, 0xb3, 0xd9]),
+        fmtid: Guid(
+            0xf29f_85e0,
+            0x4ff9,
+            0x1068,
+            [0xab, 0x91, 0x08, 0x00, 0x2b, 0x27, 0xb3, 0xd9],
+        ),
         pid: 2,
     };
 
@@ -221,7 +248,10 @@ mod imp {
     }
 
     fn wide(s: &str) -> Vec<u16> {
-        std::ffi::OsStr::new(s).encode_wide().chain(Some(0)).collect()
+        std::ffi::OsStr::new(s)
+            .encode_wide()
+            .chain(Some(0))
+            .collect()
     }
 
     /// An owned COM pointer, released on drop.
@@ -256,7 +286,15 @@ mod imp {
         let mut p: *mut c_void = std::ptr::null_mut();
         // SAFETY: documented call with valid GUIDs and out-pointer.
         hr(
-            unsafe { CoCreateInstance(clsid, std::ptr::null_mut(), CLSCTX_INPROC_SERVER, iid, &mut p) },
+            unsafe {
+                CoCreateInstance(
+                    clsid,
+                    std::ptr::null_mut(),
+                    CLSCTX_INPROC_SERVER,
+                    iid,
+                    &mut p,
+                )
+            },
             what,
         )?;
         if p.is_null() {
@@ -272,11 +310,18 @@ mod imp {
         unsafe {
             CoInitializeEx(std::ptr::null_mut(), COINIT_APARTMENTTHREADED);
         }
-        let list = create(&CLSID_DESTINATION_LIST, &IID_ICUSTOM_DESTINATION_LIST, "DestinationList")?;
+        let list = create(
+            &CLSID_DESTINATION_LIST,
+            &IID_ICUSTOM_DESTINATION_LIST,
+            "DestinationList",
+        )?;
         if let Some(id) = app_id {
             let w = wide(id);
             // SAFETY: vtable of the interface we asked for; valid string.
-            hr(unsafe { (list.vtbl::<DestListVtbl>().set_app_id)(list.0, w.as_ptr()) }, "SetAppID")?;
+            hr(
+                unsafe { (list.vtbl::<DestListVtbl>().set_app_id)(list.0, w.as_ptr()) },
+                "SetAppID",
+            )?;
         }
         Ok(list)
     }
@@ -288,14 +333,26 @@ mod imp {
         unsafe {
             let v = l.vtbl::<ShellLinkVtbl>();
             hr((v.set_path)(l.0, path.as_ptr()), "IShellLink::SetPath")?;
-            hr((v.set_arguments)(l.0, args.as_ptr()), "IShellLink::SetArguments")?;
-            hr((v.set_description)(l.0, title.as_ptr()), "IShellLink::SetDescription")?;
-            hr((v.set_icon_location)(l.0, path.as_ptr(), 0), "IShellLink::SetIconLocation")?;
+            hr(
+                (v.set_arguments)(l.0, args.as_ptr()),
+                "IShellLink::SetArguments",
+            )?;
+            hr(
+                (v.set_description)(l.0, title.as_ptr()),
+                "IShellLink::SetDescription",
+            )?;
+            hr(
+                (v.set_icon_location)(l.0, path.as_ptr(), 0),
+                "IShellLink::SetIconLocation",
+            )?;
 
             // A task's visible label is the link's PKEY_Title, not its
             // description.
             let mut ps: *mut c_void = std::ptr::null_mut();
-            hr((v.query_interface)(l.0, &IID_IPROPERTY_STORE, &mut ps), "QI IPropertyStore")?;
+            hr(
+                (v.query_interface)(l.0, &IID_IPROPERTY_STORE, &mut ps),
+                "QI IPropertyStore",
+            )?;
             let ps = Com(ps);
             let pv = PropVariant {
                 vt: VT_LPWSTR,
@@ -308,7 +365,10 @@ mod imp {
             let pvt = ps.vtbl::<PropStoreVtbl>();
             // SetValue copies the value, so a borrowed string is fine and no
             // PropVariantClear is needed.
-            hr((pvt.set_value)(ps.0, &PKEY_TITLE, &pv), "IPropertyStore::SetValue")?;
+            hr(
+                (pvt.set_value)(ps.0, &PKEY_TITLE, &pv),
+                "IPropertyStore::SetValue",
+            )?;
             hr((pvt.commit)(ps.0), "IPropertyStore::Commit")?;
         }
         Ok(l)
@@ -342,7 +402,10 @@ mod imp {
                 let mut n = 0u32;
                 hr((cv.get_count)(coll.0, &mut n), "IObjectArray::GetCount")?;
                 if n as usize != tasks.len() {
-                    return Err(format!("collection holds {n} tasks, expected {}", tasks.len()));
+                    return Err(format!(
+                        "collection holds {n} tasks, expected {}",
+                        tasks.len()
+                    ));
                 }
                 // IObjectCollection *is* an IObjectArray (single inheritance),
                 // so the same pointer is passed.
@@ -408,7 +471,13 @@ mod tests {
     fn tasks_are_new_window_new_tab_then_one_per_profile() {
         let t = tasks(&["pwsh", "Command Prompt"]);
         assert_eq!(t.len(), 4);
-        assert_eq!(t[0], Task { title: "New Window".into(), args: "+new-window".into() });
+        assert_eq!(
+            t[0],
+            Task {
+                title: "New Window".into(),
+                args: "+new-window".into()
+            }
+        );
         assert_eq!(t[1].args, "+new-tab");
         assert_eq!(t[2].args, "+new-tab --command=pwsh");
         assert_eq!(t[3].title, "New Tab: Command Prompt");
