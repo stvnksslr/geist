@@ -3483,6 +3483,35 @@ pub fn config_path() -> Option<PathBuf> {
     Some(PathBuf::from(appdata).join("giest").join("config"))
 }
 
+/// Create the config file (and its directory) if it does not exist yet, so
+/// "Open Config" hands the user something to edit rather than a path that only
+/// *would* be read. Called from there and nowhere else: startup must not write
+/// to `%APPDATA%` for a config that is entirely optional. Empty on purpose: every key is optional, and an empty file
+/// parses to exactly the built-in defaults. Best-effort — a read-only or
+/// unwritable location is not an error; config loading already treats a missing
+/// root file as normal.
+pub fn ensure_config_file() {
+    let Some(path) = config_path() else { return };
+    ensure_file(&path);
+}
+
+/// `ensure_config_file` minus the path lookup, so it is testable without
+/// touching the process environment.
+fn ensure_file(path: &Path) {
+    if path.exists() {
+        return;
+    }
+    if let Some(dir) = path.parent()
+        && std::fs::create_dir_all(dir).is_err()
+    {
+        return;
+    }
+    let _ = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path);
+}
+
 /// The directory the config file lives in — what a relative `Path`-valued key
 /// resolves against. `None` when there is no config path at all.
 pub fn config_dir() -> Option<PathBuf> {
@@ -6144,6 +6173,23 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_missing_config_file_is_created_empty_and_an_existing_one_is_left_alone() {
+        let dir = std::env::temp_dir().join(format!("giest-ensure-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("nested").join("config");
+
+        ensure_file(&path);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
+        // Defaults, not a parse error: an empty file sets nothing.
+        assert!(Config::load_from_file(&path).diagnostics.is_empty());
+
+        std::fs::write(&path, "font-size = 20").unwrap();
+        ensure_file(&path);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "font-size = 20");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     #[test]
     fn path_values_resolve_relative_to_the_config_dir() {
         let dir = Path::new(r"C:\Users\me\AppData\Roaming\giest");

@@ -143,6 +143,7 @@ impl Action {
             Action::Noop(_) => App,
             // Obviously app actions.
             Action::OpenConfig
+            | Action::ShowProfiles
             | Action::ReloadConfig
             | Action::Quit
             | Action::ToggleQuickTerminal
@@ -503,6 +504,9 @@ pub enum Action {
     /// it exists so the scrollbar can drive the core.
     ScrollToRow(u32),
     OpenConfig,
+    /// The profiles page (`profilepage`): show/hide, rename, reorder and add
+    /// shells, and pick the default. giest-only — Ghostty has no equivalent.
+    ShowProfiles,
     ReloadConfig,
 }
 
@@ -623,6 +627,8 @@ impl Action {
             Action::ScrollToBottom => "Scroll to Bottom",
             Action::ScrollToRow(_) => "Scroll to Row",
             Action::OpenConfig => "Open Config",
+
+            Action::ShowProfiles => "Profiles",
             Action::ReloadConfig => "Reload Config",
         }
     }
@@ -732,6 +738,8 @@ impl Action {
             | Action::ClearSelection
             | Action::ResetTerminal
             | Action::OpenConfig
+
+            | Action::ShowProfiles
             | Action::ReloadConfig => return None,
         })
     }
@@ -812,6 +820,8 @@ impl Action {
             Action::ScrollToBottom => "scroll_to_bottom".into(),
             Action::ScrollToRow(n) => format!("scroll_to_row:{n}"),
             Action::OpenConfig => "open_config".into(),
+
+            Action::ShowProfiles => "show_profiles".into(),
             Action::ReloadConfig => "reload_config".into(),
             Action::TogglePalette => "toggle_command_palette".into(),
             Action::WriteFile(scope, act) => {
@@ -995,6 +1005,8 @@ impl Action {
             "scroll_to_top" => Action::ScrollToTop,
             "scroll_to_bottom" => Action::ScrollToBottom,
             "open_config" => Action::OpenConfig,
+
+            "show_profiles" => Action::ShowProfiles,
             "reload_config" => Action::ReloadConfig,
             "toggle_command_palette" => Action::TogglePalette,
             "clear_screen" => Action::ClearScreen,
@@ -1116,6 +1128,7 @@ const BASE_ACTIONS: &[Action] = &[
     Action::ToggleFloatOnTop,
     Action::ToggleBackgroundOpacity,
     Action::OpenConfig,
+    Action::ShowProfiles,
     Action::ReloadConfig,
 ];
 

@@ -23,10 +23,10 @@ use crate::theme;
 /// array): the program with its arguments, run verbatim.
 fn profile_for_argv(argv: &[String]) -> Option<Profile> {
     let (prog, args) = argv.split_first()?;
-    (!prog.trim().is_empty()).then(|| Profile {
-        name: prog.clone(),
-        program: prog.clone(),
-        args: args.to_vec(),
+    (!prog.trim().is_empty()).then(|| {
+        let mut p = Profile::new(prog, prog);
+        p.args = args.to_vec();
+        p
     })
 }
 
@@ -1408,6 +1408,9 @@ pub struct Window {
     inspector_rect: Option<egui::Rect>,
     /// The About dialog is up (modal: in both input gates).
     about_open: bool,
+    /// The profiles page, open over its working copy of the profile list
+    /// (`profilepage`). Modal, so it is in both input gates.
+    profiles_page: Option<crate::profilepage::Page>,
     /// Which corner of the pane the search bar is snapped to (dragged there by
     /// its grip, like macOS Ghostty's `SearchOverlay`), and the live drag.
     search_corner: crate::indicators::Corner,
@@ -1718,6 +1721,10 @@ enum AppRequest {
     Drop(Grab, egui::Pos2),
     /// The update pill's "Restart to Complete Update" (`update.rs`).
     RestartForUpdate,
+    /// The profiles page saved: every window re-reads the profiles file, so a
+    /// hidden shell disappears from all the new-tab menus at once rather than
+    /// only the window the page was opened from.
+    ReloadProfiles,
 }
 
 /// The whole application: every open window, plus the little state that has to
@@ -2058,7 +2065,7 @@ impl Window {
         let (cell_w, cell_h) =
             render::init(render_state, px, config.text_gamma, &font_spec(&config));
 
-        let (profiles, default_profile) = profiles::detect(config.shell.as_deref());
+        let (profiles, default_profile) = profiles::detect_edited(config.shell.as_deref());
         // The very first session predates the `Window`, so it resolves
         // `working-directory` directly (nothing can be inherited yet). It is
         // also the one surface `initial-command` applies to (upstream's
@@ -2189,6 +2196,7 @@ impl Window {
             undo_state: crate::command::UndoState::default(),
             inspector_rect: None,
             about_open: false,
+            profiles_page: None,
             search_corner: crate::indicators::Corner::TopRight,
             search_drag: egui::Vec2::ZERO,
             unseen_bell: false,
@@ -2461,6 +2469,23 @@ impl Window {
                 for (label, url) in crate::about::LINKS {
                     ui.hyperlink_to(*label, *url);
                 }
+                // The settings file, as a link: giest has no settings UI, so
+                // "where do I configure this?" is otherwise unanswered anywhere
+                // in the app. Shown even when the file does not exist yet —
+                // `open_config` creates it on the way.
+                if let Some(path) = crate::config::config_path() {
+                    ui.add_space(8.0);
+                    let link = ui.link("Settings file");
+                    if link.on_hover_text(path.display().to_string()).clicked() {
+                        open_config();
+                    }
+                    ui.label(
+                        egui::RichText::new(path.display().to_string())
+                            .monospace()
+                            .size(10.0)
+                            .color(chrome.weak_text),
+                    );
+                }
                 ui.add_space(12.0);
                 if ui.button("Close").clicked() {
                     close = true;
@@ -2472,6 +2497,263 @@ impl Window {
         }
         if close {
             self.about_open = false;
+        }
+    }
+
+    /// Open the profiles page over this window's live profile list.
+    fn open_profiles(&mut self) {
+        self.profiles_page = Some(crate::profilepage::Page::open(
+            &self.profiles,
+            self.default_profile,
+            self.config.shell.as_deref(),
+        ));
+    }
+
+    /// Re-read the profiles file — after the page saves (in *every* window, via
+    /// `AppRequest::ReloadProfiles`) and on a config reload, since `shell =`
+    /// feeds detection's own default.
+    fn reload_profiles(&mut self) {
+        let (list, default) = profiles::detect_edited(self.config.shell.as_deref());
+        self.profiles = list;
+        self.default_profile = default;
+    }
+
+    /// The profiles page: show/hide each detected shell, rename and reorder
+    /// them, add your own, and pick the default for new windows and tabs. The
+    /// edits are a working copy until Save (see [`crate::profilepage`]).
+    fn render_profiles(&mut self, ctx: &egui::Context) {
+        let Some(mut page) = self.profiles_page.take() else {
+            return;
+        };
+        let chrome = self.chrome;
+        let mut close = false;
+        let mut save = false;
+        // Deferred intents, for the same reason the tab strip uses them: the
+        // row loop borrows `page`, so nothing structural can happen inside it.
+        let mut want_move: Option<(usize, isize)> = None;
+        let mut want_remove: Option<usize> = None;
+        let mut want_default: Option<usize> = None;
+        let mut want_hidden: Option<(usize, bool)> = None;
+
+        let modal = egui::Modal::new(self.id("profiles")).show(ctx, |ui| {
+            ui.set_width(560.0);
+            ui.heading("Profiles");
+            ui.label(
+                egui::RichText::new(
+                    "Shells are detected automatically. Hide the ones you don't use, \
+                     rename or reorder them, and pick the default for new windows and tabs.",
+                )
+                .color(chrome.weak_text),
+            );
+            ui.add_space(8.0);
+
+            let n = page.rows.len();
+            egui::ScrollArea::vertical()
+                .max_height(360.0)
+                .show(ui, |ui| {
+                    for i in 0..n {
+                        let key = page.rows[i].profile.key.clone();
+                        let custom = page.rows[i].profile.custom;
+                        let is_default = page.default == i;
+                        ui.horizontal(|ui| {
+                            // The default's radio also un-hides it, so there is no
+                            // way to reach "default but not in the menu".
+                            if ui
+                                .radio(is_default, "")
+                                .on_hover_text("Default for new windows and tabs")
+                                .clicked()
+                            {
+                                want_default = Some(i);
+                            }
+                            let mut shown = !page.rows[i].profile.hidden;
+                            let vis =
+                                ui.add_enabled(!is_default, egui::Checkbox::new(&mut shown, ""));
+                            if vis
+                                .on_hover_text(if is_default {
+                                    "The default profile is always shown"
+                                } else {
+                                    "Show in the new-tab menu"
+                                })
+                                .changed()
+                            {
+                                want_hidden = Some((i, !shown));
+                            }
+                            ui.add(
+                                egui::TextEdit::singleline(&mut page.rows[i].profile.name)
+                                    .desired_width(180.0),
+                            );
+                            // Fixed width and elided: a custom profile's program is
+                            // a full path, and left to size itself it pushes the
+                            // right-to-left controls off the row and overlaps them
+                            // (`C:\Program Files\Git\bin\bash.exe` is wider than
+                            // everything else in the row put together).
+                            let program = ui.add_sized(
+                                [150.0, ui.spacing().interact_size.y],
+                                egui::Label::new(
+                                    egui::RichText::new(&page.rows[i].profile.program)
+                                        .monospace()
+                                        .size(11.0)
+                                        .color(chrome.weak_text),
+                                )
+                                .truncate(),
+                            );
+                            if !page.rows[i].profile.program.is_empty() {
+                                program.on_hover_text(&page.rows[i].profile.program);
+                            }
+                            // Right-to-left, so the slots are listed rightmost
+                            // first. The two custom-only buttons still take their
+                            // width when absent, or ▲/▼ would sit at a different x
+                            // on every row depending on what else that row has.
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    let slot = ui.spacing().interact_size.y + 8.0;
+                                    if custom {
+                                        if ui.small_button("🗑").on_hover_text("Remove").clicked()
+                                        {
+                                            want_remove = Some(i);
+                                        }
+                                    } else {
+                                        ui.add_space(slot);
+                                    }
+                                    if custom {
+                                        let open = page.expanded.as_deref() == Some(key.as_str());
+                                        if ui
+                                            .small_button(if open { "▴" } else { "⚙" })
+                                            .on_hover_text("Program, directory and arguments")
+                                            .clicked()
+                                        {
+                                            page.expanded = (!open).then(|| key.clone());
+                                        }
+                                    } else {
+                                        ui.add_space(slot);
+                                    }
+                                    if ui
+                                        .add_enabled(i + 1 < n, egui::Button::new("▼").small())
+                                        .clicked()
+                                    {
+                                        want_move = Some((i, 1));
+                                    }
+                                    if ui
+                                        .add_enabled(i > 0, egui::Button::new("▲").small())
+                                        .clicked()
+                                    {
+                                        want_move = Some((i, -1));
+                                    }
+                                },
+                            );
+                        });
+                        if let Some(p) = page.rows[i].problem() {
+                            ui.label(
+                                egui::RichText::new(format!("⚠ {p}"))
+                                    .color(chrome.accent)
+                                    .size(11.0),
+                            );
+                        }
+                        // Program/args/directory: only a user-added profile's are
+                        // editable — a detected shell's are what detection found,
+                        // and editing them would make the row a lie about what ran.
+                        if custom && page.expanded.as_deref() == Some(key.as_str()) {
+                            ui.indent(("profile", i), |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label("Program");
+                                    ui.add(
+                                        egui::TextEdit::singleline(
+                                            &mut page.rows[i].profile.program,
+                                        )
+                                        .hint_text(r"C:\Git\bin\bash.exe")
+                                        .desired_width(340.0),
+                                    );
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.label("Directory");
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut page.rows[i].cwd)
+                                            .hint_text("(inherit)")
+                                            .desired_width(340.0),
+                                    );
+                                });
+                                ui.label(
+                                    egui::RichText::new("Arguments, one per line")
+                                        .color(chrome.weak_text)
+                                        .size(11.0),
+                                );
+                                ui.add(
+                                    egui::TextEdit::multiline(&mut page.rows[i].args)
+                                        .desired_rows(2)
+                                        .desired_width(400.0),
+                                );
+                            });
+                        }
+                    }
+                });
+
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("Add profile").clicked() {
+                    page.add_custom();
+                }
+                if ui
+                    .button("Reset to detected")
+                    .on_hover_text("Discard every profile edit and go back to what was detected")
+                    .clicked()
+                {
+                    page.reset();
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let problem = page.problem();
+                    let save_btn = ui.add_enabled(problem.is_none(), egui::Button::new("Save"));
+                    if let Some((_, why)) = problem {
+                        save_btn.on_hover_text(format!("A profile {why}"));
+                    } else if save_btn.clicked() {
+                        save = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        close = true;
+                    }
+                });
+            });
+            ui.add_space(4.0);
+            // The page writes its own file; say where, so the settings file and
+            // this dialog aren't confused for each other.
+            if let Some(p) = crate::profilestore::store_path() {
+                ui.label(
+                    egui::RichText::new(format!("Saved to {}", p.display()))
+                        .size(10.0)
+                        .color(chrome.weak_text),
+                );
+            }
+        });
+
+        if let Some((i, d)) = want_move {
+            page.reorder(i, d);
+        }
+        if let Some(i) = want_default {
+            page.set_default(i);
+        }
+        if let Some((i, h)) = want_hidden {
+            page.set_hidden(i, h);
+        }
+        if let Some(i) = want_remove {
+            page.remove(i);
+        }
+        if save {
+            if let Some((list, default, store)) = page.commit() {
+                crate::profilestore::save(&store);
+                self.profiles = list;
+                self.default_profile = default;
+                // Every other window is showing the same menus from its own
+                // copy of the list; make them re-read it too.
+                self.requests.push(AppRequest::ReloadProfiles);
+            }
+            close = true;
+        }
+        // A click on the backdrop is a cancel, like every other modal here.
+        if modal.should_close() {
+            close = true;
+        }
+        if !close {
+            self.profiles_page = Some(page);
         }
     }
 
@@ -2937,6 +3219,7 @@ impl Window {
             undo_state: crate::command::UndoState::default(),
             inspector_rect: None,
             about_open: false,
+            profiles_page: None,
             search_corner: crate::indicators::Corner::TopRight,
             search_drag: egui::Vec2::ZERO,
             unseen_bell: false,
@@ -3231,7 +3514,14 @@ impl Window {
     /// Spawn a session running exactly `profile`, in `cwd` or else
     /// `working-directory`.
     fn spawn_profile(&self, profile: &Profile, cwd: Option<&std::path::Path>) -> Option<Session> {
-        let cwd = cwd.or(self.config.working_directory.as_deref());
+        // A user-added profile's own starting directory outranks the inherited
+        // one: `*-inherit-working-directory` is a blanket rule about new
+        // surfaces, while this directory was chosen for *this* shell.
+        let cwd = profile
+            .cwd
+            .as_deref()
+            .or(cwd)
+            .or(self.config.working_directory.as_deref());
         open_session(&self.egui_ctx, &self.config, profile, cwd)
     }
 
@@ -3489,6 +3779,7 @@ impl Window {
             || self.clipboard_prompt().is_some()
             || self.config_errors_open()
             || self.about_open
+            || self.profiles_page.is_some()
             || self.title_prompt.is_some()
             // The tab overview: also in `render_active`'s `palette_open` gate.
             || self.overview.is_some()
@@ -4120,6 +4411,14 @@ impl Window {
         // `load_bg_image` caches by path), so editing the key applies live like
         // the colors do. Only the *surface's* transparency is startup-only.
         self.config = cfg;
+
+        // `shell =` feeds detection's default, so the profile list is derived
+
+        // from the config too — and the user may have hand-edited the profiles
+
+        // file beside it.
+
+        self.reload_profiles();
         // A reload re-reads `window-decoration`, replacing any per-window toggle.
         self.decorated = self.config.window_decoration.decorated();
         if self.config.app_notifications.config_reload {
@@ -4596,6 +4895,8 @@ impl Window {
                 }
             }
             Action::OpenConfig => open_config(),
+
+            Action::ShowProfiles => self.open_profiles(),
             Action::ReloadConfig => self.reload_config(render_state),
         }
         ctx.request_repaint();
@@ -5536,6 +5837,7 @@ impl Window {
         let mut want_new: Option<usize> = None;
         let mut want_rename: Option<usize> = None;
         let mut want_about = false;
+        let mut want_profiles = false;
         let mut want_color: Option<(usize, Option<egui::Color32>)> = None;
         let mut commit_rename: Option<(usize, Option<String>)> = None;
         let mut stop_rename = false;
@@ -5553,7 +5855,17 @@ impl Window {
         let active = self.active_tab;
         let ntabs = self.tabs.len();
         let default_profile = self.default_profile;
-        let profile_names: Vec<String> = self.profiles.iter().map(|p| p.name.clone()).collect();
+        // `(index into self.profiles, name)` for the profiles the new-tab menus
+        // offer. The index is carried rather than re-derived by `enumerate`,
+        // because hiding a profile must not renumber the ones after it — those
+        // indices are what `new_tab_with_profile:N` and IPC address.
+        let menu_profiles: Vec<(usize, String)> = self
+            .profiles
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| !p.hidden)
+            .map(|(i, p)| (i, p.name.clone()))
+            .collect();
 
         let chrome = self.chrome;
         // Reserve the new-tab controls *before* the tabs, and give the tabs only
@@ -5908,7 +6220,8 @@ impl Window {
                                         ui.close();
                                     }
                                     ui.menu_button("New Tab with shell", |ui| {
-                                        for (pi, name) in profile_names.iter().enumerate() {
+                                        for (pi, name) in menu_profiles.iter().map(|(i, n)| (*i, n))
+                                        {
                                             if ui.button(name).clicked() {
                                                 want_new = Some(pi);
                                                 ui.close();
@@ -5980,11 +6293,32 @@ impl Window {
                         ui.close();
                     }
                     ui.separator();
-                    for (pi, name) in profile_names.iter().enumerate() {
+                    for (pi, name) in menu_profiles.iter().map(|(i, n)| (*i, n)) {
                         if ui.button(name).clicked() {
                             want_new = Some(pi);
                             ui.close();
                         }
+                    }
+                    ui.separator();
+                    if ui
+                        .button("Profiles…")
+                        .on_hover_text("Show, hide, rename and reorder shells; set the default")
+                        .clicked()
+                    {
+                        want_profiles = true;
+                        ui.close();
+                    }
+                    let settings = ui.button("Open Settings File");
+                    if settings
+                        .on_hover_text(
+                            crate::config::config_path()
+                                .map(|p| p.display().to_string())
+                                .unwrap_or_else(|| "no settings file location".into()),
+                        )
+                        .clicked()
+                    {
+                        open_config();
+                        ui.close();
                     }
                     ui.separator();
                     if ui.button("About giest").clicked() {
@@ -6016,6 +6350,9 @@ impl Window {
         });
         if want_about {
             self.about_open = true;
+        }
+        if want_profiles {
+            self.open_profiles();
         }
         if want_update_click && crate::update::global().activate() {
             self.requests.push(AppRequest::RestartForUpdate);
@@ -6262,6 +6599,7 @@ impl Window {
                 // The About box and the terminal-title dialog: also listed in
                 // `modal_open` — a modal needs *both* gates.
                 || self.about_open
+                || self.profiles_page.is_some()
                 || self.title_prompt.is_some()
                 || self.overview.is_some();
 
@@ -8248,6 +8586,7 @@ impl Window {
         // dialogs that are waiting on a decision.
         self.render_config_errors(&ctx, render_state);
         self.render_about(&ctx);
+        self.render_profiles(&ctx);
         self.render_overview(&ctx);
         // The close confirmation draws over everything else.
         self.render_confirm_close(&ctx);
@@ -8696,6 +9035,11 @@ impl App {
                 }
                 AppRequest::AdoptTab(tab) => self.adopt_tab(ctx, id, *tab),
                 AppRequest::ToggleVisibility => self.toggle_visibility(ctx),
+                AppRequest::ReloadProfiles => {
+                    for w in &mut self.windows {
+                        w.reload_profiles();
+                    }
+                }
                 AppRequest::DragHover(grab, screen) => self.drag = Some((grab, screen)),
                 AppRequest::Drop(grab, screen) => {
                     self.drag = None;
@@ -10258,18 +10602,29 @@ fn os_double_click_ms() -> u32 {
     500
 }
 
-/// Reveal the config file in Explorer (palette "Open Config"). Falls back to the
-/// containing folder when the file doesn't exist yet, so the user can create it.
+/// Reveal the config file in Explorer (palette "Open Config", the about dialog's
+/// "Settings file" link). The file is created empty on the way if it does not
+/// exist yet — this is the one place that needs a real file, so it is also the
+/// only place that makes one; startup keeps treating a missing config as normal.
+///
+/// `/select,` rather than opening the path: the file has no extension, so
+/// `explorer <path>` raises the "How do you want to open this file?" picker
+/// instead of showing it. Selecting it in its folder works either way, and is
+/// also the sensible fallback when the file could not be created at all.
 fn open_config() {
     let Some(path) = crate::config::config_path() else {
         return;
     };
-    let target = if path.exists() {
-        path
+    crate::config::ensure_config_file();
+    let arg = if path.exists() {
+        format!("/select,{}", path.display())
     } else {
-        path.parent().map(|p| p.to_path_buf()).unwrap_or(path)
+        match path.parent() {
+            Some(dir) => dir.display().to_string(),
+            None => return,
+        }
     };
-    let _ = std::process::Command::new("explorer").arg(target).spawn();
+    let _ = std::process::Command::new("explorer").arg(arg).spawn();
 }
 
 /// Direction for split-focus navigation (`Ctrl+Alt+arrow`).

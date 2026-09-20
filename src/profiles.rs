@@ -7,20 +7,72 @@ use std::path::PathBuf;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 
-/// One launchable shell: a display name plus the program and args to spawn.
+/// One launchable shell: a display name plus the program and args to spawn,
+/// together with the bits the profiles page edits (see [`crate::profilestore`]).
 #[derive(Clone, Debug)]
 pub struct Profile {
     pub name: String,
     pub program: String,
     pub args: Vec<String>,
+    /// An explicit starting directory. Set only on user-added profiles, and it
+    /// outranks an inherited cwd — the user chose this directory *for this
+    /// shell*, which is more specific than the blanket
+    /// `*-inherit-working-directory` rule.
+    pub cwd: Option<PathBuf>,
+    /// Stable identity for the profiles store: the program's bare stem for a
+    /// detected shell (`pwsh`, `cmd`), `custom:N` for a user-added one. Never
+    /// contains a space — the store's order line depends on that.
+    pub key: String,
+    /// Hidden from the new-tab menu. Nothing else honours it: an explicit
+    /// `new_tab_with_profile:N`, an IPC request or a `command =` still runs it.
+    pub hidden: bool,
+    /// User-added rather than detected, so the profiles page may edit its
+    /// program and args (a detected shell's are fixed).
+    pub custom: bool,
+}
+
+/// The store key for a detected shell: its program's bare stem, lowercased
+/// (`C:\Program Files\pwsh.exe` → `pwsh`), normalised exactly as
+/// [`Profile::launch`]'s own dispatch does. Spaces become `-`, because the
+/// store's order line separates keys by space.
+fn program_key(program: &str) -> String {
+    let stem = program.rsplit(['\\', '/']).next().unwrap_or(program);
+    stem.trim_end_matches(".exe")
+        .to_ascii_lowercase()
+        .replace(' ', "-")
 }
 
 impl Profile {
-    fn new(name: &str, program: &str) -> Self {
+    pub fn new(name: &str, program: &str) -> Self {
         Self {
             name: name.to_string(),
             program: program.to_string(),
             args: Vec::new(),
+            cwd: None,
+            key: program_key(program),
+            hidden: false,
+            custom: false,
+        }
+    }
+
+    /// A user-added profile, with the program, args and starting directory the
+    /// profiles page captured. `key` is allocated by
+    /// [`crate::profilestore::Store::next_custom_key`].
+    pub fn custom(
+        key: &str,
+        name: &str,
+        program: &str,
+        args: Vec<String>,
+        cwd: Option<PathBuf>,
+    ) -> Self {
+        Self {
+            name: name.to_string(),
+            program: program.to_string(),
+            args,
+            cwd,
+            key: key.to_string(),
+            hidden: false,
+            custom: true,
         }
     }
 
@@ -535,6 +587,14 @@ pub fn detect(config_shell: Option<&str>) -> (Vec<Profile>, usize) {
         _ => 0,
     };
     (profiles, default)
+}
+
+/// [`detect`], with the user's saved profiles-page edits laid over it — what
+/// the app actually runs on. Kept separate from `detect` so the profiles page
+/// can re-derive the *unedited* list to diff against (and to reset to).
+pub fn detect_edited(config_shell: Option<&str>) -> (Vec<Profile>, usize) {
+    let (list, default) = detect(config_shell);
+    crate::profilestore::load().apply(list, default)
 }
 
 /// The profile a `command`-style value names: a detected profile when it

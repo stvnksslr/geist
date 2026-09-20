@@ -115,7 +115,19 @@ fallback engine without app changes:
   path with a temp `LOCALAPPDATA` and a copied exe, never against `target\` or a real install.
 - **`config.rs`** — Ghostty-format config (`key = value` lines, kebab-case keys, unquoted
   colors, repeatable `palette`) from `%APPDATA%\giest\config` (override with `GIEST_CONFIG`);
-  defines the full ANSI 16 + 256-color palette. **`profiles.rs`** — shell profiles (pwsh/powershell/cmd/wsl).
+  defines the full ANSI 16 + 256-color palette. **`profiles.rs`** — shell profiles (pwsh/powershell/cmd/wsl),
+  auto-detected from what's installed. The user's edits to that list live in a **separate** file
+  (`%APPDATA%\giest\profiles`, `$GIEST_PROFILES`), not in the config: **`profilestore.rs`** records only
+  the *deltas* over detection (hidden, renamed, reordered, user-added, default) in the same
+  line-oriented format as `state.rs`, so the profiles page never has to rewrite the hand-maintained
+  config file and preserve its comments. `profiles::detect_edited` is detect + store; plain `detect`
+  stays the unedited baseline the page diffs against and resets to. **`profilepage.rs`** is that page's
+  working copy — the rules the dialog is easy to get wrong (a reorder moves the default *index* too;
+  the default can never be hidden; a custom profile with no program blocks Save) live there so they
+  are testable without egui, with `app.rs::render_profiles` only drawing them. A profile's `hidden`
+  flag suppresses it in the **new-tab menus only** — `new_tab_with_profile:N`, IPC and `command =`
+  still run it, so the menus filter while *carrying* each profile's real index rather than
+  re-`enumerate`-ing (hiding must not renumber what those bindings address).
   **`clipboard.rs`** — policy for program clipboard access, OSC 52 *and* kitty OSC 5522 (+ paste
   events, mode 5522). The engine parses both and calls `on_clipboard_write`/`on_clipboard_read`
   (installed in `ghostty_vt::install_clipboard`); this module decides `clipboard-read`/`-write`/

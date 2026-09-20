@@ -392,11 +392,7 @@ fn kitty_dnd_protocol_survives_conpty() {
 #[test]
 #[ignore = "spawns a real shell; run with --ignored --nocapture"]
 fn the_cmd_prompt_sets_the_bar_cursor_and_title() {
-    let profile = Profile {
-        name: "Command Prompt".into(),
-        program: "cmd.exe".into(),
-        args: Vec::new(),
-    };
+    let profile = Profile::new("Command Prompt", "cmd.exe");
     let out = drive(
         "cmd.exe",
         &profile.launch_args(),
@@ -422,11 +418,7 @@ fn the_cmd_prompt_sets_the_bar_cursor_and_title() {
 fn the_powershell_hook_reports_command_exit_codes() {
     // The real hook, exactly as `Profile::launch_args` builds it — base64 inside
     // `-EncodedCommand`, where a syntax error is invisible.
-    let profile = Profile {
-        name: "Windows PowerShell".into(),
-        program: "powershell.exe".into(),
-        args: Vec::new(),
-    };
+    let profile = Profile::new("Windows PowerShell", "powershell.exe");
     let args = profile.launch_args();
     assert!(
         !args.is_empty(),

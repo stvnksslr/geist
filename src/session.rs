@@ -305,11 +305,7 @@ impl Session {
     ) -> Result<Self> {
         let name = crate::handoff::client_image_name(&attached.client)
             .unwrap_or_else(|| "console".to_string());
-        let profile = Profile {
-            name: name.clone(),
-            program: name,
-            args: Vec::new(),
-        };
+        let profile = Profile::new(&name, &name);
         let title: String = attached.title.chars().filter(|c| !c.is_control()).collect();
         let wake_ctx = ctx.clone();
         // Wakes ROOT for the same reason as `Session::new`.
