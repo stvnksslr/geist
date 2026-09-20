@@ -95,8 +95,8 @@ fn run_cli(cli: &cli::Cli) -> Option<i32> {
     // The command line's overrides must be in place before the first load, so
     // `single-instance` can itself be overridden (`--single-instance=false`).
     giest::config::set_cli_overrides(cli.override_body());
-    let single = Config::load().single_instance;
-    match cli.plan(single) {
+    let startup_cfg = Config::load();
+    match cli.plan_with(startup_cfg.single_instance, startup_cfg.drop_behavior) {
         Plan::ForwardOnly(req) => {
             attach_console();
             match ipc::send(&ipc::pipe_name(), &req) {

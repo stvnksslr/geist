@@ -86,6 +86,15 @@ fn parse_app_notifications(value: &str) -> Option<AppNotifications> {
     Some(out)
 }
 
+/// What a path handed to an already-running giest opens.
+/// Ghostty `macos-dock-drop-behavior`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DropBehavior {
+    #[default]
+    NewTab,
+    NewWindow,
+}
+
 /// What a right-click inside a terminal pane does. Ghostty `right-click-action`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RightClickAction {
@@ -1582,6 +1591,34 @@ pub struct Config {
     /// analogue of GTK's `gtk-single-instance`, which upstream only honours on
     /// GTK. Read at startup only.
     pub single_instance: bool,
+    /// Ghostty `window-inherit-font-size`. **Divergence:** giest's font size is
+    /// app-global (one glyph atlas for every viewport — see CLAUDE.md), so a new
+    /// window cannot carry a different size from the others. `true` (the default)
+    /// is therefore free; `false` resets *every* window to `font-size` whenever a
+    /// new one opens, which is as close as this model gets.
+    pub window_inherit_font_size: bool,
+    /// Ghostty `term`: the `TERM` handed to spawned shells. **Divergence:** empty
+    /// by default (upstream sends `xterm-ghostty`), because nothing installs that
+    /// terminfo inside WSL and a missing entry breaks curses programs outright.
+    /// Windows console programs ignore it; WSL and custom shells read it.
+    pub term: String,
+    /// Ghostty `config-default-files`: when false, the default config path is not
+    /// read and only `--config-file` / `config-file` sources apply. CLI-only,
+    /// like upstream.
+    pub config_default_files: bool,
+    /// Ghostty `macos-window-buttons`. On Windows it hides the caption buttons of
+    /// giest's own client-drawn caption (`macos-titlebar-style = tabs`); the
+    /// native caption's buttons are the OS's and stay.
+    pub window_buttons: bool,
+    /// Ghostty `macos-hidden`: keep giest out of the taskbar and Alt-Tab
+    /// (`WS_EX_TOOLWINDOW`), for quick-terminal-only use.
+    pub hidden_from_taskbar: bool,
+    /// Ghostty `macos-window-shadow`: the drop shadow around the window.
+    pub window_shadow: bool,
+    /// Ghostty `macos-dock-drop-behavior`: what a path handed to a running giest
+    /// (Explorer's "Open giest here", a file dropped on the exe or a taskbar
+    /// shortcut) opens.
+    pub drop_behavior: DropBehavior,
     /// giest-specific `jump-list` (default `true`): publish the taskbar Jump
     /// List tasks (`jumplist.rs`). `false` removes a previously published one.
     pub jump_list: bool,
@@ -1856,6 +1893,13 @@ impl Default for Config {
             quit_after_last_window_closed: true,
             quit_after_last_window_closed_delay_ms: None,
             single_instance: true,
+            window_inherit_font_size: true,
+            term: String::new(),
+            config_default_files: true,
+            window_buttons: true,
+            hidden_from_taskbar: false,
+            window_shadow: true,
+            drop_behavior: DropBehavior::NewTab,
             jump_list: true,
             auto_update: crate::update::AutoUpdate::default_for_build(),
             auto_update_channel: None,
@@ -1944,9 +1988,19 @@ impl Config {
     }
 
     pub fn load() -> Self {
-        // No config path still gets the command-line overrides: an empty path
-        // just reads as "no file".
-        Self::load_from_file(&config_path().unwrap_or_default())
+        // `config-default-files = false` (CLI-only, as upstream) skips the
+        // default path; an empty path reads as "no file", so the command-line
+        // overrides and any `--config-file` they name still apply.
+        let default_files = CLI_OVERRIDES
+            .get()
+            .map(|body| {
+                let mut probe = Self::default();
+                probe.parse(body);
+                probe.config_default_files
+            })
+            .unwrap_or(true);
+        let path = if default_files { config_path().unwrap_or_default() } else { PathBuf::new() };
+        Self::load_from_file(&path)
     }
 
     /// Load `root` plus every file it pulls in with `config-file`, and the files
@@ -3196,6 +3250,37 @@ const SETTERS: &[(&str, Setter)] = &[
         c.quit_after_last_window_closed = parse_bool(v, d.quit_after_last_window_closed)
     }),
     ("single-instance", |c, v, d| c.single_instance = parse_bool(v, d.single_instance)),
+    ("window-inherit-font-size", |c, v, d| {
+        c.window_inherit_font_size = parse_bool(v, d.window_inherit_font_size);
+    }),
+    ("term", |c, v, d| {
+        c.term = if v.is_empty() { d.term.clone() } else { unquote(v).to_string() };
+    }),
+    ("config-default-files", |c, v, d| {
+        c.config_default_files = parse_bool(v, d.config_default_files);
+    }),
+    // Upstream's value is an enum (`visible` / `hidden`); `true`/`false` are
+    // accepted too so a Windows-first config reads naturally.
+    ("macos-window-buttons", |c, v, d| {
+        c.window_buttons = match v {
+            "visible" => true,
+            "hidden" => false,
+            _ => parse_bool(v, d.window_buttons),
+        };
+    }),
+    ("macos-hidden", |c, v, d| {
+        c.hidden_from_taskbar = parse_bool(v, d.hidden_from_taskbar);
+    }),
+    ("macos-window-shadow", |c, v, d| {
+        c.window_shadow = parse_bool(v, d.window_shadow);
+    }),
+    ("macos-dock-drop-behavior", |c, v, d| {
+        c.drop_behavior = match v {
+            "new-tab" => DropBehavior::NewTab,
+            "new-window" => DropBehavior::NewWindow,
+            _ => d.drop_behavior,
+        };
+    }),
     ("jump-list", |c, v, d| c.jump_list = parse_bool(v, d.jump_list)),
     ("auto-update", |c, v, d| {
         c.auto_update = if v.is_empty() {
@@ -4141,6 +4226,33 @@ mod tests {
         assert!(c.links.is_empty(), "an empty value clears the table");
         assert_eq!(c.link_previews, LinkPreviews::Never);
         assert_eq!(c.window_padding_color, PaddingColor::Extend);
+    }
+
+    #[test]
+    fn window_and_shell_leftover_keys() {
+        let d = parsed("");
+        assert!(d.window_inherit_font_size && d.config_default_files && d.window_buttons);
+        assert!(d.window_shadow && !d.hidden_from_taskbar);
+        assert_eq!(d.term, "", "no TERM by default: WSL has no xterm-ghostty terminfo");
+        assert_eq!(d.drop_behavior, DropBehavior::NewTab);
+
+        let c = parsed(
+            "window-inherit-font-size = false\nterm = xterm-256color\n\
+             config-default-files = false\nmacos-window-buttons = hidden\n\
+             macos-hidden = true\nmacos-window-shadow = false\n\
+             macos-dock-drop-behavior = new-window",
+        );
+        assert!(!c.window_inherit_font_size && !c.config_default_files && !c.window_buttons);
+        assert!(c.hidden_from_taskbar && !c.window_shadow);
+        assert_eq!(c.term, "xterm-256color");
+        assert_eq!(c.drop_behavior, DropBehavior::NewWindow);
+
+        // `macos-window-buttons` also takes plain booleans; an empty value and
+        // an unknown one both fall back rather than flipping the setting.
+        assert!(!parsed("macos-window-buttons = false").window_buttons);
+        assert!(parsed("macos-window-buttons = nonsense").window_buttons);
+        assert_eq!(parsed("macos-dock-drop-behavior = nonsense").drop_behavior, DropBehavior::NewTab);
+        assert_eq!(parsed("term = \"xterm\"").term, "xterm", "quotes stripped");
     }
 
     #[test]

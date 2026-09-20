@@ -321,6 +321,12 @@ impl Cli {
     /// Decide where this invocation runs. `single_instance` is the config's
     /// `single-instance` (after this command line's own overrides).
     pub fn plan(&self, single_instance: bool) -> Plan {
+        self.plan_with(single_instance, crate::config::DropBehavior::NewTab)
+    }
+
+    /// [`Self::plan`] with the configured `macos-dock-drop-behavior`, which
+    /// decides what a positional path opens in the running instance.
+    pub fn plan_with(&self, single_instance: bool, drop: crate::config::DropBehavior) -> Plan {
         let cwd = self.cwd.as_ref().map(|p| p.display().to_string());
         match &self.verb {
             Verb::NewWindow => Plan::Forward(Request::NewWindow {
@@ -364,7 +370,7 @@ impl Cli {
                 // Explorer's "Open giest here" (a positional dir) is a new tab
                 // in the window you already have; a bare relaunch is a new
                 // window, like clicking a pinned taskbar icon.
-                if self.positional_dir {
+                if self.positional_dir && drop == crate::config::DropBehavior::NewTab {
                     Plan::Forward(Request::NewTab {
                         cwd,
                         command: None,
@@ -592,6 +598,12 @@ mod tests {
     fn a_plain_launch_forwards_as_a_window_and_explorer_as_a_tab() {
         assert_eq!(p(&[]).plan(true), Plan::Forward(Request::NewWindow { cwd: None, command: None }));
         assert!(matches!(p(&["proj"]).plan(true), Plan::Forward(Request::NewTab { .. })));
+        // `macos-dock-drop-behavior = new-window`: the same positional dir opens
+        // a window instead of a tab.
+        assert!(matches!(
+            p(&["proj"]).plan_with(true, crate::config::DropBehavior::NewWindow),
+            Plan::Forward(Request::NewWindow { .. })
+        ));
         assert_eq!(p(&[]).plan(false), Plan::Local { serve: false });
     }
 

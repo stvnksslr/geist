@@ -245,6 +245,10 @@ mod imp {
         ) -> i32;
         fn GetWindowRect(hwnd: HWND, rect: *mut RECT) -> i32;
         fn GetClientRect(hwnd: HWND, rect: *mut RECT) -> i32;
+        fn GetWindowLongPtrW(hwnd: HWND, index: i32) -> isize;
+        fn SetWindowLongPtrW(hwnd: HWND, index: i32, new: isize) -> isize;
+        fn ShowWindow(hwnd: HWND, cmd: i32) -> i32;
+        fn IsWindowVisible(hwnd: HWND) -> i32;
     }
     #[link(name = "kernel32")]
     unsafe extern "system" {
@@ -267,6 +271,55 @@ mod imp {
                 &value as *const u32 as *const c_void,
                 size_of::<u32>() as u32,
             );
+        }
+    }
+
+    /// `macos-hidden` and `macos-window-shadow`, for every window on this
+    /// thread.
+    ///
+    /// Taskbar/Alt-Tab presence is `WS_EX_TOOLWINDOW`, which the shell only
+    /// re-reads when the window is hidden, so a visible window is cycled.
+    /// The shadow is DWM's non-client rendering: disabling it drops the shadow
+    /// (and, for a client-drawn caption, nothing else — the frame is ours).
+    pub fn sync_window_flags(hidden_from_taskbar: bool, shadow: bool) {
+        /// `DWMWA_NCRENDERING_POLICY`, with `DWMNCRP_ENABLED` / `DWMNCRP_DISABLED`.
+        const DWMWA_NCRENDERING_POLICY: u32 = 2;
+        const NCRP_ENABLED: u32 = 2;
+        const NCRP_DISABLED: u32 = 1;
+        const GWL_EXSTYLE: i32 = -20;
+        const WS_EX_TOOLWINDOW: isize = 0x0000_0080;
+        const SW_HIDE: i32 = 0;
+        const SW_SHOWNA: i32 = 8;
+
+        unsafe extern "system" fn each(hwnd: HWND, lp: isize) -> i32 {
+            // SAFETY: `lp` is the `&(bool, bool)` passed below, alive for the call.
+            let (hidden, shadow) = unsafe { *(lp as *const (bool, bool)) };
+            set_attr(
+                hwnd,
+                DWMWA_NCRENDERING_POLICY,
+                if shadow { NCRP_ENABLED } else { NCRP_DISABLED },
+            );
+            // SAFETY: a live HWND owned by this thread.
+            unsafe {
+                let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+                let want = if hidden { ex | WS_EX_TOOLWINDOW } else { ex & !WS_EX_TOOLWINDOW };
+                if want != ex {
+                    let visible = IsWindowVisible(hwnd) != 0;
+                    if visible {
+                        ShowWindow(hwnd, SW_HIDE);
+                    }
+                    SetWindowLongPtrW(hwnd, GWL_EXSTYLE, want);
+                    if visible {
+                        ShowWindow(hwnd, SW_SHOWNA);
+                    }
+                }
+            }
+            1
+        }
+        let args = (hidden_from_taskbar, shadow);
+        // SAFETY: the callback only reads `args`, which outlives the call.
+        unsafe {
+            EnumThreadWindows(GetCurrentThreadId(), each, &args as *const _ as isize);
         }
     }
 
@@ -846,7 +899,7 @@ mod caption_imp {
 }
 
 #[cfg(windows)]
-pub use imp::{apply_titlebar_colors, set_step_resize, show_on_screen_keyboard};
+pub use imp::{apply_titlebar_colors, set_step_resize, show_on_screen_keyboard, sync_window_flags};
 
 #[cfg(not(windows))]
 pub fn apply_titlebar_colors(_bg: Option<Rgb>, _fg: Option<Rgb>) {}
@@ -854,6 +907,8 @@ pub fn apply_titlebar_colors(_bg: Option<Rgb>, _fg: Option<Rgb>) {}
 pub fn set_step_resize(_hwnd: isize, _g: Option<StepGeometry>) {}
 #[cfg(not(windows))]
 pub fn show_on_screen_keyboard() {}
+#[cfg(not(windows))]
+pub fn sync_window_flags(_hidden_from_taskbar: bool, _shadow: bool) {}
 
 #[cfg(test)]
 mod tests {

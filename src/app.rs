@@ -1696,6 +1696,10 @@ pub struct App {
     /// pass — never held across frames, since a retire can invalidate it.
     focused: usize,
     next_window_id: u64,
+    /// A new window opened under `window-inherit-font-size = false`: reset the
+    /// (app-global) font size to `font-size` on the next pass, where the render
+    /// state needed to rebuild the atlas is in hand.
+    font_reset_pending: bool,
     /// The layout as it stood at the last window close, for `window-save-state`.
     ///
     /// Held because by the time `on_exit` runs there are no windows left to read
@@ -8091,6 +8095,7 @@ impl App {
             windows: vec![first],
             focused: 0,
             next_window_id: 1,
+            font_reset_pending: false,
             last_state: crate::state::SavedState::default(),
             global_actions: Vec::new(),
             global_chords: Vec::new(),
@@ -9049,11 +9054,18 @@ impl App {
             return;
         };
         crate::winchrome::set_caption_style(match cfg.titlebar_style {
+            // `macos-window-buttons = hidden`: the client-drawn caption without
+            // its buttons *is* the `hidden` style, so it lands there. The native
+            // caption's buttons belong to the OS and are left alone.
+            crate::config::TitlebarStyle::Tabs if !cfg.window_buttons => {
+                crate::winchrome::CaptionStyle::Hidden
+            }
             crate::config::TitlebarStyle::Tabs => crate::winchrome::CaptionStyle::Tabs,
             crate::config::TitlebarStyle::Hidden => crate::winchrome::CaptionStyle::Hidden,
             _ => crate::winchrome::CaptionStyle::Native,
         });
         crate::winchrome::sync_caption();
+        crate::winchrome::sync_window_flags(cfg.hidden_from_taskbar, cfg.window_shadow);
         if let Some(icon) = crate::icon::configure(cfg) {
             ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Icon(Some(icon)));
         }
@@ -9106,7 +9118,16 @@ impl App {
         let src = self.windows.get(from)?;
         let id = self.next_window_id;
         // Only bump the counter on success, so a failed spawn doesn't burn an id.
-        let w = src.sibling_running(id, profile, cwd)?;
+        let mut w = src.sibling_running(id, profile, cwd)?;
+        // `window-inherit-font-size = false`: the new window starts at
+        // `font-size` rather than at the zoom the parent happened to be on.
+        // **Divergence:** the glyph atlas is app-global (one `RenderState` for
+        // every viewport), so this resets *every* window's size, not just this
+        // one — the closest this model gets to upstream's per-window size.
+        if !w.config.window_inherit_font_size {
+            w.font_points = w.config.font_points;
+            self.font_reset_pending = true;
+        }
         self.next_window_id += 1;
         self.windows.push(w);
         // Upstream registers an undo for `new_window` too — undoing a
@@ -9517,6 +9538,15 @@ impl eframe::App for App {
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        if std::mem::take(&mut self.font_reset_pending)
+            && let Some(rs) = frame.wgpu_render_state()
+        {
+            let ppp = ctx.pixels_per_point().max(1.0);
+            let points = self.windows.first().map_or(12.0, |w| w.config.font_points);
+            for w in &mut self.windows {
+                w.set_font_points(rs, points, ppp);
+            }
+        }
         // One `RenderState` serves every viewport (egui-wgpu keeps a single
         // painter), so the root's is valid for all windows.
         let render_state = frame.wgpu_render_state().cloned();

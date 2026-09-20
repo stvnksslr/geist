@@ -8,7 +8,7 @@ the terminal data already exists and just needs wiring).
 
 **Headline finding.** giest has a strong, correct *spine* — real VT engine, splits, tabs, ligatures,
 emoji, smooth scroll, command palette — but it covered a fraction of Ghostty's config surface and
-~90 keybind actions, with little of the macOS app's UX breadth. *(Measured since: **116 of Ghostty's
+~90 keybind actions, with little of the macOS app's UX breadth. *(Measured since: **178 of Ghostty's
 208 config keys** (upstream `main`, 2026-09-19) are now supported — see the config-surface ledger
 and the full parity plan below.)* The encouraging part: **much of the gap
 is plumbing, not greenfield.** libghostty-vt already surfaces underline styles, faint/overline, OSC 8
@@ -26,7 +26,7 @@ features** that are neither — surveyed from `macos/Sources` and from the 673 u
 between the old pin (b869a6e) and `main`. Key/action extraction is the config-surface ledger's
 method, re-run against the `main` checkout the build fetches.
 
-Scoreboard: **137 of 208** public config keys · **77 of 88** actions · app features in §C.
+Scoreboard (re-measured 2026-09-19, after the whole plan landed): **178 of 208** public config keys (`theme` is special-cased outside the setter table, so the key diff reports 177) - **85 of 88** actions (`unbind` is handled in `keybind.rs`, not as an `Action`; the other three are debug-only, internal, or GTK). The 30 unsupported keys are `gtk-*`, `linux-*`, `x11-*`, `class`, `async-backend`, `freetype-load-flags` (a different rasteriser), the macOS-only security/Dock/Option keys, the two GTK quick-terminal keys, and `language` (see its row). App features in §C.
 Effort: **S** <1d · **M** 1–3d · **L** ~1wk · **XL** multi-week.
 
 ### A. Config keys still unsupported (87)
@@ -35,8 +35,15 @@ Effort: **S** <1d · **M** 1–3d · **L** ~1wk · **XL** multi-week.
 
 | Key(s) | What it takes | Effort |
 |---|---|---|
+| ✅ `window-inherit-font-size` | Done. **Divergence:** the glyph atlas is app-global (one `RenderState` for every viewport), so `false` resets *every* window to `font-size` when a new one opens rather than giving the new window its own size. |
+| ✅ `term` | Done — layered into the spawned shell's environment, and an explicit `env = TERM=...` still wins. **Divergence:** empty by default instead of upstream's `xterm-ghostty`, because nothing installs that terminfo inside WSL and a missing entry breaks curses programs outright. Windows console programs ignore `TERM`; WSL and custom shells read it. |
+| ✅ `config-default-files` | Done, CLI-only as upstream: `--config-default-files=false` skips the default path, and only `--config-file` / `config-file` sources apply. |
+| ✅ `macos-window-buttons` | Done, mapped onto the client-drawn caption: `hidden` resolves `macos-titlebar-style = tabs` to the buttonless `hidden` caption. The *native* caption's buttons belong to the OS and are left alone. Plain booleans are accepted too. |
+| ✅ `macos-hidden` | Done — `WS_EX_TOOLWINDOW` on every giest window keeps it out of the taskbar and Alt-Tab (the quick-terminal-only case upstream means). The shell only re-reads the flag while a window is hidden, so a visible window is cycled. |
+| ✅ `macos-window-shadow` | Done — DWM non-client rendering (`DWMWA_NCRENDERING_POLICY`) off drops the shadow. |
+| ✅ `macos-dock-drop-behavior` | Done — decides what a path handed to a running giest opens (Explorer's "Open giest here", a file dropped on the exe or a taskbar shortcut): `new-tab` (default) or `new-window`. Windows has no Dock, so this is the taskbar/Explorer equivalent rather than a literal port. |
 | ✅ `shell-integration`, `shell-integration-features` | Done. `none` disables every injected hook (pwsh/cmd prompt hooks + WSL). Features per shell: **pwsh/powershell/cmd** — `cursor` (bar at the prompt, `5`/`6` by `cursor-style-blink`; reset to default by the *session* on Enter, since these shells have no pre-exec hook) and `title` (cwd at the prompt; never the running command, same reason); `sudo`/`ssh-env`/`ssh-terminfo`/`path` N/A (no terminfo on Windows, no `ghostty` CLI). **WSL** — Ghostty's own bash/zsh/fish/elvish/nushell scripts, vendored in `assets/shell-integration/` (embedded, extracted to `%LOCALAPPDATA%\giest\shell-integration`), reached via WSLENV `/p` and injected by `giest-wsl.sh` with upstream's per-shell mechanism (bash `ENV`+`--posix`, zsh `ZDOTDIR`, fish/elvish/nushell `XDG_DATA_DIRS`); `cursor`/`title`/`sudo`/`path` pass through, `ssh-*` are **withheld** (upstream wraps `ssh` in `ghostty +ssh`, which doesn't exist in WSL). `detect` on WSL reads `$SHELL`; a forced `bash`/`zsh`/… only changes the WSL scheme (Ghostty has none for pwsh/cmd). Native Windows bash/zsh (`command = …bash.exe`) are not injected. Verified: pwsh/cmd features and Ghostty's bash script via the bootstrap (Git for Windows bash) in `tests/conpty_passthrough.rs`; zsh/fish/WSL itself unverified (no distro on the dev box). | ✅ |
-| `scrollback-compression` | Engine now exposes `Terminal::compress` + `compression_activity`; needs a per-session idle timer (compress after N s without an activity-token change). | S |
+| ✅ `scrollback-compression` | Done — `Session::idle_work` runs bounded incremental steps once the engine's activity token has been quiet for 250 ms, matching upstream's renderer thread. | S |
 | ~~`cursor-click-to-move`~~ | ✅ Port of `maybePromptClick`/`promptClickLine` (`prompt_click.rs`). `osc133.rs` side-scans `cl=`/`click_events=` off `A` (the C API exposes neither); the engine reports per-cell OSC 133 *input* content (`prompt_rows`). `cl` → arrows via the engine encoder (DECCKM-aware), `click_events=1|2` → SGR click. The pwsh/cmd hooks now send `A;cl=line`. Needs a live check that ConPTY keeps the typed text's input marking. | — |
 | ~~`link`, `link-previews`~~ | ✅ Done (`links.rs`). Priority is upstream's: OSC 8, then `link` rules in order, then `link-url` last. Divergence: upstream declares `link` but cannot parse it ("TODO: This can't currently be set!"), so giest's syntax is its own — `link = <regex>`, repeatable, empty clears, action always "open"; a match is matched per row (no cross-wrap). `link-previews = true/false/osc8` gates the hover banner. | — |
 | ~~`env`, `input`, `initial-command`, `wait-after-command`, `abnormal-command-exit-runtime`~~ | ✅ Done. `env` is an ordered map (empty resets, `KEY=` removes) passed to `CommandBuilder::env`; `input` decodes Zig escapes for `raw:`/`path:`/untagged, 10MB cap, all-or-nothing; `initial-command` resolves like `command` (a profile name keeps its prompt hooks) for the startup surface only — a `window-save-state` restore replaces it. The abnormal check needs a non-zero code (upstream waives that only on macOS) and measures runtime from `GetProcessTimes`, not from when the 500 ms idle poll noticed. | — |

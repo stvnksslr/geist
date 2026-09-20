@@ -271,11 +271,16 @@ impl Session {
             crate::profiles::shell_integration_dir().as_deref(),
             &config.env,
         );
+        // `term`: layered last so an explicit `env = TERM=...` still wins.
+        let mut env = launch.env.clone();
+        if !config.term.is_empty() && !env.iter().any(|(k, _)| k == "TERM") {
+            env.push(("TERM".to_string(), config.term.clone()));
+        }
         let pty = Pty::spawn(
             &profile.program,
             &launch.args,
             cwd,
-            &launch.env,
+            &env,
             DEFAULT_COLS,
             DEFAULT_ROWS,
             // Wake the **root** viewport, explicitly.
