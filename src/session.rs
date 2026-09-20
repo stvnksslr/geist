@@ -977,6 +977,7 @@ impl Session {
             ch,
             self.cols,
             self.rows,
+            self.scroll_offset_px,
         )
     }
 
@@ -1000,7 +1001,7 @@ impl Session {
         crate::engine::GesturePoint {
             px: (
                 f64::from((pos.x - rect.min.x) * ppp),
-                f64::from((pos.y - rect.min.y) * ppp),
+                f64::from((pos.y - rect.min.y) * ppp - self.scroll_offset_px),
             ),
             cell: self.pos_to_cell(pos, rect, ppp, cw, ch),
         }
@@ -2269,10 +2270,13 @@ impl Session {
             (self.cols as f32 * cw) as u32,
             (self.rows as f32 * ch) as u32,
         );
+        // The grid is drawn `scroll_offset_px` lower than the pane origin
+        // during a smooth scroll; reported positions are grid-relative.
+        let shift_px = self.scroll_offset_px.max(0.0) as u32;
         let to_px = |pos: egui::Pos2| -> (u32, u32) {
             (
                 px_offset(pos.x - rect.min.x, ppp),
-                px_offset(pos.y - rect.min.y, ppp),
+                px_offset(pos.y - rect.min.y, ppp).saturating_sub(shift_px),
             )
         };
 
@@ -2664,6 +2668,12 @@ fn grid_dims(width_pts: f32, height_pts: f32, ppp: f32, cell_w: f32, cell_h: f32
 
 /// Map a pointer offset (points, relative to the grid's top-left) to a grid
 /// cell, clamped to the last valid cell. Negative offsets clamp to cell 0.
+///
+/// `shift_px` is the renderer's sub-line smooth-scroll offset
+/// (`Session::scroll_offset_px`): while it is non-zero the grid is drawn that
+/// many device pixels *lower* than the pane origin (the partly-visible
+/// `over_row` fills the gap), so a hit test that ignored it would report the
+/// row below the one under the pointer.
 fn cell_from_pos(
     rel_x: f32,
     rel_y: f32,
@@ -2672,9 +2682,10 @@ fn cell_from_pos(
     ch: f32,
     cols: u16,
     rows: u16,
+    shift_px: f32,
 ) -> (u16, u16) {
     let x = (rel_x * ppp / cw).floor().max(0.0) as u16;
-    let y = (rel_y * ppp / ch).floor().max(0.0) as u16;
+    let y = ((rel_y * ppp - shift_px) / ch).floor().max(0.0) as u16;
     (x.min(cols.saturating_sub(1)), y.min(rows.saturating_sub(1)))
 }
 
@@ -3687,14 +3698,20 @@ mod tests {
     #[test]
     fn cell_from_pos_clamps_edges_and_negatives() {
         // Inside the grid: (25,30)pt at 10×20px → cell (2,1).
-        assert_eq!(cell_from_pos(25.0, 30.0, 1.0, 10.0, 20.0, 80, 24), (2, 1));
+        assert_eq!(cell_from_pos(25.0, 30.0, 1.0, 10.0, 20.0, 80, 24, 0.0), (2, 1));
         // Negative offsets clamp to cell (0,0).
-        assert_eq!(cell_from_pos(-5.0, -9.0, 1.0, 10.0, 20.0, 80, 24), (0, 0));
+        assert_eq!(cell_from_pos(-5.0, -9.0, 1.0, 10.0, 20.0, 80, 24, 0.0), (0, 0));
         // Far beyond the grid clamps to the last cell.
         assert_eq!(
-            cell_from_pos(1.0e6, 1.0e6, 1.0, 10.0, 20.0, 80, 24),
+            cell_from_pos(1.0e6, 1.0e6, 1.0, 10.0, 20.0, 80, 24, 0.0),
             (79, 23)
         );
+        // A sub-line smooth-scroll shift draws the grid 15px lower, so row 0
+        // covers y 15..35 and the same pointer that was row 1 is now row 0.
+        assert_eq!(cell_from_pos(25.0, 30.0, 1.0, 10.0, 20.0, 80, 24, 15.0), (2, 0));
+        assert_eq!(cell_from_pos(25.0, 36.0, 1.0, 10.0, 20.0, 80, 24, 15.0), (2, 1));
+        // Inside the partly-visible over-row above row 0, clamp to row 0.
+        assert_eq!(cell_from_pos(25.0, 5.0, 1.0, 10.0, 20.0, 80, 24, 15.0), (2, 0));
     }
 
     #[test]
