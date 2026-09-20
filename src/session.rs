@@ -501,6 +501,11 @@ impl Session {
         let mut color_queries: Vec<(ColorQuery, Terminator)> = Vec::new();
         let mut marks: Vec<Mark> = Vec::new();
         let mut osc9: Vec<Osc9> = Vec::new();
+        // Clear the reader's wake flag *before* draining: a chunk that lands
+        // after this point posts its own wake, so nothing is left unpumped.
+        if let Some(pty) = self.pty.as_ref() {
+            pty.wake_pending.store(false, std::sync::atomic::Ordering::Release);
+        }
         loop {
             let Some(pty) = self.pty.as_ref() else { break };
             match pty.output.try_recv() {

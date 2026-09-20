@@ -8,6 +8,8 @@
 
 use std::io::Write;
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
 use std::time::Instant;
@@ -41,6 +43,9 @@ pub struct Pty {
     /// Bytes read from the shell. The sender lives on the reader thread, which
     /// exits (closing this channel) when the shell closes its output.
     pub output: Receiver<Vec<u8>>,
+    /// Wake-coalescing flag shared with the reader thread; see `spawn_reader`.
+    /// Clear it (`Ordering::AcqRel`) *before* draining `output`.
+    pub wake_pending: Arc<AtomicBool>,
     /// When the shell was spawned; the fallback clock for [`Pty::exit_info`].
     spawned: Instant,
 }
@@ -134,7 +139,8 @@ impl Pty {
 
         let reader = pair.master.try_clone_reader().context("clone reader")?;
         let writer = pair.master.take_writer().context("take writer")?;
-        let rx = spawn_reader(reader, wake)?;
+        let wake_pending = Arc::new(AtomicBool::new(false));
+        let rx = spawn_reader(reader, wake_pending.clone(), wake)?;
 
         Ok(Self {
             backend: Backend::Spawned {
@@ -143,6 +149,7 @@ impl Pty {
             },
             writer,
             output: rx,
+            wake_pending,
             spawned: Instant::now(),
         })
     }
@@ -158,7 +165,8 @@ impl Pty {
     ) -> Result<Self> {
         let reader = std::fs::File::from(a.output);
         let writer = std::fs::File::from(a.input);
-        let rx = spawn_reader(Box::new(reader), wake)?;
+        let wake_pending = Arc::new(AtomicBool::new(false));
+        let rx = spawn_reader(Box::new(reader), wake_pending.clone(), wake)?;
         let pty = Self {
             backend: Backend::Handoff {
                 signal: std::fs::File::from(a.signal),
@@ -168,6 +176,7 @@ impl Pty {
             },
             writer: Box::new(writer),
             output: rx,
+            wake_pending,
             spawned: Instant::now(),
         };
         pty.resize(cols, rows)?;
@@ -235,16 +244,34 @@ impl Pty {
     }
 }
 
-/// Stream `reader` to a channel on its own thread, calling `wake` per chunk.
+/// Stream `reader` to a channel on its own thread, waking the UI when a chunk
+/// lands and no wake is already pending.
+///
+/// `pending` is the coalescing flag: the reader sets it after every send and
+/// only calls `wake` on the false→true edge; the UI clears it **before**
+/// draining (`Session::pump_pty`), so a chunk sent after the clear always
+/// gets its own wake and none can be stranded. Under a flood this turns
+/// thousands of cross-thread event posts per second into one per UI pass.
+///
+/// Measured (`scripts/perf-vs.ps1 -Only giest`): **no throughput change** —
+/// 11.9 → 12.4 MiB/s, within noise. The write-side rate is bound by the
+/// console host, not this loop (inbox conhost ≈ 13 MiB/s, sideloaded
+/// OpenConsole ≈ 84 MiB/s; see docs/benchmarking.md). Kept because it stops
+/// a flood from posting an event per 8 KiB to the UI loop, which is cheap
+/// insurance rather than a speed-up.
 fn spawn_reader<W: Fn() + Send + 'static>(
     mut reader: Box<dyn std::io::Read + Send>,
+    pending: Arc<AtomicBool>,
     wake: W,
 ) -> Result<Receiver<Vec<u8>>> {
     let (tx, rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = channel();
     thread::Builder::new()
         .name("pty-reader".into())
         .spawn(move || {
-            let mut buf = [0u8; 8192];
+            // ConPTY hands over output in bursts far larger than 8 KiB under
+            // load; a bigger buffer means fewer reads, allocations and sends
+            // per megabyte. Idle reads still return whatever is available.
+            let mut buf = vec![0u8; 64 * 1024];
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) => break,
@@ -252,7 +279,9 @@ fn spawn_reader<W: Fn() + Send + 'static>(
                         if tx.send(buf[..n].to_vec()).is_err() {
                             break;
                         }
-                        wake();
+                        if !pending.swap(true, Ordering::AcqRel) {
+                            wake();
+                        }
                     }
                     Err(_) => break,
                 }
