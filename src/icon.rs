@@ -123,7 +123,7 @@ mod tests {
     #[test]
     fn master_is_straight_alpha() {
         let icon = decode(ICON_PNG).expect("decodes");
-        let found = icon.rgba.chunks_exact(4).any(|p| {
+        let found = icon.rgba.as_chunks::<4>().0.iter().any(|p| {
             let a = p[3];
             a > 0 && a < 255 && p[..3].iter().any(|&c| c > a)
         });

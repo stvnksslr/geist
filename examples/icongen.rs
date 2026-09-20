@@ -94,7 +94,7 @@ fn main() -> std::io::Result<()> {
         // witness: B = 0x24 > A needs an arc pixel with coverage < 36/255, which
         // the master's r44 arcs guarantee; a small size's short arc might not).
         let mut witness = false;
-        for p in rgba.chunks_exact(4) {
+        for p in rgba.as_chunks::<4>().0 {
             if p[3] > 0 && p[3] < 255 {
                 assert_eq!(
                     [p[0], p[1], p[2]],

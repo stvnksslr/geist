@@ -3034,11 +3034,8 @@ fn osc7_to_path(raw: &str) -> Option<PathBuf> {
         .or_else(|| raw.strip_prefix("kitty-shell-cwd:"))
     {
         let rest = rest.strip_prefix("//").unwrap_or(rest);
-        match rest.find('/') {
-            Some(i) => &rest[i..],
-            // No path separator after the host — nothing usable.
-            None => return None,
-        }
+        // No path separator after the host — nothing usable.
+        &rest[rest.find('/')?..]
     } else {
         raw
     };

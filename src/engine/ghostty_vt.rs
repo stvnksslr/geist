@@ -546,7 +546,7 @@ fn to_rgba(fmt: ImageFormat, comp: Compression, w: u32, h: u32, src: &[u8]) -> O
                 return None;
             }
             out.reserve_exact(out_len);
-            for c in src.chunks_exact(3) {
+            for c in src.as_chunks::<3>().0 {
                 out.extend_from_slice(&[c[0], c[1], c[2], 0xff]);
             }
         }
@@ -564,7 +564,7 @@ fn to_rgba(fmt: ImageFormat, comp: Compression, w: u32, h: u32, src: &[u8]) -> O
                 return None;
             }
             out.reserve_exact(out_len);
-            for c in src.chunks_exact(2) {
+            for c in src.as_chunks::<2>().0 {
                 out.extend_from_slice(&[c[0], c[0], c[0], c[1]]);
             }
         }

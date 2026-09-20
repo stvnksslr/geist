@@ -57,7 +57,10 @@ jobs:
         with:
           version: ${{ env.ZIG_VERSION }}
 
-      - uses: dtolnay/rust-toolchain@1.96
+      # Pinned, and pinned to the same version developers run locally: the hooks
+      # in .pre-commit-config.yaml are the same four checks as below, so a
+      # toolchain skew here means clippy findings that only one side can see.
+      - uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: rustfmt, clippy
 

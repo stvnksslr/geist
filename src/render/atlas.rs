@@ -2040,7 +2040,9 @@ mod tests {
         assert!(w > 0 && h > 0);
         // At least one pixel must be opaque and have a non-zero color channel.
         let colored = rgba
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .any(|p| p[3] > 0 && (p[0] > 0 || p[1] > 0 || p[2] > 0));
         assert!(
             colored,

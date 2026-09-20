@@ -126,7 +126,12 @@ fn decode_jpeg(bytes: &[u8]) -> Result<BgImage> {
             if pixels.len() < count * 3 {
                 bail!("JPEG decoded short");
             }
-            for (px, src) in rgba.chunks_exact_mut(4).zip(pixels.chunks_exact(3)) {
+            for (px, src) in rgba
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .zip(pixels.as_chunks::<3>().0)
+            {
                 px[..3].copy_from_slice(src);
                 px[3] = 0xff;
             }
@@ -137,7 +142,7 @@ fn decode_jpeg(bytes: &[u8]) -> Result<BgImage> {
             if pixels.len() < count {
                 bail!("JPEG decoded short");
             }
-            for (px, &l) in rgba.chunks_exact_mut(4).zip(pixels.iter()) {
+            for (px, &l) in rgba.as_chunks_mut::<4>().0.iter_mut().zip(pixels.iter()) {
                 px.copy_from_slice(&[l, l, l, 0xff]);
             }
         }
@@ -145,7 +150,12 @@ fn decode_jpeg(bytes: &[u8]) -> Result<BgImage> {
             if pixels.len() < count * 2 {
                 bail!("JPEG decoded short");
             }
-            for (px, src) in rgba.chunks_exact_mut(4).zip(pixels.chunks_exact(2)) {
+            for (px, src) in rgba
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .zip(pixels.as_chunks::<2>().0)
+            {
                 let l = src[1];
                 px.copy_from_slice(&[l, l, l, 0xff]);
             }

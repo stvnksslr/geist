@@ -1,0 +1,54 @@
+# Local gates that mirror .github/workflows/ci.yml, so a commit that CI would
+# reject cannot leave this machine. Run through prek (https://github.com/j178/prek):
+#
+#   prek install --hook-type pre-commit --hook-type pre-push
+#
+# Every hook runs `mise exec --` first: the native libghostty-vt-sys build needs
+# the Zig 0.16.0 pinned in mise.toml on PATH, and a plain `cargo clippy` picks up
+# whatever Zig (if any) the shell happens to have. `pass_filenames: false`
+# because all four are whole-workspace checks, not per-file ones.
+#
+# The split is deliberate. fmt and clippy run at commit (clippy builds, so it
+# catches a non-compiling tree too); the test suite runs at push, because a cold
+# `cargo test` compiles ghostty through Zig and takes minutes. CI still runs all
+# four on every push and PR — these hooks are the fast local copy, not a
+# replacement for it.
+#
+# fmt and clippy carry no `stages`, so they run at commit *and* at push: that is
+# what still gates a batch of commits made with `--no-verify`. The file filter is
+# `files:` rather than `types: [rust]` so a Cargo.toml or Cargo.lock edit (which
+# `--locked` cares about) is not waved through.
+repos:
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt --check
+        entry: mise exec -- cargo fmt --all -- --check
+        language: system
+        files: \.(rs|toml|lock)$
+        pass_filenames: false
+
+      - id: cargo-clippy
+        name: cargo clippy -D warnings
+        entry: mise exec -- cargo clippy --all-targets -- -D warnings
+        language: system
+        files: \.(rs|toml|lock)$
+        pass_filenames: false
+
+      # Pre-push only (see above). `--locked` matches CI: a Cargo.lock that
+      # would have to change is a failure, not something to fix up silently.
+      - id: cargo-test
+        name: cargo test --locked
+        entry: mise exec -- cargo test --locked
+        language: system
+        files: \.(rs|toml|lock)$
+        pass_filenames: false
+        stages: [pre-push]
+
+      - id: cargo-build
+        name: cargo build --locked
+        entry: mise exec -- cargo build --locked
+        language: system
+        files: \.(rs|toml|lock)$
+        pass_filenames: false
+        stages: [pre-push]
