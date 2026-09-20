@@ -1001,9 +1001,7 @@ pub fn classify(ch: char) -> Constraint {
         // consulted, but the two tables should agree about what tiles the cell —
         // narrowing `sprite::covers` later would otherwise silently start
         // centring them instead.
-        0x1FB00..=0x1FB6F | 0x1FB70..=0x1FB97 | 0x1FB9A..=0x1FBAF | 0x1CD00..=0x1CDE5 => {
-            Constraint::Fill
-        }
+        0x1FB00..=0x1FBAF | 0x1CD00..=0x1CDE5 => Constraint::Fill,
         // Powerline separators/arrows must touch cell edges — matched before the
         // broad PUA Fit arm below so they stay Fill.
         0xE0B0..=0xE0D4 => Constraint::Fill,
@@ -2640,5 +2638,219 @@ mod tests {
         assert!(clusters.contains(&0));
         assert!(clusters.contains(&1));
         assert!(clusters.contains(&3));
+    }
+}
+
+
+/// Glyph-coverage sweep: the one place that answers "would this character
+/// render, or come out as an empty cell?" without a GPU.
+///
+/// It mirrors the renderer's resolution order in `render/mod.rs` (sprite →
+/// codepoint map → primary font → color font → monochrome fallback chain),
+/// minus the codepoint map, which is user config rather than a default. A
+/// character no step claims is *dropped* by the renderer, so the symptom is a
+/// blank (or, where something substitutes, a `[]` box) with nothing logged —
+/// which is exactly why this is swept rather than noticed.
+#[cfg(test)]
+mod coverage {
+    use super::*;
+    use ab_glyph::FontVec;
+
+    /// Who is responsible for a range's glyphs.
+    #[derive(PartialEq, Eq, Clone, Copy)]
+    pub enum Source {
+        /// giest draws these itself (`sprite`) or ships them in the embedded
+        /// Nerd Font. Deterministic on every machine, so a gap is a bug.
+        Own,
+        /// Resolved from whatever Windows ships. Present on a stock install,
+        /// but the exact repertoire moves with the OS font version.
+        System,
+    }
+
+    /// One Unicode span a terminal is expected to render.
+    pub struct Range {
+        pub name: &'static str,
+        pub lo: u32,
+        pub hi: u32,
+        pub source: Source,
+    }
+
+    const fn own(name: &'static str, lo: u32, hi: u32) -> Range {
+        Range { name, lo, hi, source: Source::Own }
+    }
+
+    const fn sys(name: &'static str, lo: u32, hi: u32) -> Range {
+        Range { name, lo, hi, source: Source::System }
+    }
+
+    /// The ranges giest claims to render with its default font set.
+    pub const EXPECTED: &[Range] = &[
+        // Drawn by `sprite` from the cell metrics.
+        own("Box Drawing", 0x2500, 0x257F),
+        own("Block Elements", 0x2580, 0x259F),
+        own("Braille Patterns", 0x2800, 0x28FF),
+        own("Symbols for Legacy Computing", 0x1FB00, 0x1FBAF),
+        own("Octants", 0x1CD00, 0x1CDE5),
+        // In the embedded Nerd Font.
+        own("ASCII", 0x0020, 0x007E),
+        own("Latin-1 Supplement", 0x00A0, 0x00FF),
+        own("Latin Extended-A", 0x0100, 0x017F),
+        own("General Punctuation", 0x2010, 0x2027),
+        own("Powerline", 0xE0A0, 0xE0D4),
+        // From the system fallback chain.
+        sys("Greek and Coptic", 0x0391, 0x03C9),
+        sys("Cyrillic", 0x0400, 0x045F),
+        sys("Superscripts and Subscripts", 0x2070, 0x209C),
+        sys("Currency Symbols", 0x20A0, 0x20BF),
+        sys("Letterlike Symbols", 0x2100, 0x214F),
+        sys("Number Forms", 0x2150, 0x218B),
+        sys("Arrows", 0x2190, 0x21FF),
+        sys("Mathematical Operators", 0x2200, 0x22FF),
+        sys("Miscellaneous Technical", 0x2300, 0x23FF),
+        sys("Control Pictures", 0x2400, 0x2426),
+        sys("Enclosed Alphanumerics", 0x2460, 0x24FF),
+        sys("Geometric Shapes", 0x25A0, 0x25FF),
+        sys("Miscellaneous Symbols", 0x2600, 0x26FF),
+        sys("Dingbats", 0x2700, 0x27BF),
+        sys("Supplemental Arrows-B", 0x2900, 0x297F),
+        sys("Miscellaneous Symbols and Arrows", 0x2B00, 0x2BFF),
+        sys("Emoticons", 0x1F600, 0x1F64F),
+        sys("Misc Symbols and Pictographs", 0x1F300, 0x1F5FF),
+        sys("Transport and Map", 0x1F680, 0x1F6FF),
+        sys("Supplemental Symbols and Pictographs", 0x1F900, 0x1F9FF),
+    ];
+
+    /// Codepoints inside the swept ranges that Unicode has never assigned, so
+    /// no font can cover them and a gap is correct. Reserved holes only — not a
+    /// place to park a character that should render.
+    pub const UNASSIGNED: &[u32] = &[
+        0x03A2, // Greek: the hole where a second final sigma would be
+        0x2072, 0x2073, // Superscripts: reserved (superscript 2/3 live in Latin-1)
+        0x208F, // Subscripts: reserved
+        0x2B74, 0x2B75, 0x2B96, // Misc Symbols and Arrows: reserved
+    ];
+
+    /// Above this, a gap is a fact about the installed Segoe UI Emoji rather
+    /// than about giest: Windows adds emoji with OS updates, so the set a given
+    /// machine has is not something a test can pin.
+    pub const EMOJI_FLOOR: u32 = 0x1F000;
+
+    /// Every face the default configuration can draw from, loaded once.
+    pub struct Faces {
+        primary: FontRef<'static>,
+        color: Option<ColorFont>,
+        fallbacks: Vec<FontVec>,
+    }
+
+    impl Faces {
+        pub fn load() -> Self {
+            let mut fallbacks = Vec::new();
+            for (path, idx) in FALLBACK_FONTS {
+                if let Ok(bytes) = std::fs::read(path) {
+                    if let Ok(f) = FontVec::try_from_vec_and_index(bytes, *idx) {
+                        fallbacks.push(f);
+                    }
+                }
+            }
+            Self {
+                primary: FontRef::try_from_slice(FONT_REGULAR).unwrap(),
+                color: ColorFont::load(COLOR_FONT),
+                fallbacks,
+            }
+        }
+
+        /// Whether the sprite drawer or some face produces ink for `ch`.
+        pub fn covers(&self, ch: char) -> bool {
+            if crate::sprite::covers(ch) || self.primary.glyph_id(ch).0 != 0 {
+                return true;
+            }
+            if let Some(cf) = &self.color {
+                if cf
+                    .face
+                    .glyph_index(ch)
+                    .is_some_and(|g| cf.face.is_color_glyph(g))
+                {
+                    return true;
+                }
+            }
+            self.fallbacks.iter().any(|f| f.glyph_id(ch).0 != 0)
+        }
+
+        /// The uncovered codepoints in `range`, minus the unassigned holes.
+        pub fn gaps(&self, range: &Range) -> Vec<char> {
+            (range.lo..=range.hi)
+                .filter(|c| !UNASSIGNED.contains(c))
+                .filter_map(char::from_u32)
+                .filter(|&c| !self.covers(c))
+                .collect()
+        }
+    }
+
+    /// `U+XXXX` for each, for a failure message.
+    pub fn list(chars: &[char]) -> String {
+        chars
+            .iter()
+            .map(|c| format!("U+{:04X}", *c as u32))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+}
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::coverage::{EMOJI_FLOOR, EXPECTED, Faces, Source, list};
+
+    /// The ranges giest draws or ships: these depend on nothing but the repo,
+    /// so a single uncovered codepoint is a bug — and this is the test that
+    /// finds the ones nobody happened to type.
+    #[test]
+    fn sprite_and_embedded_font_cover_every_range_giest_owns() {
+        let faces = Faces::load();
+        for range in EXPECTED.iter().filter(|r| r.source == Source::Own) {
+            let gaps = faces.gaps(range);
+            assert!(
+                gaps.is_empty(),
+                "{} has {} uncovered codepoint(s): {}",
+                range.name,
+                gaps.len(),
+                list(&gaps)
+            );
+        }
+    }
+
+    /// The ranges that come from Windows' own fonts. Below [`EMOJI_FLOOR`] the
+    /// repertoire is stable enough to assert — a gap there means the fallback
+    /// chain lost a face, not that the OS changed. Emoji gaps are reported
+    /// instead, because they track the installed Segoe UI Emoji.
+    #[test]
+    fn system_fallback_chain_covers_the_symbol_ranges() {
+        // A machine with no fallback fonts at all can say nothing about the
+        // chain; the owned test still applies there.
+        if !std::path::Path::new(super::FALLBACK_FONTS[0].0).exists() {
+            return;
+        }
+        let faces = Faces::load();
+        let mut emoji_gaps = Vec::new();
+        for range in EXPECTED.iter().filter(|r| r.source == Source::System) {
+            let (emoji, text): (Vec<char>, Vec<char>) = faces
+                .gaps(range)
+                .into_iter()
+                .partition(|&c| c as u32 >= EMOJI_FLOOR);
+            assert!(
+                text.is_empty(),
+                "{} has {} uncovered codepoint(s): {}",
+                range.name,
+                text.len(),
+                list(&text)
+            );
+            emoji_gaps.extend(emoji);
+        }
+        if !emoji_gaps.is_empty() {
+            println!(
+                "note: this Segoe UI Emoji lacks {} emoji: {}",
+                emoji_gaps.len(),
+                list(&emoji_gaps)
+            );
+        }
     }
 }

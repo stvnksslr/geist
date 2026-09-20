@@ -41,13 +41,13 @@
 //! …and its *diagonal* families, which reuse the polygon fill the rounded
 //! corners already needed: **U+1FB3C–1FB67** smooth mosaics, **U+1FB68–1FB6F**
 //! edge triangles, **U+1FB9A–1FB9F** opposed and shaded triangles, and
-//! **U+1FBA0–1FBAF** the corner diagonal lines.
+//! **U+1FBA0–1FBAF** the corner diagonal lines, and **U+1FB98/1FB99** the
+//! diagonal hatch fills.
 //!
 //! Deliberately *not* ported, so they still come from the font: the stylized
 //! powerline symbols (E0C0+, E0D0/E0D1/E0D3 — flames, hexagons, ice), which
-//! upstream doesn't draw either; and, from legacy computing, the diagonal
-//! *fills* (U+1FB98/1FB99), the separated blocks and the segmented digits —
-//! repeating patterns and digit segments rather than a shape.
+//! upstream doesn't draw either; and, from legacy computing, the separated
+//! blocks and the segmented digits — digit segments rather than a shape.
 
 /// Cell metrics a sprite is drawn against, in **physical pixels**.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -386,6 +386,7 @@ pub fn covers(ch: char) -> bool {
         | 0x1FB00..=0x1FB3B    // sextants
         | 0x1FB3C..=0x1FB6F    // smooth mosaics + the edge triangles
         | 0x1FB70..=0x1FB97    // eighth/quarter blocks and their shades
+        | 0x1FB98..=0x1FB99    // diagonal hatch fills
         | 0x1FB9A..=0x1FB9F    // opposed and shaded triangles
         | 0x1FBA0..=0x1FBAF    // corner diagonal lines, and the light/heavy cross
         | 0x1CD00..=0x1CDE5    // octants (the supplement block)
@@ -407,6 +408,7 @@ pub fn draw(ch: char, m: Metrics) -> Option<Vec<u8>> {
         0xE0B0..=0xE0BF | 0xE0D2 | 0xE0D4 => draw_powerline(&mut c, m, cp),
         0x1FB00..=0x1FB3B => draw_sextant(&mut c, m, cp),
         0x1FB3C..=0x1FB67 => draw_smooth_mosaic(&mut c, m, cp),
+        0x1FB98..=0x1FB99 => draw_diagonal_fill(&mut c, m, cp),
         0x1FB68..=0x1FB6F | 0x1FB9A..=0x1FB9F | 0x1FBA0..=0x1FBAF => {
             draw_diagonal_legacy(&mut c, m, cp)
         }
@@ -544,6 +546,39 @@ fn arc(c: &mut Canvas, m: Metrics, corner: Corner) {
         }
     }
     c.stroke(&pts, thick);
+}
+
+/// The diagonal hatch fills, U+1FB98 (upper-left to lower-right) and U+1FB99
+/// (upper-right to lower-left): a cell filled with evenly spaced parallel
+/// diagonals.
+///
+/// Neither the embedded Nerd Font nor any stock Windows fallback face has these
+/// two, so without this they render as an empty cell — which is why they are
+/// drawn here even though upstream leaves them to the font.
+///
+/// The stride stays a float and the lines step from `-count`, both for
+/// tiling: an integer-rounded stride accumulates a drift that shows as a kink
+/// where two filled cells meet, and starting at zero leaves the corner the
+/// diagonals enter from empty.
+fn draw_diagonal_fill(c: &mut Canvas, m: Metrics, cp: u32) {
+    let (fw, fh) = (m.w as f64, m.h as f64);
+    let thick = m.line(Weight::Light) as f64;
+    // The spacing is *horizontal*, but the gap the eye sees is perpendicular to
+    // the stroke — a factor of `h/hypot(w,h)` smaller. Four stroke widths apart
+    // leaves a clear gap at a typical cell; two (the naive choice) puts the
+    // lines under 1.5px apart on a square cell, and antialiasing fills the cell
+    // solid.
+    let count = ((fw / (4.0 * thick)).round() as i32).max(1);
+    let stride = fw / count as f64;
+    for i in -count..=count {
+        let x = i as f64 * stride;
+        let pts: [Point; 2] = if cp == 0x1FB98 {
+            [(x, 0.0), (x + fw, fh)]
+        } else {
+            [(fw - x, 0.0), (-x, fh)]
+        };
+        c.stroke(&pts, thick);
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1926,6 +1961,36 @@ mod tests {
         // rather than left to the font to render as tofu.
         assert!(covers('\u{1FB93}'));
         assert!(buf('\u{1FB93}', m).iter().all(|&v| v == 0));
+    }
+
+    #[test]
+    fn the_diagonal_fills_hatch_the_whole_cell_in_both_directions() {
+        let m = Metrics { w: 16, h: 16, thickness: 1 };
+        for (cp, name) in [('\u{1FB98}', "upper-left to lower-right"), ('\u{1FB99}', "the mirror")] {
+            let b = buf(cp, m);
+            // Every row and every column is struck: the hatch reaches all four
+            // corners rather than leaving the one the diagonals enter from
+            // empty, which is what a naive loop from zero does.
+            for y in 0..m.h {
+                assert!(
+                    row_span(&b, m, y).len() > 1,
+                    "{name}: row {y} is bare"
+                );
+            }
+            for x in 0..m.w {
+                assert!(!col_span(&b, m, x).is_empty(), "{name}: column {x} is bare");
+            }
+            // It is a hatch, not a solid fill: gaps remain between the lines.
+            assert!(b.iter().any(|&v| v == 0), "{name}: filled solid");
+        }
+        // They run opposite ways, so they are not the same picture. (Corners
+        // don't discriminate: the hatch overshoots the cell on both sides, so
+        // every corner is inked either way.)
+        assert_ne!(
+            buf('\u{1FB98}', m),
+            buf('\u{1FB99}', m),
+            "the two fills must slope opposite ways"
+        );
     }
 
     #[test]
