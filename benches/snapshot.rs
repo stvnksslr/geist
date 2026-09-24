@@ -1,11 +1,11 @@
-//! Snapshot copy-loop throughput — giest's host analog of Ghostty's `ScreenClone`
+//! Snapshot copy-loop throughput — geist's host analog of Ghostty's `ScreenClone`
 //! benchmark. Measures the cost of building a [`GridSnapshot`] from the engine
 //! (the per-frame copy out of libghostty-vt that the renderer consumes), across
 //! grid sizes and input classes. Run: `cargo bench --bench snapshot`.
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
-use giest::engine::{GhosttyVtEngine, GridSnapshot, TerminalEngine};
-use giest::synthetic;
+use geist::engine::{GhosttyVtEngine, GridSnapshot, TerminalEngine};
+use geist::synthetic;
 
 /// Build an engine of `cols`×`rows` pre-filled with ~2 screenfuls of `kind` data.
 fn filled(cols: u16, rows: u16, kind: &str) -> GhosttyVtEngine {

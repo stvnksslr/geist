@@ -1,5 +1,5 @@
 //! **Global** keybinds — Ghostty's `keybind = global:<trigger>=<action>`, which
-//! fire even when giest is not the focused application.
+//! fire even when geist is not the focused application.
 //!
 //! Windows offers two mechanisms and only one of them fits:
 //!
@@ -259,7 +259,7 @@ mod imp {
     pub fn set_binds(ctx: &egui::Context, mut binds: Vec<GlobalBind>) {
         if binds.len() > MAX_BINDS {
             eprintln!(
-                "giest: only the first {MAX_BINDS} global keybinds are supported; ignoring {} more",
+                "geist: only the first {MAX_BINDS} global keybinds are supported; ignoring {} more",
                 binds.len() - MAX_BINDS
             );
             binds.truncate(MAX_BINDS);
@@ -276,7 +276,7 @@ mod imp {
                 unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, hook_proc, std::ptr::null_mut(), 0) };
             if h.is_null() {
                 eprintln!(
-                    "giest: could not install the global-keybind hook; global: binds are inactive"
+                    "geist: could not install the global-keybind hook; global: binds are inactive"
                 );
             } else {
                 *hook = h as usize;

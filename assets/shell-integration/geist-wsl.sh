@@ -1,7 +1,7 @@
-# giest: WSL shell-integration bootstrap (POSIX sh, not part of upstream Ghostty).
+# geist: WSL shell-integration bootstrap (POSIX sh, not part of upstream Ghostty).
 #
-# giest launches `wsl.exe -e /bin/sh -c 'exec /bin/sh "$GIEST_SHELL_INTEGRATION_DIR/giest-wsl.sh"'`
-# with GIEST_SHELL_INTEGRATION_DIR translated to a Linux path by WSLENV's `/p`
+# geist launches `wsl.exe -e /bin/sh -c 'exec /bin/sh "$geist_SHELL_INTEGRATION_DIR/geist-wsl.sh"'`
+# with geist_SHELL_INTEGRATION_DIR translated to a Linux path by WSLENV's `/p`
 # flag. This script finds the user's login shell and injects Ghostty's own
 # integration scripts (vendored next to this file) with the same per-shell
 # mechanism as Ghostty's src/termio/shell_integration.zig:
@@ -15,9 +15,9 @@
 #
 # Anything unrecognised just runs the login shell untouched.
 
-dir=$GIEST_SHELL_INTEGRATION_DIR
-kind=${GIEST_SHELL_INTEGRATION:-detect}
-unset GIEST_SHELL_INTEGRATION_DIR GIEST_SHELL_INTEGRATION
+dir=$geist_SHELL_INTEGRATION_DIR
+kind=${geist_SHELL_INTEGRATION:-detect}
+unset geist_SHELL_INTEGRATION_DIR geist_SHELL_INTEGRATION
 
 shell=${SHELL:-}
 if [ -z "$shell" ]; then

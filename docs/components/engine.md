@@ -101,7 +101,7 @@ classDiagram
 ```
 
 `KeyCode` is named after the W3C `KeyboardEvent.code` values libghostty's
-encoder uses, listing only the subset giest translates; printable text is
+encoder uses, listing only the subset geist translates; printable text is
 delivered separately via `KeyInput::text`. `MouseButton::WheelUp/WheelDown` map
 to buttons 4/5.
 

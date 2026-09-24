@@ -1,4 +1,4 @@
-# Cross-terminal comparison: run the SAME inner workload inside giest,
+# Cross-terminal comparison: run the SAME inner workload inside geist,
 # Windows Terminal and WezTerm, and collect each terminal's results.
 #
 # The inner workload (`perf-vs-inner.ps1`, generated below) runs in a pwsh
@@ -14,19 +14,19 @@
 # Every terminal is pinned to a 120x40 grid: ConPTY's cost scales with the
 # cell count, so unequal default sizes would measure window size, not the
 # terminal. Note which console host each uses (WezTerm bundles OpenConsole;
-# giest uses a sideloaded one only if conpty.dll sits beside the exe).
+# geist uses a sideloaded one only if conpty.dll sits beside the exe).
 param(
-    [string]$Giest = "$PSScriptRoot/../target/release/giest.exe",
+    [string]$geist = "$PSScriptRoot/../target/release/geist.exe",
     [string]$WezTerm = "",
     [string]$Corpus = "$PSScriptRoot/../target/audit/corpus.vt",
     [string]$VtebenchDir = "$PSScriptRoot/../target/audit/vtb",
     [string]$OutDir = "$PSScriptRoot/../perf/vs",
     [int]$FloodRepeat = 3,
     [string[]]$Only = @(),
-    # Extra giest CLI args, e.g. '--conpty-passthrough=false' to measure the
+    # Extra geist CLI args, e.g. '--conpty-passthrough=false' to measure the
     # inbox console host; the label gets -Suffix so both variants can coexist.
-    [string[]]$GiestExtraArgs = @(),
-    [string]$GiestLabelSuffix = ''
+    [string[]]$geistExtraArgs = @(),
+    [string]$geistLabelSuffix = ''
 )
 $ErrorActionPreference = 'Stop'
 New-Item -ItemType Directory -Force $OutDir | Out-Null
@@ -50,11 +50,11 @@ Set-Content (Join-Path `$out "`$Label-done") 'ok'
 # Bare `pwsh`, not its full path: `Start-Process -ArgumentList` below joins
 # arguments with spaces WITHOUT quoting, so a path like
 # `C:\Program Files\PowerShell\7\pwsh.exe` would reach the terminal as two
-# arguments. (Not a giest `-e` limitation: a quoted full path works.) Every
+# arguments. (Not a geist `-e` limitation: a quoted full path works.) Every
 # terminal resolves PATH anyway.
 $pw = 'pwsh'
 $terms = @(
-    @{ label = "giest$GiestLabelSuffix"; exe = (Resolve-Path $Giest).Path; args = @('--window-width=120', '--window-height=40') + $GiestExtraArgs + @('-e', $pw, '-NoProfile', '-NoLogo', '-File', $inner, "giest$GiestLabelSuffix") }
+    @{ label = "geist$geistLabelSuffix"; exe = (Resolve-Path $geist).Path; args = @('--window-width=120', '--window-height=40') + $geistExtraArgs + @('-e', $pw, '-NoProfile', '-NoLogo', '-File', $inner, "geist$geistLabelSuffix") }
     @{ label = 'wt';     exe = 'wt.exe'; args = @('-w', 'new', '--size', '120,40', '--', $pw, '-NoProfile', '-NoLogo', '-File', $inner, 'wt') }
 )
 if ($WezTerm) {
@@ -65,18 +65,18 @@ foreach ($t in $terms) {
     $done = Join-Path $OutDir "$($t.label)-done"
     Remove-Item $done -ErrorAction SilentlyContinue
     Write-Host ">> $($t.label): $($t.exe) $($t.args -join ' ')"
-    $env:GIEST_IPC_PIPE = "giest-perf-vs-$PID"
+    $env:geist_IPC_PIPE = "geist-perf-vs-$PID"
     $p = Start-Process -FilePath $t.exe -ArgumentList $t.args -PassThru
     $deadline = (Get-Date).AddMinutes(10)
     while (-not (Test-Path $done) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
     if (-not (Test-Path $done)) { Write-Warning "$($t.label): timed out" }
     # Let the terminal close itself (the shell exited); nudge stragglers.
     Start-Sleep 2
-    foreach ($n in 'giest','WindowsTerminal','wezterm-gui') {
+    foreach ($n in 'geist','WindowsTerminal','wezterm-gui') {
         Get-Process $n -ErrorAction SilentlyContinue | Where-Object { $_.StartTime -gt (Get-Date).AddMinutes(-11) } | Stop-Process -Force -ErrorAction SilentlyContinue
     }
 }
-Remove-Item Env:GIEST_IPC_PIPE -ErrorAction SilentlyContinue
+Remove-Item Env:geist_IPC_PIPE -ErrorAction SilentlyContinue
 
 # Summarize
 $rows = foreach ($t in $terms) {

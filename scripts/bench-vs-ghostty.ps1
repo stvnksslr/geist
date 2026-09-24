@@ -2,21 +2,21 @@
 #requires -version 7
 <#
 .SYNOPSIS
-  Apples-to-apples engine-throughput comparison: giest's `stream` bench vs
+  Apples-to-apples engine-throughput comparison: geist's `stream` bench vs
   Ghostty's own `ghostty-bench terminal-stream`, over the SAME corpus file.
 
 .DESCRIPTION
-  giest reuses Ghostty's VT engine (libghostty-vt). This script builds Ghostty's
+  geist reuses Ghostty's VT engine (libghostty-vt). This script builds Ghostty's
   benchmark binary from the *same pinned commit* the vt lib is built from, runs
   `ghostty-bench terminal-stream --data <corpus>` (wall-clock timed, the way
-  Ghostty's own methodology measures it), then runs giest's `stream` bench with
-  `GIEST_BENCH_DATA` pointed at the same corpus, and prints both throughputs.
+  Ghostty's own methodology measures it), then runs geist's `stream` bench with
+  `geist_BENCH_DATA` pointed at the same corpus, and prints both throughputs.
 
   It degrades gracefully: if Zig 0.16.0, the ghostty source, or a corpus can't be
   found it prints a clear notice and skips that half rather than failing.
 
   Note on methodology: the two harnesses differ (Ghostty = single-pass wall clock
-  incl. process startup; giest = criterion steady-state). Use a LARGE corpus
+  incl. process startup; geist = criterion steady-state). Use a LARGE corpus
   (tens of MiB+) so per-run processing dominates startup, and read the numbers as
   a relative ratio, not an exact figure. See docs/benchmarking.md.
 
@@ -39,7 +39,7 @@ param(
     [int]$Cols = 80,
     [int]$Rows = 24,
     [int]$Runs = 20,
-    # Skip building/running Ghostty's bench (just run giest's side over the corpus).
+    # Skip building/running Ghostty's bench (just run geist's side over the corpus).
     [switch]$SkipGhostty
 )
 
@@ -76,7 +76,7 @@ function Find-GhosttySource {
 
 $ghosttyBenchExe = $null
 if ($SkipGhostty) {
-    Note "-SkipGhostty set; running giest side only."
+    Note "-SkipGhostty set; running geist side only."
 } elseif ($null -ne $zigPrefix) {
     $src = Find-GhosttySource
     if (-not $src) {
@@ -144,10 +144,10 @@ if ($ghosttyBenchExe) {
     Warn "Ghostty side skipped (no ghostty-bench built)."
 }
 
-# --- giest side -----------------------------------------------------------------
+# --- geist side -----------------------------------------------------------------
 if ($null -ne $zigPrefix -or (Get-Command cargo -ErrorAction SilentlyContinue)) {
-    Note "giest stream bench (criterion, corpus case):"
-    $env:GIEST_BENCH_DATA = $Corpus
+    Note "geist stream bench (criterion, corpus case):"
+    $env:geist_BENCH_DATA = $Corpus
     try {
         $filter = "corpus/${Cols}x${Rows}"
         $pfx = if ($zigPrefix) { $zigPrefix } else { @() }
@@ -156,13 +156,13 @@ if ($null -ne $zigPrefix -or (Get-Command cargo -ErrorAction SilentlyContinue)) 
         # Surface criterion's absolute throughput line for the corpus case (skip
         # its change-vs-baseline percentage line).
         $out | Select-String -Pattern 'thrpt:' | Where-Object { $_ -notmatch '%' } | ForEach-Object {
-            Write-Host ("  giest engine.write      : " + ($_.ToString().Trim()))
+            Write-Host ("  geist engine.write      : " + ($_.ToString().Trim()))
         }
     } finally {
-        Remove-Item Env:\GIEST_BENCH_DATA -ErrorAction SilentlyContinue
+        Remove-Item Env:\geist_BENCH_DATA -ErrorAction SilentlyContinue
     }
 } else {
-    Warn "giest side skipped (no cargo)."
+    Warn "geist side skipped (no cargo)."
 }
 
 Write-Host "=================================================" -ForegroundColor Green

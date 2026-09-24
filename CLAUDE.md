@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-giest is a GPU-accelerated terminal emulator for **Windows**, in Rust. eframe (egui + wgpu)
+geist is a GPU-accelerated terminal emulator for **Windows**, in Rust. eframe (egui + wgpu)
 owns the window; the terminal grid is drawn by a custom wgpu glyph-atlas pipeline; the
 terminal state lives in **libghostty-vt** (Ghostty's VT engine) behind a backend-agnostic
 trait; the shell runs over **ConPTY**. North-star goal: feature parity with the macOS Ghostty app.
@@ -30,7 +30,7 @@ headless renderer cost) and can be compared against upstream `ghostty-bench` via
   PATH — prefer them. Run `mise trust` once. Fallbacks: `mise exec zig@0.16.0 -- cargo build`,
   or plain `cargo build`/`cargo run --release` if Zig 0.16.0 is already on PATH.
 - **Always run cargo from the project root.** Running it from inside `vendor/libghostty-rs/...`
-  builds the *vendored crate* instead of giest (cargo walks up to the nearest Cargo.toml). A
+  builds the *vendored crate* instead of geist (cargo walks up to the nearest Cargo.toml). A
   "Finished" that only mentions `libghostty-vt` compiling means you're in the wrong directory.
 - First build takes minutes (fetches + compiles Ghostty via Zig); later builds skip Zig unless
   the native crate changes. Edition 2024, requires recent stable Rust.
@@ -55,8 +55,8 @@ fallback engine without app changes:
   `CallbackTrait`. **`render/atlas.rs`** — rustybuzz shaping + ab_glyph rasterization (primary +
   system fallback faces) into an R8 atlas; COLR/CPAL color emoji composited into a separate RGBA atlas.
 - **`pty.rs`** — ConPTY shell via portable-pty with a reader thread that wakes the UI on output.
-  A second backend (`Pty::from_handoff`) drives a pseudoconsole giest did *not* create.
-- **`handoff.rs`** — default-terminal handoff: `giest -Embedding` is an out-of-proc COM server for
+  A second backend (`Pty::from_handoff`) drives a pseudoconsole geist did *not* create.
+- **`handoff.rs`** — default-terminal handoff: `geist -Embedding` is an out-of-proc COM server for
   `ITerminalHandoff3` (hand-declared vtables), `+register-default-terminal` /
   `+unregister-default-terminal` write HKCU only with exact restore. See GAP.md for the chain.
 - **`bell.rs`** — the non-visual `bell-features`: `MessageBeep` (system), `PlaySoundW` (audio),
@@ -94,12 +94,12 @@ fallback engine without app changes:
   `A`/`B` prompt marks to the screen (that's what `cursor_at_prompt` reads), but `D`'s exit code
   never lands on a cell, so `notify-on-command-finish` has to read it off the stream.
 - **`bgimage.rs`** — `background-image`: PNG/JPEG decode (format sniffed from magic bytes) plus the
-  pure fit/position geometry. Ghostty computes that geometry per vertex in its shader; giest does it
+  pure fit/position geometry. Ghostty computes that geometry per vertex in its shader; geist does it
   on the CPU so it can be table-tested, and the shader (`render` mode 4) just samples.
 - **Automation.** **`cli.rs`** parses the command line (`-e` swallows the rest; `--key=value` is
   replayed after the config files on every load via `config::set_cli_overrides`). **`ipc.rs`** is
-  the single-instance pipe (`\\.\pipe\giest-<SID>-<session>`, JSON lines, `$GIEST_IPC_PIPE`
-  overrides the name — use it for any live test so you never talk to the user's running giest);
+  the single-instance pipe (`\\.\pipe\geist-<SID>-<session>`, JSON lines, `$geist_IPC_PIPE`
+  overrides the name — use it for any live test so you never talk to the user's running geist);
   its threads hand requests to the UI over a channel and wake **ROOT**, and `App::answer_ipc`
   addresses windows/tabs/panes by **id**. `input_text` is a paste and goes through
   `Session::paste_str`. **`shellreg.rs`** (Explorer verb, HKCU, explicit CLI only),
@@ -108,16 +108,16 @@ fallback engine without app changes:
   `WM_ENDSESSION`, because `on_exit` never runs when Windows ends the session). Clean up after
   live tests: `+unregister-shell-integration`, and run with `jump-list = false`.
 - **Distribution.** `mise package` (`scripts/package.ps1`) builds `dist/<v>/`: zip, MSIX (unsigned
-  unless `-CertPath`), `giest.appinstaller`, `giest-manifest.json`. **`update.rs`** consumes that
+  unless `-CertPath`), `geist.appinstaller`, `geist-manifest.json`. **`update.rs`** consumes that
   manifest: SHA-256 is verified *before* extraction, and a staged update is applied only by
   `startup_apply` at the top of `main` — replaced files are **renamed** to `*.old`, never deleted
   while running. Its network goes through the `Http` trait; tests use a mock. Live-test the apply
   path with a temp `LOCALAPPDATA` and a copied exe, never against `target\` or a real install.
 - **`config.rs`** — Ghostty-format config (`key = value` lines, kebab-case keys, unquoted
-  colors, repeatable `palette`) from `%APPDATA%\giest\config` (override with `GIEST_CONFIG`);
+  colors, repeatable `palette`) from `%APPDATA%\geist\config` (override with `geist_CONFIG`);
   defines the full ANSI 16 + 256-color palette. **`profiles.rs`** — shell profiles (pwsh/powershell/cmd/wsl),
   auto-detected from what's installed. The user's edits to that list live in a **separate** file
-  (`%APPDATA%\giest\profiles`, `$GIEST_PROFILES`), not in the config: **`profilestore.rs`** records only
+  (`%APPDATA%\geist\profiles`, `$geist_PROFILES`), not in the config: **`profilestore.rs`** records only
   the *deltas* over detection (hidden, renamed, reordered, user-added, default) in the same
   line-oriented format as `state.rs`, so the profiles page never has to rewrite the hand-maintained
   config file and preserve its comments. `profiles::detect_edited` is detect + store; plain `detect`
@@ -140,7 +140,7 @@ fallback engine without app changes:
   @b32f20f (the binding pins 22d1317, 876 commits older). That bump carries three local deltas:
   `GHOSTTY_COMMIT` in `libghostty-vt-sys/build.rs`; a **regenerated** `bindings.rs`; and
   `render.rs::colors()` moved from the removed `ghostty_render_state_colors_get` onto
-  `ghostty_render_state_get(.., RenderStateData::COLORS, ..)`. Plus **giest-local** wrappers in
+  `ghostty_render_state_get(.., RenderStateData::COLORS, ..)`. Plus **geist-local** wrappers in
   `terminal.rs`: `on_clipboard_write` fixed to the pinned reply-function ABI (upstream's still
   *returned* the result, which the C side ignored — every write was silently denied),
   `on_clipboard_read`, `Terminal::paste` (`ghostty_terminal_paste`), and `Mode::PASTE_EVENTS`. The old Windows static-link patch
@@ -169,7 +169,7 @@ fallback engine without app changes:
   gotcha below.
 - **Clipboard callbacks are synchronous; `ask` is built by cutting the engine's refusal back out.**
   `on_clipboard_read/write` must answer before returning, and an unanswered request is refused *on
-  the spot* (OSC 52: empty reply; 5522: `EPERM`) straight into the response buffer. giest can't block
+  the spot* (OSC 52: empty reply; 5522: `EPERM`) straight into the response buffer. geist can't block
   on a modal, so under `ask` the callback records the buffer's length and doesn't answer; after
   `vt_write`, `collect_clipboard_deferrals` cuts the refusal at that offset out and holds it. Deny
   sends it; allow writes + sends it flipped to `DONE`, or *replays* the read into the engine with a
@@ -224,12 +224,12 @@ fallback engine without app changes:
   **`tests/conpty_passthrough.rs` is the probe, made permanent** — an ignored host test that spawns
   a real shell and asserts which sequences survive (OSC 7/9/52/133/777/5522 and DECSET 5522 do; APC does not). Run it
   *first* for any new escape-sequence work: `cargo test --test conpty_passthrough -- --ignored`,
-  and again with `GIEST_TEST_PASSTHROUGH=1` for the sideloaded ConPTY (where APC/ENQ must arrive).
+  and again with `geist_TEST_PASSTHROUGH=1` for the sideloaded ConPTY (where APC/ENQ must arrive).
   In the default mode the APC case is asserted **inverted** — it fails if a future Windows build
   stops stripping APC, which is how we'd learn kitty graphics works without the sideload.
 - **Anything newly forwarded by the sideloaded ConPTY is newly *live* in the engine.** libghostty
   enables some APC features by default — the glyph protocol (`25a1`) would answer support queries
-  giest can't render — so `GhosttyVtEngine::new` switches it off. Check engine defaults for any
+  geist can't render — so `GhosttyVtEngine::new` switches it off. Check engine defaults for any
   sequence family that starts arriving. Likewise **OSC 72** (kitty drag-and-drop): the engine answers
   `t=q`, but the C API cannot deliver a drop, so `write` strips every OSC 72 reply (`strip_osc72`)
   rather than advertise it. ENQ is answered via `on_enquiry` (`enquiry-response`) — which is why
@@ -296,7 +296,7 @@ fallback engine without app changes:
   presentation path builds the swapchain straight from the HWND, and such a surface advertises only
   `CompositeAlphaMode::Opaque` (`wgpu-hal` `dx12/adapter.rs`; `Dx12SwapchainKind::DxgiFromHwnd` is
   documented as "does not support transparency"). egui-wgpu then finds no premultiplied mode, logs one
-  `log::warn` giest never surfaces (no logger installed), and falls back to opaque — the window just
+  `log::warn` geist never surfaces (no logger installed), and falls back to opaque — the window just
   stays solid with no error. `main.rs` must also set `presentation_system = DxgiFromVisual` (the
   DirectComposition path, which costs RenderDoc capture support, so it's opt-in when opacity < 1).
   (2) `App::clear_color` must return `[0,0,0,0]`. eframe's default clear is
@@ -315,7 +315,7 @@ fallback engine without app changes:
   any kind** — the only evidence was the Windows Application event log's faulting-module line
   (`Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='Application Error'}`;
   reach for it first for any silent-exit report, as an `0xC0000005` from a vendor DLL looks exactly
-  like a giest bug). The pin in `main.rs` is therefore **unconditional**, not part of the
+  like a geist bug). The pin in `main.rs` is therefore **unconditional**, not part of the
   transparency branch it originally lived in — that branch pinned DX12 for its own reasons, which
   masked this everywhere `background-opacity < 1` and left the *default* config as the one that
   crashed. `WGPU_BACKEND` still overrides, deliberately.
@@ -405,7 +405,7 @@ fallback engine without app changes:
   leaving a window the × cannot shut.
 - **Default-terminal handoff has four silent traps** (`handoff.rs`). (1) Only a **release** exe can
   be the COM server: a debug build is console-subsystem, COM gives it a console, and creating that
-  console is *itself* delegated (to Windows Terminal, or to giest - a deadlock); it never reaches
+  console is *itself* delegated (to Windows Terminal, or to geist - a deadlock); it never reaches
   `main` and the caller sees `CO_E_SERVER_EXEC_FAILURE` after 30 s. `register` refuses such an exe.
   (2) The proxy DLL must be built with `midl /target NT100` and link `ole32.lib`; without the target
   flag it links but the first `EstablishPtyHandoff` is an access violation *in the caller*. (3) "Let
@@ -417,9 +417,9 @@ fallback engine without app changes:
   which looks exactly like a reaping bug (`ping` spawned from a test does this). Live tests:
   `cargo test --test handoff_com -- --ignored` (never touches `%%Startup`) and `--test
   default_terminal` (the real chain, delegation live ~1 s); both need `cargo build --release`,
-  `scripts/build-handoff-proxy.ps1`, and no giest running.
+  `scripts/build-handoff-proxy.ps1`, and no geist running.
 - **After `cargo test`, the *binary* is still stale.** `cargo test --lib` builds only the test
-  harness, so launching `target\debug\giest.exe` to check a change runs the previous build — which
+  harness, so launching `target\debug\geist.exe` to check a change runs the previous build — which
   looks exactly like the feature not working. Run `cargo build` before any manual/screenshot check.
 
 ## Verifying visual/rendering changes

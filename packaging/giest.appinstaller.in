@@ -15,10 +15,10 @@
 <AppInstaller
   xmlns="http://schemas.microsoft.com/appx/appinstaller/2021"
   Version="@VERSION4@"
-  Uri="@BASE_URI@/giest.appinstaller">
+  Uri="@BASE_URI@/geist.appinstaller">
 
   <MainPackage
-    Name="giest.giest"
+    Name="geist.geist"
     Publisher="@PUBLISHER@"
     Version="@VERSION4@"
     ProcessorArchitecture="@ARCH@"

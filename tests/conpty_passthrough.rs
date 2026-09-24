@@ -7,7 +7,7 @@
 //! error anywhere, so for any new escape-sequence support the first question is
 //! whether the bytes reach us at all.
 //!
-//! This test answers that question for the sequences giest side-scans, by
+//! This test answers that question for the sequences geist side-scans, by
 //! spawning a real shell that emits each one and checking the drained PTY output
 //! for it. It is the automated form of the temporary `GhosttyVtEngine::write`
 //! probe CLAUDE.md recommends.
@@ -22,8 +22,8 @@
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
 
-use giest::profiles::Profile;
-use giest::pty::Pty;
+use geist::profiles::Profile;
+use geist::pty::Pty;
 
 /// Give up on a shell that never reports exit. A probe that hangs is far more
 /// confusing than one that fails.
@@ -152,12 +152,12 @@ fn run(command: &str) -> Vec<u8> {
     out
 }
 
-/// Which ConPTY mode this run probes. `GIEST_TEST_PASSTHROUGH=1` requests
+/// Which ConPTY mode this run probes. `geist_TEST_PASSTHROUGH=1` requests
 /// `PSEUDOCONSOLE_PASSTHROUGH_MODE`; the choice is process-global in the
 /// vendored portable-pty, so it is set from the environment (identical for
 /// every test in the run) rather than per test, which would race.
 fn requested_passthrough() -> bool {
-    std::env::var("GIEST_TEST_PASSTHROUGH").is_ok_and(|v| v == "1")
+    std::env::var("geist_TEST_PASSTHROUGH").is_ok_and(|v| v == "1")
 }
 
 fn select_mode() {
@@ -228,12 +228,12 @@ fn cat(parts: &[String]) -> String {
 #[test]
 #[ignore = "spawns a real shell; run with --ignored --nocapture"]
 fn the_harness_itself_round_trips_plain_output() {
-    // Guards the *test*, not giest: if the shell never exits or the command is
+    // Guards the *test*, not geist: if the shell never exits or the command is
     // mis-quoted, every other assertion here fails for a reason that has nothing
     // to do with escape sequences. Check the trivial case first.
-    let out = run(&emit(&lit("giest-plain-probe")));
+    let out = run(&emit(&lit("geist-plain-probe")));
     assert!(
-        contains(&out, b"giest-plain-probe"),
+        contains(&out, b"geist-plain-probe"),
         "the harness cannot even round-trip plain text: {:?}",
         String::from_utf8_lossy(&out)
     );
@@ -245,7 +245,7 @@ fn osc_notification_sequences_survive_conpty() {
     // OSC 9 (iTerm2 form) and OSC 777 (rxvt form), ST-terminated.
     let out = run(&emit(&cat(&[
         ESC.into(),
-        lit("]9;giest-osc9-probe"),
+        lit("]9;geist-osc9-probe"),
         st(),
         ESC.into(),
         lit("]777;notify;T;B"),
@@ -255,7 +255,7 @@ fn osc_notification_sequences_survive_conpty() {
     eprintln!("ConPTY emitted {} bytes: {:?}", out.len(), text);
 
     assert!(
-        contains(&out, b"]9;giest-osc9-probe"),
+        contains(&out, b"]9;geist-osc9-probe"),
         "ConPTY dropped OSC 9 — desktop notifications cannot work over ConPTY. Got: {text:?}"
     );
     assert!(
@@ -296,7 +296,7 @@ fn conemu_progress_sequences_survive_conpty() {
 #[test]
 #[ignore = "spawns a real shell; run with --ignored --nocapture"]
 fn already_shipped_osc_sequences_still_survive_conpty() {
-    // A regression net for the sequences giest already side-scans, so a Windows
+    // A regression net for the sequences geist already side-scans, so a Windows
     // or ConPTY update that starts eating one of them is caught here rather than
     // as a mysteriously dead feature.
     let out = run(&emit(&cat(&[
@@ -367,7 +367,7 @@ fn kitty_clipboard_protocol_survives_conpty() {
 #[ignore = "spawns a real shell; run with --ignored --nocapture"]
 fn kitty_dnd_protocol_survives_conpty() {
     // OSC 72 (kitty drag-and-drop): a support query and a drop-target
-    // registration with a MIME list. Probed before deciding what giest can do
+    // registration with a MIME list. Probed before deciding what geist can do
     // with it (see GAP.md: the C API can't deliver a drop, so replies are
     // withheld) — this pins that the bytes would at least arrive.
     let out = run(&emit(&cat(&[
@@ -437,7 +437,7 @@ fn the_powershell_hook_reports_command_exit_codes() {
             // because there is no marker unique to the successful command to
             // wait on: its own `D;0` is indistinguishable from the one the very
             // first prompt emits.
-            ("\x1b]133;D;3", "Write-Output giest-ok\rexit\r"),
+            ("\x1b]133;D;3", "Write-Output geist-ok\rexit\r"),
         ],
     );
     let text = String::from_utf8_lossy(&out);
@@ -458,7 +458,7 @@ fn the_powershell_hook_reports_command_exit_codes() {
         "the hook did not report exit code 3: {text:?}"
     );
     assert!(
-        contains(&out, b"giest-ok"),
+        contains(&out, b"geist-ok"),
         "the second command never ran: {text:?}"
     );
     // `shell-integration-features` defaults: `cursor` (blinking bar at the
@@ -495,7 +495,7 @@ fn enq_is_still_stripped_by_conpty() {
     // stream and drops what it doesn't forward, which is what blocks kitty
     // graphics. Probed before building, per this repo's own rule, and **measured
     // stripped**: the run below emits `open`, ENQ, `close` and ConPTY returns
-    // `giest-enq-opengiest-enq-close`.
+    // `geist-enq-opengeist-enq-close`.
     //
     // So this is asserted **inverted**, like the APC probe: it fails if a future
     // Windows build starts forwarding ENQ, which is how we would learn
@@ -504,26 +504,26 @@ fn enq_is_still_stripped_by_conpty() {
     // The markers bracket the ENQ so a *missing* byte is distinguishable from a
     // failed run: both markers present and no 0x05 means ConPTY ate it.
     let out = run(&emit(&cat(&[
-        lit("giest-enq-open"),
+        lit("geist-enq-open"),
         "[char]5".into(),
-        lit("giest-enq-close"),
+        lit("geist-enq-close"),
     ])));
     let text = String::from_utf8_lossy(&out);
     eprintln!("ConPTY emitted {} bytes: {:?}", out.len(), text);
     assert!(
-        contains(&out, b"giest-enq-open") && contains(&out, b"giest-enq-close"),
+        contains(&out, b"geist-enq-open") && contains(&out, b"geist-enq-close"),
         "the probe itself did not run: {text:?}"
     );
     if requested_passthrough() {
         // Measured: the out-of-band ConPTY forwards ENQ too.
         assert!(
-            contains(&out, b"giest-enq-open\x05giest-enq-close"),
+            contains(&out, b"geist-enq-open\x05geist-enq-close"),
             "the sideloaded ConPTY no longer forwards ENQ. Got: {text:?}"
         );
         return;
     }
     assert!(
-        !contains(&out, b"giest-enq-open\x05giest-enq-close"),
+        !contains(&out, b"geist-enq-open\x05geist-enq-close"),
         "ConPTY now forwards ENQ (0x05) — `enquiry-response` may be unblocked. \
          Got: {text:?}"
     );
@@ -535,8 +535,8 @@ fn apc_is_stripped_unless_passthrough() {
     // The documented blocker for kitty graphics. In the default (re-rendering)
     // mode this is asserted *inverted*: if a future Windows build stops
     // stripping APC, it fails and tells us the feature is unblocked there too.
-    // With passthrough on (GIEST_TEST_PASSTHROUGH=1) APC must arrive verbatim.
-    let out = run(&emit(&cat(&[ESC.into(), lit("_Ggiest-apc-probe"), st()])));
+    // With passthrough on (geist_TEST_PASSTHROUGH=1) APC must arrive verbatim.
+    let out = run(&emit(&cat(&[ESC.into(), lit("_Ggeist-apc-probe"), st()])));
     let text = String::from_utf8_lossy(&out);
     eprintln!("ConPTY emitted {} bytes: {:?}", out.len(), text);
     if requested_passthrough() {
@@ -547,13 +547,13 @@ fn apc_is_stripped_unless_passthrough() {
             "no conpty.dll next to the test exe — run scripts/fetch-conpty.ps1 first"
         );
         assert!(
-            contains(&out, b"\x1b_Ggiest-apc-probe\x1b\\"),
+            contains(&out, b"\x1b_Ggeist-apc-probe\x1b\\"),
             "passthrough is on but APC still did not arrive. Got: {text:?}"
         );
         return;
     }
     assert!(
-        !contains(&out, b"giest-apc-probe"),
+        !contains(&out, b"geist-apc-probe"),
         "ConPTY now passes APC through — kitty graphics may be unblocked. Got: {text:?}"
     );
 }
@@ -563,7 +563,7 @@ fn apc_is_stripped_unless_passthrough() {
 fn ghosttys_bash_integration_injects_through_the_wsl_bootstrap() {
     // No WSL distro is needed to exercise the *bash* half of the WSL story:
     // Git for Windows ships a real bash and a POSIX sh, so the bootstrap
-    // (`giest-wsl.sh`) and upstream's `ghostty.bash` run exactly as they would
+    // (`geist-wsl.sh`) and upstream's `ghostty.bash` run exactly as they would
     // inside WSL — only the path translation WSLENV's `/p` does is replaced by
     // spelling the MSYS path directly.
     let sh = r"C:\Program Files\Git\usr\bin\sh.exe";
@@ -571,13 +571,13 @@ fn ghosttys_bash_integration_injects_through_the_wsl_bootstrap() {
         eprintln!("skipping: Git for Windows not installed");
         return;
     }
-    let root = std::env::temp_dir().join(format!("giest-si-bash-{}", std::process::id()));
-    let dir = giest::profiles::extract_shell_integration(&root).expect("extract scripts");
+    let root = std::env::temp_dir().join(format!("geist-si-bash-{}", std::process::id()));
+    let dir = geist::profiles::extract_shell_integration(&root).expect("extract scripts");
     let win = dir.to_string_lossy().replace('\\', "/");
     let msys = format!("/{}{}", win[..1].to_ascii_lowercase(), &win[2..]);
     let env = vec![
         ("SHELL".to_string(), "/usr/bin/bash".to_string()),
-        ("GIEST_SHELL_INTEGRATION_DIR".to_string(), msys),
+        ("geist_SHELL_INTEGRATION_DIR".to_string(), msys),
         (
             "GHOSTTY_SHELL_FEATURES".to_string(),
             "cursor:blink,title".to_string(),
@@ -585,13 +585,13 @@ fn ghosttys_bash_integration_injects_through_the_wsl_bootstrap() {
     ];
     let args = vec![
         "-c".to_string(),
-        r#"exec /bin/sh "$GIEST_SHELL_INTEGRATION_DIR/giest-wsl.sh""#.to_string(),
+        r#"exec /bin/sh "$geist_SHELL_INTEGRATION_DIR/geist-wsl.sh""#.to_string(),
     ];
     select_mode();
     let mut pty = Pty::spawn(sh, &args, None, &env, 80, 24, || {}).expect("spawn sh");
     let steps: [(&[u8], &[u8]); 2] = [
-        (b"\x1b]133;A", b"echo giest-bash-ok; false\r"),
-        (b"giest-bash-ok\r\n", b"exit\r"),
+        (b"\x1b]133;A", b"echo geist-bash-ok; false\r"),
+        (b"geist-bash-ok\r\n", b"exit\r"),
     ];
     let mut out = Vec::new();
     let started = Instant::now();

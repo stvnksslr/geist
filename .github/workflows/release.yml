@@ -98,10 +98,10 @@ jobs:
         shell: pwsh
         run: |
           $ver  = "${env:GITHUB_REF_NAME}".TrimStart('v')
-          $stem = "giest-$ver-${{ matrix.target }}"
+          $stem = "geist-$ver-${{ matrix.target }}"
           New-Item -ItemType Directory -Force dist | Out-Null
-          Copy-Item "target/${{ matrix.target }}/release/giest.exe" "dist/$stem.exe"
-          Compress-Archive -Path "target/${{ matrix.target }}/release/giest.exe" -DestinationPath "dist/$stem.zip" -Force
+          Copy-Item "target/${{ matrix.target }}/release/geist.exe" "dist/$stem.exe"
+          Compress-Archive -Path "target/${{ matrix.target }}/release/geist.exe" -DestinationPath "dist/$stem.zip" -Force
           $hash = (Get-FileHash "dist/$stem.zip" -Algorithm SHA256).Hash.ToLower()
           "$hash  $stem.zip" | Out-File -Encoding ascii "dist/$stem.zip.sha256"
 

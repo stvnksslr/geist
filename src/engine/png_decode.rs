@@ -82,7 +82,7 @@ thread_local! {
     static INSTALLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// Install giest's PNG decoder on the current thread, once.
+/// Install geist's PNG decoder on the current thread, once.
 pub fn install() {
     INSTALLED.with(|done| {
         if done.get() {

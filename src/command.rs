@@ -127,7 +127,7 @@ pub enum Scope {
 
 impl Action {
     /// This action's scope, **ported verbatim** from `Binding.zig`'s `scope()`
-    /// rather than judged by what giest's implementation happens to touch.
+    /// rather than judged by what geist's implementation happens to touch.
     ///
     /// Several rows are counter-intuitive and are upstream's on purpose:
     /// `new_tab` / `goto_tab` / `toggle_readonly` are **surface**-scoped
@@ -158,9 +158,9 @@ impl Action {
         }
     }
 
-    /// Whether `all:` can broadcast this action to every pane in giest.
+    /// Whether `all:` can broadcast this action to every pane in geist.
     ///
-    /// A subset of [`Scope::Surface`], and the split is **giest plumbing, not
+    /// A subset of [`Scope::Surface`], and the split is **geist plumbing, not
     /// Ghostty semantics**: these are the actions whose execution touches only
     /// the focused *session*, so running them per pane is a loop over the same
     /// call. The window-structural remainder (new/close/goto tab, splits, focus
@@ -304,7 +304,7 @@ fn adjust_from_name(s: &str) -> Option<crate::engine::SelectionAdjust> {
 /// closure that produced it (the deferred-intent pattern used throughout `app.rs`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
-    /// Bind-able and does nothing, for a Ghostty action giest has no work to do
+    /// Bind-able and does nothing, for a Ghostty action geist has no work to do
     /// for. Rejecting the name would log an "unknown action" the user cannot act
     /// on; mapping it onto some *other* action would silently do the wrong
     /// thing, which is exactly what `equalize_splits` used to do.
@@ -404,7 +404,7 @@ pub enum Action {
     Undo,
     /// Re-apply the change `Undo` took back. Ghostty `redo`.
     Redo,
-    /// Close every window, quitting giest. Ghostty `close_all_windows` / `quit`.
+    /// Close every window, quitting geist. Ghostty `close_all_windows` / `quit`.
     Quit,
     /// Open the inline tab-rename box. Ghostty `prompt_tab_title`.
     PromptTabTitle,
@@ -432,7 +432,7 @@ pub enum Action {
     SplitLeft,
     /// Ghostty `new_split:up`.
     SplitUp,
-    /// The About dialog (giest-specific; macOS Ghostty has it in the app menu).
+    /// The About dialog (geist-specific; macOS Ghostty has it in the app menu).
     ShowAbout,
     /// Zoom the focused split to fill the tab, hiding the other panes; toggles
     /// (Ghostty `toggle_split_zoom`).
@@ -505,7 +505,7 @@ pub enum Action {
     ScrollToRow(u32),
     OpenConfig,
     /// The profiles page (`profilepage`): show/hide, rename, reorder and add
-    /// shells, and pick the default. giest-only — Ghostty has no equivalent.
+    /// shells, and pick the default. geist-only — Ghostty has no equivalent.
     ShowProfiles,
     ReloadConfig,
 }
@@ -582,7 +582,7 @@ impl Action {
             Action::SplitDown => "Split Down",
             Action::SplitLeft => "Split Left",
             Action::SplitUp => "Split Up",
-            Action::ShowAbout => "About giest",
+            Action::ShowAbout => "About geist",
             Action::ToggleSplitZoom => "Toggle Split Zoom",
             Action::ResizeSplit(SplitDir::Up, _) => "Resize Split: Up",
             Action::ResizeSplit(SplitDir::Down, _) => "Resize Split: Down",
@@ -703,7 +703,7 @@ impl Action {
             Action::SplitDown => "Ctrl+Shift+E",
             Action::ToggleSplitZoom => "Ctrl+Shift+Enter",
             // Upstream's non-macOS defaults are super+ctrl+shift+arrow, which
-            // giest cannot see (egui reports no Win-key modifier), and it has no
+            // geist cannot see (egui reports no Win-key modifier), and it has no
             // non-macOS default for equalize_splits at all.
             Action::ResizeSplit(..) | Action::EqualizeSplits => return None,
             Action::ClosePane => "Ctrl+Shift+W",
@@ -729,7 +729,7 @@ impl Action {
             | Action::GotoTab(_)
             | Action::ScrollToRow(_)
             // Deliberately unbound: Windows already delivers Alt+F4 as WM_CLOSE,
-            // which giest answers with the close-confirmation flow. See keybind.rs.
+            // which geist answers with the close-confirmation flow. See keybind.rs.
             | Action::CloseWindow
             | Action::CloseTab
             | Action::CloseOtherTabs
@@ -874,7 +874,7 @@ impl Action {
         }
         let s = s.trim();
         if let Some(rest) = s.strip_prefix("goto_tab:") {
-            // Ghostty's goto_tab is 1-based; giest indexes tabs from 0.
+            // Ghostty's goto_tab is 1-based; geist indexes tabs from 0.
             let n: u16 = rest.trim().parse().ok()?;
             return n
                 .checked_sub(1)
@@ -893,7 +893,7 @@ impl Action {
             return adjust_from_name(rest.trim()).map(Action::AdjustSelection);
         }
         if let Some(rest) = s.strip_prefix("set_font_size:") {
-            // Ghostty takes a float; giest's font size is whole points, so round
+            // Ghostty takes a float; geist's font size is whole points, so round
             // rather than reject — `set_font_size:13.5` asking for 14 is closer
             // to the intent than doing nothing.
             return rest
@@ -928,7 +928,7 @@ impl Action {
             return Some(Action::JumpToPrompt(n));
         }
         if let Some(rest) = s.strip_prefix("new_split:") {
-            // giest splits the focused pane; left/right share an axis, up/down too.
+            // geist splits the focused pane; left/right share an axis, up/down too.
             return match rest.trim() {
                 "right" => Some(Action::SplitRight),
                 "left" => Some(Action::SplitLeft),
@@ -1046,7 +1046,7 @@ impl Action {
                 };
                 Action::WriteFile(scope, crate::writefile::WriteAction::from_name(param)?)
             }
-            // `toggle_search` is giest's own: one key that opens *and* closes.
+            // `toggle_search` is geist's own: one key that opens *and* closes.
             // Upstream splits that into `start_search` / `end_search`, and both
             // are bindable here too — the toggle predates them and stays the
             // default because a single Ctrl+Shift+F is what Windows users reach
@@ -1440,7 +1440,7 @@ mod tests {
         );
         assert_eq!(Action::from_name("navigate_search:sideways"), None);
         // `search` takes a payload upstream, so the bare word is *not* an alias
-        // for giest's toggle — accepting it would make a transferred config do
+        // for geist's toggle — accepting it would make a transferred config do
         // something other than what it says.
         assert_eq!(Action::from_name("search"), None);
         assert_eq!(

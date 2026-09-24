@@ -1909,7 +1909,7 @@ pub fn create_winit_window_attributes(
         })
         .with_active(active.unwrap_or(true));
 
-    // ---- giest patch (the ONLY change from upstream egui-winit 0.34.3) ----
+    // ---- geist patch (the ONLY change from upstream egui-winit 0.34.3) ----
     // A transparent window on Windows also needs `WS_EX_NOREDIRECTIONBITMAP`.
     //
     // wgpu presents a transparent surface through DirectComposition, and builds
@@ -1922,7 +1922,7 @@ pub fn create_winit_window_attributes(
     // window creation, so it cannot be added later from the app.
     //
     // Upstream sets `.with_transparent(...)` (above) but never this. Everything
-    // else in this vendored crate is untouched — see giest's CLAUDE.md.
+    // else in this vendored crate is untouched — see geist's CLAUDE.md.
     #[cfg(target_os = "windows")]
     {
         use winit::platform::windows::WindowAttributesExtWindows as _;

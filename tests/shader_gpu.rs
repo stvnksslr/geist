@@ -8,7 +8,7 @@
 //! so it needs a real device.
 //!
 //! This is the gate that decides whether the uniform block in
-//! [`giest::shader::PREFIX`] is shippable at all. It skips cleanly when no GPU
+//! [`geist::shader::PREFIX`] is shippable at all. It skips cleanly when no GPU
 //! adapter is available (headless CI), like the render bench.
 
 use eframe::wgpu;
@@ -22,7 +22,7 @@ fn headless_device() -> Option<(wgpu::Device, wgpu::Queue)> {
     }))
     .ok()?;
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-        label: Some("giest-shader-test-device"),
+        label: Some("geist-shader-test-device"),
         ..Default::default()
     }))
     .ok()?;
@@ -37,7 +37,7 @@ fn headless_device() -> Option<(wgpu::Device, wgpu::Queue)> {
 /// the whole point of this file. The pipeline is built separately below, where
 /// a complaint about the *vertex* stage isn't a shader problem.
 fn build_module(device: &wgpu::Device, glsl: &str) -> Result<(), String> {
-    let wgsl = giest::shader::compile(glsl).map_err(|e| format!("translation failed: {e:#}"))?;
+    let wgsl = geist::shader::compile(glsl).map_err(|e| format!("translation failed: {e:#}"))?;
 
     // wgpu reports shader-creation errors through an error scope, not a Result.
     let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);

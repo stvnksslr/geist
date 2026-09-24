@@ -1,5 +1,5 @@
 # Fetch the out-of-band ConPTY (conpty.dll + OpenConsole.exe) from Microsoft's
-# NuGet package and place it next to giest.exe (and the test binaries).
+# NuGet package and place it next to geist.exe (and the test binaries).
 #
 # Why: the inbox conhost (10.0.26100 even on Windows 11 25H2) re-renders shell
 # output and strips APC, which is what kitty graphics uses. The rewritten
@@ -17,7 +17,7 @@ param(
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 $arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "x64" }
-$work = Join-Path $env:TEMP "giest-conpty-$Version"
+$work = Join-Path $env:TEMP "geist-conpty-$Version"
 if (-not (Test-Path "$work\x")) {
     New-Item -ItemType Directory -Force $work | Out-Null
     $url = "https://api.nuget.org/v3-flatcontainer/microsoft.windows.console.conpty/$Version/microsoft.windows.console.conpty.$Version.nupkg"

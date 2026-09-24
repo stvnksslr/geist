@@ -1,4 +1,4 @@
-//! Embeds the Win32 icon resource into the `giest` executable.
+//! Embeds the Win32 icon resource into the `geist` executable.
 //!
 //! This is the *other* half of the icon story from `src/icon.rs`. That module
 //! sets the icon on a live window (taskbar button, Alt-Tab); this one writes an
@@ -30,13 +30,13 @@ fn main() {
         res.set_icon("assets/icon.ico");
         if let Err(e) = res.compile() {
             println!(
-                "cargo:warning=giest: could not embed the icon resource ({e}). The exe will build and run, but Explorer and the taskbar will show the default icon. This usually means rc.exe (Windows SDK) is not discoverable."
+                "cargo:warning=geist: could not embed the icon resource ({e}). The exe will build and run, but Explorer and the taskbar will show the default icon. This usually means rc.exe (Windows SDK) is not discoverable."
             );
         }
     }
 }
 
-/// Expose the short commit hash as `GIEST_GIT_COMMIT` for the About dialog.
+/// Expose the short commit hash as `geist_GIT_COMMIT` for the About dialog.
 ///
 /// Re-run triggers are the HEAD file *and* the ref it points at, resolved via
 /// `rev-parse --git-path` (which also works in a worktree, where `.git` is a
@@ -53,7 +53,7 @@ fn git_commit() {
             .filter(|s| !s.is_empty())
     };
     let commit = run(&["rev-parse", "--short=10", "HEAD"]).unwrap_or_else(|| "unknown".into());
-    println!("cargo:rustc-env=GIEST_GIT_COMMIT={commit}");
+    println!("cargo:rustc-env=geist_GIT_COMMIT={commit}");
     if let Some(head) = run(&["rev-parse", "--git-path", "HEAD"]) {
         println!("cargo:rerun-if-changed={head}");
     }

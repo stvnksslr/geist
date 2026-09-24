@@ -2,7 +2,7 @@
 //! (OSC 5522) — serviced through libghostty-vt's clipboard callbacks.
 //!
 //! The engine parses both protocols (base64, chunking, MIME lists, passwords,
-//! the 5522 status replies) and hands giest one normalized request per read or
+//! the 5522 status replies) and hands geist one normalized request per read or
 //! write. This module is the *policy* half: `clipboard-read` / `clipboard-write`
 //! / `clipboard-write-limit-bytes`, which MIME types Windows can serve, and the
 //! deferral that makes `ask` possible.
@@ -13,7 +13,7 @@
 //! callback returns, and a callback that does not answer is taken as a refusal
 //! (OSC 52 gets an empty clipboard, 5522 gets `EPERM`) which the engine writes
 //! to the PTY *immediately*. Upstream's advice is to block on a modal — which
-//! giest cannot do, since the modal is drawn by the very thread that would be
+//! geist cannot do, since the modal is drawn by the very thread that would be
 //! blocked. So for `ask`:
 //!
 //! 1. the callback records the request and where the response buffer ended
@@ -35,7 +35,7 @@ use base64::engine::general_purpose::STANDARD;
 
 use crate::config::ClipboardAccess;
 
-/// The MIME type giest offers and serves: Windows' `CF_UNICODETEXT` via arboard.
+/// The MIME type geist offers and serves: Windows' `CF_UNICODETEXT` via arboard.
 pub const TEXT_PLAIN: &str = "text/plain";
 
 /// Whether `mime` names plain text in any spelling a program is likely to use.
@@ -224,7 +224,7 @@ pub trait ClipboardIo {
     fn write_text(&mut self, text: &str);
 }
 
-/// The Windows clipboard, via arboard. Best-effort, like every other giest
+/// The Windows clipboard, via arboard. Best-effort, like every other geist
 /// clipboard path: a locked clipboard reads as empty and a failed write is
 /// dropped.
 pub struct SystemClipboard;

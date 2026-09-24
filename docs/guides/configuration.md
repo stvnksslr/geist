@@ -1,7 +1,7 @@
 # Configuration
 
-giest reads `%APPDATA%\giest\config` on startup. Override the path with the
-`GIEST_CONFIG` environment variable. The file uses **Ghostty's config format**,
+geist reads `%APPDATA%\geist\config` on startup. Override the path with the
+`geist_CONFIG` environment variable. The file uses **Ghostty's config format**,
 so keys are transposable with a real Ghostty config:
 
 - `key = value`, one per line, **kebab-case** keys.
@@ -65,12 +65,12 @@ palette = 8=#666a73
 | `foreground` / `background` | `#rrggbb` | Default fg/bg, applied via `engine.apply_theme`. |
 | `cursor-color` | `#rrggbb` | Cursor color; omit to defer to the program/engine default. |
 | `window-padding-x` / `window-padding-y` | float | Per-pane inset in logical points (wraps every split, not just the window edge). Defaults to Ghostty's `2`; the scrollbar overlays rather than reserving space, so the padding doesn't have to make room for it. |
-| `working-directory` | path | Where new terminals start when nothing is inherited: an absolute path, `~/...`, `home`, or `inherit` (the directory giest itself was launched from — the default). |
+| `working-directory` | path | Where new terminals start when nothing is inherited: an absolute path, `~/...`, `home`, or `inherit` (the directory geist itself was launched from — the default). |
 | `window-new-tab-position` | enum | `current` (default) inserts the new tab after the focused one; `end` appends. |
 | `window-padding-balance` | enum | Share out the leftover space the grid can't fill: `false` (default) leaves it all at the right/bottom, `true` balances but caps the top, `equal` balances every side. |
 | `split-divider-color` | color | The hairline between splits (and the other chrome hairlines); unset derives one from the theme. |
-| `window-theme` | enum | Light/dark mode for the **chrome** (tab strip, command palette, overlays, dialogs): `auto` (default) derives it from `background`, so the chrome matches your terminal; `dark`/`light` force it. giest never follows the OS theme — that is what used to render a light tab strip over a dark terminal. Colors and accents come from `foreground`/`background`/`palette`, so a theme change restyles the chrome too. |
-| `text-gamma` | float (0.5–3.0) | Anti-aliasing gamma passed to the shader; >1 thickens light-on-dark text. **giest-specific** — Ghostty has no equivalent. |
+| `window-theme` | enum | Light/dark mode for the **chrome** (tab strip, command palette, overlays, dialogs): `auto` (default) derives it from `background`, so the chrome matches your terminal; `dark`/`light` force it. geist never follows the OS theme — that is what used to render a light tab strip over a dark terminal. Colors and accents come from `foreground`/`background`/`palette`, so a theme change restyles the chrome too. |
+| `text-gamma` | float (0.5–3.0) | Anti-aliasing gamma passed to the shader; >1 thickens light-on-dark text. **geist-specific** — Ghostty has no equivalent. |
 | `scrollback-limit` | int | Scrollback retained per pane, in **bytes** — the same unit as Ghostty's own key, so a Ghostty config transposes exactly. (Earlier versions of this guide called it a line count; that was wrong.) The engine always keeps at least one page, so a very small value buys nothing. The default, `10000`, is Ghostty's. |
 | `selection-background` | `#rrggbb` | Background of selected cells. |
 | `selection-foreground` | `#rrggbb` | Text color over a selection (optional; omit to keep each cell's own fg). |
@@ -109,12 +109,12 @@ than hanging. Includes are re-read on config reload like everything else.
 | --- | --- | --- |
 | `image-storage-limit` | int (default `320000000`) | Bytes of image data retained per terminal screen. **Zero disables the image protocols and deletes everything stored.** Per screen, so the effective budget per pane is double. |
 
-| `conpty-passthrough` | `auto` \| `true` \| `false` (default `auto`) | **giest-specific.** Which ConPTY runs the shell. `auto`/`true` use a `conpty.dll` + `OpenConsole.exe` placed next to `giest.exe` when present; `false` always uses the one built into Windows. Restart to apply. |
+| `conpty-passthrough` | `auto` \| `true` \| `false` (default `auto`) | **geist-specific.** Which ConPTY runs the shell. `auto`/`true` use a `conpty.dll` + `OpenConsole.exe` placed next to `geist.exe` when present; `false` always uses the one built into Windows. Restart to apply. |
 
 ⚠️ **Inline images need the newer ConPTY.** The ConPTY built into Windows re-renders the shell's
 output and drops the APC escape sequences the kitty protocol uses, so no image command reaches the
 terminal. The newer ConPTY that Windows Terminal ships forwards them. Run
-`pwsh scripts/fetch-conpty.ps1` to put it next to `giest.exe` (leave `conpty-passthrough` at
+`pwsh scripts/fetch-conpty.ps1` to put it next to `geist.exe` (leave `conpty-passthrough` at
 `auto`), and images work. Animations advance only when the program switches frames itself
 (autoplay is not supported yet) — see GAP.md.
 
@@ -130,13 +130,13 @@ Secondary windows share the first window's glyph atlas, so **font size is applic
 zoom in one window resizes them all (Ghostty's is per-surface). They also don't get the DWM acrylic
 backdrop or the taskbar attention flash, which need a window handle only the first window has.
 
-`close_window` has no default binding: Windows already delivers Alt+F4 to the window, which giest
+`close_window` has no default binding: Windows already delivers Alt+F4 to the window, which geist
 answers with the close confirmation. Bind it explicitly with `keybind = alt+f4=close_window` if you
 want the action as well.
 
 ### Box drawing, blocks, braille and mosaics
 
-giest **draws** these characters itself rather than taking them from the font, like Ghostty:
+geist **draws** these characters itself rather than taking them from the font, like Ghostty:
 
 - U+2500–257F box drawing, complete: the intersections `─│┌┐└┘├┬┼╋═║╔╗…`, the dashed lines, the
   rounded corners `╭╮╯╰` and the diagonals `╱╲╳`
@@ -181,7 +181,7 @@ with Ghostty rather than with a second opinion computed from the drawn grid:
   window selects whole instead of one screen row of itself — and stops at a shell prompt.
 - **Ctrl+triple-click** selects the *output* of the command that produced that row, delimited by its
   OSC 133 marks (so it needs a shell that marks its prompts: PowerShell and cmd do, via the hooks
-  giest injects).
+  geist injects).
 
 | Key | Type | Notes |
 | --- | --- | --- |
@@ -206,7 +206,7 @@ as one line rather than as the rows it was displayed on.
   without letting go.
 
 Not yet matched: upstream includes the cell under the pointer only once you cross 60% of its width,
-where giest includes it as soon as the pointer is over it — so a drag can grab one more cell than
+where geist includes it as soon as the pointer is over it — so a drag can grab one more cell than
 Ghostty would. Double-click-*drag* also doesn't snap to whole words yet.
 
 ### Fonts, fallback chains and synthetic styles
@@ -223,7 +223,7 @@ Ghostty would. Double-click-*drag* also doesn't snap to whole words yet.
 | `font-synthetic-style` | bool or list | Whether a missing style may be **synthesized** from the face you have: bold by thickening it, italic by slanting it 12°. `false` disables all three; a list starts from the defaults, so `no-bold` disables only bold — note that it does **not** disable `bold-italic`, which you must turn off by name. |
 
 Synthesis only happens when your family genuinely lacks the style: if the font has a real bold face,
-it is used as-is. For bold-italic with no real face, giest slants a real bold if there is one, else
+it is used as-is. For bold-italic with no real face, geist slants a real bold if there is one, else
 thickens a real italic, else does both to the regular — upstream's preference order.
 
 Font selection is applied **at startup**; changing any of these keys needs a restart (a config
@@ -271,17 +271,17 @@ The axis id is always exactly four characters. Whitespace around either side of 
 `font-feature` takes, and writing `font-variation = wght=350, wdth=90` is rejected here because a
 real Ghostty config rejects it too. An empty value clears that slot.
 
-Two things surprise people, and both are upstream's behaviour rather than giest's:
+Two things surprise people, and both are upstream's behaviour rather than geist's:
 
 - **The style slots do not inherit.** `font-variation` applies to the regular face only. If you want
   a weight on bold too you must also write `font-variation-bold`; setting only `font-variation` will
   leave the bold face at the font's default weight.
 - **An axis a font doesn't have is ignored, and so is an out-of-range value.** `wght=800` on a font
-  that stops at 700 does nothing — it is not clamped. giest logs a line when the *axis* is unknown,
+  that stops at 700 does nothing — it is not clamped. geist logs a line when the *axis* is unknown,
   since a typo in the tag is otherwise indistinguishable from a font that lacks it; an out-of-range
   value cannot be detected and is silent.
 
-**The bundled font is not variable.** giest ships a static JetBrains Mono, so `font-variation` does
+**The bundled font is not variable.** geist ships a static JetBrains Mono, so `font-variation` does
 nothing until you point `font-family` at a variable font of your own. Windows ships two you can try
 it against: `Bahnschrift` (`wght`, `wdth`) and `Segoe UI Variable` (`wght`, `opsz`) — neither is
 monospaced, so they are for confirming the feature works rather than for daily use.
@@ -315,7 +315,7 @@ not affected"), reached here by construction rather than by an exception.
 
 ### Quick terminal (dropdown) and global keybinds
 
-A **global** keybind fires even when giest isn't the focused application, which is what makes the
+A **global** keybind fires even when geist isn't the focused application, which is what makes the
 dropdown terminal usable:
 
 ```
@@ -329,7 +329,7 @@ keybind = global:ctrl+alt+g=toggle_quick_terminal
 | `quick-terminal-autohide` | bool (default `false`) | Hide the quick terminal when it loses focus. `false` is Ghostty's own non-macOS default. |
 | `quick-terminal-screen` | enum | Recognized; only `main` is honored. |
 
-The quick terminal is an ordinary giest window in every respect except its chrome — tabs, splits,
+The quick terminal is an ordinary geist window in every respect except its chrome — tabs, splits,
 search and the palette all work inside it — but it has no titlebar, sits above other windows, and
 takes no taskbar button. Hiding it destroys the native window while **leaving its shells running**,
 so it comes back exactly as you left it.
@@ -340,7 +340,7 @@ Notes on global binds:
   binding exists. A matched chord is **swallowed** — it does not also reach the app you were typing
   into, which is the point.
 - The match is exact: `global:ctrl+grave` does not fire on Ctrl+Shift+`.
-- A global binding is *not* also an in-app binding. The hook fires whether or not giest is focused,
+- A global binding is *not* also an in-app binding. The hook fires whether or not geist is focused,
   so binding it twice would run the action twice.
 - Any action can be bound globally, not just `toggle_quick_terminal`; a window action runs against
   the window you used last.
@@ -362,7 +362,7 @@ it:
 keybind = unconsumed:ctrl+alt+r=reload_config
 ```
 
-Flags stack in any order (`performable:unconsumed:ctrl+k=…`). One exception worth knowing: giest
+Flags stack in any order (`performable:unconsumed:ctrl+k=…`). One exception worth knowing: geist
 reserves whole modifier namespaces (`ctrl+shift+*`, `ctrl+alt+arrows`, `alt+digit`, `ctrl+=/-/0`)
 from the shell, and that still wins — `unconsumed:` on a key in one of those does not deliver it.
 
@@ -379,7 +379,7 @@ keybind = all:ctrl+alt+l=clear_screen
 - Actions that belong to the app rather than a pane (`new_window`, `quit`, `reload_config`) run
   **once**, as they do upstream.
 - Window-structural actions (`new_tab`, `close_tab`, `goto_tab`, splits, focus moves) also run once
-  here — giest can't source them to a specific pane yet.
+  here — geist can't source them to a specific pane yet.
 - `all:` always consumes the key and always counts as performed, so it overrides `unconsumed:` and
   `performable:` (upstream does the same).
 - It can't be used with key sequences, but it *is* allowed inside a key table.
@@ -424,8 +424,8 @@ keybind = copy/catch_all=ignore
 
 ### Saving and restoring the layout
 
-`window-save-state = always` makes giest write its layout to `%APPDATA%\giest\state` (override the
-path with `$GIEST_STATE`) when the last window closes, and rebuild it at the next launch: every
+`window-save-state = always` makes geist write its layout to `%APPDATA%\geist\state` (override the
+path with `$geist_STATE`) when the last window closes, and rebuild it at the next launch: every
 window, its tabs in order and which one was active, each tab's nested split tree, which pane had
 focus, a renamed tab's name, and each pane's working directory.
 
@@ -442,7 +442,7 @@ The state file is **consumed on read**: it describes one specific exit, so a lat
 got to write its own layout resurrects nothing. A pane whose saved directory no longer exists
 starts in the default one, and a shell that fails to spawn drops out of its split rather than
 taking the tab with it. The file is plain text, one record per line, and anything unparseable is
-skipped — a bad state file can never stop giest starting.
+skipped — a bad state file can never stop geist starting.
 
 ### The terminal inspector
 
@@ -471,12 +471,12 @@ scrolled past. `Clear` empties both logs; the sequence numbers keep counting, so
 never confused for each other.
 
 The inspector is **per pane**, like upstream's per-surface one: each pane has its own logs, and
-focusing another shows that pane's inspector or none. It is also the one overlay in giest that does
+focusing another shows that pane's inspector or none. It is also the one overlay in geist that does
 **not** take the keyboard — a keyboard log you cannot type into would be useless — so the terminal
 underneath keeps working while it is open. Recording costs nothing while it is closed: the buffers
 only exist once you open one.
 
-What it does not have, against upstream: **parsed** VT actions (giest sees the byte stream, not
+What it does not have, against upstream: **parsed** VT actions (geist sees the byte stream, not
 libghostty's parse of it), the DEC mode table, per-cell and pagelist browsing, renderer statistics,
 and detachable/dockable sub-windows.
 
@@ -493,7 +493,7 @@ actions are all bindable:
 | `navigate_search:next` / `:previous` | Step through matches. `performable:`: nothing to navigate when no search is open. |
 | `search_selection` | Opens the bar with the current selection as the needle. `performable:` on there being a selection. |
 | `search:<text>` | Set the needle directly. An **empty** payload stops the search *without* hiding the bar — that is upstream's split, and `end_search` is the one that hides it. |
-| `toggle_search` | giest's own: one key that both opens and closes. It predates the pair above and stays the `Ctrl+Shift+F` default, because a single key is what Windows users reach for. There is no bare `search` alias — upstream's `search` takes a payload, so accepting the bare word for a toggle would make a transferred config quietly do the wrong thing. |
+| `toggle_search` | geist's own: one key that both opens and closes. It predates the pair above and stays the `Ctrl+Shift+F` default, because a single key is what Windows users reach for. There is no bare `search` alias — upstream's `search` takes a payload, so accepting the bare word for a toggle would make a transferred config quietly do the wrong thing. |
 
 **`Esc` is bound to `end_search`, and it is `performable:`** — which is the only reason that binding
 is safe. With a search open the key closes the bar; with none open the action reports that it did
@@ -537,7 +537,7 @@ is upstream's documented meaning rather than an edge case; a very large value ke
 around indefinitely, at the cost of an unbounded stack of live shells.
 
 Both bindings are `performable:`, so with nothing to undo the key is the shell's rather than being
-swallowed. Undo never quits giest: undoing the creation of the *only* remaining window would have
+swallowed. Undo never quits geist: undoing the creation of the *only* remaining window would have
 to close it, so it declines instead.
 
 Two divergences from upstream worth knowing:
@@ -566,7 +566,7 @@ Beyond the defaults, these Ghostty actions are available to `keybind`:
 | `undo` / `redo` | Take back (or re-apply) the last structural change — see [Undo and redo](#undo-and-redo). Bound to `ctrl+shift+z` / `ctrl+shift+y`, both `performable:`. |
 | `start_search` / `end_search` / `navigate_search:<dir>` / `search_selection` / `search:<text>` | See [Search](#search). |
 | `inspector:toggle` / `:show` / `:hide` | The debug panel — see [The terminal inspector](#the-terminal-inspector). The parameter is required; there is no default, so a typo fails to bind rather than picking a mode. |
-| `equalize_splits` | Accepted as a no-op: giest's splits are always 50/50, so there is nothing to equalize. It binds without error so a Ghostty config transfers cleanly. |
+| `equalize_splits` | Accepted as a no-op: geist's splits are always 50/50, so there is nothing to equalize. It binds without error so a Ghostty config transfers cleanly. |
 | `adjust_selection:<dir>` | Move the selection's free end. All ten upstream directions: `left`, `right`, `up`, `down`, `page_up`, `page_down`, `home`, `end`, `beginning_of_line`, `end_of_line`. Bound to shift+arrows by default (as `performable:`). |
 
 These send text or set titles. The payload keeps everything after the first `=`, including further
@@ -604,7 +604,7 @@ keybind = ctrl+shift+b=toggle_background_opacity
 ```
 
 Ghostty documents `toggle_maximize` as having no effect on macOS, and `toggle_window_float_on_top`
-and `toggle_background_opacity` as macOS-only. Windows supports all three, so giest implements them
+and `toggle_background_opacity` as macOS-only. Windows supports all three, so geist implements them
 regardless of which side upstream leaves them on.
 
 `toggle_background_opacity` flips between your configured `background-opacity` and fully opaque. It
@@ -725,13 +725,13 @@ Details worth knowing:
 
 | Key | Type | Notes |
 | --- | --- | --- |
-| `bell-features` | list | Comma-separated `system`, `audio`, `attention`, `title`, `border`, each negatable with `no-`. Defaults to `attention,title` — **note `border` is off**, so the pane-border flash giest used to show by default now needs `bell-features = border`. A bare `true`/`false` sets every feature. A feature list starts from the defaults, so a second `bell-features` line *replaces* the first, and one unknown name rejects the whole value. |
+| `bell-features` | list | Comma-separated `system`, `audio`, `attention`, `title`, `border`, each negatable with `no-`. Defaults to `attention,title` — **note `border` is off**, so the pane-border flash geist used to show by default now needs `bell-features = border`. A bare `true`/`false` sets every feature. A feature list starts from the defaults, so a second `bell-features` line *replaces* the first, and one unknown name rejects the whole value. |
 | `bell-audio-path` | path | Sound file for `audio` (`.wav`); relative paths resolve against the config directory. |
 | `bell-audio-volume` | float 0–1 | Parsed and stored but **not honored** — the Windows playback API has no volume parameter. |
 | `resize-overlay` | enum | `after-first` (default), `always`, `never`. `after-first` suppresses the overlay on a surface's very first sizing, so new tabs and splits don't flash a size. |
 | `resize-overlay-position` | enum | `center` (default), `top-left`, `top-center`, `top-right`, `bottom-left`, `bottom-center`, `bottom-right`. |
 | `resize-overlay-duration` | duration | Default `750ms`. Accepts Ghostty's additive grammar (`1h30m`, `2s500ms`) and a bare integer as milliseconds; clamped to 250 ms – 60 s. |
-| `confirm-close-surface` | enum | `true` (default) confirms only when a pane looks busy, `always` always confirms, `false` never does. Also guards the titlebar close / Alt+F4. "Busy" is inferred from OSC 133 prompt marks, which giest injects for PowerShell and cmd; a shell that doesn't mark its prompts can't be judged, so it always confirms. |
+| `confirm-close-surface` | enum | `true` (default) confirms only when a pane looks busy, `always` always confirms, `false` never does. Also guards the titlebar close / Alt+F4. "Busy" is inferred from OSC 133 prompt marks, which geist injects for PowerShell and cmd; a shell that doesn't mark its prompts can't be judged, so it always confirms. |
 | `window-save-state` | enum | `default` (default), `never`, `always`. With `always`, the windows/tabs/splits open at quit — including each pane's working directory, the focused pane and any renamed tab — are restored at the next launch. `default` means "restore when the OS asks", which is a macOS mechanism Windows has no equivalent of, so it behaves as `never`. See below. |
 | `osc-color-report-format` | enum | Precision of replies to `OSC 10/11/12 ; ?` colour queries: `16-bit` (default), `8-bit`, or `none` to not answer. |
 | `scrollbar` | enum | `system` (default) or `never`. See below. |
@@ -743,7 +743,7 @@ Details worth knowing:
 
 ### Progress on the taskbar button
 
-A program reports progress with ConEmu's `OSC 9;4`, and giest shows it on the **Windows taskbar
+A program reports progress with ConEmu's `OSC 9;4`, and geist shows it on the **Windows taskbar
 button** — the same place ConEmu (which invented the sequence) and Windows Terminal put it. Ghostty
 draws a bar inside its own window instead, which is the right answer on macOS and GTK and the wrong
 one here.
@@ -779,7 +779,7 @@ notify-on-command-finish-action = no-bell,notify
 notify-on-command-finish-after = 30s
 ```
 
-This needs the shell to mark its commands with OSC 133, which giest injects for its built-in
+This needs the shell to mark its commands with OSC 133, which geist injects for its built-in
 PowerShell and Command Prompt profiles. **WSL and custom shells get nothing** unless they emit the
 marks themselves, in which case they work automatically.
 
@@ -792,32 +792,32 @@ Two Windows-specific limits, neither of them fixable from the terminal side:
 - **The clock starts when you press Enter**, not when the shell begins executing. The OSC 133 `C`
   mark exists for exactly this, but emitting one needs a pre-execution hook: PowerShell has none
   short of overriding a PSReadLine key handler, which isn't always loaded, and cmd has none at all.
-  giest measures from the keystroke it sent instead, which is within microseconds of the real thing.
+  geist measures from the keystroke it sent instead, which is within microseconds of the real thing.
   A shell that *does* emit `C` overrides this automatically.
 
 ### Desktop notifications
 
-A program can raise a notification two ways, both of which giest accepts:
+A program can raise a notification two ways, both of which geist accepts:
 
 ```sh
 printf '\033]9;Build finished\033\\'                 # iTerm2 form: body only
 printf '\033]777;notify;make;done in 3m12s\033\\'    # rxvt form: title + body
 ```
 
-They surface as Windows toasts. giest uses the notification-area (`Shell_NotifyIcon`) balloon API
+They surface as Windows toasts. geist uses the notification-area (`Shell_NotifyIcon`) balloon API
 rather than the modern WinRT toast API, because the latter requires the app to register an
 *AppUserModelID* via a Start Menu shortcut — a permanent machine-wide side effect a portable
 terminal shouldn't create. Windows 10 and 11 render those balloons as toasts anyway.
 
 The consequence is one notification-area icon, added **lazily**: nothing appears in the tray until a
-program actually notifies, and it is removed when giest exits. Notifications never make a sound —
+program actually notifies, and it is removed when geist exits. Notifications never make a sound —
 that's the bell's job (`bell-features = system`), and doubling them up on anything that rings and
 notifies together would be worse than either alone. Long titles and bodies are truncated with an
 ellipsis (Windows' own limits are 63 and 255 characters, and it truncates silently otherwise).
 
 `OSC 9` is overloaded: ConEmu claims `9;1` through `9;9` for unrelated commands (progress bars, tab
 titles, working-directory reports), so a notification body that begins with one of those shapes is
-interpreted as the ConEmu command instead. giest follows Ghostty's disambiguation exactly, including
+interpreted as the ConEmu command instead. geist follows Ghostty's disambiguation exactly, including
 the one genuinely lossy case — `\033]9;5…` is ConEmu's "wait for input" and is swallowed, so a
 message starting with a bare `5` won't show. Start the body with anything else.
 
@@ -826,7 +826,7 @@ message starting with a bare `5` won't show. Start the body with anything else.
 `system` gives each pane an **auto-hiding overlay** scrollbar: invisible at rest, fading in whenever
 you scroll or when you hover a narrow band at the pane's right edge, and fading out about a second
 later. Drag the thumb to scroll; click above or below it to page. Ghostty has exactly these two
-values and no width/opacity/always knob, so neither does giest.
+values and no width/opacity/always knob, so neither does geist.
 
 It never reserves space — the grid keeps every column it would otherwise have. At the default
 `window-padding-x` of 2 that means the visible bar overlays the last column, which is what Ghostty's
@@ -838,7 +838,7 @@ also hides itself while a full-screen program is capturing the mouse, since ther
 point at.
 
 `keybind = <chord>=scroll_to_row:N` scrolls so absolute row `N` is at the top. Ghostty leaves this
-action unbound — it exists so the scrollbar can drive the terminal — but giest accepts it in a
+action unbound — it exists so the scrollbar can drive the terminal — but geist accepts it in a
 keybind too.
 
 Note the bell's `attention` feature flashes the taskbar button only while the window is unfocused,
@@ -856,7 +856,7 @@ and `title` prefixes the window title with 🔔 until you focus it again.
 
 **Why paste protection exists.** A shell runs a line the moment it sees a newline. Copy a
 "helpful" one-liner from a web page and the newline hiding at the end of it means the command runs
-before you can read what you pasted. With protection on, giest shows you the text first — control
+before you can read what you pasted. With protection on, geist shows you the text first — control
 characters made visible, so a payload can't disguise itself — and pastes nothing until you say
 Allow.
 
@@ -872,7 +872,7 @@ deliberate click.
 through an escape sequence. Setting is allowed by default, matching Ghostty, since the worst case
 is a clobbered clipboard. Reading defaults to `ask`, because it sends whatever you last copied —
 passwords included — to whatever is running in that pane, possibly on another machine. Set
-`clipboard-read = deny` to refuse silently, which is what giest did unconditionally before these
+`clipboard-read = deny` to refuse silently, which is what geist did unconditionally before these
 keys existed.
 
 ### Transparency and opacity
@@ -917,7 +917,7 @@ Two things to know:
   and Metal), but *not* shadertoy.com, which is Y-up. A shader ported straight from Shadertoy will
   have any vertical asymmetry mirrored — on Ghostty as well as here. Flip `uv.y` if it matters.
 
-`iChannelTime` is a `vec4` rather than a `float[4]`; it indexes the same way, and giest has no media
+`iChannelTime` is a `vec4` rather than a `float[4]`; it indexes the same way, and geist has no media
 channels for it to describe anyway.
 
 ### Background image
@@ -943,7 +943,7 @@ in Ghostty, and the image never double-darkens the window. All five keys reload 
 Windows has no blur-*radius* control — DWM's backdrops are fixed-strength — so unlike
 macOS/KDE, where Ghostty's number is a real Gaussian sigma, here the intensity only picks
 *which* backdrop to use. Blur also needs something to see through: it has no visible effect
-at `background-opacity = 1`, and giest warns at startup if you configure that combination.
+at `background-opacity = 1`, and geist warns at startup if you configure that combination.
 
 ## How a value reaches the screen
 

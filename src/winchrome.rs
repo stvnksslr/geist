@@ -7,7 +7,7 @@
 //!
 //! **Why titlebar colors go to every window on the thread.** Only the root
 //! viewport's `HWND` is reachable through eframe; a child viewport's is not.
-//! But the colors are app-global config, and every giest window is a top-level
+//! But the colors are app-global config, and every geist window is a top-level
 //! window owned by the UI thread — so `EnumThreadWindows` reaches all of them
 //! without needing a handle per window.
 
@@ -74,7 +74,7 @@ pub fn colorref(c: Rgb) -> u32 {
 // The window keeps its native frame (`WS_CAPTION | WS_THICKFRAME`, so Aero
 // snap, the drop shadow, Win11 rounded corners and the side/bottom resize
 // borders all stay native), but a `WM_NCCALCSIZE` subclass hands the caption
-// band to the client area — the Windows Terminal technique. giest then draws
+// band to the client area — the Windows Terminal technique. geist then draws
 // the tab strip at the very top, and `WM_NCHITTEST` answers for the pieces of
 // that strip Windows must still own:
 //
@@ -88,7 +88,7 @@ pub fn colorref(c: Rgb) -> u32 {
 // `ViewportCommand::StartDrag` / `Maximized`, which work for *every* viewport —
 // child windows have no reachable `HWND`, so the native side is written to
 // need nothing per window: the caption geometry is app-global (one font, one
-// strip height) and the subclass is installed on every giest top-level window
+// strip height) and the subclass is installed on every geist top-level window
 // on the UI thread, found with `EnumThreadWindows`, as the titlebar colours are.
 //
 // Because the buttons are non-client, the client never sees the pointer over
@@ -96,7 +96,7 @@ pub fn colorref(c: Rgb) -> u32 {
 // position, and each window asks "is it over my button?" with its own screen
 // rect ([`caption_hover`]).
 
-/// Which caption giest draws.
+/// Which caption geist draws.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CaptionStyle {
     /// The system caption (default).
@@ -143,7 +143,7 @@ impl CaptionHit {
     }
 }
 
-/// Caption-button width in DIPs (= egui points: giest never zooms egui) —
+/// Caption-button width in DIPs (= egui points: geist never zooms egui) —
 /// Windows 11's own caption buttons are 46 wide.
 pub const CAPTION_BUTTON_W: f32 = 46.0;
 
@@ -586,7 +586,7 @@ pub fn caption_hover(screen_rect_px: [f32; 4]) -> Option<(CaptionHit, bool)> {
     Some((hit, pressed))
 }
 
-/// Install the caption subclass on any giest window that lacks it. Cheap
+/// Install the caption subclass on any geist window that lacks it. Cheap
 /// enough to run every pass (one `EnumThreadWindows`); new child windows are
 /// picked up the pass after they appear.
 pub fn sync_caption() {
@@ -864,7 +864,7 @@ mod caption_imp {
         }
     }
 
-    fn is_giest_window(hwnd: HWND) -> bool {
+    fn is_geist_window(hwnd: HWND) -> bool {
         let mut buf = [0u16; 32];
         // SAFETY: valid buffer and length.
         let n = unsafe { GetClassNameW(hwnd, buf.as_mut_ptr(), buf.len() as i32) };
@@ -883,7 +883,7 @@ mod caption_imp {
 
     pub fn sync() {
         unsafe extern "system" fn each(hwnd: HWND, _lp: isize) -> i32 {
-            if !is_giest_window(hwnd) {
+            if !is_geist_window(hwnd) {
                 return 1;
             }
             let new = INSTALLED

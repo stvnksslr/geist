@@ -1,4 +1,4 @@
-# Build dependencies for the giest documentation site.
+# Build dependencies for the geist documentation site.
 #   pip install -r docs/requirements.txt
 #   mkdocs serve        # live preview at http://127.0.0.1:8000
 #   mkdocs build        # render static site into ./site

@@ -92,13 +92,13 @@ impl Profile {
     /// How to spawn this shell under `si` (Ghostty `shell-integration` +
     /// `shell-integration-features`).
     ///
-    /// - **pwsh / powershell / cmd** get giest's own startup hook: an OSC 7 cwd
+    /// - **pwsh / powershell / cmd** get geist's own startup hook: an OSC 7 cwd
     ///   report and OSC 133 D/A/B prompt marks, plus the `cursor` and `title`
     ///   features. Ghostty ships no scheme for these shells, so a forced
-    ///   `shell-integration = bash` (etc.) leaves them on giest's hook.
+    ///   `shell-integration = bash` (etc.) leaves them on geist's hook.
     /// - **WSL** (`wsl.exe`, no args) runs Ghostty's own bash/zsh/fish/elvish/
     ///   nushell scripts, vendored in `assets/shell-integration/` and extracted
-    ///   to `si_dir`: `giest-wsl.sh` picks the login shell (or the forced one)
+    ///   to `si_dir`: `geist-wsl.sh` picks the login shell (or the forced one)
     ///   and injects exactly as upstream's `shell_integration.zig` does.
     /// - `shell-integration = none` injects **nothing** anywhere.
     ///
@@ -156,10 +156,10 @@ impl Profile {
                 env.retain(|(k, _)| !k.eq_ignore_ascii_case("WSLENV"));
                 env.push(("WSLENV".into(), wslenv(existing.as_deref())));
                 env.push((
-                    "GIEST_SHELL_INTEGRATION_DIR".into(),
+                    "geist_SHELL_INTEGRATION_DIR".into(),
                     dir.to_string_lossy().into_owned(),
                 ));
-                env.push(("GIEST_SHELL_INTEGRATION".into(), si.mode.as_str().into()));
+                env.push(("geist_SHELL_INTEGRATION".into(), si.mode.as_str().into()));
                 if let Some(f) = si.features.wsl_env_value(si.cursor_blink) {
                     env.push(("GHOSTTY_SHELL_FEATURES".into(), f));
                 }
@@ -193,7 +193,7 @@ pub struct Launch {
 /// Ghostty `shell-integration`: which injection scheme to use.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ShellIntegration {
-    /// Inject nothing — not even giest's pwsh/cmd prompt hooks.
+    /// Inject nothing — not even geist's pwsh/cmd prompt hooks.
     None,
     #[default]
     Detect,
@@ -360,10 +360,10 @@ impl Integration {
 
 /// The `sh -c` script `wsl.exe` runs. The dir arrives already translated to a
 /// Linux path by WSLENV's `/p` flag, which also honours a custom automount
-/// root — so giest never has to guess `/mnt/<drive>`.
-const WSL_BOOTSTRAP: &str = r#"exec /bin/sh "$GIEST_SHELL_INTEGRATION_DIR/giest-wsl.sh""#;
+/// root — so geist never has to guess `/mnt/<drive>`.
+const WSL_BOOTSTRAP: &str = r#"exec /bin/sh "$geist_SHELL_INTEGRATION_DIR/geist-wsl.sh""#;
 
-/// Append giest's variables to an existing `WSLENV` (colon-separated,
+/// Append geist's variables to an existing `WSLENV` (colon-separated,
 /// `NAME[/flags]`), without duplicating any already listed.
 pub fn wslenv(existing: Option<&str>) -> String {
     let mut parts: Vec<String> = existing
@@ -373,8 +373,8 @@ pub fn wslenv(existing: Option<&str>) -> String {
         .map(str::to_string)
         .collect();
     for want in [
-        "GIEST_SHELL_INTEGRATION_DIR/p",
-        "GIEST_SHELL_INTEGRATION",
+        "geist_SHELL_INTEGRATION_DIR/p",
+        "geist_SHELL_INTEGRATION",
         "GHOSTTY_SHELL_FEATURES",
     ] {
         let name = want.split('/').next().unwrap();
@@ -459,10 +459,10 @@ fn cmd_prompt(si: &Integration) -> String {
 ///
 /// There is deliberately **no `C` mark**: emitting one needs a pre-execution
 /// hook, which on PowerShell means overriding a PSReadLine key handler (absent
-/// in plenty of setups) and on cmd is impossible. giest derives the command
+/// in plenty of setups) and on cmd is impossible. geist derives the command
 /// start from the Enter keystroke it sent instead — see
 /// `Session::note_command_submitted`.
-const PWSH_SHELL_HOOK: &str = r#"$global:__giestPrompt = $function:prompt
+const PWSH_SHELL_HOOK: &str = r#"$global:__geistPrompt = $function:prompt
 function global:prompt {
   $code = if ($?) { 0 } elseif ($null -ne $global:LASTEXITCODE) { $global:LASTEXITCODE } else { 1 }
   [Console]::Write("$([char]27)]133;D;$code$([char]27)\")
@@ -473,17 +473,17 @@ function global:prompt {
   }
   [Console]::Write("$([char]27)]133;A;cl=line$([char]27)\")
   #FEATURES#
-  $base = & $global:__giestPrompt
+  $base = & $global:__geistPrompt
   "$base$([char]27)]133;B$([char]27)\"
 }"#;
 
-/// Ghostty's shell-integration scripts (plus giest's WSL bootstrap), embedded
-/// so a bare `giest.exe` needs no install layout. Paths are relative to the
+/// Ghostty's shell-integration scripts (plus geist's WSL bootstrap), embedded
+/// so a bare `geist.exe` needs no install layout. Paths are relative to the
 /// `shell-integration` dir; upstream license headers travel with the files.
 const SI_FILES: &[(&str, &str)] = &[
     (
-        "giest-wsl.sh",
-        include_str!("../assets/shell-integration/giest-wsl.sh"),
+        "geist-wsl.sh",
+        include_str!("../assets/shell-integration/geist-wsl.sh"),
     ),
     (
         "LICENSE-ghostty",
@@ -540,12 +540,12 @@ pub fn extract_shell_integration(root: &std::path::Path) -> Option<PathBuf> {
     Some(dir)
 }
 
-/// [`extract_shell_integration`] into `%LOCALAPPDATA%\giest`, once per process.
+/// [`extract_shell_integration`] into `%LOCALAPPDATA%\geist`, once per process.
 pub fn shell_integration_dir() -> Option<PathBuf> {
     static DIR: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
     DIR.get_or_init(|| {
         let local = std::env::var_os("LOCALAPPDATA")?;
-        extract_shell_integration(&PathBuf::from(local).join("giest"))
+        extract_shell_integration(&PathBuf::from(local).join("geist"))
     })
     .clone()
 }
@@ -799,7 +799,7 @@ mod tests {
 
     #[test]
     fn wsl_runs_the_bootstrap_with_translated_env() {
-        let dir = std::path::Path::new(r"C:\Users\me\AppData\Local\giest\shell-integration");
+        let dir = std::path::Path::new(r"C:\Users\me\AppData\Local\geist\shell-integration");
         let base = vec![("FOO".to_string(), "1".to_string())];
         let l = Profile::new("WSL", "wsl.exe").launch(
             &si(|i| i.mode = ShellIntegration::Zsh),
@@ -807,12 +807,12 @@ mod tests {
             &base,
         );
         assert_eq!(l.args[..3], ["-e", "/bin/sh", "-c"]);
-        assert!(l.args[3].contains("$GIEST_SHELL_INTEGRATION_DIR/giest-wsl.sh"));
+        assert!(l.args[3].contains("$geist_SHELL_INTEGRATION_DIR/geist-wsl.sh"));
         let get = |k: &str| l.env.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str());
         assert_eq!(get("FOO"), Some("1"));
-        assert_eq!(get("GIEST_SHELL_INTEGRATION"), Some("zsh"));
+        assert_eq!(get("geist_SHELL_INTEGRATION"), Some("zsh"));
         assert_eq!(
-            get("GIEST_SHELL_INTEGRATION_DIR"),
+            get("geist_SHELL_INTEGRATION_DIR"),
             Some(dir.to_str().unwrap())
         );
         assert_eq!(
@@ -823,7 +823,7 @@ mod tests {
         assert!(
             wslenv
                 .split(':')
-                .any(|p| p == "GIEST_SHELL_INTEGRATION_DIR/p"),
+                .any(|p| p == "geist_SHELL_INTEGRATION_DIR/p"),
             "{wslenv}"
         );
         assert!(
@@ -847,11 +847,11 @@ mod tests {
     fn wslenv_merges_without_duplicates() {
         assert_eq!(
             wslenv(None),
-            "GIEST_SHELL_INTEGRATION_DIR/p:GIEST_SHELL_INTEGRATION:GHOSTTY_SHELL_FEATURES"
+            "geist_SHELL_INTEGRATION_DIR/p:geist_SHELL_INTEGRATION:GHOSTTY_SHELL_FEATURES"
         );
         assert_eq!(
-            wslenv(Some("USERPROFILE/p:GIEST_SHELL_INTEGRATION_DIR/u:")),
-            "USERPROFILE/p:GIEST_SHELL_INTEGRATION_DIR/p:GIEST_SHELL_INTEGRATION:GHOSTTY_SHELL_FEATURES"
+            wslenv(Some("USERPROFILE/p:geist_SHELL_INTEGRATION_DIR/u:")),
+            "USERPROFILE/p:geist_SHELL_INTEGRATION_DIR/p:geist_SHELL_INTEGRATION:GHOSTTY_SHELL_FEATURES"
         );
     }
 
@@ -872,9 +872,9 @@ mod tests {
 
     #[test]
     fn extraction_writes_lf_scripts_once() {
-        let root = std::env::temp_dir().join(format!("giest-si-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("geist-si-{}", std::process::id()));
         let dir = extract_shell_integration(&root).unwrap();
-        for rel in ["giest-wsl.sh", "bash/ghostty.bash", "zsh/.zshenv"] {
+        for rel in ["geist-wsl.sh", "bash/ghostty.bash", "zsh/.zshenv"] {
             let body = std::fs::read(dir.join(rel)).unwrap();
             assert!(
                 !body.contains(&b'\r'),

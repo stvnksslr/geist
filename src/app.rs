@@ -19,7 +19,7 @@ use crate::scrollbar;
 use crate::session::{self, Session};
 use crate::theme;
 
-/// The profile for an explicit argv (`giest -e prog args…`, an IPC `command`
+/// The profile for an explicit argv (`geist -e prog args…`, an IPC `command`
 /// array): the program with its arguments, run verbatim.
 fn profile_for_argv(argv: &[String]) -> Option<Profile> {
     let (prog, args) = argv.split_first()?;
@@ -1555,12 +1555,12 @@ fn load_custom_shaders(cfg: &Config) -> Arc<Vec<render::CustomShader>> {
             Ok(src) => match crate::shader::compile(&src) {
                 Ok(wgsl) => out.push(render::CustomShader { name, wgsl }),
                 Err(e) => eprintln!(
-                    "giest: custom-shader {} failed to compile:\n{e:#}",
+                    "geist: custom-shader {} failed to compile:\n{e:#}",
                     path.display()
                 ),
             },
             Err(e) => eprintln!(
-                "giest: could not read custom-shader {}: {e}",
+                "geist: could not read custom-shader {}: {e}",
                 path.display()
             ),
         }
@@ -1593,7 +1593,7 @@ fn load_bg_image(cfg: &Config) -> Option<Arc<crate::bgimage::BgImage>> {
         }
         Err(e) => {
             eprintln!(
-                "giest: could not load background-image {}: {e}",
+                "geist: could not load background-image {}: {e}",
                 path.display()
             );
             // Drop any previously cached image so its VRAM is released once the
@@ -1661,9 +1661,9 @@ fn open_session(
     match Session::new(ctx, config, profile, cwd) {
         Ok(s) => Some(s),
         Err(e) => {
-            eprintln!("giest: failed to open session: {e:#}");
+            eprintln!("geist: failed to open session: {e:#}");
             Session::failed(config, profile, &format!("{e:#}"))
-                .map_err(|e| eprintln!("giest: failed to create an error pane: {e:#}"))
+                .map_err(|e| eprintln!("geist: failed to create an error pane: {e:#}"))
                 .ok()
         }
     }
@@ -1692,7 +1692,7 @@ enum AppRequest {
     /// raising window's focused pane (Ghostty resolves it from the previously
     /// focused surface, not from the new one's parent).
     NewWindow(Option<std::path::PathBuf>),
-    /// Retire the raising window. Quits giest when it's the last one.
+    /// Retire the raising window. Quits geist when it's the last one.
     ///
     /// `undoable` is false for the one path that must never be reversible: a
     /// window whose last shell *exited*. There is nothing to restore — the
@@ -1777,7 +1777,7 @@ pub struct App {
         Option<crate::engine::Rgb>,
         Option<crate::engine::Rgb>,
     )>,
-    /// Requests from other `giest` processes (`ipc.rs`), when this process is
+    /// Requests from other `geist` processes (`ipc.rs`), when this process is
     /// the single instance.
     ipc_rx: Option<std::sync::mpsc::Receiver<crate::ipc::Incoming>>,
     /// `(window id, pane id)` of the last notification shown — where a click on
@@ -1947,7 +1947,7 @@ const TOAST_SECS: f32 = 2.0;
 /// A free function so pane code that holds a `self.tabs` borrow can still post
 /// a toast with just the window id.
 fn toast_id(window_id: u64) -> egui::Id {
-    egui::Id::new(("giest-window", window_id, "toast"))
+    egui::Id::new(("geist-window", window_id, "toast"))
 }
 
 /// Show `msg` as this window's toast, replacing any current one. Callers check
@@ -2070,7 +2070,7 @@ impl Window {
         // `working-directory` directly (nothing can be inherited yet). It is
         // also the one surface `initial-command` applies to (upstream's
         // `app.first`); every later pane uses `command`.
-        // `giest -e prog args…` outranks it: an explicit argv, run verbatim.
+        // `geist -e prog args…` outranks it: an explicit argv, run verbatim.
         let initial = crate::cli::initial_argv()
             .and_then(profile_for_argv)
             .or_else(|| {
@@ -2080,11 +2080,11 @@ impl Window {
                     .filter(|c| !c.trim().is_empty())
                     .map(|c| profiles::for_command(&profiles, c))
             });
-        // Started as the default terminal (`giest -Embedding`): the first pane
+        // Started as the default terminal (`geist -Embedding`): the first pane
         // is the handed-over console session, not a new shell.
         let handed = crate::handoff::take_initial().and_then(|a| {
             Session::from_handoff(&cc.egui_ctx, &config, a)
-                .map_err(|e| eprintln!("giest: handoff session failed: {e:#}"))
+                .map_err(|e| eprintln!("geist: handoff session failed: {e:#}"))
                 .ok()
         });
         let first = match handed {
@@ -2114,14 +2114,14 @@ impl Window {
             // will stay solid.
             let backend = render_state.adapter.get_info().backend;
             eprintln!(
-                "giest: transparency requested (background-opacity = {:.2}); \
+                "geist: transparency requested (background-opacity = {:.2}); \
                  rendering on {backend:?}",
                 config.background_opacity
             );
         }
         if config.background_blur.enabled() && config.background_opacity >= 1.0 {
             eprintln!(
-                "giest: background-blur has no visible effect at background-opacity = 1 — \
+                "geist: background-blur has no visible effect at background-opacity = 1 — \
                  the blur shows *through* the window, so lower the opacity to see it."
             );
         }
@@ -2225,7 +2225,7 @@ impl Window {
     /// height. Keyed on the stable `window_id` rather than the slot, so a
     /// rehost can't shuffle widget state between windows.
     fn id(&self, what: impl std::hash::Hash) -> egui::Id {
-        egui::Id::new(("giest-window", self.window_id, what))
+        egui::Id::new(("geist-window", self.window_id, what))
     }
 
     /// Fire the out-of-band bell effects for the configured `bell-features`.
@@ -2449,7 +2449,7 @@ impl Window {
         let modal = egui::Modal::new(self.id("about")).show(ctx, |ui| {
             ui.set_width(360.0);
             ui.vertical_centered(|ui| {
-                ui.heading("giest");
+                ui.heading("geist");
                 ui.add_space(4.0);
                 ui.label(
                     egui::RichText::new("A GPU-accelerated terminal for Windows on libghostty-vt")
@@ -2463,13 +2463,13 @@ impl Window {
                     .clicked()
                 {
                     ui.ctx()
-                        .copy_text(format!("giest {}", crate::about::version_line()));
+                        .copy_text(format!("geist {}", crate::about::version_line()));
                 }
                 ui.add_space(8.0);
                 for (label, url) in crate::about::LINKS {
                     ui.hyperlink_to(*label, *url);
                 }
-                // The settings file, as a link: giest has no settings UI, so
+                // The settings file, as a link: geist has no settings UI, so
                 // "where do I configure this?" is otherwise unanswered anywhere
                 // in the app. Shown even when the file does not exist yet —
                 // `open_config` creates it on the way.
@@ -3367,7 +3367,7 @@ impl Window {
         // new icon every frame and re-set it on every child window forever.
         crate::icon::apply(
             egui::ViewportBuilder::default()
-                .with_title("giest")
+                .with_title("geist")
                 .with_inner_size([960.0, 600.0])
                 // NOT optional. The vendored egui-winit patch reads `transparent` to
                 // set WS_EX_NOREDIRECTIONBITMAP at creation, and children go through
@@ -3391,7 +3391,7 @@ impl Window {
     fn quick_builder(&self) -> egui::ViewportBuilder {
         let base = crate::icon::apply(
             egui::ViewportBuilder::default()
-                .with_title("giest quick terminal")
+                .with_title("geist quick terminal")
                 // No titlebar: a dropdown terminal is chrome the user never
                 // drags or minimizes, and the strip would eat a row of cells.
                 .with_decorations(false)
@@ -3475,7 +3475,7 @@ impl Window {
     /// This window's child viewport id. Derived from the stable `window_id`, not
     /// the slot, so a window keeps its native window across a list reshuffle.
     fn viewport_id(&self) -> egui::ViewportId {
-        egui::ViewportId(egui::Id::new(("giest-viewport", self.window_id)))
+        egui::ViewportId(egui::Id::new(("geist-viewport", self.window_id)))
     }
 
     /// Allocate a fresh unique pane id.
@@ -3678,7 +3678,7 @@ impl Window {
             title: self
                 .last_window_title
                 .clone()
-                .unwrap_or_else(|| "giest".into()),
+                .unwrap_or_else(|| "geist".into()),
             focused,
             tabs,
         }
@@ -4243,7 +4243,7 @@ impl Window {
             {
                 Ok(p) => p,
                 Err(e) => {
-                    eprintln!("giest: {e:#}");
+                    eprintln!("geist: {e:#}");
                     return;
                 }
             };
@@ -4302,7 +4302,7 @@ impl Window {
     /// Run `action` for an `all:`-flagged binding.
     ///
     /// App-scoped actions run **once** (upstream does the same — they aren't
-    /// repeated per surface). Surface-scoped actions that giest can source to a
+    /// repeated per surface). Surface-scoped actions that geist can source to a
     /// pane run on **every pane in every tab of this window**, including panes
     /// in background tabs, which is what makes `all:` a broadcast-input feature.
     ///
@@ -4403,8 +4403,8 @@ impl Window {
         let wants_transparent = cfg.background_opacity < 1.0 || cfg.background_blur.enabled();
         if wants_transparent && !self.transparent_surface {
             eprintln!(
-                "giest: background-opacity/background-blur need a transparent window, \
-                 which is set up at startup — restart giest to apply them."
+                "geist: background-opacity/background-blur need a transparent window, \
+                 which is set up at startup — restart geist to apply them."
             );
         }
         // Re-decode the background image (a no-op when the path is unchanged —
@@ -4552,7 +4552,7 @@ impl Window {
                             sess.send_text(&text);
                         }
                     }
-                    None => eprintln!("giest: invalid escape sequence in 'text:{s}'"),
+                    None => eprintln!("geist: invalid escape sequence in 'text:{s}'"),
                 }
             }
             Action::SendCsi(ref s) => {
@@ -4691,7 +4691,7 @@ impl Window {
                     self.opaque_override = !self.opaque_override;
                 } else {
                     eprintln!(
-                        "giest: toggle_background_opacity needs a transparent window, which is \
+                        "geist: toggle_background_opacity needs a transparent window, which is \
                          set up at startup — set background-opacity below 1 and restart."
                     );
                 }
@@ -4700,7 +4700,7 @@ impl Window {
                 if let Some(s) = self.focused_session_mut() {
                     let on = s.toggle_mouse_reporting();
                     eprintln!(
-                        "giest: mouse reporting {}",
+                        "geist: mouse reporting {}",
                         if on { "enabled" } else { "disabled" }
                     );
                 }
@@ -5175,7 +5175,7 @@ impl Window {
     /// / previous match), Esc and Ctrl+Shift+F (close), and the query box. Edits
     /// are deferred to after the egui closure so no session borrow spans it.
     /// Whether `action` is one the search overlay handles while it owns the
-    /// keyboard. Upstream's five, plus giest's own toggle.
+    /// keyboard. Upstream's five, plus geist's own toggle.
     fn is_search_action(action: &Action) -> bool {
         matches!(
             action,
@@ -5256,7 +5256,7 @@ impl Window {
     /// **Not a modal**, and that is the whole design: the keyboard log is
     /// worthless if opening it stops you typing, and watching a program redraw
     /// is why the IO log exists. So this appears in neither `modal_open` nor
-    /// `render_active`'s `palette_open` gate — the one overlay in giest that
+    /// `render_active`'s `palette_open` gate — the one overlay in geist that
     /// doesn't take the keyboard.
     ///
     /// Per *pane*, like upstream's per-surface inspector: the state and the logs
@@ -5318,7 +5318,7 @@ impl Window {
                 ui.separator();
 
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    // Upstream's five windows, as collapsing sections: giest has
+                    // Upstream's five windows, as collapsing sections: geist has
                     // no docking, and five floating windows over one pane would
                     // be unusable at a terminal's size.
                     egui::CollapsingHeader::new("Surface")
@@ -6321,7 +6321,7 @@ impl Window {
                         ui.close();
                     }
                     ui.separator();
-                    if ui.button("About giest").clicked() {
+                    if ui.button("About geist").clicked() {
                         want_about = true;
                         ui.close();
                     }
@@ -7055,7 +7055,7 @@ impl Window {
             // Dim every split except the focused one. Deliberately keyed on
             // `is_focus`, *not* on window focus: Ghostty leaves the last-focused
             // surface undimmed when the window itself is inactive, so an
-            // unfocused giest window must not dim every one of its panes.
+            // unfocused geist window must not dim every one of its panes.
             if dimming && !is_focus {
                 let fill = unfocused_split_fill.unwrap_or_else(|| session.default_bg());
                 dim_rects.push((
@@ -7138,7 +7138,7 @@ impl Window {
                 // button got focus — switching/closing tabs unexpectedly.
                 let resp = ui.interact(
                     prect,
-                    egui::Id::new(("giest-window", win_id, "pane", active_tab, leaf_id)),
+                    egui::Id::new(("geist-window", win_id, "pane", active_tab, leaf_id)),
                     egui::Sense::click_and_drag(),
                 );
                 resp.request_focus();
@@ -7384,7 +7384,7 @@ impl Window {
                         _ => {}
                     }
 
-                    // Middle-click. `primary-paste` reads giest's emulated
+                    // Middle-click. `primary-paste` reads geist's emulated
                     // PRIMARY (`crate::primary`) and, while nothing has been
                     // selected into it, the clipboard — so the default keeps
                     // doing something useful on a platform with no PRIMARY.
@@ -7408,7 +7408,7 @@ impl Window {
             // id the focused pane's `interact` above uses, so keyboard focus and
             // the reader's focus coincide. The probe returns `None` — and all of
             // this is skipped — unless an assistive technology is attached.
-            let a11y_id = egui::Id::new(("giest-window", win_id, "pane", active_tab, leaf_id));
+            let a11y_id = egui::Id::new(("geist-window", win_id, "pane", active_tab, leaf_id));
             if ctx.accesskit_node_builder(a11y_id, |_| ()).is_some() {
                 let snap = session.snapshot.clone();
                 let announce = session.announce_output;
@@ -7546,7 +7546,7 @@ impl Window {
             };
             let resp = ui.interact(
                 hit,
-                egui::Id::new(("giest-window", win_id, "scrollbar", active_tab, leaf_id)),
+                egui::Id::new(("geist-window", win_id, "scrollbar", active_tab, leaf_id)),
                 sense,
             );
             let hovered = resp.hovered();
@@ -7678,7 +7678,7 @@ impl Window {
         // geometry. `extra` is everything in the client area that isn't whole
         // cells — tab strip, padding, the sub-cell remainder — so a snapped
         // size keeps exactly that and changes the grid by whole cells. Root
-        // window only: it is the one whose HWND giest can reach.
+        // window only: it is the one whose HWND geist can reach.
         if let Some(hwnd) = self.hwnd.filter(|_| self.is_root) {
             let g = self.config.window_step_resize.then(|| {
                 let client = ctx.content_rect().size() * ppp;
@@ -8413,7 +8413,7 @@ impl Window {
                 // whether the process ends (it closes the root itself when it
                 // does), and it may not — another window may inherit the root
                 // viewport, or `quit-after-last-window-closed = false` keeps
-                // giest resident.
+                // geist resident.
                 if self.is_root() {
                     ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 }
@@ -8469,7 +8469,7 @@ impl Window {
                         .get(self.active_tab)
                         .and_then(|t| t.focused_payload().title())
                 })
-                .unwrap_or_else(|| "giest".to_string());
+                .unwrap_or_else(|| "geist".to_string());
             // `window-subtitle = working-directory`. A Windows caption has one
             // line, so the subtitle rides after the title.
             let base = match self
@@ -8654,7 +8654,7 @@ impl App {
     ///
     /// The file is **consumed** — deleted as soon as it is read — because it
     /// describes one specific exit. Leaving it would resurrect that layout after
-    /// a later crash that never got to write its own, which reads as giest
+    /// a later crash that never got to write its own, which reads as geist
     /// ignoring everything the user has done since.
     fn restore_state(&mut self) {
         // `--restore-session` (a `RegisterApplicationRestart` relaunch) restores
@@ -8713,7 +8713,7 @@ impl App {
                     binds.push(b);
                     actions.push(action.clone());
                 }
-                None => eprintln!("giest: global keybind key has no Windows virtual-key code"),
+                None => eprintln!("geist: global keybind key has no Windows virtual-key code"),
             }
         }
         self.global_actions = actions;
@@ -8766,7 +8766,7 @@ impl App {
             return;
         }
         // Everything else is a *window* action, and the focused window is the
-        // only sensible default target — including when giest isn't focused at
+        // only sensible default target — including when geist isn't focused at
         // all, where "the window you last used" is what a user means.
         let idx = target
             .unwrap_or(self.focused)
@@ -8890,7 +8890,7 @@ impl App {
                 }
                 std::process::exit(0);
             }
-            Err(e) => eprintln!("giest: restart for update failed: {e}"),
+            Err(e) => eprintln!("geist: restart for update failed: {e}"),
         }
     }
 
@@ -9188,7 +9188,7 @@ impl App {
                 Some(UndoOp::RemoveWindow { window: id })
             }
             UndoOp::RemoveWindow { window } => {
-                // Closing the last window quits giest, and an undo must never be
+                // Closing the last window quits geist, and an undo must never be
                 // able to end the process.
                 if self.windows.len() <= 1 {
                     return None;
@@ -9992,7 +9992,7 @@ impl App {
         crate::restart::set_snapshot((!state.is_empty()).then(|| crate::state::serialize(&state)));
     }
 
-    /// Close the window with `id`, quitting giest when it was the last one.
+    /// Close the window with `id`, quitting geist when it was the last one.
     ///
     /// `undoable` is what separates a user's close from a window whose last
     /// shell exited: the first keeps the window (and its running panes) alive in
@@ -10021,7 +10021,7 @@ impl App {
     /// to what the caller does with the result.
     fn take_window(&mut self, ctx: &egui::Context, id: u64) -> Option<Window> {
         let idx = self.windows.iter().position(|w| w.window_id == id)?;
-        // Capture *before* the removal: closing the last window is how giest
+        // Capture *before* the removal: closing the last window is how geist
         // quits, so this is the only moment the exiting layout still exists.
         self.snapshot_state();
         // Remember where the surviving root-slot window is on screen *before*
@@ -10102,7 +10102,7 @@ impl eframe::App for App {
     /// Remove the notification-area icon on the way out.
     ///
     /// The shell would eventually garbage-collect a stale one, but only when the
-    /// user next hovers the tray — until then giest appears to still be running.
+    /// user next hovers the tray — until then geist appears to still be running.
     /// A no-op unless something actually notified (see [`crate::notify`]).
     fn on_exit(&mut self) {
         // A window still standing means the process is going down some other way
@@ -10186,12 +10186,12 @@ impl eframe::App for App {
         if let Some(msg) = crate::render::device_lost()
             && !DEVICE_LOST_SHOWN.swap(true, std::sync::atomic::Ordering::Relaxed)
         {
-            eprintln!("giest: {msg}");
+            eprintln!("geist: {msg}");
             let hwnd = self.windows.first().and_then(|w| w.hwnd).unwrap_or(0);
-            crate::notify::error_box(hwnd, "giest: renderer error", &msg);
+            crate::notify::error_box(hwnd, "geist: renderer error", &msg);
         }
 
-        // Other `giest` processes' requests, answered before the window passes
+        // Other `geist` processes' requests, answered before the window passes
         // so a new window or tab is drawn this very frame.
         self.handle_ipc(&ctx, now, render_state.as_ref());
         // A click on the last notification: go to the pane that raised it (by
@@ -10499,7 +10499,7 @@ fn open_url(url: &str) {
     let _ = std::process::Command::new("explorer").arg(url).spawn();
 }
 
-/// Append giest's embedded JetBrains Mono Nerd Font as the last fallback for both
+/// Append geist's embedded JetBrains Mono Nerd Font as the last fallback for both
 /// egui UI font families. egui's bundled fonts (Ubuntu-Light / Hack) lack many
 /// symbols — arrows, `×`, box/powerline glyphs — so chrome like the search bar's
 /// prev/next/close buttons would otherwise render as tofu boxes. As a *fallback*
@@ -10514,7 +10514,7 @@ fn install_ui_fallback_font(ctx: &egui::Context, title_family: Option<&str>) {
     use std::sync::Arc;
     let mut fonts = egui::FontDefinitions::default();
     fonts.font_data.insert(
-        "giest-nerd".to_owned(),
+        "geist-nerd".to_owned(),
         Arc::new(egui::FontData::from_static(render::regular_font())),
     );
     for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
@@ -10522,7 +10522,7 @@ fn install_ui_fallback_font(ctx: &egui::Context, title_family: Option<&str>) {
             .families
             .entry(family)
             .or_default()
-            .push("giest-nerd".to_owned());
+            .push("geist-nerd".to_owned());
     }
     let mut title = fonts
         .families
@@ -10536,11 +10536,11 @@ fn install_ui_fallback_font(ctx: &egui::Context, title_family: Option<&str>) {
                 data.index = index;
                 fonts
                     .font_data
-                    .insert("giest-title".to_owned(), Arc::new(data));
-                title.insert(0, "giest-title".to_owned());
+                    .insert("geist-title".to_owned(), Arc::new(data));
+                title.insert(0, "geist-title".to_owned());
             }
             None => {
-                eprintln!("giest: window-title-font-family '{name}' not found; using the default")
+                eprintln!("geist: window-title-font-family '{name}' not found; using the default")
             }
         }
     }
@@ -10551,7 +10551,7 @@ fn install_ui_fallback_font(ctx: &egui::Context, title_family: Option<&str>) {
 }
 
 /// The egui font family tab titles are drawn in (`window-title-font-family`).
-const TITLE_FONT: &str = "giest-title";
+const TITLE_FONT: &str = "geist-title";
 
 /// Build the renderer's neutral font selection from config. Cloned at atlas
 /// construction (startup); `font-family`/`font-feature` are not re-applied on
@@ -10846,7 +10846,7 @@ mod tests {
 
     #[test]
     fn retire_window_on_the_last_one_empties_the_list() {
-        // An empty list is how `App` knows to quit giest.
+        // An empty list is how `App` knows to quit geist.
         let (v, f, out) = retire_window(vec![10], 0, 0);
         assert!(v.is_empty());
         assert_eq!(f, 0);

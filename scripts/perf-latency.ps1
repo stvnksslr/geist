@@ -1,5 +1,5 @@
 # Keystroke-to-pixel latency, measured from OUTSIDE the terminal, so it can be
-# pointed at any of them (giest, WezTerm, Windows Terminal) on equal terms.
+# pointed at any of them (geist, WezTerm, Windows Terminal) on equal terms.
 #
 # Method (a camera-free typometer): focus the window, snapshot its client area
 # with PrintWindow, send one key with SendInput, then re-snapshot in a tight
@@ -19,7 +19,7 @@
 #
 # !! INVOKE IT IN YOUR SHELL, NOT AS `pwsh -File` !!
 #
-#   & ./scripts/perf-latency.ps1 -Exe target/release/giest.exe -TermArgs @('--window-width=120','--window-height=40')
+#   & ./scripts/perf-latency.ps1 -Exe target/release/geist.exe -TermArgs @('--window-width=120','--window-height=40')
 #
 # Run as a child `pwsh -File ...`, every terminal it launches dies within ~10 ms
 # and the probe reports "no window" as though the terminal had crashed. Measured
@@ -40,7 +40,7 @@ param(
     # Every terminal is resized to the same client pixels before timing. The
     # poll loop's PrintWindow cost scales with window area and is part of the
     # measured interval, so comparing terminals at their own default sizes
-    # measures the window, not the terminal: WezTerm's default is 1.6x giest's
+    # measures the window, not the terminal: WezTerm's default is 1.6x geist's
     # area here, which alone accounted for ~8 ms of its first result.
     [int]$ClientW = 1200,
     [int]$ClientH = 800,
@@ -204,11 +204,11 @@ public static class Probe {
 '@ -CompilerOptions '/unsafe'
 
 [Probe]::Dpi()
-# Isolate the instance under test. Without its own pipe, a giest launched while
-# any other giest is reachable on the default pipe forwards its request to that
+# Isolate the instance under test. Without its own pipe, a geist launched while
+# any other geist is reachable on the default pipe forwards its request to that
 # one and exits in ~10 ms - the probe then reports "no window" and looks like a
-# giest crash. Harmless for other terminals, which ignore the variable.
-$env:GIEST_IPC_PIPE = "giest-perf-latency-$PID"
+# geist crash. Harmless for other terminals, which ignore the variable.
+$env:geist_IPC_PIPE = "geist-perf-latency-$PID"
 $p = if ($TermArgs.Count) { Start-Process -PassThru $Exe -ArgumentList $TermArgs } else { Start-Process -PassThru $Exe }
 try {
     # Wait for a window big enough to be the terminal, not a helper (see RealWindow).

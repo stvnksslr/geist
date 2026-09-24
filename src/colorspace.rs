@@ -2,7 +2,7 @@
 //!
 //! Upstream's key says how *terminal colours* (config colours and direct-colour
 //! SGR) are to be interpreted; macOS then colour-manages the window onto the
-//! display. giest does the same interpretation but maps it onto the swapchain
+//! display. geist does the same interpretation but maps it onto the swapchain
 //! it actually has, which is **sRGB**, so P3 colours outside the sRGB gamut are
 //! clipped to its boundary. On a wide-gamut panel with Windows' automatic
 //! colour management the result is the sRGB-gamut rendering of the P3 colour —

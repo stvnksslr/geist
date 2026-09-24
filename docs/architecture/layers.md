@@ -1,6 +1,6 @@
 # Layered design
 
-giest has four conceptual layers. Data crosses each boundary in a deliberately
+geist has four conceptual layers. Data crosses each boundary in a deliberately
 narrow shape, which is what keeps the renderer and input code free of any
 libghostty or Windows specifics.
 

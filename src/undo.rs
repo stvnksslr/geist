@@ -51,7 +51,7 @@ struct Entry<T> {
 ///
 /// Upstream has none: it relies purely on the timeout, and its documentation
 /// warns that a very long `undo-timeout` grows the stack (and so the process
-/// count) without bound. giest keeps the warning *and* the cap — an entry holds
+/// count) without bound. geist keeps the warning *and* the cap — an entry holds
 /// a live shell, so an unbounded stack is unbounded processes. The oldest entry
 /// is dropped, which is the same end the timeout would have reached.
 const MAX_ENTRIES: usize = 64;

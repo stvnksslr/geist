@@ -16,7 +16,7 @@
 
 use std::path::Path;
 
-use giest::iconart::{Palette, SIZES, render};
+use geist::iconart::{Palette, SIZES, render};
 
 /// Supersampling grid per axis: 16x16 = 256 coverage levels per pixel.
 const SS: u32 = 16;

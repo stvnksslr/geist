@@ -1368,6 +1368,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "geist"
+version = "0.1.0"
+dependencies = [
+ "ab_glyph",
+ "anyhow",
+ "arboard",
+ "base64",
+ "bytemuck",
+ "compact_str",
+ "criterion",
+ "eframe",
+ "jpeg-decoder",
+ "libghostty-vt",
+ "memmap2",
+ "naga",
+ "percent-encoding",
+ "png",
+ "pollster",
+ "portable-pty",
+ "raw-window-handle",
+ "regex",
+ "rustybuzz",
+ "serde",
+ "serde_json",
+ "sha2",
+ "unicode-width",
+ "windows-sys 0.61.2",
+ "winresource",
+]
+
+[[package]]
 name = "generic-array"
 version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1397,37 +1428,6 @@ dependencies = [
  "libc",
  "r-efi",
  "wasip2",
-]
-
-[[package]]
-name = "giest"
-version = "0.1.0"
-dependencies = [
- "ab_glyph",
- "anyhow",
- "arboard",
- "base64",
- "bytemuck",
- "compact_str",
- "criterion",
- "eframe",
- "jpeg-decoder",
- "libghostty-vt",
- "memmap2",
- "naga",
- "percent-encoding",
- "png",
- "pollster",
- "portable-pty",
- "raw-window-handle",
- "regex",
- "rustybuzz",
- "serde",
- "serde_json",
- "sha2",
- "unicode-width",
- "windows-sys 0.61.2",
- "winresource",
 ]
 
 [[package]]

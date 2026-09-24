@@ -1,25 +1,25 @@
-# giest → Ghostty macOS: Feature-Gap & Parity Roadmap
+# geist → Ghostty macOS: Feature-Gap & Parity Roadmap
 
-giest's north-star is feature parity with the **macOS Ghostty app**. This document audits the gap and
-lays out a phased roadmap. It is grounded in three sources read directly: giest's `src/` tree, the
+geist's north-star is feature parity with the **macOS Ghostty app**. This document audits the gap and
+lays out a phased roadmap. It is grounded in three sources read directly: geist's `src/` tree, the
 complete Ghostty source vendored locally under `target/.../out/ghostty-src/` (the macOS Swift app *and*
 the Zig core / `Config.zig`), and the Rust binding `vendor/libghostty-rs/` (to judge, per gap, whether
 the terminal data already exists and just needs wiring).
 
-**Headline finding.** giest has a strong, correct *spine* — real VT engine, splits, tabs, ligatures,
+**Headline finding.** geist has a strong, correct *spine* — real VT engine, splits, tabs, ligatures,
 emoji, smooth scroll, command palette — but it covered a fraction of Ghostty's config surface and
 ~90 keybind actions, with little of the macOS app's UX breadth. *(Measured since: **178 of Ghostty's
 208 config keys** (upstream `main`, 2026-09-19) are now supported — see the config-surface ledger
 and the full parity plan below.)* The encouraging part: **much of the gap
 is plumbing, not greenfield.** libghostty-vt already surfaces underline styles, faint/overline, OSC 8
 hyperlinks, OSC 133 semantic-prompt marks, kitty graphics, the bell, and a rich selection model — data
-giest's single per-cell chokepoint (`engine/ghostty_vt.rs::copy_cell`) historically discarded.
+geist's single per-cell chokepoint (`engine/ghostty_vt.rs::copy_cell`) historically discarded.
 
 ---
 
 ## Full parity plan against Ghostty `main` (re-audited 2026-09-19)
 
-**Baseline.** giest now builds on Ghostty `main` itself (@b32f20f, via libghostty-rs @5988a0b, Zig
+**Baseline.** geist now builds on Ghostty `main` itself (@b32f20f, via libghostty-rs @5988a0b, Zig
 0.16.0), so the plan and the engine describe the same Ghostty. Three sources were diffed:
 (1) **config keys** in `Config.zig`, (2) **keybind actions** in `Binding.zig`, (3) **app-level
 features** that are neither — surveyed from `macos/Sources` and from the 673 user-facing commits
@@ -39,29 +39,29 @@ Effort: **S** <1d · **M** 1–3d · **L** ~1wk · **XL** multi-week.
 | ✅ `term` | Done — layered into the spawned shell's environment, and an explicit `env = TERM=...` still wins. **Divergence:** empty by default instead of upstream's `xterm-ghostty`, because nothing installs that terminfo inside WSL and a missing entry breaks curses programs outright. Windows console programs ignore `TERM`; WSL and custom shells read it. |
 | ✅ `config-default-files` | Done, CLI-only as upstream: `--config-default-files=false` skips the default path, and only `--config-file` / `config-file` sources apply. |
 | ✅ `macos-window-buttons` | Done, mapped onto the client-drawn caption: `hidden` resolves `macos-titlebar-style = tabs` to the buttonless `hidden` caption. The *native* caption's buttons belong to the OS and are left alone. Plain booleans are accepted too. |
-| ✅ `macos-hidden` | Done — `WS_EX_TOOLWINDOW` on every giest window keeps it out of the taskbar and Alt-Tab (the quick-terminal-only case upstream means). The shell only re-reads the flag while a window is hidden, so a visible window is cycled. |
+| ✅ `macos-hidden` | Done — `WS_EX_TOOLWINDOW` on every geist window keeps it out of the taskbar and Alt-Tab (the quick-terminal-only case upstream means). The shell only re-reads the flag while a window is hidden, so a visible window is cycled. |
 | ✅ `macos-window-shadow` | Done — DWM non-client rendering (`DWMWA_NCRENDERING_POLICY`) off drops the shadow. |
-| ✅ `macos-dock-drop-behavior` | Done — decides what a path handed to a running giest opens (Explorer's "Open giest here", a file dropped on the exe or a taskbar shortcut): `new-tab` (default) or `new-window`. Windows has no Dock, so this is the taskbar/Explorer equivalent rather than a literal port. |
-| ✅ `shell-integration`, `shell-integration-features` | Done. `none` disables every injected hook (pwsh/cmd prompt hooks + WSL). Features per shell: **pwsh/powershell/cmd** — `cursor` (bar at the prompt, `5`/`6` by `cursor-style-blink`; reset to default by the *session* on Enter, since these shells have no pre-exec hook) and `title` (cwd at the prompt; never the running command, same reason); `sudo`/`ssh-env`/`ssh-terminfo`/`path` N/A (no terminfo on Windows, no `ghostty` CLI). **WSL** — Ghostty's own bash/zsh/fish/elvish/nushell scripts, vendored in `assets/shell-integration/` (embedded, extracted to `%LOCALAPPDATA%\giest\shell-integration`), reached via WSLENV `/p` and injected by `giest-wsl.sh` with upstream's per-shell mechanism (bash `ENV`+`--posix`, zsh `ZDOTDIR`, fish/elvish/nushell `XDG_DATA_DIRS`); `cursor`/`title`/`sudo`/`path` pass through, `ssh-*` are **withheld** (upstream wraps `ssh` in `ghostty +ssh`, which doesn't exist in WSL). `detect` on WSL reads `$SHELL`; a forced `bash`/`zsh`/… only changes the WSL scheme (Ghostty has none for pwsh/cmd). Native Windows bash/zsh (`command = …bash.exe`) are not injected. Verified: pwsh/cmd features and Ghostty's bash script via the bootstrap (Git for Windows bash) in `tests/conpty_passthrough.rs`; zsh/fish/WSL itself unverified (no distro on the dev box). | ✅ |
+| ✅ `macos-dock-drop-behavior` | Done — decides what a path handed to a running geist opens (Explorer's "Open geist here", a file dropped on the exe or a taskbar shortcut): `new-tab` (default) or `new-window`. Windows has no Dock, so this is the taskbar/Explorer equivalent rather than a literal port. |
+| ✅ `shell-integration`, `shell-integration-features` | Done. `none` disables every injected hook (pwsh/cmd prompt hooks + WSL). Features per shell: **pwsh/powershell/cmd** — `cursor` (bar at the prompt, `5`/`6` by `cursor-style-blink`; reset to default by the *session* on Enter, since these shells have no pre-exec hook) and `title` (cwd at the prompt; never the running command, same reason); `sudo`/`ssh-env`/`ssh-terminfo`/`path` N/A (no terminfo on Windows, no `ghostty` CLI). **WSL** — Ghostty's own bash/zsh/fish/elvish/nushell scripts, vendored in `assets/shell-integration/` (embedded, extracted to `%LOCALAPPDATA%\geist\shell-integration`), reached via WSLENV `/p` and injected by `geist-wsl.sh` with upstream's per-shell mechanism (bash `ENV`+`--posix`, zsh `ZDOTDIR`, fish/elvish/nushell `XDG_DATA_DIRS`); `cursor`/`title`/`sudo`/`path` pass through, `ssh-*` are **withheld** (upstream wraps `ssh` in `ghostty +ssh`, which doesn't exist in WSL). `detect` on WSL reads `$SHELL`; a forced `bash`/`zsh`/… only changes the WSL scheme (Ghostty has none for pwsh/cmd). Native Windows bash/zsh (`command = …bash.exe`) are not injected. Verified: pwsh/cmd features and Ghostty's bash script via the bootstrap (Git for Windows bash) in `tests/conpty_passthrough.rs`; zsh/fish/WSL itself unverified (no distro on the dev box). | ✅ |
 | ✅ `scrollback-compression` | Done — `Session::idle_work` runs bounded incremental steps once the engine's activity token has been quiet for 250 ms, matching upstream's renderer thread. | S |
 | ~~`cursor-click-to-move`~~ | ✅ Port of `maybePromptClick`/`promptClickLine` (`prompt_click.rs`). `osc133.rs` side-scans `cl=`/`click_events=` off `A` (the C API exposes neither); the engine reports per-cell OSC 133 *input* content (`prompt_rows`). `cl` → arrows via the engine encoder (DECCKM-aware), `click_events=1|2` → SGR click. The pwsh/cmd hooks now send `A;cl=line`. Needs a live check that ConPTY keeps the typed text's input marking. | — |
-| ~~`link`, `link-previews`~~ | ✅ Done (`links.rs`). Priority is upstream's: OSC 8, then `link` rules in order, then `link-url` last. Divergence: upstream declares `link` but cannot parse it ("TODO: This can't currently be set!"), so giest's syntax is its own — `link = <regex>`, repeatable, empty clears, action always "open"; a match is matched per row (no cross-wrap). `link-previews = true/false/osc8` gates the hover banner. | — |
+| ~~`link`, `link-previews`~~ | ✅ Done (`links.rs`). Priority is upstream's: OSC 8, then `link` rules in order, then `link-url` last. Divergence: upstream declares `link` but cannot parse it ("TODO: This can't currently be set!"), so geist's syntax is its own — `link = <regex>`, repeatable, empty clears, action always "open"; a match is matched per row (no cross-wrap). `link-previews = true/false/osc8` gates the hover banner. | — |
 | ~~`env`, `input`, `initial-command`, `wait-after-command`, `abnormal-command-exit-runtime`~~ | ✅ Done. `env` is an ordered map (empty resets, `KEY=` removes) passed to `CommandBuilder::env`; `input` decodes Zig escapes for `raw:`/`path:`/untagged, 10MB cap, all-or-nothing; `initial-command` resolves like `command` (a profile name keeps its prompt hooks) for the startup surface only — a `window-save-state` restore replaces it. The abnormal check needs a non-zero code (upstream waives that only on macOS) and measures runtime from `GetProcessTimes`, not from when the 500 ms idle poll noticed. | — |
 | ~~`key-remap`~~ | ✅ `keyremap.rs`, applied to the pass's input in `Window::run_pass` (before bindings, `decide_key`, encoding, mouse). Divergence: egui has no sided modifiers (sided names act on both sides) and never reports the Win key, so `super` works only as a *target*. | — |
 | ~~`font-codepoint-map`, `clipboard-codepoint-map`~~ | ✅ Mapped faces resolve like `font-family` and win after sprites, before the primary font (a face lacking the glyph falls through). `Session::copy_text` applies the clipboard map to every copy (not search / `write_selection_file`). | — |
 | ~~`font-shaping-break`~~ | ✅ `cursor` (default on): the cursor cell is its own run; keyed on the snapshot's visibility, not the blink phase. | — |
 | `grapheme-width-method` | Engine already has mode 2027; expose the option. | S |
 | `cursor-text` | Text color under the cursor (incl. `cell-foreground`). | S |
-| ~~`window-padding-color`~~ | ✅ Done (`padding.rs`), **needs human visual confirmation**. Upstream extends per pixel in its cell shader; giest paints the same nearest-cell colours as egui rects after the terminal callback (the per-pane scissor is the grid box, so the renderer cannot reach the band). `extend` applies upstream's `neverExtendBg` to the top/bottom rows (default-bg cell or powerline glyph) — minus the prompt-row check, since the snapshot has no per-row OSC 133 marks. A custom shader does not see the fill (it is painted after the offscreen pass). | — |
-| ~~`window-show-tab-bar`, `maximize`, `fullscreen`, `title`, `initial-window`, `quit-after-last-window-closed` (+`-delay`)~~ | ✅ Done. **Resident mode** (no window open): the last window is kept as a tab-less template (`App::dormant`) and the root viewport is *hidden*, not closed — closing it is what ends an eframe process (eframe 0.34 still paints invisible windows, so timers and hotkeys run). Only a `global:` keybind (`new_window`, `new_tab`, `toggle_visibility`, `toggle_quick_terminal`) brings a window back — there is no tray icon yet. `quit-after-last-window-closed` defaults **true** (the Windows convention; upstream's default is "Linux only"); `-delay` quits when it expires with no window. `initial-window = false` starts resident (its first shell is spawned and immediately dropped — `Window::first` needs a session) and skips `window-save-state` restore; with no delay it stays resident. `window-show-tab-bar` **defaults to `always`** (divergence from `auto`): the strip holds the profile picker. `title`: a runtime `set_window_title`/`prompt_window_title` outranks it. `fullscreen = non-native*` behaves as `true` (upstream's non-macOS rule). The root × no longer lets eframe close the root itself (`CancelClose`, then the retire decides) — which also fixes the root × quitting giest while other windows were open. | — |
-| ~~`split-preserve-zoom`~~ | ✅ `navigation`: `goto_split` moves the zoom to the newly focused pane. Without it, navigating out of a zoom now **unzooms and moves** (upstream); giest used to refuse to navigate while zoomed. Directional nav while zoomed uses the unzoomed layout (`Node::leaf_rects`). | — |
+| ~~`window-padding-color`~~ | ✅ Done (`padding.rs`), **needs human visual confirmation**. Upstream extends per pixel in its cell shader; geist paints the same nearest-cell colours as egui rects after the terminal callback (the per-pane scissor is the grid box, so the renderer cannot reach the band). `extend` applies upstream's `neverExtendBg` to the top/bottom rows (default-bg cell or powerline glyph) — minus the prompt-row check, since the snapshot has no per-row OSC 133 marks. A custom shader does not see the fill (it is painted after the offscreen pass). | — |
+| ~~`window-show-tab-bar`, `maximize`, `fullscreen`, `title`, `initial-window`, `quit-after-last-window-closed` (+`-delay`)~~ | ✅ Done. **Resident mode** (no window open): the last window is kept as a tab-less template (`App::dormant`) and the root viewport is *hidden*, not closed — closing it is what ends an eframe process (eframe 0.34 still paints invisible windows, so timers and hotkeys run). Only a `global:` keybind (`new_window`, `new_tab`, `toggle_visibility`, `toggle_quick_terminal`) brings a window back — there is no tray icon yet. `quit-after-last-window-closed` defaults **true** (the Windows convention; upstream's default is "Linux only"); `-delay` quits when it expires with no window. `initial-window = false` starts resident (its first shell is spawned and immediately dropped — `Window::first` needs a session) and skips `window-save-state` restore; with no delay it stays resident. `window-show-tab-bar` **defaults to `always`** (divergence from `auto`): the strip holds the profile picker. `title`: a runtime `set_window_title`/`prompt_window_title` outranks it. `fullscreen = non-native*` behaves as `true` (upstream's non-macOS rule). The root × no longer lets eframe close the root itself (`CancelClose`, then the retire decides) — which also fixes the root × quitting geist while other windows were open. | — |
+| ~~`split-preserve-zoom`~~ | ✅ `navigation`: `goto_split` moves the zoom to the newly focused pane. Without it, navigating out of a zoom now **unzooms and moves** (upstream); geist used to refuse to navigate while zoomed. Directional nav while zoomed uses the unzoomed layout (`Node::leaf_rects`). | — |
 | ~~`mouse-shift-capture`, `click-repeat-interval`~~ | ✅ Held Shift takes the mouse back from a tracking program unless captured; `true`/`false` defer to `XTSHIFTESCAPE`, side-scanned (`xtshiftescape.rs`) — whether ConPTY forwards it is unprobed. `click-repeat-interval` sets egui's double-click window; `0` → `GetDoubleClickTime`. | — |
 | `title-report`, `vt-kam-allowed` | Engine options. Title reports are now **off by default** upstream — a behavior change the bump brought in. | S |
 | `palette-generate`, `palette-harmonious` | Generate the 256-color cube from the 16 base colors. | S |
 | ~~`command-palette-entry`~~ | ✅ Upstream grammar incl. Zig-literal quoting; `clear` drops the built-ins, empty restores them; unparseable actions are dropped. | — |
 | ~~`window-subtitle`, `window-title-font-family`~~ | ✅ ◐ Subtitle (`working-directory`) is appended to the window caption as `title — cwd` (a Windows caption has one line). The title font applies to the **tab strip** only — the caption is drawn by DWM with the system font; resolved through the renderer's font scan, startup-only. | — |
 | ~~`app-notifications`~~ | ✅ In-app toasts ("Copied to clipboard", "Reloaded the configuration"); `Window::render_toast`, per-window egui temp data. | S |
-| `language` | **Decided against for now.** Upstream uses it to pick a gettext catalog for its GUI strings; giest ships no translations, so accepting the key would be a no-op that looks supported. Revisit if giest's UI is ever localized. | — |
+| `language` | **Decided against for now.** Upstream uses it to pick a gettext catalog for its GUI strings; geist ships no translations, so accepting the key would be a no-op that looks supported. Revisit if geist's UI is ever localized. | — |
 
 **A2. Windows analogues of platform keys.** Done (`winchrome.rs`): ✅ `window-decoration`
 (`none`/`false` → `ViewportCommand::Decorations(false)`; `auto`/`client`/`server` all mean "native
@@ -70,7 +70,7 @@ caption", Windows having one decoration system; a reload re-reads it), ✅ `wind
 window on the UI thread via `EnumThreadWindows` — child viewports have no reachable HWND; pre-Win11
 ignores them; unlike GTK not gated on `window-theme = ghostty`), ✅ `window-vsync` (`AutoVsync` /
 `AutoNoVsync`, **startup-only**: the swapchain predates the app), ◐ `window-step-resize` (a
-`WM_SIZING` subclass on the **root window only** — the one HWND giest can reach — snapping the
+`WM_SIZING` subclass on the **root window only** — the one HWND geist can reach — snapping the
 client to whole cells of the non-grid overhead measured each frame; with splits it snaps the whole
 pane area, not each pane), ✅ `quick-terminal-animation-duration` (slide in/out from the anchored
 edge, ease-out cubic; `center` doesn't slide; a newly *created* quick terminal may show one frame at
@@ -94,7 +94,7 @@ the sideload the byte never reaches the engine. See the ledger "Protocol leftove
 
 | Action | Plan | Effort |
 |---|---|---|
-| ~~`resize_split`, `equalize_splits`~~ ✅ | Done: `Node::Split::ratio`, nearest-ancestor resize (10–90% + 2-cell clamp), leaf-weighted equalize, ratios persisted (`S v 0.3`; old files read 0.5). Upstream's non-macOS `super+ctrl+shift+arrow` defaults are not bound — giest sees no Win-key modifier. | M |
+| ~~`resize_split`, `equalize_splits`~~ ✅ | Done: `Node::Split::ratio`, nearest-ancestor resize (10–90% + 2-cell clamp), leaf-weighted equalize, ratios persisted (`S v 0.3`; old files read 0.5). Upstream's non-macOS `super+ctrl+shift+arrow` defaults are not bound — geist sees no Win-key modifier. | M |
 | ~~`prompt_window_title`, `prompt_surface_title`~~ ✅ | A small modal (in both input gates) prefilled with the current title; empty clears the override. A modal rather than the inline tab-rename box: a pane or window has no strip slot to edit in. `new_split:left` / `:up` now put the new pane before the focused one instead of aliasing right/down. | S |
 | ~~`move_tab_to_new_window`~~ ✅ | The active tab is moved (shells running) into `Window::sibling_with`; a window's only tab is a no-op, as upstream. Not undoable (upstream neither). | S |
 | ~~`goto_window`, `toggle_visibility`~~ ✅ | `toggle_visibility` is app-scoped: `Visible(false/true)` to every window but the quick terminal, focus restored on show, no-op while fullscreen (upstream). Only a `global:` bind can bring hidden windows back. | S |
@@ -110,14 +110,14 @@ the sideload the byte never reaches the engine. See the ledger "Protocol leftove
 
 ### C. App-level features (no key, no action)
 
-| Feature | giest | Windows shape | Effort |
+| Feature | geist | Windows shape | Effort |
 |---|---|---|---|
 | **IME / preedit** (CJK, dead keys, Win+. emoji panel) | ◐ | Done: `PlatformOutput::ime` at the cursor cell (candidate window placement), `Event::Ime` preedit/commit (`ime.rs`, commit/Text dedupe, keys held back while composing), preedit drawn underlined at the cursor. Missing: preedit caret/segment styling (egui drops winit's cursor range), overlong preedit doesn't wrap; needs a human check with a real CJK IME | M |
 | **Split divider drag** | ✅ | Grab band ±3pt around the gutter, resize cursor, clamped to 2 cells a side; double-click equalizes (upstream). Needs human visual confirmation. | M |
 | **Pane drag-to-rearrange, drag out to tab/window** | ✅ | `drag-handle` (`auto`/`always`/`never`): an 80×12pt grab handle on each pane's top edge, dots shown in the top 20% band (upstream `SurfaceGrabHandle`). Drop zones are upstream's nearest-edge triangles with the half-pane highlight (`panedrag.rs`); a drop is detach-then-insert on the split tree (`take_grab`/`put_grab`), within a tab, across tabs and across windows (sessions *move*, ids renumbered from the target window's counter). On a tab strip → new tab; outside every window → new window at the pointer (only if the pane was split or the window has other tabs, as upstream). **Tab tear-out**: a tab dragged >24pt off its strip lands in another window's strip (or its panes → appended) or becomes a new window. Every move is one undo entry ("moved split"); a window a move empties is retired and its undo re-creates it. Divergences/limits: overlapping windows resolve source-window-first, not by z-order; windows on monitors with different DPI don't share a point space, so cross-monitor drops can land off by the scale ratio; the drop relies on winit's mouse capture delivering the release outside the window. Needs human drag tests. | L |
 | **File drag-and-drop** → shell-quoted path | ✅ | `dropfiles.rs`: PowerShell single quotes, cmd double quotes, WSL `/mnt/c/…` (and `\\wsl$\distro\…` back to its Linux path) with POSIX quoting; through `Session::paste_str`. Lands in the pane under the pointer, else the focused one (Windows may report no pointer motion during an OLE drag); accent outline while hovering. Needs a human drag test. | S |
-| **Accessibility** (Narrator/NVDA) | ◐ | `a11y.rs`, AccessKit (eframe `accesskit` feature, UI Automation). Each pane is a `Terminal` node (UIA Document + Text pattern) on the focused pane's own egui id, named `Terminal — <title>`, read-only; value = the visible grid as text (one `TextRun` per line, split at 255 chars; wide chars are one character), caret = terminal cursor, selection = the engine selection (upstream's `accessibilityValue`/`selectedRange`/`insertionPoint`). Rebuilt only when a cell/cursor/selection fingerprint changes, and only while an AT is attached. **giest-only:** new output is announced via a polite live region, diffed to new lines (scroll-aware; a change confined to the cursor line — typing echo — is skipped), rate-limited to one announcement per 0.5 s, tail-capped at 2000 chars, silent while scrolled back; `accessibility-announce-output = false` turns it off (upstream has no equivalent — VoiceOver users re-read the text area). Tabs are `Tab` items (selected = active), glyph buttons (`+`, the profile picker, search's `Aa`/`.*`/arrows/`×`, tab `×`) and text boxes (palette, search, title prompts) have spoken names; palette rows are `ListBoxOption`s with `selected`. Verified with a UIA client (text, caret, `select_all` selection, live-region events, names). Missing: scrollback isn't in the text (visible viewport only, like upstream), a rectangular selection is flattened to first..last cell, the palette's selected row isn't the text box's active descendant, rows aren't soft-wrap aware (every row ends in `\n`); **needs a human Narrator/NVDA session** | L |
-| **Child-exited bar** (exit code, abnormal exit, press-any-key) | ✅ | Painter-only strip at the pane bottom (red on failure); any key dismisses and `reap_dead` closes the pane. A held pane is not alive, so it never counts as busy for quit confirmation. **Needs human visual confirmation.** Divergence: upstream prints its non-GUI fallback into the terminal and also shows it on a normal close for undo; giest shows the bar only while held. | S–M |
+| **Accessibility** (Narrator/NVDA) | ◐ | `a11y.rs`, AccessKit (eframe `accesskit` feature, UI Automation). Each pane is a `Terminal` node (UIA Document + Text pattern) on the focused pane's own egui id, named `Terminal — <title>`, read-only; value = the visible grid as text (one `TextRun` per line, split at 255 chars; wide chars are one character), caret = terminal cursor, selection = the engine selection (upstream's `accessibilityValue`/`selectedRange`/`insertionPoint`). Rebuilt only when a cell/cursor/selection fingerprint changes, and only while an AT is attached. **geist-only:** new output is announced via a polite live region, diffed to new lines (scroll-aware; a change confined to the cursor line — typing echo — is skipped), rate-limited to one announcement per 0.5 s, tail-capped at 2000 chars, silent while scrolled back; `accessibility-announce-output = false` turns it off (upstream has no equivalent — VoiceOver users re-read the text area). Tabs are `Tab` items (selected = active), glyph buttons (`+`, the profile picker, search's `Aa`/`.*`/arrows/`×`, tab `×`) and text boxes (palette, search, title prompts) have spoken names; palette rows are `ListBoxOption`s with `selected`. Verified with a UIA client (text, caret, `select_all` selection, live-region events, names). Missing: scrollback isn't in the text (visible viewport only, like upstream), a rectangular selection is flattened to first..last cell, the palette's selected row isn't the text box's active descendant, rows aren't soft-wrap aware (every row ends in `\n`); **needs a human Narrator/NVDA session** | L |
+| **Child-exited bar** (exit code, abnormal exit, press-any-key) | ✅ | Painter-only strip at the pane bottom (red on failure); any key dismisses and `reap_dead` closes the pane. A held pane is not alive, so it never counts as busy for quit confirmation. **Needs human visual confirmation.** Divergence: upstream prints its non-GUI fallback into the terminal and also shows it on a normal close for undo; geist shows the bar only while held. | S–M |
 | Renderer-error / spawn-error views | ✅ | A failed spawn becomes `Session::failed`: a PTY-less pane that prints the error and holds a red exit bar until a key (the first window no longer aborts startup). A lost wgpu device (`set_device_lost_callback`) paints a message over the terminal **and** shows a native `MessageBoxW`, because egui draws through the same dead device. Device loss is untested on real hardware. | S |
 | **Config-errors dialog** | ✅ | parser diagnostics (unknown keys, bad values, malformed lines, unreadable includes, missing theme) collected into `Config::diagnostics`; modal with Reload Configuration / Ignore, re-shown only when the set changes. Not every setter reports a bad value yet — many still keep the old value silently | S |
 | Right-click menu completeness | ✅ | `menu.rs`: Copy URL (on a link, latched when the menu opens), Copy, Paste, Split Right/Left/Down/Up, Select All, Reset Terminal, Toggle Inspector, Read-only (checked), Change Tab Title…, Change Terminal Title…; routed through `execute_action` | S |
@@ -128,17 +128,17 @@ the sideload the byte never reaches the engine. See the ledger "Protocol leftove
 | Notification click → focus pane (+ highlight flash) | ✅ | `notify.rs` subclasses the root window for the icon's `CALLBACK_MSG`; `NIN_BALLOONUSERCLICK` (or a click on the tray icon) focuses the **last** notification's `(window id, pane id)` — ids, never slots — with a 0.6 s accent highlight (`Session::request_highlight`). Suppressed per upstream `shouldPresentNotification` (window active *and* pane focused); `notify-on-command-finish` ones are `requireFocus: false`. Verified by posting the callback message; **a real toast click needs a human check** (Windows 11 renders balloons as toasts). | M |
 | Undo feedback ("Undo Close Tab") | ✅ | toast naming the op (`Undo: reopened 2 tabs`, `Redo: closed split`) on the window it touched | S |
 | Search bar match count, drag-to-corner | ✅ | `3/17` (upstream's format); a grip drags the bar and it snaps to the quadrant it was dropped in | S |
-| About box | ✅ | modal (both gates) with version, commit (`build.rs` → `GIEST_GIT_COMMIT`), build profile, links; from the palette ("About giest", `show_about`) and the tab strip's ⏷ menu | S |
-| **CLI arguments** (`giest <dir>`, `-e`, `+new-window`) | ✅ | `cli.rs`: positional dir (a file opens its folder; Explorer's `"C:\"` → `C:"` quoting accident repaired), `--working-directory`, `-e argv…` (swallows the rest; initial surface only; standalone instance, as upstream's implied `gtk-single-instance = false`), `--<key>=<value>` / `--config-file` replayed after the files on every load, `+new-window` / `+new-tab` (`--command`, `-e`), `+list` / `+focus` / `+action=` / `+input=`, `--help` / `--version` (a release build `AttachConsole`s to print), `--restore-session`. `--title` is not forwarded by `+new-window`. | S |
-| **Single-instance IPC** (App Intents / AppleScript / Services analogue) | ✅ | `ipc.rs`: `\\.\pipe\giest-<SID>-<session>`, JSON lines with `"v": 1`: `new_window`, `new_tab`, `focus`, `input_text` (through `Session::paste_str` — a newline paste is held by paste protection, verified live), `run_action`, `list` (stable window/tab/pane ids). DACL = user SID + SYSTEM, remote clients rejected, `FILE_FLAG_FIRST_PIPE_INSTANCE`; the client checks the server runs as the same user and grants it `AllowSetForegroundWindow`. Opt-out: giest key `single-instance = false`. A plain relaunch opens a window, a positional dir a tab; `-e` or config overrides start standalone. | L |
-| Explorer "Open giest here" | ✅ | `giest +register-shell-integration` / `+unregister-shell-integration` (`shellreg.rs`): HKCU `Directory\Background\shell`, `Directory\shell`, `Drive\shell` → `"<exe>" "%V"` → a new tab over IPC. Never registered implicitly. | S / M |
-| Taskbar Jump List (Dock menu) | ✅ | `jumplist.rs`: `ICustomDestinationList` user tasks New Window / New Tab / one per profile (`+new-tab --command=<profile>`); hand-declared vtables pinned by an ignored host test under a throwaway AppUserModelID. Giest key `jump-list = false` deletes the list. **Needs a human glance at the taskbar menu.** | M |
-| Restart restore (`RegisterApplicationRestart`), window frames in `state.rs` | ✅ | `restart.rs`: registered with `--restore-session` (no crash/hang restarts); the root window's subclass writes a ≤2 s-old layout snapshot on `WM_ENDSESSION`, since `on_exit` never runs then (verified by sending the message). State files gain an optional `F x y w h max` record per window — old files parse unchanged and older giests skip it; restored exactly at 150% DPI (verified). A real update/reboot relaunch needs a human. | S |
-| Custom caption / tabs-in-titlebar | ✅ | `macos-titlebar-style = tabs` (opt-in; see the chrome ledger). `WM_NCCALCSIZE` subclass on every giest top-level window, non-client caption buttons (Win11 snap layouts on the maximize button), strip drag / double-click through `ViewportCommand`. **Needs a human check** (list in the ledger). | L |
+| About box | ✅ | modal (both gates) with version, commit (`build.rs` → `geist_GIT_COMMIT`), build profile, links; from the palette ("About geist", `show_about`) and the tab strip's ⏷ menu | S |
+| **CLI arguments** (`geist <dir>`, `-e`, `+new-window`) | ✅ | `cli.rs`: positional dir (a file opens its folder; Explorer's `"C:\"` → `C:"` quoting accident repaired), `--working-directory`, `-e argv…` (swallows the rest; initial surface only; standalone instance, as upstream's implied `gtk-single-instance = false`), `--<key>=<value>` / `--config-file` replayed after the files on every load, `+new-window` / `+new-tab` (`--command`, `-e`), `+list` / `+focus` / `+action=` / `+input=`, `--help` / `--version` (a release build `AttachConsole`s to print), `--restore-session`. `--title` is not forwarded by `+new-window`. | S |
+| **Single-instance IPC** (App Intents / AppleScript / Services analogue) | ✅ | `ipc.rs`: `\\.\pipe\geist-<SID>-<session>`, JSON lines with `"v": 1`: `new_window`, `new_tab`, `focus`, `input_text` (through `Session::paste_str` — a newline paste is held by paste protection, verified live), `run_action`, `list` (stable window/tab/pane ids). DACL = user SID + SYSTEM, remote clients rejected, `FILE_FLAG_FIRST_PIPE_INSTANCE`; the client checks the server runs as the same user and grants it `AllowSetForegroundWindow`. Opt-out: geist key `single-instance = false`. A plain relaunch opens a window, a positional dir a tab; `-e` or config overrides start standalone. | L |
+| Explorer "Open geist here" | ✅ | `geist +register-shell-integration` / `+unregister-shell-integration` (`shellreg.rs`): HKCU `Directory\Background\shell`, `Directory\shell`, `Drive\shell` → `"<exe>" "%V"` → a new tab over IPC. Never registered implicitly. | S / M |
+| Taskbar Jump List (Dock menu) | ✅ | `jumplist.rs`: `ICustomDestinationList` user tasks New Window / New Tab / one per profile (`+new-tab --command=<profile>`); hand-declared vtables pinned by an ignored host test under a throwaway AppUserModelID. geist key `jump-list = false` deletes the list. **Needs a human glance at the taskbar menu.** | M |
+| Restart restore (`RegisterApplicationRestart`), window frames in `state.rs` | ✅ | `restart.rs`: registered with `--restore-session` (no crash/hang restarts); the root window's subclass writes a ≤2 s-old layout snapshot on `WM_ENDSESSION`, since `on_exit` never runs then (verified by sending the message). State files gain an optional `F x y w h max` record per window — old files parse unchanged and older geists skip it; restored exactly at 150% DPI (verified). A real update/reboot relaunch needs a human. | S |
+| Custom caption / tabs-in-titlebar | ✅ | `macos-titlebar-style = tabs` (opt-in; see the chrome ledger). `WM_NCCALCSIZE` subclass on every geist top-level window, non-client caption buttons (Win11 snap layouts on the maximize button), strip drag / double-click through `ViewportCommand`. **Needs a human check** (list in the ledger). | L |
 | Runtime custom app icon | ✅ | `macos-icon` / `macos-custom-icon` / `macos-icon-frame` / `-ghost-color` / `-screen-color`: the artwork moved to `src/iconart.rs` (shared with `icongen`, byte-identical output) and is redrawn in the configured palette; one shared `Arc`, live on reload. | M |
-| **Release packaging** | ✅ | `mise package` (`scripts/package.ps1`) → `dist/<v>/`: portable zip (exe + `conpty.dll` + `OpenConsole.exe` + icon + `licenses/`: Ghostty MIT, ConPTY MIT, JetBrains Mono OFL, icon), an MSIX (`makeappx`; manifest template `packaging/AppxManifest.xml.in`, full trust, `giest.exe` execution alias), `giest.appinstaller` (24 h on-launch + background update checks; **not hosted**), and `giest-manifest.json` (per-package SHA-256 + size). Mtimes pinned to the HEAD commit for reproducible zips. **Needs a human:** a code-signing certificate (the MSIX is unsigned and Windows refuses to install an unsigned package; `-CertPath`/`-Publisher` sign it), hosting for the `.appinstaller`/`.msix`, and a giest `LICENSE` file (the repo has none; the script copies one if it appears). winget manifest not written. | M |
-| **Auto-update** | ✅ | `update.rs`: `auto-update = off\|check\|download` (default `check` in release builds, `off` in debug — upstream defers to Sparkle's stored preference), `auto-update-channel = stable\|tip` (default: the running version's channel, as upstream), giest-specific `auto-update-feed` (default: compile-time `GIEST_UPDATE_FEED` or the repo's GitHub `/releases` API). Checks 5 s after start and daily; `check_for_updates` checks now. A release is an update only if it carries `giest-manifest.json`; the zip is downloaded to `%LOCALAPPDATA%\giest\updates`, **SHA-256-verified before extraction** (a mismatch deletes it), extracted with `tar.exe`, and marked `pending.json`. Applied at the **next launch** (`startup_apply`, first thing in `main`): each replaced file is *renamed* to `*.old` (the running exe is never deleted or overwritten), the new ones copied in (rolled back on failure), the new exe relaunched with the same args; `*.old` swept on a later launch. The pill (tab strip, right of ⏷) has upstream's wording: `Update Available: X` (click downloads), `Downloading: N%`, `Restart to Complete Update` (click → native confirm → layout saved → relaunch with `--restore-session` + `GIEST_UPDATE_WAIT_PID`; shells end, as with Sparkle), `No Updates Available` / `Update Failed` (fade after 8 s). HTTP is `curl.exe` from System32 behind an `Http` trait; the tests use a mock and never touch the network. MSIX installs (`GetCurrentPackageFullName`) never self-update. Divergences: no release-notes popover (the tooltip carries the URL), no EdDSA signature like Sparkle's — the hash comes from the same release, so it catches corruption, not a compromised release; Authenticode is the real answer and needs a cert. Unverified live: nothing is published yet, so the end-to-end path ran only against the mock. | L |
-| Default-terminal handoff | ✅ | `giest +register-default-terminal` (HKCU, exact restore), `giest -Embedding` COM server + proxy/stub DLL, handed-off PTY backend, IPC forwarding to a running instance, MSIX terminal-host declaration. Verified live with Windows Terminal's OpenConsole as the console half; **needs a human** for the no-WT case and the packaged Settings path - see "Default-terminal handoff" below | XL |
+| **Release packaging** | ✅ | `mise package` (`scripts/package.ps1`) → `dist/<v>/`: portable zip (exe + `conpty.dll` + `OpenConsole.exe` + icon + `licenses/`: Ghostty MIT, ConPTY MIT, JetBrains Mono OFL, icon), an MSIX (`makeappx`; manifest template `packaging/AppxManifest.xml.in`, full trust, `geist.exe` execution alias), `geist.appinstaller` (24 h on-launch + background update checks; **not hosted**), and `geist-manifest.json` (per-package SHA-256 + size). Mtimes pinned to the HEAD commit for reproducible zips. **Needs a human:** a code-signing certificate (the MSIX is unsigned and Windows refuses to install an unsigned package; `-CertPath`/`-Publisher` sign it), hosting for the `.appinstaller`/`.msix`, and a geist `LICENSE` file (the repo has none; the script copies one if it appears). winget manifest not written. | M |
+| **Auto-update** | ✅ | `update.rs`: `auto-update = off\|check\|download` (default `check` in release builds, `off` in debug — upstream defers to Sparkle's stored preference), `auto-update-channel = stable\|tip` (default: the running version's channel, as upstream), geist-specific `auto-update-feed` (default: compile-time `geist_UPDATE_FEED` or the repo's GitHub `/releases` API). Checks 5 s after start and daily; `check_for_updates` checks now. A release is an update only if it carries `geist-manifest.json`; the zip is downloaded to `%LOCALAPPDATA%\geist\updates`, **SHA-256-verified before extraction** (a mismatch deletes it), extracted with `tar.exe`, and marked `pending.json`. Applied at the **next launch** (`startup_apply`, first thing in `main`): each replaced file is *renamed* to `*.old` (the running exe is never deleted or overwritten), the new ones copied in (rolled back on failure), the new exe relaunched with the same args; `*.old` swept on a later launch. The pill (tab strip, right of ⏷) has upstream's wording: `Update Available: X` (click downloads), `Downloading: N%`, `Restart to Complete Update` (click → native confirm → layout saved → relaunch with `--restore-session` + `geist_UPDATE_WAIT_PID`; shells end, as with Sparkle), `No Updates Available` / `Update Failed` (fade after 8 s). HTTP is `curl.exe` from System32 behind an `Http` trait; the tests use a mock and never touch the network. MSIX installs (`GetCurrentPackageFullName`) never self-update. Divergences: no release-notes popover (the tooltip carries the URL), no EdDSA signature like Sparkle's — the hash comes from the same release, so it catches corruption, not a compromised release; Authenticode is the real answer and needs a cert. Unverified live: nothing is published yet, so the end-to-end path ran only against the mock. | L |
+| Default-terminal handoff | ✅ | `geist +register-default-terminal` (HKCU, exact restore), `geist -Embedding` COM server + proxy/stub DLL, handed-off PTY backend, IPC forwarding to a running instance, MSIX terminal-host declaration. Verified live with Windows Terminal's OpenConsole as the console half; **needs a human** for the no-WT case and the packaged Settings path - see "Default-terminal handoff" below | XL |
 | Tab overview | ✅ | see §B (text thumbnails, not rendered previews) | M–L |
 
 #### Default-terminal handoff (built; unpackaged path verified live)
@@ -155,22 +155,22 @@ only in its package's COM catalog and is **invisible to unpackaged processes** (
 `REGDB_E_IIDNOTREG` for both IIDs with WT installed).
 
 **The chain as built.** conhost -> WT's packaged `OpenConsole.exe -Embedding` (`{2EACA947-...}`,
-`IConsoleHandoff`) -> `CoCreateInstance(giest CLSID {2CED21A9-...})` -> COM starts `giest.exe
+`IConsoleHandoff`) -> `CoCreateInstance(geist CLSID {2CED21A9-...})` -> COM starts `geist.exe
 -Embedding` -> `ITerminalHandoff3::EstablishPtyHandoff` through our proxy/stub -> `Pty::from_handoff`
 (second PTY backend: our two anonymous pipes, `PTY_SIGNAL_RESIZE_WINDOW` = `u16 8, cols, rows` on the
 signal pipe instead of `ResizePseudoConsole`, exit = the *client* process handle, the `\Reference` and
-server handles held for the session). With `single-instance` and a giest already running, the
+server handles held for the session). With `single-instance` and a geist already running, the
 `-Embedding` process forwards over IPC (`Request::Handoff {pid, handles}`) and the running instance
 `DuplicateHandle`s the handles out of it into a new tab; otherwise it becomes the instance (and IPC
-server) itself. Failures go to `%TEMP%\giest-handoff.log` - the `-Embedding` process has no console.
+server) itself. Failures go to `%TEMP%\geist-handoff.log` - the `-Embedding` process has no console.
 
 **Pieces.** `vendor/terminal-handoff/` (verbatim IDLs + our `dlldata.c`/`proxy.def`, proxy CLSID
-`{4CDF6A34-...}` so it never collides with WT's) built into `giestHandoffProxy.dll` by
+`{4CDF6A34-...}` so it never collides with WT's) built into `geistHandoffProxy.dll` by
 `scripts/build-handoff-proxy.ps1` (vswhere -> vcvars -> `midl /target NT100` + `cl`; `mise package` runs
-it and ships the DLL). `giest +register-default-terminal` / `+unregister-default-terminal` (HKCU only):
-class + proxy + two `Interface` keys, then `%%Startup` = (WT OpenConsole, giest); the replaced values
+it and ships the DLL). `geist +register-default-terminal` / `+unregister-default-terminal` (HKCU only):
+class + proxy + two `Interface` keys, then `%%Startup` = (WT OpenConsole, geist); the replaced values
 (present *or absent*) and any parent key it had to create are backed up under
-`HKCU\Software\giest\DefaultTerminal`, and unregister restores them exactly - unless the user has
+`HKCU\Software\geist\DefaultTerminal`, and unregister restores them exactly - unless the user has
 since picked another terminal in Settings, which it leaves alone. Refuses a console-subsystem exe
 (every debug build) and refuses to overwrite another proxy's `Interface` key. The MSIX manifest now
 declares `com.microsoft.windows.terminal.host`, the `ExeServer` and the `ProxyStub`.
@@ -179,10 +179,10 @@ declares `com.microsoft.windows.terminal.host`, the `ExeServer` and the `ProxySt
 `{00000000-0000-0000-0000-000000000000}`, restored byte-for-byte after every run):
 `tests/handoff_com.rs` (plays OpenConsole over real COM; never touches `%%Startup`): resize on the
 signal pipe, output -> engine (OSC 2 title via `+list`), `+input` -> the `in` pipe, client exit reaps the
-pane and the instance; and the **forwarded** path (a running giest adopts it as a second tab, the
+pane and the instance; and the **forwarded** path (a running geist adopts it as a second tab, the
 `-Embedding` process exits, the client's exit closes only that tab). `tests/default_terminal.rs` (the
-real chain, delegation live ~1 s): a `cmd` started with a new console appears in giest, a typed
-`title` command runs in it and its title comes back, typed `exit` ends it and giest with it.
+real chain, delegation live ~1 s): a `cmd` started with a new console appears in geist, a typed
+`title` command runs in it and its title comes back, typed `exit` ends it and geist with it.
 
 **Still needs a human:**
 1. **Without Windows Terminal installed there is no console half.** The NuGet `OpenConsole.exe` we ship
@@ -196,7 +196,7 @@ real chain, delegation live ~1 s): a `cmd` started with a new console appears in
 3. Eyeball a real handoff once: title/icon from `TERMINAL_STARTUP_INFO` (only the title is used; icon
    and `wShowWindow` are ignored), and a `.lnk` launch.
 4. A debug build cannot be the COM server (console subsystem: COM gives it a console, whose creation
-   is itself delegated - to giest, i.e. a deadlock; observed as `CO_E_SERVER_EXEC_FAILURE`). Register a
+   is itself delegated - to geist, i.e. a deadlock; observed as `CO_E_SERVER_EXEC_FAILURE`). Register a
    release build.
 
 ### D. Protocols and engine features new on `main`
@@ -208,13 +208,13 @@ real chain, delegation live ~1 s): a `cmd` started with a new console appears in
 | OSC 99 (kitty notifications) | ✅ | side-scanned by `osc_notify.rs` (chunking + `o=`); the engine's notification callback never sees OSC 99, which is why the scanner is not retired — see "Protocol leftovers" |
 | OSC 5522 kitty clipboard + paste-events mode 5522 | ✅ | `clipboard.rs` + engine callbacks, existing permission prompts; see the ledger "Kitty clipboard (OSC 5522) + engine-side OSC 52 / pwd" |
 | OSC 52 / pwd **effects in lib-vt** | ✅ | `osc52.rs` and `osc7.rs` retired; same ledger |
-| `ghostty_terminal_paste` | ✅ | every paste now encodes through the engine (`encode_paste` → `Terminal::paste`, `allow_unsafe` since giest's own gate has decided), with the old encoder as fallback; byte-identical on plain, multi-line, bracketed and injected-`ESC[201~` input (pinned by test). |
-| Native search API (`ghostty_search_*`) | ✅ N/A | evaluated, not adopted: no case-sensitive mode and no regex, so it would lose the `Aa` toggle; regex search built on giest's own wrap-joined text instead — see the ledger "Regex search, and why not the native search API" |
+| `ghostty_terminal_paste` | ✅ | every paste now encodes through the engine (`encode_paste` → `Terminal::paste`, `allow_unsafe` since geist's own gate has decided), with the old encoder as fallback; byte-identical on plain, multi-line, bracketed and injected-`ESC[201~` input (pinned by test). |
+| Native search API (`ghostty_search_*`) | ✅ N/A | evaluated, not adopted: no case-sensitive mode and no regex, so it would lose the `Aa` toggle; regex search built on geist's own wrap-joined text instead — see the ledger "Regex search, and why not the native search API" |
 | Dirty-row iteration | ✅ | `f00c510`: only dirty rows are re-copied; the render state is now acknowledged each frame (it reported `Full` forever before). Needs an eyeball pass for stale cells while typing, scrolling and changing themes. |
-| Selection gesture engine | ✅ | adopted: left-button selection now runs on `ghostty_selection_gesture_*` (press/drag/release) — click counting, the 60%-of-cell threshold, double/triple-click-*drag* word/line snapping, Ctrl+triple-click output, rectangle drag, and the autoscroll *decision*. giest keeps its 15 ms rate clock and smooth scroll instead of `AUTOSCROLL_TICK` (which scrolls the engine viewport behind `animate_scroll`'s back). See the ledger "Selection gesture engine" |
+| Selection gesture engine | ✅ | adopted: left-button selection now runs on `ghostty_selection_gesture_*` (press/drag/release) — click counting, the 60%-of-cell threshold, double/triple-click-*drag* word/line snapping, Ctrl+triple-click output, rectangle drag, and the autoscroll *decision*. geist keeps its 15 ms rate clock and smooth scroll instead of `AUTOSCROLL_TICK` (which scrolls the engine viewport behind `animate_scroll`'s back). See the ledger "Selection gesture engine" |
 | Default cursor style/blink engine options | ✅ N/A | probed: equivalent to `decscusr.rs` for initial, `CSI 0 q`, RIS and mode 12 — except upstream ignores mode 12 when `cursor-style-blink` is set, which only the scanner does. The scanner stays. |
-| OSC 72 kitty drag-and-drop | ⬜ blocked | bytes survive both ConPTYs (probed), and the engine parses OSC 72, answers `t=q` and tracks registrations — but the C API has **no way to deliver a drop** (upstream calls `kitty.dnd.State.dragDrop` from Zig; no C export, no `drag_and_drop` effect in the C wrapper). giest therefore **withholds the engine's OSC 72 replies** so no program is told drops will come; file drops keep pasting paths. See the ledger "Protocol leftovers" |
-| Kitty animation / relative placements / glyph protocol | ◐ | unblocked by a **sideloaded ConPTY** (`conpty-passthrough`, `scripts/fetch-conpty.ps1`). Relative placements ✅, client-driven frames (`a=a,c=N`) ✅, transient ✅ (engine-side eviction); autoplay (`s=2/3`) ⬜ — `animationTick` isn't in the C API, and the C API exposes no frame count or per-frame gap either, so giest can't drive frames itself (re-checked at b32f20f); glyph protocol ⬜ — no outline read-back in the C API, so it is **disabled** rather than advertised. See the kitty section |
+| OSC 72 kitty drag-and-drop | ⬜ blocked | bytes survive both ConPTYs (probed), and the engine parses OSC 72, answers `t=q` and tracks registrations — but the C API has **no way to deliver a drop** (upstream calls `kitty.dnd.State.dragDrop` from Zig; no C export, no `drag_and_drop` effect in the C wrapper). geist therefore **withholds the engine's OSC 72 replies** so no program is told drops will come; file drops keep pasting paths. See the ledger "Protocol leftovers" |
+| Kitty animation / relative placements / glyph protocol | ◐ | unblocked by a **sideloaded ConPTY** (`conpty-passthrough`, `scripts/fetch-conpty.ps1`). Relative placements ✅, client-driven frames (`a=a,c=N`) ✅, transient ✅ (engine-side eviction); autoplay (`s=2/3`) ⬜ — `animationTick` isn't in the C API, and the C API exposes no frame count or per-frame gap either, so geist can't drive frames itself (re-checked at b32f20f); glyph protocol ⬜ — no outline read-back in the C API, so it is **disabled** rather than advertised. See the kitty section |
 | New `middle-click-action` / `copy-on-select` values, `~` in theme paths | ✅ | `clipboard-paste`; `none/primary/clipboard/both` (`true` = clipboard, as off-Linux upstream); `primary-paste` reads the PRIMARY emulation, falling back to the clipboard while it is empty; `~`/`~\` → `%USERPROFILE%` for every theme name incl. light/dark pairs |
 | Free with the bump | ✅ | XTGETTCAP, ANSI DECRQM, DECECM report, mode 2048 size-on-enable, C0/C1 fixes, CSI 2K wrap reset, color-reset fix, RIS clears progress, MOK2 + F13–F25 key encoding, kitty graphics spec fixes |
 
@@ -349,7 +349,7 @@ real chain, delegation live ~1 s): a `cmd` started with a new console appears in
     `Duration` parser (additive number+unit pairs). Reuses the visual-bell transient pattern.
   - **confirm-close-surface** ✅ `false`/`true`/`always` with `needs_confirm` as a pure decision, an
     `egui::Modal` dialog, and — the real gap — **the OS/titlebar close is now honored at all**
-    (`close_requested` + `CancelClose` in the same pass; nothing in giest handled it before).
+    (`close_requested` + `CancelClose` in the same pass; nothing in geist handled it before).
   - **Tab drag-reorder** ✅ pure `drop_index` (centre-crossing) + `reorder_tabs`, an insertion caret,
     and two latent bugs fixed along the way (`renaming` and the drag latch both hold tab *indices*
     that a reorder or a reap invalidates).
@@ -360,7 +360,7 @@ bg-alpha table/branch-order, opacity parse+clamp, blur grammar, dim alpha, bell-
 rate limit, OSC color scan/report/fallback, duration grammar, resize gating + anchors, close
 decision table, drop-index + reorder) — **208 lib + 24 conformance tests pass**. Adversarial
 Ghostty-source reviews confirmed
-parity across these feature areas; the only deliberate divergence is **RIS (`ESC c`)**: giest resets the
+parity across these feature areas; the only deliberate divergence is **RIS (`ESC c`)**: geist resets the
 cursor to the configured `cursor-style`, whereas Ghostty resets to a plain block until a config reload
 (arguably its own quirk). Rendering/interaction remain **perceptual** and need human confirmation in the
 running app (per CLAUDE.md): eyeball cursor shape/blink, bold colors, min-contrast, unfocused-pane cursors,
@@ -368,7 +368,7 @@ and a configured `font-family` / `font-feature = -calt`; curly-underline thickne
 
 ---
 
-## 1. The gap, by category (what Ghostty macOS has that giest still lacks)
+## 1. The gap, by category (what Ghostty macOS has that geist still lacks)
 
 **VT / protocols** — kitty graphics (inline images); OSC 9/777/99 desktop notifications; OSC 9;4 progress;
 OSC 4/5/13-19 color *queries*. *(OSC 8 hyperlinks, OSC 133 prompts, styled underlines, OSC 10/11/12
@@ -400,7 +400,7 @@ binding, leader sequences, key tables, `catch_all`, `chain=`, all four trigger f
 `performable:`, `unconsumed:` and `all:` — the `write_*_file` / `set_*_title` / `toggle_*` /
 `text:` / `csi:` / `esc:` actions, and now **`undo`/`redo` + `undo-timeout`**. The only remaining
 gap against upstream's action union is **`show_gtk_inspector`**, which is GTK's own widget
-inspector and has no Windows counterpart. giest's `inspector:` is now done.)*
+inspector and has no Windows counterpart. geist's `inspector:` is now done.)*
 
 **Selection / scroll / search** — deep press (no Windows pressure input). *(double-click on a link now selects the whole link, upstream
 `linkAtPin` override on click 2, OSC 8 or bare URL, one row; the **60%-of-cell
@@ -435,10 +435,10 @@ config-surface ledger). *(theme/theme-file now done.)*
 
 ## 2. Binding leverage — the effort driver
 
-✅ already exposed (just wire) · ◐ partial · ✋ needs a giest side-scanner (the OSC 7/52 pattern) or
-upstream patch · — pure giest concern.
+✅ already exposed (just wire) · ◐ partial · ✋ needs a geist side-scanner (the OSC 7/52 pattern) or
+upstream patch · — pure geist concern.
 
-| Already in the binding (✅) | Needs side-scan / upstream (✋) | Pure giest work (—) |
+| Already in the binding (✅) | Needs side-scan / upstream (✋) | Pure geist work (—) |
 |---|---|---|
 | Underline style+color, faint, blink, overline, invisible *(now wired)* | OSC 9/777/99 notifications | font-family / atlas multi-face |
 | OSC 8 hyperlink URIs *(now wired)* | OSC 9;4 progress | background opacity/blur/image |
@@ -530,7 +530,7 @@ done — see its ledger.)*
 **Done from this tier:** window geometry (`window-width`/`-height` in cells, `window-position-x`/`-y`)
 plus `toggle_maximize`, `toggle_window_float_on_top` and `toggle_background_opacity` — the last three
 are all documented upstream as macOS-only or macOS-ineffective, and Windows supports every one, so
-giest implements them regardless of which side Ghostty left them on. Notes:
+geist implements them regardless of which side Ghostty left them on. Notes:
 
 - **Geometry is applied on the first frame, not at window creation.** The size is in *cells*, and
   cell metrics don't exist until the glyph atlas is built — which happens after the window. Doing it
@@ -563,7 +563,7 @@ giest implements them regardless of which side Ghostty left them on. Notes:
   unasked. `paste` routes through `Session::paste_str` like every other paste, so
   `clipboard-paste-protection` still applies — a temp path is always safe, but routing around that
   gate is how the next caller that *isn't* ends up bypassing it too.
-- **Deferred: Ghostty's `vt` and `html` output formats.** giest writes `plain` only; the parameter
+- **Deferred: Ghostty's `vt` and `html` output formats.** geist writes `plain` only; the parameter
   grammar has no room for a format today, so this is a gap rather than a divergence.
 
 ---
@@ -709,7 +709,7 @@ halves, the checkerboards and the heavy horizontal fill. ~330 characters.
 - **The octant table is vendored, for the reason upstream states outright.** Its `octants.txt` says
   "we weren't able to discern a mathematical pattern for them" — the block omits 26 of the 256
   patterns and their *order* is not derivable. `src/res/octants.txt` is that file, parsed at first
-  use, the same call giest already makes for `rgb.txt`. The test asserts the table's shape (230
+  use, the same call geist already makes for `rgb.txt`. The test asserts the table's shape (230
   entries, no duplicates, none empty or full) rather than its contents.
 - **`adjust-icon-height` adjusts only the ceiling.** Nothing else moves with it — the grid, the text
   and the decorations are unchanged — so bigger icons don't reflow the row; and only the *height*,
@@ -737,7 +737,7 @@ already needed, so no new primitive was required.
   than ignoring. It has its own test, because the shapes it breaks are a minority of the 44.
 - **The four inverse triangles are drawn as polygons, not by inverting the canvas.** Upstream fills
   the triangle, inverts, then re-clips to the cell; the complement of an edge triangle within a
-  rectangle is just a pentagon, and giest's canvas has neither invert nor clip. Verified by the
+  rectangle is just a pentagon, and geist's canvas has neither invert nor clip. Verified by the
   property that matters: the triangle and its inverse sum to exactly full coverage at every pixel —
   which they do, unlike the *block* mosaics, because they share one exact boundary and the fill
   computes real areas.
@@ -770,7 +770,7 @@ piped through `chafa` — the geometry is proven, how it reads is not.
 All four keys (`font-variation`, `-bold`, `-italic`, `-bold-italic`), parsed to Ghostty's grammar
 and applied to the parsed faces at atlas construction.
 
-- **Both faces, or neither.** giest keeps two views of each font: `ab_glyph::FontRef` rasterizes the
+- **Both faces, or neither.** geist keeps two views of each font: `ab_glyph::FontRef` rasterizes the
   outline and `rustybuzz::Face` decides the advance. A variation set on one alone draws glyphs of
   one weight on spacing computed for another, which reads as bad kerning rather than as a broken
   feature — so `apply_variations` sets both, and the test **measures** it: Segoe UI Variable's `M`
@@ -801,7 +801,7 @@ and applied to the parsed faces at atlas construction.
 
 - **An out-of-range value is silently ignored, not clamped** — upstream's documented behaviour
   ("setting `wght=800` will do nothing") and, here, also a limit: neither backend reports whether a
-  value was in range, so giest cannot warn about it the way it warns about an unknown axis.
+  value was in range, so geist cannot warn about it the way it warns about an unknown axis.
 - **The bundled font has no variation axes**, so the feature does nothing until `font-family` points
   at a variable font. That is a property of the shipped asset rather than of the feature, and it is
   asserted in a test: swapping the bundled JetBrains Mono for a VF fails there, and the
@@ -826,7 +826,7 @@ font size, DPI), **Terminal** (cursor, scrollback, resolved colors, mouse tracki
 read-only, kitty placements, title, cwd), **Keyboard** and **Terminal IO**.
 
 - **The two logs are the point, and they are Windows-shaped.** Upstream's `termio` window shows
-  libghostty's *parsed* VT actions; giest's engine is behind a `write(&[u8])` trait, so what it can
+  libghostty's *parsed* VT actions; geist's engine is behind a `write(&[u8])` trait, so what it can
   show is the byte stream — which turns out to be the more useful half here. ConPTY does not pipe a
   child's output through: it parses the VT and emits its *own* stream, silently dropping sequences
   it doesn't understand (APC, and with it kitty graphics). CLAUDE.md's standing advice for any
@@ -845,7 +845,7 @@ read-only, kitty placements, title, cwd), **Keyboard** and **Terminal IO**.
 - **It costs nothing while closed.** The log is an `Option` on the `Session`, `None` until an
   inspector is opened on that pane, so both record calls are a null check. That is also why it is
   per-pane state rather than the window's — and it matches upstream, whose inspector is per-surface.
-- **It is deliberately not a modal.** Every other overlay in giest takes the keyboard (CLAUDE.md's
+- **It is deliberately not a modal.** Every other overlay in geist takes the keyboard (CLAUDE.md's
   two-gate rule); this one is in *neither* gate, because a keyboard log you cannot type into and an
   IO log over a program you cannot watch redraw would both be useless. The pointer is a different
   matter: the pane underneath still hit-tests, so a click on `Pause` would also start a text
@@ -862,7 +862,7 @@ read-only, kitty placements, title, cwd), **Keyboard** and **Terminal IO**.
 - **No parsed VT actions, no DEC mode table, no per-cell or pagelist browsing, no renderer
   statistics.** All four read state the binding does not surface (`libghostty-vt` exposes no mode
   enumeration and no parser event stream), so they would be invented rather than reported.
-- **Four collapsing sections, not five dockable windows.** giest has no docking, and five floating
+- **Four collapsing sections, not five dockable windows.** geist has no docking, and five floating
   ImGui-style windows over a single terminal pane would be unusable at a terminal's size.
 - **`show` on an already-open inspector keeps the capture**, rather than restarting it — the same
   rule `start_search` follows, and the one branch in the feature, so it has its own test.
@@ -881,7 +881,7 @@ never reached the app. Open it with `Ctrl+Shift+I`, type into the pane and watch
 ### The search action family — ✅ divergences
 
 Upstream's five (`start_search`, `end_search`, `navigate_search:next|previous`, `search_selection`,
-`search:<text>`) now sit alongside giest's own `toggle_search`, all bindable, all with upstream's
+`search:<text>`) now sit alongside geist's own `toggle_search`, all bindable, all with upstream's
 `performable:` semantics ported from `Surface.zig`'s return values rather than guessed at.
 
 - **`escape` is bound to `end_search`, and `performable:` is what makes that safe.** This is
@@ -901,7 +901,7 @@ Upstream's five (`start_search`, `end_search`, `navigate_search:next|previous`, 
   keyboard the same way, so this is parity rather than a shortcut: a binding on a bare letter
   belongs to whoever is typing a query. `session::produces_text` (already written for the
   swallowed-key suppression) is the predicate, reused rather than re-derived.
-- **`search:` had to go in the *payload* table, and the bare `search` alias had to go.** giest
+- **`search:` had to go in the *payload* table, and the bare `search` alias had to go.** geist
   accepted `search` as a synonym for `toggle_search`; upstream's `search` takes a needle
   (`search:foo`). Keeping both would mean a transferred Ghostty config binding `search` silently did
   something else. The prefixes don't overlap with `search_selection`, so the two coexist.
@@ -916,9 +916,9 @@ Upstream's five (`start_search`, `end_search`, `navigate_search:next|previous`, 
 **Divergences:**
 
 - **`toggle_search` stays the `Ctrl+Shift+F` default**, rather than upstream's `start_search`.
-  giest's toggle predates the pair and is a superset; a single key that both opens and closes is
+  geist's toggle predates the pair and is a superset; a single key that both opens and closes is
   what Windows users reach for, and `start_search` is bindable for anyone who wants the split.
-- **`search_selection` uses only the first line of a multi-line selection.** giest's search matches
+- **`search_selection` uses only the first line of a multi-line selection.** geist's search matches
   within a single (soft-wrapped) row, so a multi-line needle could never match — taking the first
   line finds something rather than nothing.
 - **No default `navigate_search` binding.** Upstream binds `super+g`/`super+shift+g` on macOS only;
@@ -941,10 +941,10 @@ look: Escape and Ctrl+Shift+F should still close the bar, and Enter / Shift+Ente
 **expire** on `undo-timeout` (Ghostty's key, default 5 s, `0` disables). Undoable: close split /
 tab / window, close other tabs, close tabs to the right, and — as upstream also does — the
 *creations*: new split / tab / window, whose undo closes them again. That is Ghostty's whole set
-minus `move_split` (giest has no split move) and the app-quitting `close_all_windows`.
+minus `move_split` (geist has no split move) and the app-quitting `close_all_windows`.
 
 - **A restore is lossless, and that is the whole design.** Ghostty's undo retains the live
-  `SurfaceView` tree, so undoing a close brings back the *running* terminal. giest does the same
+  `SurfaceView` tree, so undoing a close brings back the *running* terminal. geist does the same
   by construction: `Node::detach_leaf` **moves** the removed subtree into the undo entry (where
   `remove_leaf` used to drop it — that function is gone, its one caller converted), and closed tabs
   and windows are moved rather than dropped too. Scrollback, the running command and the cwd all
@@ -974,8 +974,8 @@ minus `move_split` (giest has no split move) and the app-quitting `close_all_win
   then ask for the window to close, which would have produced *two* entries (a tab restore into a
   window that no longer exists, and a window restore). It now hands the close straight to the
   window path with the tab still in place, so there is one entry: the whole window.
-- **Undo can never quit giest.** Undoing the creation of what is now the only window would have to
-  close it, which is how giest exits; `RemoveWindow` declines instead. Same rule for `RemoveTabs`
+- **Undo can never quit geist.** Undoing the creation of what is now the only window would have to
+  close it, which is how geist exits; `RemoveWindow` declines instead. Same rule for `RemoveTabs`
   when it would empty a window — that is a *window* close, a different op with a different entry,
   and silently escalating into one would surprise.
 
@@ -987,7 +987,7 @@ minus `move_split` (giest has no split move) and the app-quitting `close_all_win
   screen — the one that slid into slot 0 when this one closed — which is a worse surprise than the
   window coming back stacked.
 - **No action names.** Upstream sets "Undo Close Tab" etc. because macOS shows it in the Edit menu.
-  giest has no Edit menu, so the palette lists a plain `Undo` / `Redo` and the names aren't carried.
+  geist has no Edit menu, so the palette lists a plain `Undo` / `Redo` and the names aren't carried.
 - **The stacks are capped at 64 entries**, oldest dropped. Upstream has no cap and documents that a
   long `undo-timeout` grows the stack without bound; here that is unbounded *processes*, so the cap
   reaches the same end the timeout would have.
@@ -1018,19 +1018,19 @@ old geometry wants a human look.
 which is the "broadcast input" line of Tier 3 and the `all:` trigger flag, one feature under two
 names.
 
-- **`Action::scope()` is ported verbatim from `Binding.zig`**, not hand-picked from what giest's
+- **`Action::scope()` is ported verbatim from `Binding.zig`**, not hand-picked from what geist's
   implementation happens to touch. Several rows are counter-intuitive and are upstream's on purpose:
   `new_tab`, `goto_tab`, `close_tab` and `toggle_readonly` are **surface**-scoped ("relevant to the
   surface they come from"), while `new_window`, `quit` and `reload_config` are **app**-scoped and run
   once. A bespoke taxonomy here would be a second opinion free to drift — the failure this codebase
   keeps catching.
-- **A second, narrower predicate is giest plumbing and says so.** `broadcasts_to_panes` is the subset
+- **A second, narrower predicate is geist plumbing and says so.** `broadcasts_to_panes` is the subset
   of surface actions whose execution touches only the focused *session*, derived by reading
   `execute_action`'s arms. The window-structural remainder (new/close/goto tab, splits, focus moves)
   is surface-scoped upstream but runs **once** here, because `execute_action` acts on the focused
   pane and takes no target. *Deferred follow-up, named:* thread a target pane through
   `execute_action`. Repeating `close_tab` per pane would also not be upstream's behaviour — there
-  each surface closes *its own* tab, where giest's closes the active one N times.
+  each surface closes *its own* tab, where geist's closes the active one N times.
 - **Broadcast covers every pane in every tab of the window that received the key**, background tabs
   included (upstream also broadcasts to invisible surfaces). *Divergence:* it stops at that window —
   upstream iterates every surface in the app, but `handle_shortcuts` is a `Window` method and cannot
@@ -1048,10 +1048,10 @@ names.
 - **Broadcast `paste` raises the paste-protection prompt per pane**, since each `paste_str` gates
   independently — correct by the one-gate rule, though a background tab's prompt waits until you
   visit it. Broadcast `text:` still respects each pane's read-only flag.
-- **Font-size actions are app-global in giest anyway** (one atlas, see the P5 ledger), so `all:` on
+- **Font-size actions are app-global in geist anyway** (one atlas, see the P5 ledger), so `all:` on
   them is already all-panes — parity for free rather than by design.
 - **Related divergence, now nameable:** upstream's `global:` *implies* `all:`, so a global binding
-  broadcasts surface actions app-wide. giest's global bindings run once against the last-used
+  broadcasts surface actions app-wide. geist's global bindings run once against the last-used
   window. Not wired; recorded.
 
 ### `chain=` multi-action bindings — ✅ divergences
@@ -1142,9 +1142,9 @@ run several actions in order.
 - **Lookup falls from the innermost table *outward*, ending at the root**, which is upstream's rule
   and the non-obvious half of the feature: a table is **not modal by itself**. Root bindings stay
   reachable while a table is active, so shadowing one takes an explicit `ignore`.
-- **That forced a real bug fix: giest treated `ignore` and `unbind` as the same thing.** Upstream's
+- **That forced a real bug fix: geist treated `ignore` and `unbind` as the same thing.** Upstream's
   `unbind` is `set.remove` — the key goes back to the shell — while `ignore` *binds* it to nothing,
-  black-holing it. giest removed the binding for both, so `keybind = ctrl+t=ignore` let the key
+  black-holing it. geist removed the binding for both, so `keybind = ctrl+t=ignore` let the key
   through to the shell rather than swallowing it. They are now distinct (`ignore` →
   `Action::Noop("ignore")`), which is also what makes table shadowing expressible.
 - **Only the bare `<name>/` form clears a table.** Naming a table defines it — that is what makes
@@ -1198,7 +1198,7 @@ The five actions the keybind-coverage ledger listed as "not possible without cha
   that.** `Action::from_name` matches these prefixes ahead of the trim every other action name gets
   — but two layers above it were trimming as well (`config.rs`'s keybind setter and
   `Keymap::from_config`), so the guarantee was only true of the function the unit tests called.
-  Both now `trim_start` only. What giest cannot preserve is whitespace around the whole config
+  Both now `trim_start` only. What geist cannot preserve is whitespace around the whole config
   *value*, which the line parser strips — and **upstream strips it too** (`cli/args.zig` trims the
   value and then unquotes), so `keybind = "ctrl+k=text:hello "` is the spelling in both. That is
   pinned by a **config-body** test in `tests/config_conformance.rs`, driving the real pipeline
@@ -1207,7 +1207,7 @@ The five actions the keybind-coverage ledger listed as "not possible without cha
   string from the user's own config, not clipboard content, so bracketing it or raising a
   paste-protection prompt would be wrong. It does scroll to the bottom (the user is "typing") and it
   respects read-only, for the same reason keys do.
-- **`set_surface_title:` needed a per-pane title override**, which giest didn't have: the pane title
+- **`set_surface_title:` needed a per-pane title override**, which geist didn't have: the pane title
   came straight from the engine. An **empty** payload clears the override and hands the title back
   to the program — the only way to undo one.
 - Verified by tests over the escape grammar (including the malformed cases) and a round-trip over
@@ -1231,7 +1231,7 @@ The five actions the keybind-coverage ledger listed as "not possible without cha
   documents the feature as macOS-only ("Ghostty on macOS will automatically enable the Secure Input
   feature…"), it wraps the macOS-specific `EnableSecureEventInput`, and the **GTK apprt lists
   `secure_input` under "Unimplemented"** (`apprt/gtk/class/application.zig`) — so the platform
-  closest to giest's position doesn't have it either. Windows exposes no equivalent service: there
+  closest to geist's position doesn't have it either. Windows exposes no equivalent service: there
   is no API to stop other processes reading keystrokes. Recording it as N/A rather than leaving it
   on the roadmap as a permanently-open item.
 - **`toggle_secure_input` still *binds*, as a no-op**, so a transferred Ghostty config doesn't log
@@ -1252,7 +1252,7 @@ needed.
   it and does nothing. The same two-gate trap as the modal one already recorded in CLAUDE.md.
 - **Only the arrows are bound, and that is upstream, not a shortfall.** `Config.zig` binds
   `shift+home/end/pageup/pagedown` to `adjust_selection` too — and then registers the viewport-scroll
-  bindings *after* them on every non-macOS platform, so those four are scroll bindings there. giest
+  bindings *after* them on every non-macOS platform, so those four are scroll bindings there. geist
   is Windows and matches. All ten direction names still parse, since a config may bind any of them.
 - **The moves are the binding's, not cursor arithmetic.** `Left` goes to the previous *non-empty*
   cell, wrapping upward; `Down` to the next non-blank row. Reimplementing that on the grid would be
@@ -1304,7 +1304,7 @@ wrap is found, and match rows are corrected when scrollback eviction renumbers t
 - **Wrapped rows are joined in `search.rs`, not in the engine.** `screen_text` still yields one
   entry per *display* row and gained a `wrapped` flag (from `Row::is_wrapped`), because
   `write_scrollback_file` / `write_screen_file` read the same method — joining there would silently
-  unwrap the file giest writes, which nobody asked for. Search does the joining itself, in pure code
+  unwrap the file geist writes, which nobody asked for. Search does the joining itself, in pure code
   that hand-built rows can test.
 - **A `Match` now carries a start *and* an end row.** A match across a wrap covers several display
   rows, so `search_highlights` emits one span per row: the first runs to the end of the line, the
@@ -1328,7 +1328,7 @@ wrap is found, and match rows are corrected when scrollback eviction renumbers t
   it is passed straight to `Screen.init`, whose own comment reads *"max_scrollback is the amount of
   scrollback to keep in **bytes**"*, and `PageList.maxSize()` is
   `max(explicit_max_size, min_max_size)` — so a value below one page's worth is floored away. The
-  header is wrong. giest's `scrollback-limit` is therefore in **bytes, exactly like Ghostty's**, and
+  header is wrong. geist's `scrollback-limit` is therefore in **bytes, exactly like Ghostty's**, and
   the note claiming "the key matches but the unit differs" was the error; `config.rs` and the
   configuration guide now say so.
 - **`SpacerHead` is now skipped in `screen_text`.** When a wide character doesn't fit at the end of a
@@ -1357,10 +1357,10 @@ gives the parse error, rather than a `0/0` that reads as "no matches".
   byte-exact except ASCII letters, which compare case-insensitively" — there is no case-sensitive
   mode and no regex. Backing the bar with it would *remove* the `Aa` toggle and still leave regex to
   be built elsewhere. What it would have added — matches tracked internally across resize, reflow
-  and eviction, and primary-screen results kept across an alt-screen app — giest already covers for
+  and eviction, and primary-screen results kept across an alt-screen app — geist already covers for
   the cases that matter (wrap joining, the eviction anchor, recapture on resize). Revisit if
   upstream grows a case or regex option; its `SELECTED_MATCH`/`VIEWPORT_MATCHES` shape would then be
-  a cleaner fit than giest's capture.
+  a cleaner fit than geist's capture.
 - **Regex runs over the same wrap-joined logical lines as substring search**, so a match can span
   a soft wrap. It never spans a hard line break, and `^`/`$` anchor to the logical line — what the
   program that printed the text meant by a line. Byte offsets are mapped back to chars and then to
@@ -1392,7 +1392,7 @@ The selection now lives in the **VT engine**, not the app. `Session`'s two viewp
   Holding one across a `vt_write` is the `walk_placements` trap again.
 - **Only the anchor is tracked.** The moving end is wherever the pointer is *now* and is resolved
   fresh on each update; the range itself is owned by the terminal, which `set_selection` converts
-  to tracked state internally. giest keeps its own anchor solely because the binding exposes no way
+  to tracked state internally. geist keeps its own anchor solely because the binding exposes no way
   to read the active selection back (`GHOSTTY_TERMINAL_DATA_SELECTION` is unbound).
 - **`selection_installed` mirrors terminal state that cannot be queried.** Same cause. It is the
   one piece of duplicated state here, and it exists rather than a guess from "is the anchor set".
@@ -1401,14 +1401,14 @@ The selection now lives in the **VT engine**, not the app. `Session`'s two viewp
   enable a Copy menu item that copies nothing. The text path stays honest either way —
   `format_selection_alloc` returns nothing — and `Ctrl+C` copy-or-interrupt reads the actual text,
   so it decides correctly.
-- **Fixed in passing:** `equalize_splits` parsed to `Action::ClearSelection`. giest has nothing to
+- **Fixed in passing:** `equalize_splits` parsed to `Action::ClearSelection`. geist has nothing to
   equalize (splits are always 50/50) and the intent was a no-op, but the stand-in was a real action
   — so binding a Ghostty config's `equalize_splits` silently *dropped the user's selection*. There
   is now an `Action::Noop` that stands for nothing else, and a test, because in a config the wrong
   behaviour is invisible.
 - **An anchor that loses its cell clears the selection.** Upstream's tracked pins move to the
   screen's top-left when their row is destroyed; extending a drag from a cell that no longer exists
-  would select something the user never pointed at, so giest drops it instead.
+  would select something the user never pointed at, so geist drops it instead.
 - **A selection change forces a snapshot rebuild.** Installing a selection does not necessarily
   dirty the render state, and the "nothing changed" fast path would leave the highlight unpainted on
   an idle screen — the same insurance `viewport_moved` provides, and a silent failure without it.
@@ -1424,7 +1424,7 @@ The selection now lives in the **VT engine**, not the app. `Session`'s two viewp
   displayed on.
 - **Still deferred, deliberately:** rectangle/block selection (the binding takes a `rectangle` flag
   and upstream drives it from a modifier); upstream's **60%-of-cell-width threshold** for whether
-  the clicked and dragged cells are included (`Surface.zig::mouseSelection`) — giest includes on
+  the clicked and dragged cells are included (`Surface.zig::mouseSelection`) — geist includes on
   cell hit, so a drag can grab one more cell than Ghostty would; **drag-past-the-edge autoscroll**
   (upstream ticks one row per timer tick while the button is held); the `adjust_selection` keybinds
   (the `Adjustment` enum makes them cheap now); and **search** cross-wrap matches, which this
@@ -1456,7 +1456,7 @@ startup *and* on reload.
   the load continues, like upstream — never a hang and never a lost config.
 - **A missing *root* config is silent; a missing *include* is reported.** No config file at all is
   the normal first-run state, whereas an include is a filename the user typed.
-- **Divergence: `"?name"` cannot quote a literal leading `?`.** giest's parser strips surrounding
+- **Divergence: `"?name"` cannot quote a literal leading `?`.** geist's parser strips surrounding
   quotes before any setter sees a value, so the escape upstream offers has nowhere to live — and `?`
   is not a legal character in a Windows filename, so there is nothing to escape.
 - **`config_file` is a staging field, not a setting.** The setter collects raw specs, `apply_body`
@@ -1470,7 +1470,7 @@ startup *and* on reload.
 
 ### Sprite glyphs (box drawing, blocks, braille, powerline) — ✅ divergences
 
-giest now draws U+2500–257F (complete), U+2580–259F, U+2800–28FF and the geometric powerline
+geist now draws U+2500–257F (complete), U+2580–259F, U+2800–28FF and the geometric powerline
 separators itself, ported from Ghostty's `font/sprite/draw/{box,block,braille,powerline}.zig`,
 with `adjust-box-thickness`.
 
@@ -1478,7 +1478,7 @@ with `adjust-box-thickness`.
   checks its sprite face before any font lookup, after only the explicit codepoint overrides).
   These characters are defined relative to the *cell* and a font draws them relative to its *em
   box*, so the font's version is only ever right by luck — and is wrong for everybody at any line
-  spacing. giest already stretched the font's versions to the cell (`Constraint::Fill`), so this is
+  spacing. geist already stretched the font's versions to the cell (`Constraint::Fill`), so this is
   a sharpness/correctness change rather than a new capability, but it also covers fonts that lack
   the characters entirely.
 - **The arm table was transcribed mechanically, not by hand.** 109 intersection characters × four
@@ -1489,7 +1489,7 @@ with `adjust-box-thickness`.
   an overlap is invisible (both sides opaque), a gap is a visible seam. "Simplifying" both to a
   plain round is how quadrants end up with a hairline between them — a test pins it.
 - **`box_thickness` is derived from the cell height (`h/12`, min 1)**, where upstream derives it
-  from the font's underline thickness — giest's atlas doesn't carry that metric. Same shape of
+  from the font's underline thickness — geist's atlas doesn't carry that metric. Same shape of
   rule, same tuning knob (`adjust-box-thickness`), and it can never round to zero, since an
   invisible line reads as a missing glyph rather than a thin one.
 - **Second pass: the anti-aliased half.** U+256D–2570 rounded corners, U+2571–2573 diagonals and
@@ -1520,7 +1520,7 @@ with `adjust-box-thickness`.
   colour* — to the foreground, so the glyph and its background agree and the cell reads as one
   solid rectangle (which is what makes padding extension work). It does **not** force opacity:
   upstream's bg-alpha block never consults it, so a full block on a default background still emits
-  no quad under `background-opacity`. giest applies it in the same place and the same way, and
+  no quad under `background-opacity`. geist applies it in the same place and the same way, and
   **not** to a selected or cursor cell — upstream's non-selected-only arm, without which a
   selection would lose its own background. The earlier "full-block glyphs render opaque under
   transparency" framing described a mechanism upstream doesn't have.
@@ -1547,14 +1547,14 @@ with `adjust-box-thickness`.
 Chosen by **measuring** the gap rather than guessing, and the audit is re-runnable:
 
 ```sh
-# upstream keys                                    # giest keys
+# upstream keys                                    # geist keys
 grep -oE '^@"[a-z0-9-]+"' ghostty-src/src/config/Config.zig | tr -d '@"' | sort -u
 grep -oE '\("[a-z0-9-]+", \|' src/config.rs | grep -oE '"[a-z0-9-]+"' | tr -d '"' | sort -u
 ```
 
-**187 upstream keys; giest now sets 113, of which 105 are upstream's** (`config-file`, then
+**187 upstream keys; geist now sets 113, of which 105 are upstream's** (`config-file`, then
 `undo-timeout`, the four `font-variation*` keys, `adjust-icon-height`, and the four `font-style*`
-keys, since) (the rest are giest-specific,
+keys, since) (the rest are geist-specific,
 e.g. `text-gamma`). That replaces the "~250 options / ~230 remaining" estimates this document opened
 with, which were never counted.
 
@@ -1562,19 +1562,19 @@ Landed: `working-directory`, `window-new-tab-position`, `window-padding-balance`
 `split-divider-color`, `search-background`/`-foreground`, `search-selected-background`/`-foreground`,
 `selection-clear-on-typing`, `selection-clear-on-copy`.
 
-- **Three defaults change giest's existing behaviour**, all toward upstream:
-  `window-new-tab-position` defaults to **`current`** (giest always appended), `selection-clear-on-copy`
-  defaults to **false** (giest cleared on every copy), and search matches now use Ghostty's amber
-  (`#FFE082` / `#F2A57E` for the current one) instead of giest's own darker pair.
+- **Three defaults change geist's existing behaviour**, all toward upstream:
+  `window-new-tab-position` defaults to **`current`** (geist always appended), `selection-clear-on-copy`
+  defaults to **false** (geist cleared on every copy), and search matches now use Ghostty's amber
+  (`#FFE082` / `#F2A57E` for the current one) instead of geist's own darker pair.
 - **A mid-list tab insert is a new instance of this repo's stale-index trap.** `window-new-tab-position
   = current` inserts before the end, shifting every later tab — so `renaming` and `tab_drag`, which
   hold tab *indices*, are cleared at the insert like they are at every other mutation point. The
   index arithmetic is a pure `new_tab_index` with tests rather than a comment.
-- **The search *foreground* keys needed a hook that didn't exist.** giest only ever recolored a
+- **The search *foreground* keys needed a hook that didn't exist.** geist only ever recolored a
   match's background; the glyph pass had overrides for the cursor and selection but not for search,
   so a themed foreground could leave a match unreadable on the amber. Both `search-*` colors also
   accept upstream's `cell-foreground` / `cell-background` keywords, resolved per cell.
-- **`split-divider-color` is applied to every chrome hairline**, not just the split gutter. giest
+- **`split-divider-color` is applied to every chrome hairline**, not just the split gutter. geist
   derives one `divider` color for the gutter, the tab-strip edge and the palette rows; honoring the
   key for only one of them would leave a single stripe a different color from the rest.
 - **`working-directory` folded into the *existing* cwd decision** rather than adding a second one:
@@ -1586,7 +1586,7 @@ Landed: `working-directory`, `window-new-tab-position`, `window-padding-balance`
   user is still working with. IME preedit commits count as typing (they clear the selection like any Text).
 - **`enquiry-response` is blocked on ConPTY — now measured, not guessed.** The probe this entry
   called for was written and run (`enq_is_still_stripped_by_conpty`): a shell emitting
-  `giest-enq-open`, `0x05`, `giest-enq-close` comes back as `giest-enq-opengiest-enq-close`. Both
+  `geist-enq-open`, `0x05`, `geist-enq-close` comes back as `geist-enq-opengeist-enq-close`. Both
   markers survive and the ENQ does not, so the byte never reaches the engine and there is nothing to
   answer — the same class of blocker as kitty graphics, and it affects any Windows terminal. The
   assertion is **inverted** like the APC one, so it fails if a future Windows build starts
@@ -1617,9 +1617,9 @@ drops the gesture when the screen switches. A port would have been a second copy
   unset for it, so the reused event object is replaced by a fresh one instead of being set to `[]`
   (which would mean "no boundaries": the whole line is one word).
 - **Autoscroll divergence:** the gesture decides *when* (within 1 px of, or past, the grid's
-  top/bottom edge — upstream's rule, replacing giest's own outside-the-pane test), but giest does
+  top/bottom edge — upstream's rule, replacing geist's own outside-the-pane test), but geist does
   **not** use `AUTOSCROLL_TICK`: that calls `scrollViewport` on the engine directly, which would
-  desync `Session::engine_pin_lines` from `animate_scroll`. The rate stays giest's 15 ms clock and
+  desync `Session::engine_pin_lines` from `animate_scroll`. The rate stays geist's 15 ms clock and
   the scroll goes through the smooth-scroll target; the next frame's drag resolves against the
   scrolled viewport — the same "scroll one row, then drag" as the tick, one frame later.
 - **Geometry:** pane-local device pixels; `padding_left = 0` because the pane rect already excludes
@@ -1651,7 +1651,7 @@ read off `Surface.zig` rather than guessed.
 - **Line selection now follows soft wrapping** (and stops at a prompt via
   `with_semantic_prompt_boundary`). The old version selected one *visual* row, so triple-clicking a
   command longer than the window gave you a fragment of it.
-- **No lifetime crosses the engine trait.** `Selection`/`GridRef` borrow the terminal and giest's
+- **No lifetime crosses the engine trait.** `Selection`/`GridRef` borrow the terminal and geist's
   selection outlives any frame, so the binding types stay inside `engine/ghostty_vt.rs`. That is what
   made this slice cheap where the full migration was not.
 - ~~**Off-viewport ends are clamped, not dropped.**~~ **Superseded** by the selection migration
@@ -1667,9 +1667,9 @@ read off `Surface.zig` rather than guessed.
   boundaries. `\t`, `\n` and `\\` are honoured; other Zig escapes upstream accepts are not.
 - **Not done: the double-click-*drag* refinement.** The binding exposes `select_word_between` with a
   both-directions recipe (upstream uses it at `Surface.zig:4713`) so dragging from one word to
-  another snaps to whole words; giest still extends by cell after the initial double-click.
+  another snaps to whole words; geist still extends by cell after the initial double-click.
 - **Superseded (now matched): upstream checks for a link under the cursor *before* word selection** on
-  double-click, so double-clicking a URL selects the whole link. giest has `hyperlink_at` and could,
+  double-click, so double-clicking a URL selects the whole link. geist has `hyperlink_at` and could,
   but the double-click path doesn't consult it yet.
 - **Verified by engine tests driving real sequences** — word boundaries with and without a custom
   list (the discriminator proving the config threads through), a soft-wrapped line returning both
@@ -1724,11 +1724,11 @@ bold or italic, closing the two divergences the original font-family entry defer
 
 ### `adjust-*` metrics + `isCovering` — ✅ divergences
 
-All twelve `adjust-*` keys giest can act on (`-cell-width`, `-cell-height`, `-font-baseline`,
+All twelve `adjust-*` keys geist can act on (`-cell-width`, `-cell-height`, `-font-baseline`,
 `-underline-position`/`-thickness`, `-strikethrough-*`, `-overline-*`, `-cursor-thickness`,
 `-cursor-height`, `-box-thickness`), plus `isCovering` (see the sprite ledger).
 
-- **Decorations now come from the font, not from a fraction of the cell.** giest previously drew
+- **Decorations now come from the font, not from a fraction of the cell.** geist previously drew
   every line at `cell_h * 0.07`, the underline at `ascent + that`, and the strikethrough at exactly
   half the cell. They are now derived from the face's `post`/`OS/2` line metrics like upstream, so
   **underline and strikethrough placement changes for existing users** — it should look better, but
@@ -1754,7 +1754,7 @@ All twelve `adjust-*` keys giest can act on (`-cell-width`, `-cell-height`, `-fo
   of a taller cell. Ghostty splits the diff the same way.
 - **`adjust-cursor-height` shortens the cursor from the top**, leaving it sitting on the bottom of
   the cell — which is where upstream's bearing-placed cursor sprite ends up.
-- **Not implemented:** `adjust-icon-height` (giest has no icon-height constraint to adjust; Nerd
+- **Not implemented:** `adjust-icon-height` (geist has no icon-height constraint to adjust; Nerd
   Font icons use the generic `Fit` path) and `font-variation`.
 - **Verified**: the derivation is unit-tested against a synthetic face (14 → 24px cell for `= 10`,
   the baseline and underline both moving by 5), and live — a printed box's row pitch grew from 40px
@@ -1786,7 +1786,7 @@ terminal at all.
   `Keymap::globals()` is therefore a separate list, and a test pins that `lookup`/`starts_binding`
   don't see it.
 - **Global binds follow the *root* window's config.** Every window holds its own `Config` clone
-  (giest reloads per window, like Ghostty's per-surface clone), but an OS registration is
+  (geist reloads per window, like Ghostty's per-surface clone), but an OS registration is
   process-wide and needs one authority. A reload in a secondary window won't re-register them.
 - **Hiding the quick terminal means not drawing its viewport.** A child viewport ignores
   `ViewportCommand::Close`; ceasing to show it is what destroys the native window — and because the
@@ -1802,7 +1802,7 @@ terminal at all.
 - **Sizes are clamped to the work area.** A `200%` would otherwise put most of the window off the
   edge with nothing on screen to say why. And the work area (not the full screen) is what a
   `bottom`-positioned terminal anchors to, or it would sit under the taskbar.
-- **`quick-terminal-screen` honors `main` only**: `mouse` needs per-monitor enumeration giest has no
+- **`quick-terminal-screen` honors `main` only**: `mouse` needs per-monitor enumeration geist has no
   handle for, and `macos-menu-bar` has no Windows meaning. It says so rather than silently placing
   the window on the wrong screen.
 - **`quick-terminal-autohide` defaults to `false`**, which is Ghostty's own non-macOS default —
@@ -1811,14 +1811,14 @@ terminal at all.
   `quick-terminal-space-behavior` (macOS spaces), the GTK/Wayland `-layer` and `-namespace` keys,
   and the other trigger flags (`all:`, `unconsumed:`, `performable:`).
 - **Verified live, by measurement**: with `quick-terminal-size = 30%` on a 2560×1392 work area, the
-  hotkey pressed while giest was **unfocused** produced a new top-level window at `0,0` sized
+  hotkey pressed while geist was **unfocused** produced a new top-level window at `0,0` sized
   `2560×417` — full width, and 30% of 1392 = 417.6 → 417. Toggling again removed the window and a
   third press brought it back.
 
 ### Session / window state restore — ✅ divergences
 
 `window-save-state = default | never | always`, with Ghostty's default. On exit the window list is
-written to `%APPDATA%\giest\state` (`$GIEST_STATE` overrides) and rebuilt at the next launch:
+written to `%APPDATA%\geist\state` (`$geist_STATE` overrides) and rebuilt at the next launch:
 windows, tabs and their order and active index, each tab's nested split tree and focused pane, a
 renamed tab's name, and every pane's OSC 7 working directory.
 
@@ -1834,7 +1834,7 @@ renamed tab's name, and every pane's OSC 7 working directory.
   the top of every retire, which makes it describe exactly the moment before the close that ended
   the process — and closing windows one at a time therefore drops the earlier ones, matching macOS.
 - **The file is consumed on read.** It describes one specific exit; leaving it would resurrect that
-  layout after a later crash that never wrote its own, which reads as giest ignoring everything the
+  layout after a later crash that never wrote its own, which reads as geist ignoring everything the
   user has done since.
 - **Parsing is total.** A line-oriented text format (one record per line, free-form fields taking
   the rest of the line so nothing needs escaping) with a preorder tree — unambiguous for a binary
@@ -1878,7 +1878,7 @@ All five Ghostty keys, with Ghostty's defaults: `clipboard-paste-protection = tr
   symbols and the text is capped, because it's chosen by whoever produced the paste — an escape
   passed through could dress the payload up as dialog chrome, and a megabyte-long paste could push
   the buttons off screen.
-- **OSC 52 read is now answerable.** giest previously refused unconditionally; that is still
+- **OSC 52 read is now answerable.** geist previously refused unconditionally; that is still
   available as `clipboard-read = deny`, but the default matches Ghostty's `ask`. *(Superseded: the
   engine now parses OSC 52 and the policy is in `clipboard.rs`; see the next ledger.)*
 - **`clipboard-trim-trailing-spaces` was previously hardcoded on** (`extract_selection` always
@@ -1902,14 +1902,14 @@ and `CSI ? 5522 h` reach us through ConPTY.
   WSL path. The engine also takes OSC 9;9 and OSC 1337 CurrentDir, which the scanner didn't.
 - **The binding's `on_clipboard_write` was broken, silently.** The pinned C API answers through a
   `reply` function pointer; the vendored wrapper still *returned* the result, which the C side
-  ignored, so every write would have been denied. Fixed giest-locally, with `on_clipboard_read`,
+  ignored, so every write would have been denied. Fixed geist-locally, with `on_clipboard_read`,
   `Terminal::paste` and `Mode::PASTE_EVENTS` added beside it.
 - **`ask` cuts the engine's refusal back out.** The callbacks are synchronous and an unanswered
   request is refused immediately; upstream's advice is to block on a modal, which the UI thread
   can't. The callback records the response-buffer offset instead, the refusal written there is cut
   out after `vt_write` and held, and the answer either releases it, flips it to `DONE` (writes), or
   replays the read into the engine under a one-shot grant so the engine formats the reply.
-- **A refused OSC 52 read now gets an empty reply** (`ESC]52;c;ESC\`), where giest used to send
+- **A refused OSC 52 read now gets an empty reply** (`ESC]52;c;ESC\`), where geist used to send
   nothing. That is lib-vt's behaviour and xterm's; a program no longer waits for a reply that
   never comes.
 - **MIME types: text only.** `text/plain` and its spellings are served; a write keeps its text
@@ -1929,7 +1929,7 @@ and `CSI ? 5522 h` reach us through ConPTY.
 
 ### Keybind action coverage — ◐
 
-Ghostty's `Action` union has 85 members; giest's was diffed against it directly rather than
+Ghostty's `Action` union has 85 members; geist's was diffed against it directly rather than
 guessed at, and the ones needing no new subsystem are now wired: `clear_screen`,
 `copy_title_to_clipboard`, `toggle_readonly`, `move_tab:N`, `set_font_size:N`,
 `scroll_page_lines:N`, `scroll_page_fractional:N`, `prompt_tab_title`, `quit` /
@@ -1950,7 +1950,7 @@ guessed at, and the ones needing no new subsystem are now wired: `clear_screen`,
   own ledger; the refactor cost 16 mechanical errors, measured rather than estimated.
 - **`undo`/`redo` are now done** — see their own ledger below.
 - **The five search actions are now done** — `start_search`, `end_search`,
-  `navigate_search:next|previous`, `search_selection` and `search:<text>`, alongside giest's own
+  `navigate_search:next|previous`, `search_selection` and `search:<text>`, alongside geist's own
   `toggle_search`. See their ledger below.
 - **`inspector:toggle|show|hide` is now done** — see its ledger below. Upstream's action union is
   now fully covered apart from `show_gtk_inspector`, which is GTK's widget inspector.
@@ -1978,7 +1978,7 @@ path instead of two that could disagree.
   inherently non-sequenceable (the OS delivers one key, not a leader and a follower), which is true
   upstream too, so a global trigger must be a single chord.
 - **Not done: `end_key_sequence`**, Ghostty's action for flushing the prior keys but *not* the one
-  that triggered it. giest's dead-end flush includes the triggering key, which is Ghostty's default
+  that triggered it. geist's dead-end flush includes the triggering key, which is Ghostty's default
   behaviour; only the opt-out is missing.
 
 ### Custom shaders — ✅ divergences
@@ -2019,7 +2019,7 @@ otherwise be rediscovered by whoever does the pipeline:
   two halves and re-forms them with `#define iChannel0 sampler2D(tex, smp)`.
 - **Functions must be emitted in dependency order.** Ghostty's prefix defines `main()` (calling
   `mainImage`) up front and relies on glslang to link; naga's IR does not, and fails validation with
-  *"[0] of kind Function depends on [2] … which has not been processed yet"*. So giest appends the
+  *"[0] of kind Function depends on [2] … which has not been processed yet"*. So geist appends the
   entry point as a **suffix**, after the user's code. A useful side effect: dropping the forward
   declaration means a misspelled `mainImage` is now a compile error rather than a call to nothing —
   and `compile` checks for the name explicitly, since naga does no link checking at all.
@@ -2046,7 +2046,7 @@ Further divergences:
 - **A failed shader is reported and skipped**, never fatal and never a blank screen — same as
   Ghostty, which also compiles on the render thread and logs.
 - **`iMouse`, `iDate` and `iSampleRate` are zero**, and `iChannelTime`/`iChannelResolution` describe
-  channels giest doesn't have. Ghostty leaves most of these inert too.
+  channels geist doesn't have. Ghostty leaves most of these inert too.
 
 ### OSC 9;4 progress → Windows taskbar — ✅ divergences
 
@@ -2073,14 +2073,14 @@ parsed by the *same* function that decides notification-vs-ConEmu in `osc_notify
   it free to drift.
 - Verified: `tests/conpty_passthrough.rs` confirms ConPTY forwards `OSC 9;4` (it is Microsoft's own
   console and ConEmu's own sequence, but "obviously it passes" is the assumption that cost an
-  afternoon on kitty graphics), and a live run drives every state through a real giest without a
+  afternoon on kitty graphics), and a live run drives every state through a real geist without a
   fault — which is what a wrong slot for `SetProgressValue`/`SetProgressState` would produce.
 
 ### Desktop notifications — ◐ divergences
 
 `OSC 9` (iTerm2 form) and `OSC 777` (rxvt form) plus the `desktop-notifications` key. The other half
 of this row — `notify-on-command-finish` and its `-action` / `-after` keys — is **not** done; it
-needs OSC 133 **C/D**, and giest's shell hooks currently inject only A/B (see below).
+needs OSC 133 **C/D**, and geist's shell hooks currently inject only A/B (see below).
 
 - **Side-scanned, like OSC 7 and OSC 52.** libghostty-vt parses both forms, but its read-only stream
   drops the payload before anything we can read, so `osc_notify.rs` runs its own streaming parser
@@ -2111,7 +2111,7 @@ needs OSC 133 **C/D**, and giest's shell hooks currently inject only A/B (see be
 - **The shell hooks emit `D` but not `C`.** `D` (command ended, with its exit code) goes at the top
   of the prompt, the only post-execution hook either shell offers. `C` (command *started*) would
   need a **pre**-execution hook: PowerShell has none short of overriding a PSReadLine key handler —
-  and PSReadLine isn't always loaded — while cmd has none at all. So giest starts the clock from the
+  and PSReadLine isn't always loaded — while cmd has none at all. So geist starts the clock from the
   Enter *it* sent, gated on the cursor being on a prompt row (`Session::note_command_submitted`).
   That is within microseconds of the real thing, works identically for both shells, and adds no
   dependency. A shell that *does* emit `C` takes precedence automatically.
@@ -2136,7 +2136,7 @@ needs OSC 133 **C/D**, and giest's shell hooks currently inject only A/B (see be
   `tests/conpty_passthrough.rs` (ignored; needs a real shell) pins that OSC 9 and OSC 777 survive,
   along with the already-shipped OSC 7 / 52 / 133, and that APC is still stripped by the inbox
   conhost — inverted, so it *fails* if a future Windows build unblocks kitty graphics. Run with
-  `GIEST_TEST_PASSTHROUGH=1` (after `scripts/fetch-conpty.ps1`) it asserts the opposite: over the
+  `geist_TEST_PASSTHROUGH=1` (after `scripts/fetch-conpty.ps1`) it asserts the opposite: over the
   sideloaded ConPTY, APC and ENQ arrive.
 
 ### background-image — ✅ divergences
@@ -2146,12 +2146,12 @@ JPEG, with the fit/position math and the compositing formula taken from `bg_imag
 `bg_image_fragment` in `renderer/shaders/shaders.metal`. Notes:
 
 - **The fit/position math runs on the CPU, not per vertex.** Upstream recomputes `dest_size` and
-  `dest_offset` in the vertex shader from a uniform, where it can't be unit-tested; giest computes
+  `dest_offset` in the vertex shader from a uniform, where it can't be unit-tested; geist computes
   it once per frame in `bgimage::dest_rect` — a pure function with a table test pinned to Ghostty's
   branches, plus invariant tests (`cover` never leaves a gap, `contain` never overflows) that the
   shader form has no way to express. Same numbers, testable.
 - **Texture coordinates are image-normalized, not pixel-space.** Ghostty samples with
-  `coord::pixel` and wraps with a double `fmod`; giest folds the mapping into the quad's own `uv`
+  `coord::pixel` and wraps with a double `fmod`; geist folds the mapping into the quad's own `uv`
   (which the existing vertex stage already interpolates), so `repeat` is one `fract` and
   "off the image" is a `0..1` bounds test. No second sampler and no new vertex plumbing.
 - **The composite is rearranged from premultiplied to straight alpha**, because this pipeline blends
@@ -2164,7 +2164,7 @@ JPEG, with the fit/position math and the compositing formula taken from `bg_imag
   the same rect composite to `1-(1-a)²` (see the standing rule in CLAUDE.md).
 - **One image per window, not per terminal.** Ghostty documents its image as per-terminal, repeated
   across splits, and warns that it's duplicated in VRAM per terminal ("a future improvement will
-  address this"). giest draws it once across the whole terminal area and uploads one texture per
+  address this"). geist draws it once across the whole terminal area and uploads one texture per
   process, so splits share it — a fix, not a behaviour change, and the VRAM warning doesn't apply.
 - **CMYK JPEGs are rejected.** `jpeg-decoder` doesn't expose the Adobe inversion flag, so any
   conversion would silently render half of them inverted. Grayscale (8- and 16-bit) and RGB load.
@@ -2177,16 +2177,16 @@ JPEG, with the fit/position math and the compositing formula taken from `bg_imag
 ### Scrollbar — ✅ divergences
 
 Ghostty exposes exactly one key, `scrollbar = system | never`, and no width/opacity/always knob;
-giest matches that. Notes where the implementation differs or is Windows-specific:
+geist matches that. Notes where the implementation differs or is Windows-specific:
 
 - **`system` is an auto-hiding overlay.** Ghostty's macOS apprt forces `scrollerStyle = .overlay`
-  even against the OS preference, so "system" already means an overlay upstream; giest does the same
+  even against the OS preference, so "system" already means an overlay upstream; geist does the same
   and never reserves a gutter. Hidden at rest, raised by any scroll or by hovering a 4 pt band at the
   pane's right edge, fading after ~1 s.
 - **`Terminal::scrollbar()` is deliberately unused.** The binding exposes it, but it's documented as
   expensive at arbitrary pins — precisely when a scrollbar is on screen, and per-pane per-frame in a
   split — and its integer `offset` is the whole-line engine pin, which would make the thumb step a
-  full cell during a smooth scroll. giest reconstructs `{total, offset, len}` from
+  full cell during a smooth scroll. geist reconstructs `{total, offset, len}` from
   `scrollback_rows()` (already read every frame) plus the continuous `scroll_px`.
   `scrollbar_state_matches_the_reconstruction_from_scrollback_rows` pins the two together, so an
   upstream change to the arithmetic fails a test rather than skewing the thumb.
@@ -2195,7 +2195,7 @@ giest matches that. Notes where the implementation differs or is Windows-specifi
   scrollback the unclamped thumb is under 2 pt.
 - **The thumb is clamped into the track** once the minimum-size floor engages. Ghostty's inspector
   formula (`top = offset/total*H`) lets `top + len` exceed the track and run the thumb off the
-  bottom; giest scales by `travel = H - len` instead, which is the identical value whenever the floor
+  bottom; geist scales by `travel = H - len` instead, which is the identical value whenever the floor
   is inactive and keeps the drag inverse exact.
 - **One frame of content lag while dragging.** The thumb is exact under the cursor (the drag writes
   `scroll_px` directly, bypassing the ease); the grid follows on the next frame, since input and
@@ -2214,7 +2214,7 @@ giest matches that. Notes where the implementation differs or is Windows-specifi
   scrolled-up viewport. The thumb reflects that faithfully — the scrollbar *exposes* a pre-existing
   divergence rather than introducing one.
 - **`scroll_to_row:N` is bound-able.** Upstream leaves it unbound (it exists so the scroller can
-  drive the core); giest parses it in `keybind` too, which costs nothing and keeps the absolute
+  drive the core); geist parses it in `keybind` too, which costs nothing and keeps the absolute
   seek as real public API.
 - **Fixed in passing:** `shift+home/end/pageup/pagedown` were handled by a hardcoded branch in
   `decide_key` rather than the keymap, so `keybind = shift+home=unbind` silently did nothing. They
@@ -2239,11 +2239,11 @@ giest matches that. Notes where the implementation differs or is Windows-specifi
   absolute path next to the exe instead (the search path includes the cwd — DLL planting) and makes
   it vetoable.
 - **What changes with the sideloaded ConPTY** (all measured by `tests/conpty_passthrough.rs` in
-  both modes, `GIEST_TEST_PASSTHROUGH=1`):
+  both modes, `geist_TEST_PASSTHROUGH=1`):
   - *Opening handshake.* Inbox: `ESC[6n ESC[?9001h ESC[?1004h ESC[m ESC]0;<exe path>BEL ESC[?25h`.
     Sideloaded: `ESC[1t ESC[6n ESC[c ESC[?1004h ESC[?9001h ESC[1;1H`. It still blocks on the
     `ESC[6n` answer (the harness rule in CLAUDE.md holds), and additionally asks DA1 (`ESC[c`),
-    which the engine answers (`ESC[?62;22c`). No synthetic title — tabs show giest's own name until
+    which the engine answers (`ESC[?62;22c`). No synthetic title — tabs show geist's own name until
     the shell sets one.
   - *Stream shape.* Inbox re-renders; the rewrite forwards the child's own sequences (OSC
     7/9/9;4/52/133/777, DECSCUSR and the cmd/pwsh/bash shell-integration tests all still pass).
@@ -2252,8 +2252,8 @@ giest matches that. Notes where the implementation differs or is Windows-specifi
     scrollback-less buffer and reflow on `ResizePseudoConsole`. Not separately re-verified by a
     resize test — **needs a human** resizing a window with long wrapped lines under both modes.
   - *ENQ* now arrives too, so `enquiry-response` becomes implementable (sideloaded only).
-- **Config:** `conpty-passthrough = auto | true | false` (**giest-specific**). `auto` (default) and
-  `true` use a `conpty.dll` beside `giest.exe` when there is one and also pass the flag (for 1.17–1.21
+- **Config:** `conpty-passthrough = auto | true | false` (**geist-specific**). `auto` (default) and
+  `true` use a `conpty.dll` beside `geist.exe` when there is one and also pass the flag (for 1.17–1.21
   builds); `false` forces the inbox conhost. Startup-only (the library is loaded once). With no
   `conpty.dll` present, `auto` behaves exactly as before, so the default changes nothing until the
   pair is installed: `pwsh scripts/fetch-conpty.ps1` (debug + release target dirs).
@@ -2274,7 +2274,7 @@ declares at `src/win/psuedocon.rs:31` behind `#[allow(dead_code)]` and never pas
 `CreatePseudoConsole` gets only `RESIZE_QUIRK | WIN32_INPUT_MODE` (`:83-90`). Enabling it means
 vendoring and patching portable-pty (the pattern already used for `libghostty-rs` and `egui-winit`),
 and it changes stream handling globally rather than just for APC, so input, resize and legacy-app
-behaviour would all need re-verifying. **This affects any Windows terminal, not just giest** — which
+behaviour would all need re-verifying. **This affects any Windows terminal, not just geist** — which
 is also why upstream Ghostty offers no Windows precedent here.
 
 **What is built, unit-tested and ready for the day the PTY can deliver APC** (C1–C4 of the plan):
@@ -2319,7 +2319,7 @@ check: a 64² half-red/half-blue PNG lands as exactly 20×10 cells with equal re
   to the fetched source) before a redraw timer would have anything to redraw.
 - **Glyph protocol (APC `25a1`, upstream d3775d1 et seq.): evaluated, not implemented, and now
   explicitly disabled.** The parser, glossary and responses are in the pinned engine and are **on by
-  default** — so the moment APC arrives, giest would answer `s` with `fmt=glyf` and accept `r`
+  default** — so the moment APC arrives, geist would answer `s` with `fmt=glyf` and accept `r`
   registrations it cannot draw (apps then print PUA codepoints as tofu). The C API has only the
   on/off switch: no way to read a registered glyf outline back for rasterizing, and upstream's
   renderer half (4c34ccf) isn't in the pin. `GhosttyVtEngine::new` sets it off; a test pins that
@@ -2355,7 +2355,7 @@ shared decision table — `split-inherit-working-directory` was previously hardc
   the user closed is the one that visually disappears. Perceptual — needs eyeballing.
 
 ### Divergences recorded in this batch
-- `bell-features` `border` now defaults **false** (Ghostty parity), changing giest's previous
+- `bell-features` `border` now defaults **false** (Ghostty parity), changing geist's previous
   always-flash behavior — `bell-features = border` restores it.
 - `bell-audio-volume` is parsed, clamped and stored but **not honored**.
 - `confirm-close-surface = true` uses an **OSC 133 prompt heuristic**, not a real process check;
@@ -2382,13 +2382,13 @@ Re-checked against the pinned engine (ghostty b32f20f) and its C API.
   The engine handles the client half (query reply, registration, MIME accept, data requests), but
   the *terminal* half — "a drop happened, here are its MIMEs/data" — is `kitty.dnd.State.dragDrop` /
   `dragMove` / `dragLeave`, which are Zig-only; the C wrapper sets the `drag_and_drop` effect to null
-  and exports no drop entry point, and the registration state isn't readable either. A giest side
+  and exports no drop entry point, and the registration state isn't readable either. A geist side
   implementation would fight the engine's own replies (it answers data requests from its empty drop
-  state). So giest **withholds every OSC 72 reply** after `vt_write` (`strip_osc72`): a program that
+  state). So geist **withholds every OSC 72 reply** after `vt_write` (`strip_osc72`): a program that
   queries sees no support and falls back, instead of registering for drops that never come. File
   drops keep pasting shell-quoted paths via `Session::paste_str`. Tripwire
   `kitty_dnd_is_not_advertised` pins that the raw engine *does* answer (so a C API change is visible)
-  while giest does not. Unblocking needs a C export for drop/move/leave (+ serving data).
+  while geist does not. Unblocking needs a C export for drop/move/leave (+ serving data).
 - **Desktop-notification callback: evaluated, not adopted.** `on_desktop_notification` +
   `on_progress_report` agree with `osc_notify.rs` on every OSC 9 / 777 / 9;4 case tried, *including*
   the ConEmu fall-through (`9;4` alone is a notification with body `4`) — pinned by
@@ -2400,12 +2400,12 @@ Re-checked against the pinned engine (ghostty b32f20f) and its C API.
   delivering OSC 99.
 - **Kitty autoplay (`a=a,s=2|3`): still not possible.** `ImageStorage.animationTick` is called only
   from `renderer/generic.zig`; `kitty_graphics.h` exports no tick, no frame count and no per-frame
-  gap, so giest can't even drive frames itself with synthetic `a=a,c=N` writes. Client-driven frames
+  gap, so geist can't even drive frames itself with synthetic `a=a,c=N` writes. Client-driven frames
   keep working.
 
 ### Window chrome: client-drawn caption, runtime icon, colorspace
 
-**`macos-titlebar-style`** maps upstream's four values onto Windows: `native` (giest's default -
+**`macos-titlebar-style`** maps upstream's four values onto Windows: `native` (geist's default -
 a divergence from upstream's `transparent`), `transparent` (native caption tinted to the configured
 `background`/`foreground` through DWM on Win11, unless `window-titlebar-*` is set), `tabs` (the tab
 strip *is* the titlebar, Windows Terminal style), `hidden` (the same client-drawn frame without
@@ -2413,7 +2413,7 @@ caption buttons; empty strip space still drags). Applies live on reload (upstrea
 
 How `tabs` works (`winchrome.rs`): the window keeps `WS_CAPTION | WS_THICKFRAME`, so Aero snap,
 shadow, rounded corners and the side/bottom resize borders stay native. A comctl32 subclass on
-**every** giest top-level window of the UI thread (found per pass by `EnumThreadWindows` + winit's
+**every** geist top-level window of the UI thread (found per pass by `EnumThreadWindows` + winit's
 `Window Class`; child viewports have no reachable HWND) answers `WM_NCCALCSIZE` by keeping the
 default side/bottom borders and dropping the caption; maximized, the top moves down by the frame
 thickness (`SM_CYFRAME + SM_CXPADDEDBORDER` at the window's DPI) so nothing is off-screen.
@@ -2445,7 +2445,7 @@ translucent with no grey band at the top.
 
 **Runtime icon** (`icon.rs` + `iconart.rs`): the icon artwork moved out of `examples/icongen.rs`
 into the library (`icongen` still produces byte-identical assets - verified - and a test pins the
-256 master against `assets/icon.png`). `macos-icon` presets are giest palettes (tile gradient,
+256 master against `assets/icon.png`). `macos-icon` presets are geist palettes (tile gradient,
 monogram, cursor, rim) in the spirit of upstream's artist-drawn variants; `custom-style` maps
 `-screen-color` (gradient, bottom first) to the tile, `-ghost-color` to the monogram, `-frame` to a
 rim colour; `custom` loads `macos-custom-icon` as PNG/JPEG (no ICNS), shrunk to 256. The drawn

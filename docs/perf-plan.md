@@ -7,7 +7,7 @@
 | 1a fonts mmap + dedupe | **done** | Rust heap 76.6 -> 3.7 MB; working set 274 -> 201 MB; throughput unchanged (84.4 -> 85.5 MiB/s); 784 tests pass |
 | 1b lazy fallback loading | **dropped** | mmap made it moot — see below |
 | 1c GPU driver enumeration | **closed — accepted** | ~114 MB of shared driver images; keeping DX12 is worth it (2026-09-20) |
-| 2 latency vs WezTerm | **done — giest wins** | 38.2 ms p50 vs WezTerm's 62.3 (20 samples each, identical 1200x800 client) |
+| 2 latency vs WezTerm | **done — geist wins** | 38.2 ms p50 vs WezTerm's 62.3 (20 samples each, identical 1200x800 client) |
 | 3 dev build uses OpenConsole | **done** | `mise dev` now runs `fetch-conpty.ps1` (0.3 s no-op once installed) |
 | 4 memory series in the harness | **blocked** | needs the perf-harness branch merged; commit signing is down |
 
@@ -25,17 +25,17 @@ measurable benefit, so it is deliberately not done.
 
 ### 1c: closed — the overhead is accepted
 
-**Decision (2026-09-20): keep DX12 and live with the idle memory.** giest idles
+**Decision (2026-09-20): keep DX12 and live with the idle memory.** geist idles
 at ~201 MB against WezTerm's ~78. The measurements below stand; what they buy
 is not worth either price on offer, so no more work is planned here.
 
 Why accepting is defensible: the gap is almost entirely *shared, pageable
 driver images* (`nvwgf2umx` 86 MB, `amdxc64` 78 MB, `d3d10warp` 6 MB) mapped by
-wgpu's adapter enumeration, not memory giest allocates — its own Rust heap is
+wgpu's adapter enumeration, not memory geist allocates — its own Rust heap is
 3.7 MB after 1a. The cost scales with how many GPUs the machine has, and the
 pages are reclaimable under pressure.
 
-**What would reopen it:** giest wanting idle memory as a headline number; a
+**What would reopen it:** geist wanting idle memory as a headline number; a
 wgpu release exposing an adapter filter (then it is a config change, not a
 vendored patch); or a report of real memory pressure on a multi-GPU machine.
 The route, if so, is option (1) below — everything needed to act is recorded.
@@ -63,10 +63,10 @@ Three ways forward, none of which I took without a call from you:
    `background-opacity` regresses to opaque) and exposure to the AMD OpenGL ICD
    that crashed startup with no error at all. Not recommended.
 3. **Accept and document it.** These are shared, pageable driver images; the
-   cost is real in working set but is not giest's own allocation, and it tracks
-   the machine's GPU count. giest stays ~2.5x WezTerm on idle memory.
+   cost is real in working set but is not geist's own allocation, and it tracks
+   the machine's GPU count. geist stays ~2.5x WezTerm on idle memory.
 
-**Chosen: (3).** Option (1) would bind giest to a vendored copy of a large,
+**Chosen: (3).** Option (1) would bind geist to a vendored copy of a large,
 fast-moving crate at every wgpu bump, and (2) trades memory for transparency
 and a startup crash. Neither is worth ~114 MB of shared driver pages.
 
@@ -77,16 +77,16 @@ forced to the same 1200x800 client area, same machine, nothing else running:
 
 | | p50 | p95 | min | mean |
 |---|---|---|---|---|
-| **giest** | **38.2 ms** | 56.2 | 13.3 | 33.4 |
+| **geist** | **38.2 ms** | 56.2 | 13.3 | 33.4 |
 | WezTerm | 62.3 ms | 64.9 | 37.3 | 59.4 |
 
-giest is ~24 ms faster at p50 and ~2.8x faster at its best case. Both numbers
+geist is ~24 ms faster at p50 and ~2.8x faster at its best case. Both numbers
 are inflated by the probe's own poll period (a `PrintWindow` + hash of the
 client area sits inside the measured interval), equally for both terminals —
 which is why the windows must be the same size: at their own defaults WezTerm's
 window is 1.6x the area, worth ~8 ms of its first, discarded result.
 
-**So there is no second big item.** giest leads on throughput and latency; the
+**So there is no second big item.** geist leads on throughput and latency; the
 only dimension where WezTerm is ahead is idle memory (1c).
 
 Four traps cost real time here and are all now guarded or documented in the
@@ -95,7 +95,7 @@ script — each produced a *plausible* wrong answer rather than an error:
 - `Process.MainWindowHandle` latches onto winit's 22x22 helper window, which
   exists before the real one. Every capture then returned 1936 bytes (22*22*4)
   of nothing, which read exactly like "PrintWindow cannot see a GPU surface".
-- A giest launched while another is reachable on the default IPC pipe forwards
+- A geist launched while another is reachable on the default IPC pipe forwards
   its request and exits in ~10 ms; the probe now gives each run its own pipe.
 - `-TermArgs a,b` collapses to one comma-joined string across `pwsh -File`, so
   the terminal launches with one bogus argument and exits instantly.
@@ -115,7 +115,7 @@ reporting a plausible-looking zero.
 **To get the number, run from a terminal you opened yourself:**
 
 ```powershell
-pwsh scripts/perf-latency.ps1 -Exe target/release/giest.exe -Args '--window-width=120','--window-height=40' -Label giest
+pwsh scripts/perf-latency.ps1 -Exe target/release/geist.exe -Args '--window-width=120','--window-height=40' -Label geist
 pwsh scripts/perf-latency.ps1 -Exe <wezterm-gui.exe> -Args '--config','initial_cols=120','--config','initial_rows=40' -Label wezterm
 ```
 
@@ -131,9 +131,9 @@ GPUs), same 120x40 grid, release builds; the methods are in
 memory goes — each item names the measurement that found it and the one that
 will show it fixed.**
 
-## Where giest stands today
+## Where geist stands today
 
-| dimension | giest | WezTerm | verdict |
+| dimension | geist | WezTerm | verdict |
 |---|---|---|---|
 | write throughput, 17 MiB flood | 84.4 MiB/s | 16.5 | won (5x) — with the bundled OpenConsole |
 | same, on the inbox conhost | 12.9 | — | the console host is a 6x factor by itself |
@@ -151,14 +151,14 @@ and a set of guards so the throughput lead is not lost.
 ## 1. Memory — 274 MB → target ≤ 120 MB working set
 
 Attributed with a module breakdown, a per-backend probe and a counting
-allocator (`GIEST_HEAP_PROBE`, `main.rs`):
+allocator (`geist_HEAP_PROBE`, `main.rs`):
 
 | component | size | evidence |
 |---|---|---|
 | fallback fonts read whole into the heap at startup | **~73 MB** | Rust heap live 76.6 MB idle; the six `FALLBACK_FONTS` files total 60.5 MB and `seguiemj.ttf` (12.3 MB) is read a second time as `COLOR_FONT` |
 | second GPU vendor's DX12 driver + WARP, loaded by wgpu's adapter enumeration | ~60 MB WS / ~180 MB private | `amdxc64.dll` 78 MB + `d3d10warp.dll` mapped under DX12; the GL backend (NVIDIA only, same DLL set as WezTerm) idles at 214 MB WS |
 | NVIDIA DX12 driver itself | ~85 MB mapped (shared) | `nvwgf2umx.dll`; WezTerm pays the GL equivalent (`nvoglv64.dll`, 47 MB) |
-| everything else giest allocates | ~4 MB | remainder of the Rust heap |
+| everything else geist allocates | ~4 MB | remainder of the Rust heap |
 
 ### 1a. Memory-map the fonts instead of reading them (S, ~70 MB)
 
@@ -167,7 +167,7 @@ slice comes from `std::fs::read` + `Box::leak`. Map the files (`memmap2`) and
 hand out the mapped slice: pages of a 19 MB CJK collection that no glyph ever
 touches never enter the working set. Also load `seguiemj.ttf` once and share it
 between the outline fallback and the color font. Expected: Rust heap 77 → ~4 MB,
-working set down by roughly the same. Gate: `GIEST_HEAP_PROBE` reading and the
+working set down by roughly the same. Gate: `geist_HEAP_PROBE` reading and the
 idle-WS number in `scripts/perf-vs.ps1`'s startup probe (to be added, see 4).
 
 ### 1b. Lazy fallback loading (S, on top of 1a)
@@ -185,7 +185,7 @@ render CJK or Korean. Keeps startup flat and cuts handle count.
 
 
 wgpu-hal's DX12 backend opens a D3D12 device on *every* DXGI adapter while
-enumerating, which loads each vendor's user-mode driver and WARP. giest already
+enumerating, which loads each vendor's user-mode driver and WARP. geist already
 pins the backend to DX12 for a crash reason (CLAUDE.md); the remaining cost is
 enumeration. Options, in order of preference:
 
@@ -203,13 +203,13 @@ enumeration. Options, in order of preference:
 Gate: `d3d10warp.dll` and the non-hosting vendor's DLL absent from the module
 list; idle WS in the startup probe.
 
-**Not doing:** switching giest to the GL backend to match WezTerm's driver set.
+**Not doing:** switching geist to the GL backend to match WezTerm's driver set.
 GL measured only 60 MB better, loses DirectComposition transparency (see
 CLAUDE.md), and the OpenGL ICD is the one that faulted on the AMD card.
 
 ## 2. Input latency — measure WezTerm, then decide
 
-giest's harness reports 19 ms keystroke-to-paint at p50, with ~16 ms of that
+geist's harness reports 19 ms keystroke-to-paint at p50, with ~16 ms of that
 inside ConPTY before the byte reaches the engine. Whether WezTerm is faster is
 **unknown**: its number can only be taken externally. Plan:
 
@@ -217,8 +217,8 @@ inside ConPTY before the byte reaches the engine. Whether WezTerm is faster is
   window with `PrintWindow` (client-only, DPI-aware — the two traps in
   CLAUDE.md) until the prompt-line pixels change, 30 samples each, run against
   both terminals on the same OpenConsole. The camera-free version of typometer.
-- If WezTerm is within noise of giest, close this item: the floor is ConPTY.
-- If WezTerm is meaningfully faster, the suspects are, in order: giest's PTY
+- If WezTerm is within noise of geist, close this item: the floor is ConPTY.
+- If WezTerm is meaningfully faster, the suspects are, in order: geist's PTY
   wake path (the reader posts an event, the UI thread then pumps, snapshots and
   renders — measure the gap between `pump_ms` and `frame_cpu_ms` in the
   harness); the 500 ms exit-poll heartbeat coalescing with a real wake; and
@@ -256,13 +256,13 @@ Target: within 1 ms of WezTerm at p50, or a written reason it cannot be.
 All done or closed except one:
 
 1. ~~**1a** fonts mmap + dedupe~~ done — the largest win, and the whole of it.
-2. ~~**2** latency probe~~ done — giest leads, so there was no second big item.
+2. ~~**2** latency probe~~ done — geist leads, so there was no second big item.
 3. **4** memory series in the harness, so 1a stays fixed. **Still open**, and
    blocked on merging the perf-harness branch (`src/perf.rs`, `mise perf`).
 4. ~~**1b**~~ dropped (mmap made it moot), ~~**1c**~~ closed (accepted).
 5. ~~**3** dev-build OpenConsole fetch~~ done.
 
-With 1c accepted, giest's standing against WezTerm is: **ahead** on throughput
+With 1c accepted, geist's standing against WezTerm is: **ahead** on throughput
 (5x) and keystroke latency (1.6x), **level** on startup and idle CPU, **behind**
 on idle memory by ~2.5x, by choice and for a known reason.
 

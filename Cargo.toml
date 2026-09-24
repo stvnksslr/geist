@@ -1,5 +1,5 @@
 [package]
-name = "giest"
+name = "geist"
 version = "0.1.0"
 edition = "2024"
 publish = false # binary app with a vendored path dep — never goes to crates.io
@@ -87,7 +87,7 @@ raw-window-handle = "0.6"
 # visual sits below the window's redirection surface — without the flag the
 # window composites over that opaque surface and `background-opacity` renders as
 # an opaque grey wash. The style is create-time only, so the app cannot add it
-# later. giest doesn't depend on egui-winit directly (eframe does), hence a patch
+# later. geist doesn't depend on egui-winit directly (eframe does), hence a patch
 # rather than a plain path dependency. Same shape as the libghostty-rs patch
 # above; don't "simplify" it away. Re-apply on every egui upgrade.
 [patch.crates-io]
@@ -111,7 +111,7 @@ criterion = "0.5"
 # (benches/render.rs). Already in the dependency tree via wgpu.
 pollster = "0.4"
 
-# Host-environment CPU-path benchmarks. They link the giest *library* (src/lib.rs)
+# Host-environment CPU-path benchmarks. They link the geist *library* (src/lib.rs)
 # so they can drive the engine snapshot and the shaping path directly. Run with
 # `cargo bench` (needs Zig 0.16.0 on PATH to build libghostty-vt).
 [[bench]]
@@ -122,7 +122,7 @@ harness = false
 name = "shaping"
 harness = false
 
-# VT-write throughput (Ghostty's TerminalStream/OscParser analog) + giest's own
+# VT-write throughput (Ghostty's TerminalStream/OscParser analog) + geist's own
 # OSC side-scanners.
 [[bench]]
 name = "stream"
@@ -146,7 +146,7 @@ harness = false
 # separate profiling profile instead.
 [profile.release]
 opt-level = 3        # max speed (default, made explicit)
-lto = "fat"          # whole-program LTO across giest + all deps (incl. wgpu/eframe)
+lto = "fat"          # whole-program LTO across geist + all deps (incl. wgpu/eframe)
 codegen-units = 1    # one unit → no cross-unit optimization barriers
 panic = "abort"      # drop unwinding tables: smaller + lets the optimizer assume
                      # no unwind. A panic aborts the process (incl. the PTY reader

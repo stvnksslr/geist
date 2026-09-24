@@ -1,9 +1,9 @@
 # Touch points: overview
 
-giest is glue between three systems. This section enumerates **every boundary
-crossing** — each place where giest code calls into the operating system or into
+geist is glue between three systems. This section enumerates **every boundary
+crossing** — each place where geist code calls into the operating system or into
 libghostty-vt, and each callback that comes back the other way. If you're trying
-to understand "where does giest end and Windows/Ghostty begin?", start here.
+to understand "where does geist end and Windows/Ghostty begin?", start here.
 
 ```mermaid
 flowchart TB
@@ -17,7 +17,7 @@ flowchart TB
         proc["Process spawn"]
     end
 
-    subgraph giest["giest"]
+    subgraph geist["geist"]
         direction LR
         ptyrs["pty.rs"]
         sessrs["session.rs"]
@@ -64,8 +64,8 @@ flowchart TB
 
 | Boundary | What crosses it | Page |
 | --- | --- | --- |
-| **giest ↔ Windows** | PTY I/O, process spawning, clipboard, GPU, window/input, filesystem/env | [Operating system](os.md) |
-| **giest ↔ libghostty-vt** | VT bytes, key/mouse/paste encoding, render snapshots, modes, theming | [libghostty-vt](libghostty.md) |
+| **geist ↔ Windows** | PTY I/O, process spawning, clipboard, GPU, window/input, filesystem/env | [Operating system](os.md) |
+| **geist ↔ libghostty-vt** | VT bytes, key/mouse/paste encoding, render snapshots, modes, theming | [libghostty-vt](libghostty.md) |
 
 ## The one rule that shapes everything
 

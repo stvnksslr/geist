@@ -77,7 +77,7 @@ const ITALIC_SKEW: f32 = 0.212_556_5;
 
 /// Synthetic bold: dilate the coverage by `strength` pixels.
 ///
-/// Upstream emboldens the glyph *outline* before rasterizing; giest has no
+/// Upstream emboldens the glyph *outline* before rasterizing; geist has no
 /// outline access through ab_glyph, so this dilates the rasterized coverage
 /// instead — max-blended (never summed) so anti-aliased edges stay smooth
 /// rather than clipping to a hard block. Slightly chunkier than a real outline
@@ -394,7 +394,7 @@ pub struct FontSpec {
 /// `font-thicken`: dilate coverage by one pixel, weighted by `strength`.
 ///
 /// Upstream only implements this on macOS, where CoreText's font smoothing
-/// thickens strokes; giest has no such rasterizer hook (ab_glyph gives
+/// thickens strokes; geist has no such rasterizer hook (ab_glyph gives
 /// coverage, not an outline to stroke), so it grows the coverage instead:
 /// every pixel takes the max of itself and `weight x` its 4-neighbours, with
 /// `weight = (strength + 1) / 256` — so `0` is the lightest thickening, not
@@ -531,7 +531,7 @@ pub fn derive_metrics(raw: RawFontMetrics, adjust: &crate::config::MetricAdjust)
 /// underline and strikeout lines come from the **ttf-parser** face behind
 /// rustybuzz — ab_glyph exposes no `post`/`OS/2` line metrics at all. Both
 /// describe the same face, so mixing the two is safe; the alternative would be
-/// deriving the decorations from the cell box, which is what giest did before
+/// deriving the decorations from the cell box, which is what geist did before
 /// and is why underlines sat at a hardcoded 7% of the cell.
 fn raw_metrics(font: &FontRef<'static>, face: &ShapeFace<'static>, px: f32) -> RawFontMetrics {
     let scaled = font.as_scaled(PxScale::from(px));
@@ -598,12 +598,12 @@ fn parse_features(specs: &[String]) -> Vec<Feature> {
     let mut out = Vec::new();
     for spec in specs {
         if !has_4char_tag(spec) {
-            eprintln!("giest: ignoring font-feature '{spec}' (tag must be 4 characters)");
+            eprintln!("geist: ignoring font-feature '{spec}' (tag must be 4 characters)");
             continue;
         }
         match Feature::from_str(spec) {
             Ok(f) => out.push(f),
-            Err(_) => eprintln!("giest: ignoring invalid font-feature '{spec}'"),
+            Err(_) => eprintln!("geist: ignoring invalid font-feature '{spec}'"),
         }
     }
     out
@@ -647,7 +647,7 @@ fn apply_variations(
         }]);
         if !known {
             eprintln!(
-                "giest: font-variation '{}' is not an axis of this font; ignoring it",
+                "geist: font-variation '{}' is not an axis of this font; ignoring it",
                 v.tag_str()
             );
         }
@@ -885,7 +885,7 @@ fn resolve_slots(spec: &FontSpec) -> ([(&'static [u8], u32); 4], [Synth; 4]) {
         && spec.family_bold_italic.is_none()
     {
         if let Some(f) = primary {
-            eprintln!("giest: font-family '{f}' not found; using the built-in font");
+            eprintln!("geist: font-family '{f}' not found; using the built-in font");
         }
         return (disable_styles(embedded, spec), [Synth::default(); 4]);
     }
@@ -1009,7 +1009,7 @@ pub fn classify(ch: char) -> Constraint {
         0x2500..=0x259F => Constraint::Fill,
         // Braille patterns are designed to tile the cell.
         0x2800..=0x28FF => Constraint::Fill,
-        // The Symbols for Legacy Computing mosaics giest draws (sextants,
+        // The Symbols for Legacy Computing mosaics geist draws (sextants,
         // octants, the eighth/quarter blocks). Listed for the same reason the
         // box-drawing arm is: the sprite path takes these *before* `classify` is
         // consulted, but the two tables should agree about what tiles the cell —
@@ -1111,7 +1111,7 @@ pub struct Atlas {
     fallback_cache: HashMap<char, Option<GlyphInfo>>,
     /// Color emoji glyphs cached by character.
     color_cache: HashMap<char, Option<GlyphInfo>>,
-    /// Sprite glyphs (box drawing / blocks / braille that giest draws itself)
+    /// Sprite glyphs (box drawing / blocks / braille that geist draws itself)
     /// cached by character. Cleared with the rest on a font resize, since a
     /// sprite is drawn from the *cell* metrics and every one changes.
     sprite_cache: HashMap<char, Option<GlyphInfo>>,
@@ -1197,7 +1197,7 @@ impl Atlas {
                     }
                     fallbacks.push(font);
                 }
-                None => eprintln!("giest: font-family '{family}' not found; skipping it"),
+                None => eprintln!("geist: font-family '{family}' not found; skipping it"),
             }
         }
         for (path, index) in FALLBACK_FONTS {
@@ -1218,7 +1218,7 @@ impl Atlas {
             {
                 Some(font) => codepoint_faces.push((m.ranges.clone(), font)),
                 None => eprintln!(
-                    "giest: font-codepoint-map family '{}' not found; skipping it",
+                    "geist: font-codepoint-map family '{}' not found; skipping it",
                     m.family
                 ),
             }
@@ -1394,7 +1394,7 @@ impl Atlas {
     }
 
     /// A **sprite** glyph: box drawing, block elements or braille, drawn by
-    /// giest from the cell metrics rather than taken from the font.
+    /// geist from the cell metrics rather than taken from the font.
     ///
     /// `None` for anything [`crate::sprite::covers`] doesn't claim, which is the
     /// signal to fall through to the normal font path. Checked *before* the
@@ -2321,7 +2321,7 @@ mod tests {
         // A path to the embedded *regular* face: every styled slot must fall back
         // to it, which is exactly the "family has no bold" case. No dependence on
         // which system fonts happen to be installed.
-        let dir = std::env::temp_dir().join("giest-synth-test");
+        let dir = std::env::temp_dir().join("geist-synth-test");
         std::fs::create_dir_all(&dir).expect("temp dir");
         let path = dir.join("regular-only.ttf");
         std::fs::write(&path, FONT_REGULAR).expect("write font");
@@ -2707,7 +2707,7 @@ mod coverage {
     /// Who is responsible for a range's glyphs.
     #[derive(PartialEq, Eq, Clone, Copy)]
     pub enum Source {
-        /// giest draws these itself (`sprite`) or ships them in the embedded
+        /// geist draws these itself (`sprite`) or ships them in the embedded
         /// Nerd Font. Deterministic on every machine, so a gap is a bug.
         Own,
         /// Resolved from whatever Windows ships. Present on a stock install,
@@ -2741,7 +2741,7 @@ mod coverage {
         }
     }
 
-    /// The ranges giest claims to render with its default font set.
+    /// The ranges geist claims to render with its default font set.
     pub const EXPECTED: &[Range] = &[
         // Drawn by `sprite` from the cell metrics.
         own("Box Drawing", 0x2500, 0x257F),
@@ -2789,7 +2789,7 @@ mod coverage {
     ];
 
     /// Above this, a gap is a fact about the installed Segoe UI Emoji rather
-    /// than about giest: Windows adds emoji with OS updates, so the set a given
+    /// than about geist: Windows adds emoji with OS updates, so the set a given
     /// machine has is not something a test can pin.
     pub const EMOJI_FLOOR: u32 = 0x1F000;
 
@@ -2857,11 +2857,11 @@ mod coverage {
 mod coverage_tests {
     use super::coverage::{EMOJI_FLOOR, EXPECTED, Faces, Source, list};
 
-    /// The ranges giest draws or ships: these depend on nothing but the repo,
+    /// The ranges geist draws or ships: these depend on nothing but the repo,
     /// so a single uncovered codepoint is a bug — and this is the test that
     /// finds the ones nobody happened to type.
     #[test]
-    fn sprite_and_embedded_font_cover_every_range_giest_owns() {
+    fn sprite_and_embedded_font_cover_every_range_geist_owns() {
         let faces = Faces::load();
         for range in EXPECTED.iter().filter(|r| r.source == Source::Own) {
             let gaps = faces.gaps(range);

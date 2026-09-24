@@ -1,6 +1,6 @@
 # Data flow
 
-Two round trips capture almost everything giest does: a **keystroke going out**
+Two round trips capture almost everything geist does: a **keystroke going out**
 to the shell, and a **chunk of output coming back** to the screen. Both pass
 through the same narrow boundaries described in [Layered design](layers.md).
 
@@ -55,7 +55,7 @@ Key facts:
 
 ## Input: keystroke → shell
 
-egui hands giest already-classified events. `session.rs` decides whether each
+egui hands geist already-classified events. `session.rs` decides whether each
 event is for the **app** (tabs, splits, scrollback, copy/paste) or the
 **shell**, and only the latter is encoded to bytes and written to the PTY.
 

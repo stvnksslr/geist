@@ -549,7 +549,7 @@ pub trait TerminalEngine {
     /// applies internally. `cursor` is `None` when no cursor color is set.
     ///
     /// Needed to answer an OSC color **query**, which libghostty-vt's read-only
-    /// stream parses and then discards, so giest side-scans and replies itself
+    /// stream parses and then discards, so geist side-scans and replies itself
     /// (see [`crate::osc_color`]).
     fn dynamic_colors(&self) -> (Rgb, Rgb, Option<Rgb>);
 

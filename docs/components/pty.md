@@ -73,7 +73,7 @@ flowchart LR
 !!! warning "`read()` may never return 0 on ConPTY"
     On Windows ConPTY the master *output* pipe usually does **not** reach EOF
     when the child exits — portable-pty keeps the pseudoconsole open, so the
-    reader thread stays blocked and the channel never disconnects. giest's
+    reader thread stays blocked and the channel never disconnects. geist's
     primary exit signal is therefore `is_running()`, which polls the child
     process directly with `Child::try_wait()`. `app.rs` schedules a repaint
     every 500 ms so an idle exit is still reaped. See [Gotchas](../gotchas.md).

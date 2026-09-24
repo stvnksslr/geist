@@ -1,4 +1,4 @@
-LIBRARY giestHandoffProxy
+LIBRARY geistHandoffProxy
 EXPORTS
     DllGetClassObject   PRIVATE
     DllCanUnloadNow     PRIVATE

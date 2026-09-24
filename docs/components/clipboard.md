@@ -6,7 +6,7 @@ clipboard protocol, OSC 5522** (multi-MIME reads/writes with status replies,
 plus *paste events*, mode 5522).
 
 libghostty-vt parses both protocols and calls two effect callbacks with one
-normalized request per read or write. giest installs them in
+normalized request per read or write. geist installs them in
 `engine/ghostty_vt.rs` (`install_clipboard`); `clipboard.rs` is the policy half.
 There is no side-scanner any more — the old `osc52.rs` existed only because the
 binding used to expose neither the payload nor a callback.
@@ -39,7 +39,7 @@ A bare targets listing (`.`) is served without a prompt, as kitty and upstream d
 ## `ask` without blocking
 
 The callbacks are synchronous and an unanswered request is refused on the spot.
-giest cannot block on a modal (the UI thread draws it), so for `ask` the
+geist cannot block on a modal (the UI thread draws it), so for `ask` the
 callback records the response-buffer offset and leaves the request unanswered;
 after `vt_write` the refusal the engine wrote there is **cut back out** and held.
 On the user's answer: deny sends the held refusal; allow performs the write and

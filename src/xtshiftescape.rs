@@ -3,7 +3,7 @@
 //! A program uses it to say whether Shift+click should reach it (`Ps = 1`) or
 //! stay with the terminal for selection (`Ps = 0` or no parameter). libghostty
 //! records it in `Terminal.flags.mouse_shift_capture`, but the C API exposes no
-//! getter, so — like OSC 7 / 52 / 133 — giest parses the same bytes it feeds the
+//! getter, so — like OSC 7 / 52 / 133 — geist parses the same bytes it feeds the
 //! engine. `mouse-shift-capture = true|false` defers to the latest request
 //! ([`crate::config::MouseShiftCapture::captured`]); `always|never` ignore it.
 //!

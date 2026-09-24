@@ -84,13 +84,13 @@ pub fn tidy(lines: &[String]) -> String {
 }
 
 /// Build the file name for a capture: distinctive, sortable, and unmistakably
-/// giest's, so a temp directory full of these is still navigable.
+/// geist's, so a temp directory full of these is still navigable.
 ///
 /// `stamp` is a caller-supplied counter rather than a clock, which keeps this
 /// pure and testable — and avoids two captures in the same second colliding,
 /// which a timestamp alone would do.
 pub fn file_name(scope: WriteScope, stamp: u64) -> String {
-    format!("giest-{}-{stamp}.txt", scope.name())
+    format!("geist-{}-{stamp}.txt", scope.name())
 }
 
 /// Write `text` to a uniquely named file in the system temp directory and return
@@ -159,7 +159,7 @@ mod tests {
         let a = file_name(WriteScope::Scrollback, 1);
         let b = file_name(WriteScope::Scrollback, 2);
         assert_ne!(a, b, "two captures must not collide");
-        assert!(a.starts_with("giest-"), "{a}");
+        assert!(a.starts_with("geist-"), "{a}");
         assert!(a.ends_with(".txt"), "{a}");
         assert!(a.contains("scrollback"), "{a}");
         assert!(file_name(WriteScope::Selection, 1).contains("selection"));

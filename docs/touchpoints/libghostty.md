@@ -2,7 +2,7 @@
 
 [libghostty-vt](https://ghostty.org) is Ghostty's terminal-state engine — the
 VT parser, the grid, the scrollback, the mode state machine, and the
-key/mouse/paste encoders. giest uses it as the **terminal model** behind the
+key/mouse/paste encoders. geist uses it as the **terminal model** behind the
 [`TerminalEngine`](../components/engine.md) trait.
 
 !!! info "The boundary lives in exactly one file"
@@ -35,7 +35,7 @@ flowchart LR
 
 - `vendor/libghostty-rs/` is [Uzaaft/libghostty-rs](https://github.com/Uzaaft/libghostty-rs) @5988a0b,
   with Ghostty bumped past the binding's own pin to `ghostty-org/ghostty` `main` @b32f20f
-  (regenerated `bindings.rs` + one `render.rs` fix). The Windows static-link fix giest used to
+  (regenerated `bindings.rs` + one `render.rs` fix). The Windows static-link fix geist used to
   carry (link `ghostty-vt-static.lib`, not the DLL import lib) is now upstream. See
   [Gotchas](../gotchas.md).
 - `libghostty-vt-sys/build.rs` runs `zig build` against the pinned Ghostty
@@ -88,7 +88,7 @@ classDiagram
 ### Grid out (snapshot)
 
 `snapshot(&mut GridSnapshot)` is where libghostty's internal grid becomes
-giest's neutral cells:
+geist's neutral cells:
 
 ```mermaid
 sequenceDiagram
@@ -117,7 +117,7 @@ color.
 
 libghostty answers some sequences (device-status reports, etc.) by writing bytes
 back. It does this via the `on_pty_write` callback, which **must not re-enter the
-terminal**, so giest's callback only pushes the bytes into a shared
+terminal**, so geist's callback only pushes the bytes into a shared
 `Rc<RefCell<Vec<u8>>>` sink. `take_responses()` drains that sink after each
 `write`, and `session::pump_pty` flushes it to the PTY.
 
@@ -136,11 +136,11 @@ flowchart LR
     class cb v
 ```
 
-## What giest deliberately does *not* use from libghostty
+## What geist deliberately does *not* use from libghostty
 
 - *(OSC 52 and OSC 7 used to be side-scanned here; they now come from the
   engine's clipboard callbacks and `Terminal::pwd()` — see
   [`clipboard.rs`](../components/clipboard.md).)*
-- **OSC 8 hyperlinks.** Not yet surfaced per-cell by the binding; giest
+- **OSC 8 hyperlinks.** Not yet surfaced per-cell by the binding; geist
   auto-detects URLs in the snapshot text instead (see
   [`session::find_url_at`](../components/session.md)).

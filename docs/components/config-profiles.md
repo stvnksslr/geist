@@ -5,8 +5,8 @@ These two modules handle startup configuration: what the terminal looks like
 
 ## `config.rs` — the Ghostty-format config
 
-On startup giest reads `%APPDATA%\giest\config` (override the path with the
-`GIEST_CONFIG` environment variable). The file uses Ghostty's config format —
+On startup geist reads `%APPDATA%\geist\config` (override the path with the
+`geist_CONFIG` environment variable). The file uses Ghostty's config format —
 `key = value` lines, kebab-case keys, unquoted hex colors, `#` comment lines, and
 a repeatable `palette` key — so keys are transposable with a real Ghostty config.
 All keys are optional; missing ones fall back to the bundled defaults (which
@@ -33,8 +33,8 @@ classDiagram
 
 ```mermaid
 flowchart LR
-    env["GIEST_CONFIG env var"]
-    appdata["%APPDATA%\giest\config"]
+    env["geist_CONFIG env var"]
+    appdata["%APPDATA%\geist\config"]
     parse["line parser (key = value) → Config"]
     defaults["bundled defaults<br/>(ANSI 16 + 256 palette)"]
 

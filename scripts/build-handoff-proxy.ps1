@@ -1,9 +1,9 @@
-# Build giestHandoffProxy.dll: the COM proxy/stub for ITerminalHandoff3 and
+# Build geistHandoffProxy.dll: the COM proxy/stub for ITerminalHandoff3 and
 # IConsoleHandoff, which default-terminal handoff needs (see GAP.md,
 # "Default-terminal handoff").
 #
 # Why a native DLL: the handoff call crosses processes (OpenConsole.exe ->
-# giest.exe -Embedding) and its parameters are `system_handle`s. Only a
+# geist.exe -Embedding) and its parameters are `system_handle`s. Only a
 # MIDL-generated NDR proxy marshals those; there is no typelib path. Windows
 # Terminal ships the same thing as OpenConsoleProxy.dll, but registers it only
 # in its *package* COM catalog, which an unpackaged process cannot see
@@ -15,7 +15,7 @@
 # format must match OpenConsole's. dlldata.c/proxy.def are ours.
 #
 # Needs Visual Studio (C++ workload) + the Windows SDK (midl.exe). Output goes
-# beside giest.exe for each profile, like scripts/fetch-conpty.ps1.
+# beside geist.exe for each profile, like scripts/fetch-conpty.ps1.
 #
 #   pwsh scripts/build-handoff-proxy.ps1
 param([string[]]$Profiles = @("debug", "release"))
@@ -37,7 +37,7 @@ $cmds = @(
     "cd /d `"$out`"",
     "midl /nologo /target NT100 /env $(if ($arch -eq 'x64') {'x64'} else {'arm64'}) /h ITerminalHandoff.h /proxy ITerminalHandoff_p.c /iid ITerminalHandoff_i.c /dlldata nul_1.c `"$src\ITerminalHandoff.idl`"",
     "midl /nologo /target NT100 /env $(if ($arch -eq 'x64') {'x64'} else {'arm64'}) /h IConsoleHandoff.h /proxy IConsoleHandoff_p.c /iid IConsoleHandoff_i.c /dlldata nul_2.c `"$src\IConsoleHandoff.idl`"",
-    "cl /nologo /O2 /LD /MT /DREGISTER_PROXY_DLL /DWIN32_LEAN_AND_MEAN /I. ITerminalHandoff_p.c ITerminalHandoff_i.c IConsoleHandoff_p.c IConsoleHandoff_i.c `"$src\dlldata.c`" /Fe:giestHandoffProxy.dll /link /DEF:`"$src\proxy.def`" rpcrt4.lib oleaut32.lib ole32.lib"
+    "cl /nologo /O2 /LD /MT /DREGISTER_PROXY_DLL /DWIN32_LEAN_AND_MEAN /I. ITerminalHandoff_p.c ITerminalHandoff_i.c IConsoleHandoff_p.c IConsoleHandoff_i.c `"$src\dlldata.c`" /Fe:geistHandoffProxy.dll /link /DEF:`"$src\proxy.def`" rpcrt4.lib oleaut32.lib ole32.lib"
 ) -join " && "
 cmd /c $cmds
 if ($LASTEXITCODE -ne 0) { throw "proxy build failed ($LASTEXITCODE)" }
@@ -45,7 +45,7 @@ if ($LASTEXITCODE -ne 0) { throw "proxy build failed ($LASTEXITCODE)" }
 foreach ($p in $Profiles) {
     foreach ($dir in @("$root\target\$p", "$root\target\$p\deps")) {
         New-Item -ItemType Directory -Force $dir | Out-Null
-        Copy-Item "$out\giestHandoffProxy.dll" $dir -Force
-        Write-Output "installed giestHandoffProxy.dll into $dir"
+        Copy-Item "$out\geistHandoffProxy.dll" $dir -Force
+        Write-Output "installed geistHandoffProxy.dll into $dir"
     }
 }

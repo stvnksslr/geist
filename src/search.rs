@@ -187,7 +187,7 @@ pub struct SearchState {
     pub query: String,
     /// Whether matching is case-sensitive (default off).
     pub case_sensitive: bool,
-    /// Treat `query` as a regular expression (default off). giest-only:
+    /// Treat `query` as a regular expression (default off). geist-only:
     /// Ghostty's search, and lib-vt's native search API, are substring-only.
     pub regex: bool,
     /// Why the regex query doesn't compile, for the search bar. `None` when it

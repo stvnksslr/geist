@@ -2,9 +2,9 @@
 //!
 //! Ghostty accepts shaders written for [shadertoy.com](https://shadertoy.com) —
 //! a fragment shader defining `mainImage(out vec4, in vec2)` against a fixed set
-//! of `i*` uniforms — and so does giest, so a shader written for one runs on the
+//! of `i*` uniforms — and so does geist, so a shader written for one runs on the
 //! other unchanged. Ghostty compiles the GLSL to SPIR-V and then to Metal;
-//! giest's renderer speaks WGSL, so this module goes GLSL → naga IR → WGSL.
+//! geist's renderer speaks WGSL, so this module goes GLSL → naga IR → WGSL.
 //!
 //! **Why WGSL text rather than handing wgpu a `naga::Module`.** wgpu can consume
 //! naga IR directly, but only from the *exact* naga version it vendors — a
@@ -337,7 +337,7 @@ void mainImage( out vec4 fragColor, in vec2 fragCoord )
 
     #[test]
     fn shaders_using_ghosttys_extra_uniforms_compile() {
-        // The cursor and colour uniforms are giest/Ghostty extensions to the
+        // The cursor and colour uniforms are geist/Ghostty extensions to the
         // Shadertoy set, so a shader written against Ghostty leans on them.
         let wgsl = compile(
             r#"

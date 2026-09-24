@@ -1,9 +1,9 @@
 //! Taskbar Jump List tasks — the Windows analogue of the macOS Dock menu
 //! (`AppDelegate.applicationDockMenu`: "New Window" / "New Tab").
 //!
-//! Tasks are shell links to giest's own executable with CLI arguments
+//! Tasks are shell links to geist's own executable with CLI arguments
 //! (`+new-window`, `+new-tab`, `+new-tab --command=<profile>`), so clicking
-//! one launches a short-lived giest that forwards the request to the running
+//! one launches a short-lived geist that forwards the request to the running
 //! instance over IPC (`ipc.rs`) — or, with none running, starts one.
 //!
 //! **Why the COM vtables are declared by hand.** `windows-sys` ships no COM
@@ -14,12 +14,12 @@
 //! host test exists to catch: it publishes a list under a throwaway AppUserModelID
 //! and deletes it again, asserting every HRESULT on the way.
 //!
-//! The list is keyed on the process's AppUserModelID; giest sets none, so
+//! The list is keyed on the process's AppUserModelID; geist sets none, so
 //! Windows derives one from the executable path. `jump-list = false` deletes a
 //! previously published list rather than just not publishing one, so turning
 //! the key off actually removes the entries.
 
-/// One task: a title and the arguments giest is launched with.
+/// One task: a title and the arguments geist is launched with.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Task {
     pub title: String,
@@ -447,7 +447,7 @@ mod imp {
     }
 }
 
-/// Publish (or, with `enabled = false`, remove) giest's Jump List. Best effort:
+/// Publish (or, with `enabled = false`, remove) geist's Jump List. Best effort:
 /// a failure is reported once and never blocks startup.
 pub fn sync(enabled: bool, profile_names: &[&str]) {
     let result = if enabled {
@@ -459,7 +459,7 @@ pub fn sync(enabled: bool, profile_names: &[&str]) {
         imp::clear(None)
     };
     if let Err(e) = result {
-        eprintln!("giest: jump list: {e}");
+        eprintln!("geist: jump list: {e}");
     }
 }
 
@@ -500,7 +500,7 @@ mod tests {
     #[test]
     #[ignore = "writes (and removes) a real Jump List for a test AppUserModelID"]
     fn publish_and_delete_a_jump_list_under_a_test_app_id() {
-        let id = format!("giest.test.jumplist.{}", std::process::id());
+        let id = format!("geist.test.jumplist.{}", std::process::id());
         let exe = std::env::current_exe().unwrap().display().to_string();
         let r = imp::publish(&exe, &tasks(&["cmd"]), Some(&id));
         // Always clean up, even when publishing failed half-way.

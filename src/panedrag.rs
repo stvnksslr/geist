@@ -23,7 +23,7 @@ pub enum Zone {
 }
 
 impl Zone {
-    /// Whether dropping here makes a side-by-side split (giest's
+    /// Whether dropping here makes a side-by-side split (geist's
     /// `vertical = true`: the divider is a vertical line).
     pub fn vertical(self) -> bool {
         matches!(self, Zone::Left | Zone::Right)
@@ -125,7 +125,7 @@ pub enum DropTarget {
     Strip { window: u64, index: usize },
     /// Inside a window, but on nothing that takes a drop (padding, chrome).
     Window { window: u64 },
-    /// Outside every giest window.
+    /// Outside every geist window.
     Outside,
 }
 
@@ -134,7 +134,7 @@ pub enum DropTarget {
 const STRIP_SLOP: f32 = 6.0;
 
 /// Resolve a drop at `screen`. When windows overlap, `prefer` (the window the
-/// drag started in) wins, then list order — giest can't read the z-order.
+/// drag started in) wins, then list order — geist can't read the z-order.
 pub fn resolve(geoms: &[WindowGeom], screen: Pos2, prefer: u64) -> DropTarget {
     let mut order: Vec<&WindowGeom> = geoms.iter().filter(|g| g.window == prefer).collect();
     order.extend(geoms.iter().filter(|g| g.window != prefer));

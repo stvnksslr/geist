@@ -1,6 +1,6 @@
 # Gotchas
 
-The non-obvious, platform-specific traps that shape giest's design. Each is a
+The non-obvious, platform-specific traps that shape geist's design. Each is a
 place where the "obvious" approach is wrong on Windows / ConPTY / egui /
 libghostty.
 
@@ -36,7 +36,7 @@ libclang plus a *Linux* bindgen target, or every C enum comes out `i32`) and fix
 moved — CLAUDE.md has the exact command.
 
 !!! danger "Build *and launch* after every bump"
-    giest used to patch `build.rs` to link `ghostty-vt-static.lib`: upstream linked the DLL
+    geist used to patch `build.rs` to link `ghostty-vt-static.lib`: upstream linked the DLL
     *import* lib, and the exe then crashed on first VT write. That fix is upstream now (8272abe),
     but a regression would compile cleanly and fail only at runtime.
 
@@ -72,7 +72,7 @@ libghostty-vt FFI boundary. `cargo test`/`cargo bench` still build with unwind.
 ## Always run cargo from the project root
 
 Running cargo from inside `vendor/libghostty-rs/...` builds the **vendored
-crate** instead of giest (cargo walks up to the nearest `Cargo.toml`). A
+crate** instead of geist (cargo walks up to the nearest `Cargo.toml`). A
 "Finished" that only mentions `libghostty-vt` compiling means you're in the
 wrong directory.
 
@@ -111,7 +111,7 @@ response buffer and replays or releases it once the user answers. See
 ## `on_pty_write` must not re-enter the terminal
 
 libghostty's `on_pty_write` callback (used for device-query replies etc.) must
-not call back into the terminal. giest's callback therefore only pushes bytes
+not call back into the terminal. geist's callback therefore only pushes bytes
 into a shared `Rc<RefCell<Vec<u8>>>` sink; `take_responses()` drains it after
 each `write` and the session flushes it to the PTY.
 

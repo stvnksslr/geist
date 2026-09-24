@@ -1,10 +1,10 @@
 //! Ghostty config-format conformance.
 //!
-//! giest's config file *is* Ghostty's config format, so a key written for
-//! Ghostty should parse and behave the same way in giest. Ghostty's own config
+//! geist's config file *is* Ghostty's config format, so a key written for
+//! Ghostty should parse and behave the same way in geist. Ghostty's own config
 //! parser isn't vendored (only its VT engine is), so this suite can't do
 //! differential testing against the real implementation; instead it pins
-//! giest's parser to Ghostty's documented format and per-key semantics, feeding
+//! geist's parser to Ghostty's documented format and per-key semantics, feeding
 //! it genuine Ghostty-syntax snippets through the public
 //! [`Config::from_ghostty_config`] entry point.
 //!
@@ -12,11 +12,11 @@
 //! keys, unquoted values, `#` comment lines (no inline comments), repeatable
 //! keys (e.g. `palette`), and an empty value resets a key to its default.
 
-use giest::config::{
+use geist::config::{
     BackgroundImageFit, BackgroundImagePosition, ClipboardAccess, Config, MiddleClickAction,
     RightClickAction,
 };
-use giest::engine::Rgb;
+use geist::engine::Rgb;
 
 /// Parse a Ghostty-format body over the built-in defaults.
 fn cfg(body: &str) -> Config {
@@ -107,8 +107,8 @@ fn empty_value_resets_to_default() {
 
 #[test]
 fn unsupported_keys_are_ignored_not_fatal() {
-    // Pasting a real Ghostty config brings keys giest doesn't implement; they
-    // must be ignored without discarding the keys giest does support.
+    // Pasting a real Ghostty config brings keys geist doesn't implement; they
+    // must be ignored without discarding the keys geist does support.
     let body = "\
 theme = catppuccin-mocha
 font-family = JetBrains Mono
@@ -150,7 +150,7 @@ fn window_padding_x_and_y() {
     let c = cfg("window-padding-x = 12\nwindow-padding-y = 6");
     assert_eq!(c.padding_x, 12.0);
     assert_eq!(c.padding_y, 6.0);
-    // Unset, both match Ghostty's defaults. giest used to ship 20 on the x axis
+    // Unset, both match Ghostty's defaults. geist used to ship 20 on the x axis
     // so the scrollbar could live inside the padding; the bar overlays now, as
     // Ghostty's does, so the padding is free to match upstream.
     let d = cfg("");
@@ -160,13 +160,13 @@ fn window_padding_x_and_y() {
 
 #[test]
 fn window_theme() {
-    use giest::config::WindowTheme;
+    use geist::config::WindowTheme;
     // Default follows the configured background rather than the OS.
     assert_eq!(cfg("").window_theme, WindowTheme::Auto);
     assert_eq!(cfg("window-theme = dark").window_theme, WindowTheme::Dark);
     assert_eq!(cfg("window-theme = light").window_theme, WindowTheme::Light);
     assert_eq!(cfg("window-theme = auto").window_theme, WindowTheme::Auto);
-    // `system` is Ghostty's documented alias; giest maps it onto `auto` because
+    // `system` is Ghostty's documented alias; geist maps it onto `auto` because
     // following the OS is what rendered light chrome over a dark terminal.
     assert_eq!(cfg("window-theme = system").window_theme, WindowTheme::Auto);
     // An unknown value leaves the previous setting alone rather than resetting.
@@ -178,7 +178,7 @@ fn window_theme() {
 
 #[test]
 fn scrollback_limit() {
-    // Note: giest's unit is lines (its VT engine takes a line count), whereas
+    // Note: geist's unit is lines (its VT engine takes a line count), whereas
     // Ghostty's scrollback-limit is bytes — the key transposes, the unit differs.
     assert_eq!(cfg("scrollback-limit = 50000").scrollback_limit, 50_000);
 }
@@ -192,7 +192,7 @@ fn selection_background_and_foreground() {
 
 #[test]
 fn copy_on_select_enum_values() {
-    use giest::config::CopyOnSelect as C;
+    use geist::config::CopyOnSelect as C;
     // Ghostty's copy-on-select enum: none / primary / clipboard / both, plus
     // the true/false aliases (true = clipboard off Linux).
     assert_eq!(cfg("copy-on-select = false").copy_on_select, C::None);
@@ -201,7 +201,7 @@ fn copy_on_select_enum_values() {
         cfg("copy-on-select = clipboard").copy_on_select,
         C::Clipboard
     );
-    // Windows has no system PRIMARY: `primary` writes giest's emulated one.
+    // Windows has no system PRIMARY: `primary` writes geist's emulated one.
     assert_eq!(cfg("copy-on-select = primary").copy_on_select, C::Primary);
     assert_eq!(cfg("copy-on-select = both").copy_on_select, C::Both);
 }
@@ -276,7 +276,7 @@ fn custom_shader_is_repeatable_and_ordered() {
 
 #[test]
 fn custom_shader_animation_values() {
-    use giest::config::CustomShaderAnimation as A;
+    use geist::config::CustomShaderAnimation as A;
     assert_eq!(cfg("").custom_shader_animation, A::True);
     assert_eq!(
         cfg("custom-shader-animation = false").custom_shader_animation,
@@ -408,15 +408,15 @@ fn palette_full_256_range_addressable() {
 }
 
 #[test]
-fn text_gamma_is_giest_specific_and_clamped() {
-    // giest extension (Ghostty has no equivalent); clamped to [0.5, 3.0].
+fn text_gamma_is_geist_specific_and_clamped() {
+    // geist extension (Ghostty has no equivalent); clamped to [0.5, 3.0].
     assert_eq!(cfg("text-gamma = 1.6").text_gamma, 1.6);
     assert_eq!(cfg("text-gamma = 10.0").text_gamma, 3.0);
     assert_eq!(cfg("text-gamma = 0.1").text_gamma, 0.5);
 }
 
 // ---------------------------------------------------------------------------
-// End-to-end: a realistic Ghostty config dropped into giest verbatim.
+// End-to-end: a realistic Ghostty config dropped into geist verbatim.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -426,7 +426,7 @@ fn realistic_ghostty_config_applies_supported_subset() {
     let body = "\
 # My terminal config
 
-font-family = JetBrains Mono     # ignored by giest (no font-family yet)
+font-family = JetBrains Mono     # ignored by geist (no font-family yet)
 font-size = 14
 theme = tokyonight              # ignored
 
@@ -462,14 +462,14 @@ keybind = ctrl+shift+t=new_tab  # ignored
     assert_eq!(c.padding_y, 8.0);
     assert_eq!(c.selection_bg, rgb(0x28, 0x34, 0x57));
     assert_eq!(c.selection_fg, Some(rgb(0xc0, 0xca, 0xf5)));
-    assert_ne!(c.copy_on_select, giest::config::CopyOnSelect::None);
+    assert_ne!(c.copy_on_select, geist::config::CopyOnSelect::None);
     assert_eq!(c.scrollback_limit, 100_000);
     assert_eq!(c.palette[0], rgb(0x15, 0x16, 0x1e));
     assert_eq!(c.palette[1], rgb(0xf7, 0x76, 0x8e));
     assert_eq!(c.palette[2], rgb(0x9e, 0xce, 0x6a));
 
-    // Unsupported keys left the corresponding giest behavior at its default.
-    // (font-family/theme/keybind/window-decoration have no giest field.)
+    // Unsupported keys left the corresponding geist behavior at its default.
+    // (font-family/theme/keybind/window-decoration have no geist field.)
 }
 
 /// A `keybind` payload survives the whole config pipeline — line parse, value
@@ -479,8 +479,8 @@ keybind = ctrl+shift+t=new_tab  # ignored
 /// layers above it, and each one trims something.
 #[test]
 fn keybind_payloads_survive_the_config_pipeline() {
-    use giest::command::Action;
-    use giest::keybind::{Keymap, parse_chord};
+    use geist::command::Action;
+    use geist::keybind::{Keymap, parse_chord};
 
     let c = cfg(concat!(
         "keybind = ctrl+alt+a=text:hello world\n",

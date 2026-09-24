@@ -165,9 +165,9 @@ pub fn frame_rgb(f: IconFrame) -> [u8; 3] {
 
 /// Map the config onto an icon source.
 ///
-/// Upstream's named variants are artist-drawn Ghostty icons; giest has one
+/// Upstream's named variants are artist-drawn Ghostty icons; geist has one
 /// artwork, so each becomes a palette in the variant's spirit. `custom-style`
-/// maps its layers onto giest's: the *screen* gradient is the tile, the
+/// maps its layers onto geist's: the *screen* gradient is the tile, the
 /// *ghost* is the monogram, the *frame* is a rim. Upstream requires both
 /// colours for `custom-style`; a missing one keeps the official colour here.
 /// `custom` loads `macos-custom-icon` (PNG or JPEG; not ICNS) and falls back
@@ -274,7 +274,7 @@ fn draw(src: &Source) -> Option<Arc<egui::IconData>> {
             let img = match crate::bgimage::load(std::path::Path::new(path)) {
                 Ok(i) => i,
                 Err(e) => {
-                    eprintln!("giest: macos-custom-icon '{path}': {e}");
+                    eprintln!("geist: macos-custom-icon '{path}': {e}");
                     return draw(&Source::Official);
                 }
             };

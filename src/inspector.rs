@@ -2,10 +2,10 @@
 //!
 //! Ghostty's inspector is ~4500 lines of Dear ImGui across five dockable
 //! windows (Keyboard, Terminal, Surface, Terminal IO, Renderer), reading state
-//! straight out of a `Terminal` it owns in-process. giest's is an egui window
+//! straight out of a `Terminal` it owns in-process. geist's is an egui window
 //! over the pane it belongs to, and it necessarily shows *different* things:
 //! the terminal lives behind [`crate::engine::TerminalEngine`], so the panels
-//! that matter here are the ones giest can source honestly.
+//! that matter here are the ones geist can source honestly.
 //!
 //! This module is the **capture** half — bounded ring buffers of what crossed
 //! the two chokepoints, plus the byte rendering that makes them readable. It is
@@ -14,7 +14,7 @@
 //! Two design points are worth stating, because both are deliberate inversions
 //! of rules the rest of this codebase follows:
 //!
-//! - **The inspector is not a modal.** Every other overlay giest has takes the
+//! - **The inspector is not a modal.** Every other overlay geist has takes the
 //!   keyboard (see CLAUDE.md's two-gate rule). This one must not: the keyboard
 //!   log is worthless if opening it stops you typing, and watching a program
 //!   redraw is the reason you opened the IO log. It is added to *neither* gate.

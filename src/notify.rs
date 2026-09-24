@@ -127,7 +127,7 @@ mod imp {
 
     /// Resolve `shell32!Shell_NotifyIconW` once, dynamically — the same
     /// treatment `bell.rs` gives `PlaySoundW` and `blur.rs` gives
-    /// `SetWindowCompositionAttribute`. Nothing else in giest needs shell32, so
+    /// `SetWindowCompositionAttribute`. Nothing else in geist needs shell32, so
     /// linking it would be a load-time dependency bought for one function.
     fn shell_notify_icon_w() -> Option<ShellNotifyIconW> {
         static F: OnceLock<Option<usize>> = OnceLock::new();
@@ -201,7 +201,7 @@ mod imp {
             add.flags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
             add.callback_message = super::CALLBACK_MSG;
             add.icon = icon;
-            wide_into("giest", &mut add.tip);
+            wide_into("geist", &mut add.tip);
             // SAFETY: `add` is a fully initialized NOTIFYICONDATAW whose
             // cb_size matches its layout, and it outlives the call.
             if unsafe { f(NIM_ADD, &add) } == 0 {

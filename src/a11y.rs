@@ -10,7 +10,7 @@
 //!
 //! Upstream has no "announce output" feature — VoiceOver users re-read the text
 //! area. Windows screen readers expect terminals to speak new output (Windows
-//! Terminal does, via UIA notifications), so giest adds a live region, gated by
+//! Terminal does, via UIA notifications), so geist adds a live region, gated by
 //! `accessibility-announce-output` and rate-limited by [`Announcer`].
 //!
 //! Everything here is built **only while an assistive technology is attached**:

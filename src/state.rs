@@ -1,7 +1,7 @@
 //! Session / window **state restore** — Ghostty's `window-save-state`.
 //!
-//! On exit the whole window list is written to `%APPDATA%\giest\state` (override
-//! with `$GIEST_STATE`) and re-read at startup: windows, their tabs, each tab's
+//! On exit the whole window list is written to `%APPDATA%\geist\state` (override
+//! with `$geist_STATE`) and re-read at startup: windows, their tabs, each tab's
 //! split tree, which pane had focus, the tab's user-set name, and every pane's
 //! working directory (from OSC 7, the same source `*-inherit-working-directory`
 //! uses).
@@ -13,13 +13,13 @@
 //! taking the **rest of the line** so nothing needs escaping:
 //!
 //! ```text
-//! giest-state 1
+//! geist-state 1
 //! W                       window
 //! F 100 80 960 600 0      optional frame: outer x/y, inner w/h (points), maximized
 //! T 1 build              tab, `1` = the active tab, rest = its name (`-` = none)
 //! S v 0.5                 split (`v` vertical, `h` horizontal) + the first child's share;
 //!                         children follow. No ratio (an older file) reads as 0.5
-//! L 1 C:\src\giest        leaf, `1` = the focused pane, rest = its cwd (`-` = none)
+//! L 1 C:\src\geist        leaf, `1` = the focused pane, rest = its cwd (`-` = none)
 //! L 0 -
 //! ```
 //!
@@ -35,7 +35,7 @@ use std::path::PathBuf;
 
 /// Header of a state file. Bumped if the grammar ever changes incompatibly; a
 /// file with any other version is ignored rather than guessed at.
-const HEADER: &str = "giest-state 1";
+const HEADER: &str = "geist-state 1";
 
 /// A saved split tree: the same shape as `app::Node`, minus the live session.
 #[derive(Clone, Debug, PartialEq)]
@@ -257,7 +257,7 @@ pub fn parse(text: &str) -> SavedState {
         match tag {
             "W" => state.windows.push(SavedWindow::default()),
             // A window frame. Added without a header bump because it is purely
-            // additive: an older giest skips the unknown `F` tag (the `_` arm
+            // additive: an older geist skips the unknown `F` tag (the `_` arm
             // below), and a file without one parses as before.
             "F" => {
                 if let (Some(w), Some(f)) = (state.windows.last_mut(), parse_frame(rest)) {
@@ -297,10 +297,10 @@ pub fn parse(text: &str) -> SavedState {
     state
 }
 
-/// Where the state file lives: `$GIEST_STATE`, else next to the config as
+/// Where the state file lives: `$geist_STATE`, else next to the config as
 /// `state`. `None` when there is no config directory at all (no `%APPDATA%`).
 pub fn state_path() -> Option<PathBuf> {
-    if let Some(p) = std::env::var_os("GIEST_STATE") {
+    if let Some(p) = std::env::var_os("geist_STATE") {
         return Some(PathBuf::from(p));
     }
     Some(crate::config::config_dir()?.join("state"))
@@ -322,7 +322,7 @@ pub fn save(state: &SavedState) {
     }
     if let Err(e) = std::fs::write(&path, serialize(state)) {
         eprintln!(
-            "giest: could not save window state to {}: {e}",
+            "geist: could not save window state to {}: {e}",
             path.display()
         );
     }
@@ -369,7 +369,7 @@ mod tests {
                             tree: SavedNode::Split {
                                 vertical: true,
                                 ratio: 0.3,
-                                first: Box::new(leaf(Some(r"C:\src\giest"), false)),
+                                first: Box::new(leaf(Some(r"C:\src\geist"), false)),
                                 second: Box::new(SavedNode::Split {
                                     vertical: false,
                                     ratio: 0.5,
@@ -421,7 +421,7 @@ mod tests {
                 "F -12.5 40 960 600 1",
                 "T 0 build logs",
                 "S v 0.3",
-                "L 0 C:\\src\\giest",
+                "L 0 C:\\src\\geist",
                 "S h 0.5"
             ]
         );
@@ -433,7 +433,7 @@ mod tests {
         // A garbled or out-of-range ratio degrades the same way rather than
         // dropping the layout.
         for line in ["S v", "S v nonsense", "S v 1.5", "S v 0", "S v NaN"] {
-            let s = parse(&format!("giest-state 1\nW\nT 1 -\n{line}\nL 1 -\nL 0 -\n"));
+            let s = parse(&format!("geist-state 1\nW\nT 1 -\n{line}\nL 1 -\nL 0 -\n"));
             let SavedNode::Split {
                 vertical, ratio, ..
             } = &s.windows[0].tabs[0].tree
@@ -448,11 +448,11 @@ mod tests {
     #[test]
     fn frames_are_optional_and_old_files_still_parse() {
         // A file from before frames existed: no `F`, same layout.
-        let s = parse("giest-state 1\nW\nT 1 -\nL 1 -\n");
+        let s = parse("geist-state 1\nW\nT 1 -\nL 1 -\n");
         assert_eq!(s.windows[0].frame, None);
         assert_eq!(s.windows[0].tabs.len(), 1);
 
-        let s = parse("giest-state 1\nW\nF 10 -20.5 800 500 1\nT 1 -\nL 1 -\n");
+        let s = parse("geist-state 1\nW\nF 10 -20.5 800 500 1\nT 1 -\nL 1 -\n");
         assert_eq!(
             s.windows[0].frame,
             Some(WindowFrame {
@@ -464,7 +464,7 @@ mod tests {
             })
         );
         // Missing maximized flag reads as not maximized.
-        let s = parse("giest-state 1\nW\nF 1 2 300 400\nT 1 -\nL 1 -\n");
+        let s = parse("geist-state 1\nW\nF 1 2 300 400\nT 1 -\nL 1 -\n");
         assert!(!s.windows[0].frame.unwrap().maximized);
     }
 
@@ -477,7 +477,7 @@ mod tests {
             "F 0 0 800",
             "F 1e9 0 800 600 0",
         ] {
-            let s = parse(&format!("giest-state 1\nW\n{f}\nT 1 -\nL 1 -\n"));
+            let s = parse(&format!("geist-state 1\nW\n{f}\nT 1 -\nL 1 -\n"));
             assert_eq!(s.windows[0].frame, None, "{f}");
             assert_eq!(s.windows[0].tabs.len(), 1, "{f}");
         }
@@ -486,12 +486,12 @@ mod tests {
     #[test]
     fn a_missing_or_wrong_header_yields_nothing() {
         assert!(parse("").is_empty());
-        assert!(parse("giest-state 99\nW\nT 1 -\nL 1 -\n").is_empty());
+        assert!(parse("geist-state 99\nW\nT 1 -\nL 1 -\n").is_empty());
     }
 
     #[test]
     fn a_truncated_split_drops_only_that_tab() {
-        let s = parse("giest-state 1\nW\nT 0 half\nS v\nL 1 -\nT 1 whole\nL 1 -\n");
+        let s = parse("geist-state 1\nW\nT 0 half\nS v\nL 1 -\nT 1 whole\nL 1 -\n");
         assert_eq!(s.windows.len(), 1);
         // The truncated tab swallowed the next tab's `L` as its second child, so
         // it survives as one tab — the point is that parsing stays total and the
@@ -501,13 +501,13 @@ mod tests {
 
     #[test]
     fn an_out_of_range_active_tab_is_clamped() {
-        let s = parse("giest-state 1\nW\nT 0 -\nL 1 -\n");
+        let s = parse("geist-state 1\nW\nT 0 -\nL 1 -\n");
         assert_eq!(s.windows[0].active_tab, 0);
     }
 
     #[test]
     fn a_window_with_no_tabs_is_dropped() {
-        let s = parse("giest-state 1\nW\nW\nT 1 -\nL 1 -\n");
+        let s = parse("geist-state 1\nW\nW\nT 1 -\nL 1 -\n");
         assert_eq!(s.windows.len(), 1);
     }
 

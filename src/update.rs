@@ -1,17 +1,17 @@
 //! `auto-update` / `auto-update-channel` / `check_for_updates`: a
 //! GitHub-releases self-updater with the macOS `UpdatePill`'s states.
 //!
-//! Ghostty does this with Sparkle and an appcast; giest has no Sparkle, so the
+//! Ghostty does this with Sparkle and an appcast; geist has no Sparkle, so the
 //! moving parts are spelled out here:
 //!
 //! 1. **Check.** `GET` the releases feed (GitHub's `/releases` API — a JSON
 //!    array), pick the newest non-draft release above the running version that
 //!    the channel admits ([`select_release`]: `stable` skips pre-releases, `tip`
-//!    takes them). The release must carry a `giest-manifest.json` asset
+//!    takes them). The release must carry a `geist-manifest.json` asset
 //!    ([`Manifest`]) naming each package with its SHA-256; a release without one
 //!    is not an update (it is how an un-updatable release is published).
 //! 2. **Download** (`download`, or a click on the pill) the zip for this
-//!    architecture to `%LOCALAPPDATA%\giest\updates`, **verify its SHA-256
+//!    architecture to `%LOCALAPPDATA%\geist\updates`, **verify its SHA-256
 //!    against the manifest before anything else touches it**, and extract it
 //!    into a staging directory with a `pending.json` marker.
 //! 3. **Apply on the next launch** ([`startup_apply`]), never in place while
@@ -21,16 +21,16 @@
 //!    copied in; the process then relaunches the new exe and exits. `*.old`
 //!    files are swept by a later launch once nothing runs from them. The
 //!    running exe is never deleted. "Restart to apply" is the same path, reached
-//!    by relaunching with `GIEST_UPDATE_WAIT_PID` so the new process waits for
+//!    by relaunching with `geist_UPDATE_WAIT_PID` so the new process waits for
 //!    this one to exit first.
 //!
 //! What SHA-256 does and does not buy: it catches a truncated or corrupted
 //! download and a swapped *asset*, but the manifest comes from the same release,
 //! so it cannot stand in for code signing — that is a release-engineering step
-//! (Authenticode on giest.exe / a signed MSIX) that needs a certificate.
+//! (Authenticode on geist.exe / a signed MSIX) that needs a certificate.
 //!
-//! An MSIX-installed giest never self-updates: the package is read-only and App
-//! Installer owns updates (`packaging/giest.appinstaller`). [`is_packaged`]
+//! An MSIX-installed geist never self-updates: the package is read-only and App
+//! Installer owns updates (`packaging/geist.appinstaller`). [`is_packaged`]
 //! detects that and the updater stays idle.
 //!
 //! All network access goes through the [`Http`] trait so the pipeline is
@@ -44,17 +44,17 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-/// The release feed, overridable at build time (`GIEST_UPDATE_FEED`) and at
-/// run time (the giest-specific `auto-update-feed` config key).
-pub const DEFAULT_FEED: &str = match option_env!("GIEST_UPDATE_FEED") {
+/// The release feed, overridable at build time (`geist_UPDATE_FEED`) and at
+/// run time (the geist-specific `auto-update-feed` config key).
+pub const DEFAULT_FEED: &str = match option_env!("geist_UPDATE_FEED") {
     Some(f) => f,
-    None => "https://api.github.com/repos/stvnksslr/giest/releases?per_page=30",
+    None => "https://api.github.com/repos/stvnksslr/geist/releases?per_page=30",
 };
 
 /// The manifest asset every updatable release must carry.
-pub const MANIFEST_NAME: &str = "giest-manifest.json";
+pub const MANIFEST_NAME: &str = "geist-manifest.json";
 
-/// How often a running giest re-checks (Sparkle's default interval is a day).
+/// How often a running geist re-checks (Sparkle's default interval is a day).
 const RECHECK: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Ghostty `auto-update`.
@@ -76,7 +76,7 @@ impl AutoUpdate {
     }
 
     /// Upstream leaves the key unset and defers to Sparkle's stored preference.
-    /// giest has no such preference: a release build checks, a debug build
+    /// geist has no such preference: a release build checks, a debug build
     /// (a developer's tree) never phones home unless asked.
     pub fn default_for_build() -> Self {
         if cfg!(debug_assertions) {
@@ -239,7 +239,7 @@ impl Release {
     }
 }
 
-/// `giest-manifest.json`, written by `scripts/package.ps1`.
+/// `geist-manifest.json`, written by `scripts/package.ps1`.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct Manifest {
     pub version: String,
@@ -353,7 +353,7 @@ impl Curl {
             .unwrap_or_else(|| PathBuf::from("curl.exe"));
         let mut c = std::process::Command::new(exe);
         c.args(["-fsSL", "--proto", "=https", "--max-time", "600", "-A"])
-            .arg(format!("giest/{}", env!("CARGO_PKG_VERSION")));
+            .arg(format!("geist/{}", env!("CARGO_PKG_VERSION")));
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
@@ -454,7 +454,7 @@ pub struct Pending {
 }
 
 pub fn updates_root() -> Option<PathBuf> {
-    std::env::var_os("LOCALAPPDATA").map(|d| PathBuf::from(d).join("giest").join("updates"))
+    std::env::var_os("LOCALAPPDATA").map(|d| PathBuf::from(d).join("geist").join("updates"))
 }
 
 pub type Extract<'a> = &'a dyn Fn(&Path, &Path) -> Result<(), String>;
@@ -486,7 +486,7 @@ pub fn download_and_stage(
     progress: &dyn Fn(u64),
 ) -> Result<Pending, String> {
     std::fs::create_dir_all(root).map_err(|e| e.to_string())?;
-    let part = root.join(format!("giest-{}.zip.part", plan.version));
+    let part = root.join(format!("geist-{}.zip.part", plan.version));
     let _ = std::fs::remove_file(&part);
     http.download(&plan.url, &part, progress)?;
     if let Err(e) = verify_file(&part, &plan.sha256) {
@@ -501,8 +501,8 @@ pub fn download_and_stage(
     r?;
     // A zip with a single top-level folder stages that folder's contents.
     let dir = single_subdir(&dir).unwrap_or(dir);
-    if !dir.join("giest.exe").is_file() {
-        return Err("update package has no giest.exe".into());
+    if !dir.join("geist.exe").is_file() {
+        return Err("update package has no geist.exe".into());
     }
     let p = Pending {
         version: plan.version.clone(),
@@ -641,12 +641,12 @@ pub fn is_packaged() -> bool {
 /// over the exe's directory, relaunches the new exe with the same arguments,
 /// and returns `true` (the caller exits).
 pub fn startup_apply() -> bool {
-    if let Some(pid) = std::env::var("GIEST_UPDATE_WAIT_PID")
+    if let Some(pid) = std::env::var("geist_UPDATE_WAIT_PID")
         .ok()
         .and_then(|p| p.parse::<u32>().ok())
     {
         // SAFETY: plain env mutation before any other thread exists.
-        unsafe { std::env::remove_var("GIEST_UPDATE_WAIT_PID") };
+        unsafe { std::env::remove_var("geist_UPDATE_WAIT_PID") };
         wait_for_pid(pid, Duration::from_secs(15));
     }
     let Ok(exe) = std::env::current_exe() else {
@@ -668,7 +668,7 @@ pub fn startup_apply() -> bool {
     let cur = Version::parse(env!("CARGO_PKG_VERSION"));
     let newer = matches!((Version::parse(&p.version), cur), (Some(n), Some(c)) if n > c);
     let _ = std::fs::remove_file(root.join("pending.json"));
-    if !newer || !p.dir.join("giest.exe").is_file() {
+    if !newer || !p.dir.join("geist.exe").is_file() {
         let _ = std::fs::remove_dir_all(&p.dir);
         return false;
     }
@@ -752,9 +752,9 @@ impl State {
     pub fn tooltip(&self) -> String {
         match self {
             State::Available(p) => {
-                format!("Download and install giest {} ({})", p.version, p.notes_url)
+                format!("Download and install geist {} ({})", p.version, p.notes_url)
             }
-            State::Ready { version } => format!("giest {version} is ready; restart to apply"),
+            State::Ready { version } => format!("geist {version} is ready; restart to apply"),
             State::Error(e) => e.clone(),
             State::NotFound => "You are running the latest version".into(),
             _ => String::new(),
@@ -959,7 +959,7 @@ pub fn spawn_restart() -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     std::process::Command::new(exe)
         .arg("--restore-session")
-        .env("GIEST_UPDATE_WAIT_PID", std::process::id().to_string())
+        .env("geist_UPDATE_WAIT_PID", std::process::id().to_string())
         .spawn()
         .map(|_| ())
         .map_err(|e| e.to_string())
@@ -976,9 +976,9 @@ pub fn confirm_restart(version: &str) -> bool {
         }
         let w = |s: &str| s.encode_utf16().chain([0]).collect::<Vec<u16>>();
         let text = w(&format!(
-            "Restart giest to finish installing version {version}?\n\nRunning shells will be closed; the window layout is restored."
+            "Restart geist to finish installing version {version}?\n\nRunning shells will be closed; the window layout is restored."
         ));
-        let cap = w("giest update");
+        let cap = w("geist update");
         // MB_OKCANCEL | MB_ICONQUESTION | MB_TASKMODAL; IDOK = 1.
         unsafe { MessageBoxW(0, text.as_ptr(), cap.as_ptr(), 0x1 | 0x20 | 0x2000) == 1 }
     }
@@ -1083,7 +1083,7 @@ mod tests {
     #[test]
     fn manifest_parsing_validates_hashes_and_version() {
         let good = br#"{"version":"0.2.0","channel":"stable","files":[
-            {"name":"giest-0.2.0-windows-x64.zip","arch":"x64","kind":"zip","size":10,
+            {"name":"geist-0.2.0-windows-x64.zip","arch":"x64","kind":"zip","size":10,
              "sha256":"ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef0123456789"}]}"#;
         let m = parse_manifest(good).unwrap();
         assert_eq!(m.files[0].kind, "zip");
@@ -1116,7 +1116,7 @@ mod tests {
 
     fn tmp(tag: &str) -> PathBuf {
         let d =
-            std::env::temp_dir().join(format!("giest-update-test-{tag}-{}", std::process::id()));
+            std::env::temp_dir().join(format!("geist-update-test-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
@@ -1141,11 +1141,11 @@ mod tests {
         let arch = current_arch();
         let feed = format!(
             r#"[{{"tag_name":"v9.0.0","prerelease":false,"draft":false,"html_url":"https://x/r",
-               "assets":[{{"name":"giest-manifest.json","browser_download_url":"https://x/m","size":1}},
-                         {{"name":"giest-9.0.0-windows-{arch}.zip","browser_download_url":"https://x/z","size":3}}]}}]"#
+               "assets":[{{"name":"geist-manifest.json","browser_download_url":"https://x/m","size":1}},
+                         {{"name":"geist-9.0.0-windows-{arch}.zip","browser_download_url":"https://x/z","size":3}}]}}]"#
         );
         let man = format!(
-            r#"{{"version":"9.0.0","files":[{{"name":"giest-9.0.0-windows-{arch}.zip","arch":"{arch}","kind":"zip","sha256":"{manifest_hash}"}}]}}"#
+            r#"{{"version":"9.0.0","files":[{{"name":"geist-9.0.0-windows-{arch}.zip","arch":"{arch}","kind":"zip","sha256":"{manifest_hash}"}}]}}"#
         );
         Mock(HashMap::from([
             ("https://x/feed".to_string(), feed.into_bytes()),
@@ -1174,9 +1174,9 @@ mod tests {
     #[test]
     fn staging_verifies_before_extracting() {
         let fake_extract = |_: &Path, into: &Path| -> Result<(), String> {
-            let d = into.join("giest-9.0.0");
+            let d = into.join("geist-9.0.0");
             std::fs::create_dir_all(&d).unwrap();
-            std::fs::write(d.join("giest.exe"), b"new").map_err(|e| e.to_string())
+            std::fs::write(d.join("geist.exe"), b"new").map_err(|e| e.to_string())
         };
         let root = tmp("stage");
         let m = feed_with(b"zip", &sha256_hex(b"zip"));
@@ -1185,7 +1185,7 @@ mod tests {
             .unwrap();
         let p = download_and_stage(&m, &plan, &root, &fake_extract, &|_| {}).unwrap();
         assert!(
-            p.dir.ends_with("giest-9.0.0"),
+            p.dir.ends_with("geist-9.0.0"),
             "single top folder is unwrapped"
         );
         assert_eq!(read_pending(&root), Some(p));
@@ -1213,24 +1213,24 @@ mod tests {
     #[test]
     fn apply_renames_aside_and_never_deletes_the_original() {
         let (staged, install) = (tmp("apply-s"), tmp("apply-i"));
-        std::fs::write(staged.join("giest.exe"), b"new").unwrap();
+        std::fs::write(staged.join("geist.exe"), b"new").unwrap();
         std::fs::write(staged.join("conpty.dll"), b"newdll").unwrap();
-        std::fs::write(install.join("giest.exe"), b"old").unwrap();
-        std::fs::write(install.join("giest.exe.old"), b"older").unwrap();
+        std::fs::write(install.join("geist.exe"), b"old").unwrap();
+        std::fs::write(install.join("geist.exe.old"), b"older").unwrap();
         let aside = apply_staged(&staged, &install).unwrap();
-        assert_eq!(std::fs::read(install.join("giest.exe")).unwrap(), b"new");
+        assert_eq!(std::fs::read(install.join("geist.exe")).unwrap(), b"new");
         assert_eq!(
             std::fs::read(install.join("conpty.dll")).unwrap(),
             b"newdll"
         );
-        assert_eq!(aside, vec![install.join("giest.exe.old")]);
+        assert_eq!(aside, vec![install.join("geist.exe.old")]);
         assert_eq!(
-            std::fs::read(install.join("giest.exe.old")).unwrap(),
+            std::fs::read(install.join("geist.exe.old")).unwrap(),
             b"old"
         );
         sweep_old(&install);
-        assert!(!install.join("giest.exe.old").exists());
-        assert!(install.join("giest.exe").exists());
+        assert!(!install.join("geist.exe.old").exists());
+        assert!(install.join("geist.exe").exists());
     }
 
     #[test]

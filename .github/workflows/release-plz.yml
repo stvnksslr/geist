@@ -34,7 +34,7 @@ jobs:
           token: ${{ secrets.RELEASE_PLZ_TOKEN }}
 
       # release-plz only reads `cargo metadata` (no build-script execution) and
-      # does git/version/changelog work — it never compiles giest, so Zig 0.15.2
+      # does git/version/changelog work — it never compiles geist, so Zig 0.15.2
       # is intentionally NOT installed here. Match ci.yml's toolchain pin.
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@1.96

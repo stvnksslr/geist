@@ -1,4 +1,4 @@
-//! Windows backdrop blur behind a translucent window — giest's `background-blur`.
+//! Windows backdrop blur behind a translucent window — geist's `background-blur`.
 //!
 //! Ghostty supports blur on macOS (a real Gaussian `CAFilter`) and on some Linux
 //! compositors; Windows has no equivalent knob, but DWM offers two *fixed-strength*

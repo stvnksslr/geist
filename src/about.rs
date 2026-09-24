@@ -5,7 +5,7 @@
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// The short commit hash `build.rs` captured, or `unknown` outside a checkout.
-pub const COMMIT: &str = env!("GIEST_GIT_COMMIT");
+pub const COMMIT: &str = env!("geist_GIT_COMMIT");
 
 /// `debug` or `release`, which matters when someone reports a performance bug.
 pub const PROFILE: &str = if cfg!(debug_assertions) {

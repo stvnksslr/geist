@@ -1,8 +1,8 @@
 //! ConPTY-backed PTY via `portable-pty`: spawn a shell, stream its output on a
 //! background thread, and write input/responses back to it.
 //!
-//! A second backend, [`Pty::from_handoff`], drives a pseudoconsole giest did
-//! **not** create: one handed over by OpenConsole when giest is the Windows
+//! A second backend, [`Pty::from_handoff`], drives a pseudoconsole geist did
+//! **not** create: one handed over by OpenConsole when geist is the Windows
 //! default terminal (`handoff.rs`). It has pipes, a signal pipe for resize and
 //! the client's process handle for exit, but no `HPCON` and no child we spawned.
 
@@ -18,7 +18,7 @@ use anyhow::{Context, Result};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
 enum Backend {
-    /// A shell giest spawned into a ConPTY it owns.
+    /// A shell geist spawned into a ConPTY it owns.
     Spawned {
         master: Box<dyn MasterPty + Send>,
         /// The shell process; polled via [`Pty::is_running`] to detect exit.
@@ -254,7 +254,7 @@ impl Pty {
 /// gets its own wake and none can be stranded. Under a flood this turns
 /// thousands of cross-thread event posts per second into one per UI pass.
 ///
-/// Measured (`scripts/perf-vs.ps1 -Only giest`): **no throughput change** —
+/// Measured (`scripts/perf-vs.ps1 -Only geist`): **no throughput change** —
 /// 11.9 → 12.4 MiB/s, within noise. The write-side rate is bound by the
 /// console host, not this loop (inbox conhost ≈ 13 MiB/s, sideloaded
 /// OpenConsole ≈ 84 MiB/s; see docs/benchmarking.md). Kept because it stops

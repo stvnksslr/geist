@@ -9,13 +9,13 @@
 
 ## 1. Scope & the libghostty / host boundary
 
-giest reuses Ghostty's VT engine (**libghostty-vt**, vendored, compiled by Zig)
+geist reuses Ghostty's VT engine (**libghostty-vt**, vendored, compiled by Zig)
 but owns its entire **host environment**: the egui/wgpu renderer, the
 egui→engine input translation layer, ConPTY I/O, and the tab/split window model.
 
 The single most important fact for this analysis:
 
-> **giest delegates escape-sequence generation to libghostty-vt.**
+> **geist delegates escape-sequence generation to libghostty-vt.**
 > `encode_key` / `encode_mouse` / `encode_paste` are thin wrappers over
 > libghostty's `Encoder`, `mouse::Encoder`, and `paste::encode`
 > (`src/engine/ghostty_vt.rs:276-386`).
@@ -24,10 +24,10 @@ So *protocol conformance* — CSI-u, the kitty keyboard protocol, the SGR/X10/
 URXVT mouse formats, bracketed-paste framing — is **libghostty's
 responsibility** and is tested upstream in Zig. We do **not** reimplement those.
 
-What giest **owns and must test** is the **translation / gating / layout layer**
+What geist **owns and must test** is the **translation / gating / layout layer**
 that sits around the engine:
 
-| Owned by giest (test these)                        | Owned by libghostty (don't retest) |
+| Owned by geist (test these)                        | Owned by libghostty (don't retest) |
 | -------------------------------------------------- | ---------------------------------- |
 | egui event → neutral `KeyInput`/`MouseInput`       | `KeyInput` → bytes (the encoder)   |
 | reserved-combo gating (app shortcuts, scroll, zoom)| CSI-u / kitty / DECCKM rules       |
@@ -56,23 +56,23 @@ the upstream repo (`github.com/ghostty-org/ghostty`).
 
 ### 2b. Relevant — host-level concepts to mirror in Rust
 
-| Area                  | Upstream location                            | giest mapping                                            |
+| Area                  | Upstream location                            | geist mapping                                            |
 | --------------------- | -------------------------------------------- | ------------------------------------------------------- |
 | Key encoding          | `src/input/key_encode.zig`, `key.zig`        | Becomes a **wiring/integration** check (libghostty encodes) |
-| Mouse encoding        | `src/input/mouse_encode.zig` (17 protocol cases) | Same — verify giest feeds the encoder correctly      |
-| Config parsing        | `src/config/Config.zig`                       | giest equivalent already strong (`src/config.rs`)       |
-| Screen clone cost     | `src/benchmark/ScreenClone.zig` (the one host-ish bench) | giest analog = snapshot copy loop cost       |
+| Mouse encoding        | `src/input/mouse_encode.zig` (17 protocol cases) | Same — verify geist feeds the encoder correctly      |
+| Config parsing        | `src/config/Config.zig`                       | geist equivalent already strong (`src/config.rs`)       |
+| Screen clone cost     | `src/benchmark/ScreenClone.zig` (the one host-ish bench) | geist analog = snapshot copy loop cost       |
 | Bench methodology     | `src/synthetic/` (`ascii`/`utf8`/`osc` generators), separate generate→measure, hyperfine | Reuse the *approach* with criterion + generators |
 
 > **Note:** Ghostty's **macOS/Swift and GTK/Linux apps have essentially no
 > automated unit tests** — host behavior (window/tab/split management, IME,
 > clipboard integration) is exercised by a manual test matrix (see upstream
 > `HACKING.md`). So there is no large host suite to port; we port the
-> *concepts*, expressed as Rust unit tests over giest's own host code.
+> *concepts*, expressed as Rust unit tests over geist's own host code.
 
 ---
 
-## 3. giest current coverage (40 unit tests)
+## 3. geist current coverage (40 unit tests)
 
 | Module                        | File                        | Count | What it covers                                                |
 | ----------------------------- | --------------------------- | ----- | ------------------------------------------------------------ |
@@ -91,7 +91,7 @@ shaping/rasterization, basic engine snapshot + encode.
 
 ## 4. Gap matrix
 
-| Host area               | Owned by giest                                                                 | Current | Gap                                                                                              | Priority |
+| Host area               | Owned by geist                                                                 | Current | Gap                                                                                              | Priority |
 | ----------------------- | ----------------------------------------------------------------------------- | ------- | ----------------------------------------------------------------------------------------------- | -------- |
 | **Input gating**        | `session.rs::handle_input` (`:200-302`), `map_egui_key`/`key_mods`/`is_text_producing` | none    | Ctrl+Shift & Ctrl+Tab swallow; Shift+PageUp/Home/End scroll-not-send; Ctrl+/-/0 zoom swallow; text-producing suppression; Copy/Cut selection-or-SIGINT | **High** |
 | **Coordinate/resize**   | `pos_to_cell` (`:132`), `fit_grid` (`:120`), `to_px`/wheel-notch (`:305-383`)  | none    | cell math + clamping at edges/negatives; cols/rows across ppp+padding+min-1; notch clamp 1..5    | **High** |
@@ -157,7 +157,7 @@ Behavior-preserving, guarded by the existing 40 tests plus the new ones.
 - **Encode integration** (`src/engine/ghostty_vt.rs`): expand the existing table
   — arrows in normal vs DECCKM (`\x1b[?1h`) app-cursor mode, function keys,
   Ctrl/Alt/Shift modifier encodings (CSI-u when `\x1b[>1u` is active), SGR mouse
-  coordinates at large positions and on release. Framed as "giest wires
+  coordinates at large positions and on release. Framed as "geist wires
   libghostty's encoder correctly" (it sets options from the live terminal via
   `set_options_from_terminal`), **not** re-deriving the protocol.
 
@@ -168,7 +168,7 @@ Behavior-preserving, guarded by the existing 40 tests plus the new ones.
   `utf8`, `osc` stream producers, shared by the benches. Keep generation
   separate from measurement.
 - **CPU-path benches** (host-owned work):
-  - **Snapshot copy loop** (`ghostty_vt.rs:400-480`) — giest's `ScreenClone`
+  - **Snapshot copy loop** (`ghostty_vt.rs:400-480`) — geist's `ScreenClone`
     analog; measure across grid sizes (80×24, 200×50, 400×100).
   - **Atlas `shape_run` + rasterization** (`render/atlas.rs:513`) — ascii vs
     utf8 vs emoji vs ligature-heavy input.
@@ -232,14 +232,14 @@ ones (66 total) pass under `cargo test`.
   `tests/conpty_throughput.rs` (`#[ignore]`d; spawns real PowerShell).
 - **§5.3 Perf (round 2)** — closed the remaining gaps vs Ghostty's suite:
   `benches/stream.rs` (the `TerminalStream`/`OscParser` analog — `engine.write()`
-  throughput for ascii/utf8/osc across grid sizes, plus giest's own
+  throughput for ascii/utf8/osc across grid sizes, plus geist's own
   `Osc52Scanner`/`Osc7Scanner` side-scanners); `benches/render.rs` (the deferred
-  headless-wgpu bench, see below); `synthetic::corpus` + `GIEST_BENCH_DATA` real-
+  headless-wgpu bench, see below); `synthetic::corpus` + `geist_BENCH_DATA` real-
   corpus support (`benches/data/`, mirrors Ghostty's `--data`); and
-  `scripts/bench-vs-ghostty.ps1` to compare giest vs upstream `ghostty-bench` over
+  `scripts/bench-vs-ghostty.ps1` to compare geist vs upstream `ghostty-bench` over
   the same corpus. Full guide in [benchmarking.md](benchmarking.md).
 - **Library target** — `src/lib.rs` now exposes the modules so `benches/` and
-  `tests/` can drive the host code; `main.rs` is a thin binary over `giest::app`.
+  `tests/` can drive the host code; `main.rs` is a thin binary over `geist::app`.
 
 ### Previously deferred — now landed
 

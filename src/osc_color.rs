@@ -1,7 +1,7 @@
 //! OSC dynamic-color **queries** via a side scan of the PTY byte stream.
 //!
 //! libghostty-vt already applies the *set* and *reset* forms of OSC 10/11/12
-//! (foreground / background / cursor) internally, and giest's snapshot reads the
+//! (foreground / background / cursor) internally, and geist's snapshot reads the
 //! resulting *effective* colors — so those need nothing here (there are engine
 //! tests pinning that). What its read-only stream drops is the **query** form,
 //! `OSC 10 ; ? ST`, and the binding exposes no color-report callback. So we scan

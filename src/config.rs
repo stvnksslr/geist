@@ -4,8 +4,8 @@
 //! The file uses **Ghostty's config format** — `key = value` lines, kebab-case
 //! keys, unquoted colors (`background = #1d1f21`), `#`-prefixed comment lines,
 //! and a repeatable `palette` key — so values are transposable with a real
-//! Ghostty config. It lives at `%APPDATA%\giest\config` (override the whole path
-//! with `$GIEST_CONFIG`). Every key is optional; unset ones keep the built-in
+//! Ghostty config. It lives at `%APPDATA%\geist\config` (override the whole path
+//! with `$geist_CONFIG`). Every key is optional; unset ones keep the built-in
 //! default and an empty value (`key =`) resets that key to its default. Keys we
 //! don't support are ignored with a warning, so a full Ghostty config can be
 //! dropped in and the supported subset applies.
@@ -31,7 +31,7 @@ thread_local! {
 /// will ever see it.
 fn report(msg: String) {
     eprintln!("{msg}");
-    let msg = msg.strip_prefix("giest: ").unwrap_or(&msg).to_string();
+    let msg = msg.strip_prefix("geist: ").unwrap_or(&msg).to_string();
     DIAGNOSTICS.with(|d| d.borrow_mut().push(msg));
 }
 
@@ -92,7 +92,7 @@ fn parse_app_notifications(value: &str) -> Option<AppNotifications> {
     Some(out)
 }
 
-/// What a path handed to an already-running giest opens.
+/// What a path handed to an already-running geist opens.
 /// Ghostty `macos-dock-drop-behavior`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum DropBehavior {
@@ -119,7 +119,7 @@ pub enum RightClickAction {
 /// What a middle-click inside a terminal pane does. Ghostty `middle-click-action`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MiddleClickAction {
-    /// Paste giest's emulated PRIMARY selection (`crate::primary`), falling back
+    /// Paste geist's emulated PRIMARY selection (`crate::primary`), falling back
     /// to the system clipboard while it is empty. The default.
     PrimaryPaste,
     /// Paste the system clipboard.
@@ -128,7 +128,7 @@ pub enum MiddleClickAction {
     Ignore,
 }
 
-/// Ghostty `copy-on-select`. Windows has no PRIMARY selection, so giest keeps an
+/// Ghostty `copy-on-select`. Windows has no PRIMARY selection, so geist keeps an
 /// in-process one (`crate::primary`) for `primary`/`both` to write to, which
 /// middle-click and `paste_from_selection` read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -155,7 +155,7 @@ impl CopyOnSelect {
 /// Ghostty `mouse-shift-capture`: whether Shift+click goes to a mouse-tracking
 /// program (`true`/`always`) or extends the selection (`false`/`never`). The
 /// `true`/`false` forms can be overridden by the program with `XTSHIFTESCAPE`
-/// (`CSI > Ps s`), which giest side-scans (`crate::xtshiftescape`).
+/// (`CSI > Ps s`), which geist side-scans (`crate::xtshiftescape`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MouseShiftCapture {
     False,
@@ -319,7 +319,7 @@ pub struct FontCodepointMap {
 /// `macos-glass-clear` (macOS 26 glass, which off macOS just implies `true` —
 /// Ghostty's own Linux path does the same).
 ///
-/// giest maps this onto the Windows DWM backdrops, which have **no radius knob**,
+/// geist maps this onto the Windows DWM backdrops, which have **no radius knob**,
 /// so the intensity is only a two-bucket selector (mica below 10, acrylic at or
 /// above it) rather than the true Gaussian sigma it is on macOS/KWin.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -350,7 +350,7 @@ impl BackgroundBlur {
 /// `bell-features`, a packed-struct bitfield.
 ///
 /// Note the defaults: `attention` and `title` are **on**, `border` is **off**.
-/// giest historically flashed the pane border by default; matching Ghostty turns
+/// geist historically flashed the pane border by default; matching Ghostty turns
 /// that off, and `bell-features = border` restores it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BellFeatures {
@@ -453,7 +453,7 @@ fn terminal_color(v: &str, current: TerminalColor, default: TerminalColor) -> Te
         return default;
     }
     TerminalColor::parse(v).unwrap_or_else(|| {
-        diag!("giest: ignoring unparseable color '{v}'");
+        diag!("geist: ignoring unparseable color '{v}'");
         current
     })
 }
@@ -867,7 +867,7 @@ pub enum ConfirmClose {
 
 /// Whether closing needs confirmation.
 ///
-/// `busy` is `None` when giest can't tell — a shell that emits no OSC 133 prompt
+/// `busy` is `None` when geist can't tell — a shell that emits no OSC 133 prompt
 /// marks — and that resolves to **confirm**, the conservative side: better an
 /// extra prompt than a silently discarded running command.
 pub fn needs_confirm(mode: ConfirmClose, busy: Option<bool>) -> bool {
@@ -936,7 +936,7 @@ impl MetricModifier {
 }
 
 /// Resolve one `adjust-*` value: empty resets to the default, a malformed value
-/// is reported and keeps the previous one (Ghostty makes it a config error; giest
+/// is reported and keeps the previous one (Ghostty makes it a config error; geist
 /// has no error UI, so it says so and carries on).
 fn adjust_value(v: &str, current: MetricModifier, default: MetricModifier) -> MetricModifier {
     if v.is_empty() {
@@ -945,7 +945,7 @@ fn adjust_value(v: &str, current: MetricModifier, default: MetricModifier) -> Me
     match MetricModifier::parse(v) {
         Some(m) => m,
         None => {
-            diag!("giest: ignoring adjustment '{v}' (expected a number like '1', '-2' or '20%')");
+            diag!("geist: ignoring adjustment '{v}' (expected a number like '1', '-2' or '20%')");
             current
         }
     }
@@ -992,7 +992,7 @@ pub enum WindowSaveState {
 }
 
 impl WindowSaveState {
-    /// Whether giest should write a state file on exit and read it at startup.
+    /// Whether geist should write a state file on exit and read it at startup.
     /// One predicate for both halves on purpose: a mode that saved but never
     /// restored would leave a file that only ever goes stale.
     pub fn restores(self) -> bool {
@@ -1159,7 +1159,7 @@ pub enum ResizeOverlayPosition {
 /// default size and immediately re-fit to the real window, so the resize edge
 /// always fires once on the first frame and every new tab or split would flash a
 /// spurious size. (Ghostty's GTK apprt happens to treat `after-first` the same as
-/// `always`, because its scheduler only ever runs from a resize signal — giest
+/// `always`, because its scheduler only ever runs from a resize signal — geist
 /// matches the *documented* behavior instead.)
 pub fn show_resize_overlay(mode: ResizeOverlay, first: bool) -> bool {
     match mode {
@@ -1182,7 +1182,7 @@ pub enum OscColorReportFormat {
 }
 
 /// User-facing configuration applied at startup.
-/// giest `conpty-passthrough` (see [`Config::conpty_passthrough`]).
+/// geist `conpty-passthrough` (see [`Config::conpty_passthrough`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConptyPassthrough {
     Auto,
@@ -1219,11 +1219,11 @@ impl WindowDecoration {
 
 /// Ghostty `macos-titlebar-style`, mapped onto a Windows caption.
 ///
-/// - `native` - the system caption (giest's default).
+/// - `native` - the system caption (geist's default).
 /// - `transparent` - the system caption, tinted to the terminal background
 ///   through DWM (Win11) unless `window-titlebar-background` says otherwise.
 /// - `tabs` - a client-drawn caption: the tab strip *is* the titlebar, with
-///   giest's own minimize/maximize/close buttons (Windows Terminal style).
+///   geist's own minimize/maximize/close buttons (Windows Terminal style).
 /// - `hidden` - the client-drawn frame without caption buttons; the window
 ///   keeps its resize border and rounded corners, and empty tab-strip space
 ///   still drags it.
@@ -1236,7 +1236,7 @@ pub enum TitlebarStyle {
 }
 
 impl TitlebarStyle {
-    /// Whether giest draws the caption itself (`WM_NCCALCSIZE` extension).
+    /// Whether geist draws the caption itself (`WM_NCCALCSIZE` extension).
     pub fn client_drawn(self) -> bool {
         matches!(self, TitlebarStyle::Tabs | TitlebarStyle::Hidden)
     }
@@ -1249,8 +1249,8 @@ pub enum Colorspace {
     DisplayP3,
 }
 
-/// Ghostty `macos-icon`. The named presets are giest palettes over the giest
-/// artwork (upstream's are hand-drawn Ghostty art giest does not ship).
+/// Ghostty `macos-icon`. The named presets are geist palettes over the geist
+/// artwork (upstream's are hand-drawn Ghostty art geist does not ship).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum AppIcon {
     Official,
@@ -1320,7 +1320,7 @@ pub struct Config {
     /// `copy-on-select`, which upstream exempts by name.
     pub selection_clear_on_copy: bool,
     /// Speak new terminal output through a polite UI Automation live region
-    /// while a screen reader is attached. giest-only (upstream's VoiceOver
+    /// while a screen reader is attached. geist-only (upstream's VoiceOver
     /// support has no equivalent); default true.
     pub accessibility_announce_output: bool,
     /// Highlight colors for scrollback-search matches. Ghostty `search-*`.
@@ -1385,12 +1385,12 @@ pub struct Config {
     ///
     /// [`WindowTheme::Auto`] derives it from [`Self::bg`], which is what makes
     /// the chrome match the terminal by default; the explicit modes override
-    /// that. Note giest never follows the *OS* theme — egui's default does, and
+    /// that. Note geist never follows the *OS* theme — egui's default does, and
     /// that is what used to render a light tab strip over a dark terminal.
     pub window_theme: WindowTheme,
     /// Coverage gamma applied to text antialiasing in the glyph shader; values
     /// above 1 thicken light-on-dark text that linear blending renders too thin.
-    /// giest-specific (`text-gamma`); Ghostty has no equivalent.
+    /// geist-specific (`text-gamma`); Ghostty has no equivalent.
     pub text_gamma: f32,
     /// Cursor color; `None` defers to the running program / engine default.
     /// Ghostty `cursor-color`.
@@ -1496,10 +1496,10 @@ pub struct Config {
     /// this is applied. The limit is per screen, so the effective budget per
     /// pane is double (primary + alternate).
     pub image_storage_limit: u32,
-    /// **giest-specific** `conpty-passthrough = auto | true | false`: which
+    /// **geist-specific** `conpty-passthrough = auto | true | false`: which
     /// ConPTY carries the shell. The inbox conhost re-renders output and strips
     /// APC (kitty graphics) and ENQ; a `conpty.dll` + `OpenConsole.exe` pair
-    /// (1.22+) placed next to `giest.exe` forwards them. `auto`/`true` use that
+    /// (1.22+) placed next to `geist.exe` forwards them. `auto`/`true` use that
     /// pair when present (and request `PSEUDOCONSOLE_PASSTHROUGH_MODE`, which
     /// only 1.17–1.21 OpenConsole builds honour); `false` forces the inbox
     /// conhost. Startup-only: the ConPTY library is loaded once per process.
@@ -1606,17 +1606,17 @@ pub struct Config {
     pub window_title_font_family: Option<String>,
     /// Resize the window in whole-cell steps. Ghostty `window-step-resize`.
     pub window_step_resize: bool,
-    /// Present with vsync. Ghostty `window-vsync`; startup-only in giest.
+    /// Present with vsync. Ghostty `window-vsync`; startup-only in geist.
     pub window_vsync: bool,
     /// Ghostty `quit-after-last-window-closed` (+ `-delay`, in milliseconds).
     pub quit_after_last_window_closed: bool,
     pub quit_after_last_window_closed_delay_ms: Option<u64>,
-    /// giest-specific `single-instance` (default `true`): a second launch hands
-    /// its request to the running giest over the IPC pipe (`ipc.rs`). The
+    /// geist-specific `single-instance` (default `true`): a second launch hands
+    /// its request to the running geist over the IPC pipe (`ipc.rs`). The
     /// analogue of GTK's `gtk-single-instance`, which upstream only honours on
     /// GTK. Read at startup only.
     pub single_instance: bool,
-    /// Ghostty `window-inherit-font-size`. **Divergence:** giest's font size is
+    /// Ghostty `window-inherit-font-size`. **Divergence:** geist's font size is
     /// app-global (one glyph atlas for every viewport — see CLAUDE.md), so a new
     /// window cannot carry a different size from the others. `true` (the default)
     /// is therefore free; `false` resets *every* window to `font-size` whenever a
@@ -1632,28 +1632,28 @@ pub struct Config {
     /// like upstream.
     pub config_default_files: bool,
     /// Ghostty `macos-window-buttons`. On Windows it hides the caption buttons of
-    /// giest's own client-drawn caption (`macos-titlebar-style = tabs`); the
+    /// geist's own client-drawn caption (`macos-titlebar-style = tabs`); the
     /// native caption's buttons are the OS's and stay.
     pub window_buttons: bool,
-    /// Ghostty `macos-hidden`: keep giest out of the taskbar and Alt-Tab
+    /// Ghostty `macos-hidden`: keep geist out of the taskbar and Alt-Tab
     /// (`WS_EX_TOOLWINDOW`), for quick-terminal-only use.
     pub hidden_from_taskbar: bool,
     /// Ghostty `macos-window-shadow`: the drop shadow around the window.
     pub window_shadow: bool,
-    /// Ghostty `macos-dock-drop-behavior`: what a path handed to a running giest
-    /// (Explorer's "Open giest here", a file dropped on the exe or a taskbar
+    /// Ghostty `macos-dock-drop-behavior`: what a path handed to a running geist
+    /// (Explorer's "Open geist here", a file dropped on the exe or a taskbar
     /// shortcut) opens.
     pub drop_behavior: DropBehavior,
-    /// giest-specific `jump-list` (default `true`): publish the taskbar Jump
+    /// geist-specific `jump-list` (default `true`): publish the taskbar Jump
     /// List tasks (`jumplist.rs`). `false` removes a previously published one.
     pub jump_list: bool,
     /// Ghostty `auto-update` (`off` / `check` / `download`). Unset upstream
-    /// defers to Sparkle's stored preference; giest's default is `check` in a
+    /// defers to Sparkle's stored preference; geist's default is `check` in a
     /// release build and `off` in a debug build (see `update.rs`).
     pub auto_update: crate::update::AutoUpdate,
     /// Ghostty `auto-update-channel`; `None` = the running build's channel.
     pub auto_update_channel: Option<crate::update::Channel>,
-    /// giest-specific `auto-update-feed`: the GitHub `/releases` API URL to
+    /// geist-specific `auto-update-feed`: the GitHub `/releases` API URL to
     /// check (default: the compile-time `update::DEFAULT_FEED`).
     pub auto_update_feed: String,
     /// Ghostty `initial-window`.
@@ -1684,7 +1684,7 @@ pub struct Config {
     pub link_url: bool,
     /// Ghostty `link`: extra regex link matchers, earlier ones first. Matched
     /// text opens with the system opener. Upstream declares the key but cannot
-    /// parse it yet ("TODO: This can't currently be set!"), so giest's syntax
+    /// parse it yet ("TODO: This can't currently be set!"), so geist's syntax
     /// is the obvious one: `link = <regex>`, repeatable, empty clears.
     pub links: Vec<regex::Regex>,
     /// Ghostty `link-previews`.
@@ -1735,14 +1735,14 @@ pub struct Config {
     pub notify_on_command_finish_after_ms: u64,
     /// How long an undoable operation stays undoable, in milliseconds. Ghostty
     /// `undo-timeout`, default 5 s. **Zero disables undo**, which is upstream's
-    /// documented meaning rather than a giest shortcut — and it matters here
+    /// documented meaning rather than a geist shortcut — and it matters here
     /// because an undo entry holds a live shell open until it expires.
     pub undo_timeout_ms: u64,
     /// Keep a pane open after its shell exits, until a key is pressed.
     /// Ghostty `wait-after-command`.
     pub wait_after_command: bool,
     /// Ghostty `shell-integration`: which injection scheme; `none` disables every
-    /// hook giest injects (pwsh/cmd prompt hooks and the WSL scripts).
+    /// hook geist injects (pwsh/cmd prompt hooks and the WSL scripts).
     pub shell_integration: crate::profiles::ShellIntegration,
     /// Ghostty `shell-integration-features`.
     pub shell_integration_features: crate::profiles::ShellFeatures,
@@ -1821,11 +1821,11 @@ impl Default for Config {
             font_variations: Default::default(),
             fg: Rgb::new(0xc5, 0xc8, 0xc6),
             bg: Rgb::new(0x10, 0x12, 0x18),
-            palette: xterm_palette(GIEST_ANSI16),
+            palette: xterm_palette(GEIST_ANSI16),
             palette_set: [0; 4],
             palette_generate: false,
             palette_harmonious: false,
-            // Ghostty's own defaults. giest used to ship 20 here so the 12pt
+            // Ghostty's own defaults. geist used to ship 20 here so the 12pt
             // scrollbar could sit entirely inside the padding gutter, but that
             // put a lopsided 20/2 frame around every pane. The bar is an overlay
             // now (see the scrollbar metrics in `app.rs`), which is what Ghostty
@@ -1902,7 +1902,7 @@ impl Default for Config {
             icon_frame: IconFrame::Aluminum,
             icon_ghost_color: None,
             icon_screen_color: Vec::new(),
-            // Divergence: upstream's default is `auto`. giest's tab strip also
+            // Divergence: upstream's default is `auto`. geist's tab strip also
             // carries the new-tab profile picker, so hiding it with one tab would
             // hide the only mouse route to cmd / WSL / ... -- keep it by default.
             window_show_tab_bar: ShowTabBar::Always,
@@ -2098,7 +2098,7 @@ impl Config {
         while let Some((path, optional)) = queue.pop_front() {
             if !seen.insert(load_key(&path)) {
                 diag!(
-                    "giest: config-file {}: already loaded (cycle), ignoring",
+                    "geist: config-file {}: already loaded (cycle), ignoring",
                     path.display()
                 );
                 continue;
@@ -2109,7 +2109,7 @@ impl Config {
                     queue.extend(more);
                 }
                 Err(e) if optional && e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => diag!("giest: error reading config-file {}: {e}", path.display()),
+                Err(e) => diag!("geist: error reading config-file {}: {e}", path.display()),
             }
         }
     }
@@ -2158,15 +2158,15 @@ impl Config {
             return;
         }
         let Some(path) = resolve_theme_path(&name) else {
-            diag!("giest: theme '{name}' not found (looked in <config-dir>/themes/)");
+            diag!("geist: theme '{name}' not found (looked in <config-dir>/themes/)");
             return;
         };
         match std::fs::read_to_string(&path) {
-            // Theme files are giest/Ghostty config bodies (palette/fg/bg/…). A
+            // Theme files are geist/Ghostty config bodies (palette/fg/bg/…). A
             // nested `theme` key inside a theme file is skipped by `apply`, so
             // this cannot recurse.
             Ok(body) => self.parse(&body),
-            Err(e) => diag!("giest: could not read theme file {}: {e}", path.display()),
+            Err(e) => diag!("geist: could not read theme file {}: {e}", path.display()),
         }
     }
 
@@ -2186,7 +2186,7 @@ impl Config {
                 continue;
             }
             let Some((key, value)) = line.split_once('=') else {
-                diag!("giest: ignoring malformed config line {}: {raw}", i + 1);
+                diag!("geist: ignoring malformed config line {}: {raw}", i + 1);
                 continue;
             };
             self.apply(key.trim(), unquote(value.trim()), &defaults);
@@ -2204,7 +2204,7 @@ impl Config {
         }
         match SETTERS.iter().find(|(k, _)| *k == key) {
             Some((_, set)) => set(self, value, defaults),
-            None => diag!("giest: ignoring unsupported config key '{key}'"),
+            None => diag!("geist: ignoring unsupported config key '{key}'"),
         }
     }
 }
@@ -2312,7 +2312,7 @@ const SETTERS: &[(&str, Setter)] = &[
         c.font_synthetic_style = match v {
             "" => d.font_synthetic_style,
             _ => parse_synthetic_style(v).unwrap_or_else(|| {
-                diag!("giest: ignoring invalid font-synthetic-style '{v}'");
+                diag!("geist: ignoring invalid font-synthetic-style '{v}'");
                 c.font_synthetic_style
             }),
         }
@@ -2504,7 +2504,7 @@ const SETTERS: &[(&str, Setter)] = &[
         c.window_theme = match v.to_ascii_lowercase().as_str() {
             "" => d.window_theme,
             // Ghostty's `auto` means "match the terminal background", which is
-            // exactly what giest derives. `system` is accepted as its documented
+            // exactly what geist derives. `system` is accepted as its documented
             // alias but treated the same: following the OS is what produced a
             // light tab strip over a dark terminal.
             "auto" | "system" => WindowTheme::Auto,
@@ -2524,7 +2524,7 @@ const SETTERS: &[(&str, Setter)] = &[
             c.palette[idx as usize] = col;
             c.palette_set[idx as usize / 64] |= 1 << (idx as usize % 64);
         } else {
-            diag!("giest: ignoring bad palette entry: {v}");
+            diag!("geist: ignoring bad palette entry: {v}");
         }
     }),
     ("link-osc8", |c, v, d| {
@@ -2537,7 +2537,7 @@ const SETTERS: &[(&str, Setter)] = &[
         } else {
             match regex::Regex::new(v) {
                 Ok(re) => c.links.push(re),
-                Err(e) => diag!("giest: ignoring bad link regex {v:?}: {e}"),
+                Err(e) => diag!("geist: ignoring bad link regex {v:?}: {e}"),
             }
         }
     }),
@@ -2747,7 +2747,7 @@ const SETTERS: &[(&str, Setter)] = &[
             d.shell_integration
         } else {
             crate::profiles::ShellIntegration::parse(v).unwrap_or_else(|| {
-                eprintln!("giest: ignoring invalid shell-integration value '{v}'");
+                eprintln!("geist: ignoring invalid shell-integration value '{v}'");
                 c.shell_integration
             })
         }
@@ -2757,7 +2757,7 @@ const SETTERS: &[(&str, Setter)] = &[
             d.shell_integration_features
         } else {
             crate::profiles::ShellFeatures::parse(v).unwrap_or_else(|| {
-                eprintln!("giest: ignoring invalid shell-integration-features value '{v}'");
+                eprintln!("geist: ignoring invalid shell-integration-features value '{v}'");
                 c.shell_integration_features
             })
         }
@@ -2797,7 +2797,7 @@ const SETTERS: &[(&str, Setter)] = &[
         } else if let Some(src) = InputSource::parse(v) {
             c.input.push(src);
         } else {
-            eprintln!("giest: ignoring invalid input value '{v}'");
+            eprintln!("geist: ignoring invalid input value '{v}'");
         }
     }),
     ("command", |c, v, d| {
@@ -2826,7 +2826,7 @@ const SETTERS: &[(&str, Setter)] = &[
             c.keybinds
                 .push((trigger.trim().to_string(), action.trim_start().to_string()));
         } else {
-            diag!("giest: ignoring malformed keybind (expected 'trigger=action'): {v}");
+            diag!("geist: ignoring malformed keybind (expected 'trigger=action'): {v}");
         }
     }),
     ("confirm-close-surface", |c, v, d| {
@@ -2908,10 +2908,10 @@ const SETTERS: &[(&str, Setter)] = &[
             _ => match crate::quickterm::QuickSize::parse(v) {
                 Some(s) => s,
                 None => {
-                    // Ghostty makes a bare number a config *error*; giest logs
+                    // Ghostty makes a bare number a config *error*; geist logs
                     // and keeps the previous value, since it has no error UI.
                     diag!(
-                        "giest: ignoring quick-terminal-size '{v}' \
+                        "geist: ignoring quick-terminal-size '{v}' \
                          (sizes need a % or px suffix, e.g. '25%' or '400px')"
                     );
                     c.quick_terminal_size
@@ -2920,12 +2920,12 @@ const SETTERS: &[(&str, Setter)] = &[
         }
     }),
     // Recognized so a transposed Ghostty config doesn't warn, but only `main` is
-    // honored: `mouse` needs per-monitor enumeration giest has no handle for and
+    // honored: `mouse` needs per-monitor enumeration geist has no handle for and
     // `macos-menu-bar` has no Windows meaning. Says so rather than silently
     // placing the window on the wrong screen.
     ("quick-terminal-screen", |_c, v, _d| {
         if !v.is_empty() && !v.eq_ignore_ascii_case("main") {
-            diag!("giest: quick-terminal-screen '{v}' is not supported; using 'main'");
+            diag!("geist: quick-terminal-screen '{v}' is not supported; using 'main'");
         }
     }),
     ("quick-terminal-autohide", |c, v, d| {
@@ -3137,7 +3137,7 @@ const SETTERS: &[(&str, Setter)] = &[
             d.bell
         } else {
             parse_bell_features(v).unwrap_or_else(|| {
-                diag!("giest: ignoring invalid bell-features '{v}'");
+                diag!("geist: ignoring invalid bell-features '{v}'");
                 c.bell
             })
         }
@@ -3147,7 +3147,7 @@ const SETTERS: &[(&str, Setter)] = &[
             d.app_notifications
         } else {
             parse_app_notifications(v).unwrap_or_else(|| {
-                diag!("giest: ignoring invalid app-notifications '{v}'");
+                diag!("geist: ignoring invalid app-notifications '{v}'");
                 c.app_notifications
             })
         }
@@ -3372,7 +3372,7 @@ const SETTERS: &[(&str, Setter)] = &[
             d.auto_update
         } else {
             crate::update::AutoUpdate::parse(v).unwrap_or_else(|| {
-                diag!("giest: invalid auto-update {v:?} (off, check, download)");
+                diag!("geist: invalid auto-update {v:?} (off, check, download)");
                 c.auto_update
             })
         }
@@ -3382,7 +3382,7 @@ const SETTERS: &[(&str, Setter)] = &[
             None
         } else {
             crate::update::Channel::parse(v).or_else(|| {
-                diag!("giest: invalid auto-update-channel {v:?} (stable, tip)");
+                diag!("geist: invalid auto-update-channel {v:?} (stable, tip)");
                 c.auto_update_channel
             })
         }
@@ -3472,15 +3472,15 @@ pub fn set_cli_overrides(body: String) {
     let _ = CLI_OVERRIDES.set(body);
 }
 
-/// Resolve the config file path: `$GIEST_CONFIG` if set, else
-/// `%APPDATA%\giest\config` (Ghostty names its file `config`, no extension).
+/// Resolve the config file path: `$geist_CONFIG` if set, else
+/// `%APPDATA%\geist\config` (Ghostty names its file `config`, no extension).
 /// Public so the command palette's "Open Config" can reveal it.
 pub fn config_path() -> Option<PathBuf> {
-    if let Some(p) = std::env::var_os("GIEST_CONFIG") {
+    if let Some(p) = std::env::var_os("geist_CONFIG") {
         return Some(PathBuf::from(p));
     }
     let appdata = std::env::var_os("APPDATA")?;
-    Some(PathBuf::from(appdata).join("giest").join("config"))
+    Some(PathBuf::from(appdata).join("geist").join("config"))
 }
 
 /// Create the config file (and its directory) if it does not exist yet, so
@@ -3544,7 +3544,7 @@ pub fn resolve_path(raw: &str, config_dir: Option<&Path>) -> Option<PathBuf> {
 ///
 /// A leading `?` marks the file optional (missing is not an error), matching
 /// Ghostty. **Divergence:** upstream lets `"?name"` quote a *literal* leading
-/// `?`; giest's parser strips surrounding quotes before any key sees the value,
+/// `?`; geist's parser strips surrounding quotes before any key sees the value,
 /// and `?` is not a legal character in a Windows filename anyway, so there is
 /// nothing to escape. An empty path is ignored rather than reset — resetting is
 /// what a bare empty value does, and `?` alone is a typo, not a reset.
@@ -3585,7 +3585,7 @@ fn config_value(text: &str, key: &str) -> Option<String> {
 
 /// Choose the theme name from a `theme` spec. A bare name (or path) is returned
 /// as-is; Ghostty's `light:Foo,dark:Bar` dual form resolves to the dark variant
-/// (giest renders dark by default; wiring system light/dark switching is a
+/// (geist renders dark by default; wiring system light/dark switching is a
 /// follow-up).
 fn select_theme_variant(spec: &str) -> String {
     if spec.contains("light:") || spec.contains("dark:") {
@@ -3746,7 +3746,7 @@ fn set_font_variation(c: &mut Config, d: &Config, v: &str, slot: usize) {
     match parse_font_variation(v) {
         Some(var) => c.font_variations[slot].push(var),
         None => diag!(
-            "giest: font-variation: expected a 4-character axis and a number, e.g. `wght=200`; got {v:?}"
+            "geist: font-variation: expected a 4-character axis and a number, e.g. `wght=200`; got {v:?}"
         ),
     }
 }
@@ -3835,7 +3835,7 @@ fn parse_font_variation(s: &str) -> Option<FontVariation> {
 ///
 /// A duration is a series of number+unit pairs which **add**, so `1h30m` is 90
 /// minutes and even `1h1h` is 2 hours. Units: `y d w h m s ms us`/`µs` `ns`.
-/// giest additionally accepts a bare integer as milliseconds — a superset that
+/// geist additionally accepts a bare integer as milliseconds — a superset that
 /// can't collide, since Ghostty requires a unit on every component.
 ///
 /// Sub-millisecond components are parsed and contribute 0 ms rather than being
@@ -4053,7 +4053,7 @@ fn x11_colors() -> &'static HashMap<String, Rgb> {
 }
 
 /// The 16 ANSI colors (a calm dark scheme). 0–7 normal, 8–15 bright.
-const GIEST_ANSI16: [Rgb; 16] = [
+const GEIST_ANSI16: [Rgb; 16] = [
     Rgb::new(0x10, 0x12, 0x18), // black
     Rgb::new(0xcc, 0x66, 0x66), // red
     Rgb::new(0xb5, 0xbd, 0x68), // green
@@ -4239,7 +4239,7 @@ mod tests {
     fn palette_is_well_formed() {
         let c = Config::default();
         // ANSI red at index 1, cube corner white at 231, grayscale endpoints.
-        assert_eq!(c.palette[1], GIEST_ANSI16[1]);
+        assert_eq!(c.palette[1], GEIST_ANSI16[1]);
         assert_eq!(c.palette[231], Rgb::new(255, 255, 255));
         assert_eq!(c.palette[16], Rgb::new(0, 0, 0));
         assert_eq!(c.palette[232], Rgb::new(8, 8, 8));
@@ -4347,7 +4347,7 @@ mod tests {
         assert_eq!(c.palette[1], Rgb::new(0xab, 0xcd, 0xef));
         assert_eq!(c.palette[232], Rgb::new(0x0a, 0x0a, 0x0a));
         // Untouched indices keep their default.
-        assert_eq!(c.palette[2], GIEST_ANSI16[2]);
+        assert_eq!(c.palette[2], GEIST_ANSI16[2]);
     }
 
     #[test]
@@ -4559,7 +4559,7 @@ mod tests {
     }
 
     /// A scratch directory that removes itself, for the `config-file` tests.
-    /// (`std::env::temp_dir` + a counter; giest has no temp-dir dependency.)
+    /// (`std::env::temp_dir` + a counter; geist has no temp-dir dependency.)
     struct Scratch(PathBuf);
 
     impl Scratch {
@@ -4567,7 +4567,7 @@ mod tests {
             use std::sync::atomic::{AtomicUsize, Ordering};
             static N: AtomicUsize = AtomicUsize::new(0);
             let dir = std::env::temp_dir().join(format!(
-                "giest-cfg-{}-{}",
+                "geist-cfg-{}-{}",
                 std::process::id(),
                 N.fetch_add(1, Ordering::Relaxed)
             ));
@@ -4965,7 +4965,7 @@ mod tests {
     #[test]
     fn padding_balance_shares_out_the_leftover_space() {
         use PaddingBalance::*;
-        // Off: everything falls to the trailing edge, which is giest's old
+        // Off: everything falls to the trailing edge, which is geist's old
         // (and Ghostty's default) behaviour.
         assert_eq!(balance_padding(None, 9.0, 20.0), (0.0, 9.0));
         // Equal: split down the middle, odd pixel to the trailing side.
@@ -4992,7 +4992,7 @@ mod tests {
             parsed("window-new-tab-position = end").new_tab_position,
             NewTabPosition::End
         );
-        // Upstream's default is `current`, not `end` — giest used to always
+        // Upstream's default is `current`, not `end` — geist used to always
         // append, so this changes where a new tab lands.
         assert_eq!(Config::default().new_tab_position, NewTabPosition::Current);
         assert_eq!(
@@ -5012,7 +5012,7 @@ mod tests {
             Some(Rgb::new(0xFF, 0x88, 0x00))
         );
         assert_eq!(Config::default().split_divider_color, None);
-        // Ghostty's defaults, one of which giest previously had backwards:
+        // Ghostty's defaults, one of which geist previously had backwards:
         // it cleared the selection on every copy.
         assert!(Config::default().selection_clear_on_typing);
         assert!(!Config::default().selection_clear_on_copy);
@@ -5318,7 +5318,7 @@ mod tests {
 
     #[test]
     fn input_resolution_is_all_or_nothing() {
-        let dir = std::env::temp_dir().join(format!("giest-input-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("geist-input-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let f = dir.join("in.txt");
         std::fs::write(&f, b"FILE").unwrap();
@@ -5552,7 +5552,7 @@ mod tests {
         assert_eq!(ms("1h30m"), 60_000);
         // …and repeat rather than overwrite (1h1h == 2h), though both clamp here.
         assert_eq!(ms("2s500ms"), 2_500);
-        // A bare integer is milliseconds (a giest superset).
+        // A bare integer is milliseconds (a geist superset).
         assert_eq!(ms("300"), 300);
         // Clamped at both ends.
         assert_eq!(ms("10ms"), 250);
@@ -5725,7 +5725,7 @@ mod tests {
     fn bell_features_defaults_match_ghostty() {
         let b = Config::default().bell;
         // attention/title on, everything else off — note `border` is OFF, which
-        // differs from giest's pre-parity default of always flashing the pane.
+        // differs from geist's pre-parity default of always flashing the pane.
         assert!(b.attention && b.title);
         assert!(!b.system && !b.audio && !b.border);
     }
@@ -5867,7 +5867,7 @@ mod tests {
     #[test]
     fn cursor_and_faint_opacity_parse_and_clamp() {
         assert_eq!(Config::default().cursor_opacity, 1.0);
-        // giest's faint used to be a hardcoded 0.55; Ghostty's default is 0.5.
+        // geist's faint used to be a hardcoded 0.55; Ghostty's default is 0.5.
         assert_eq!(Config::default().faint_opacity, 0.5);
         assert_eq!(parsed("cursor-opacity = 0.4").cursor_opacity, 0.4);
         assert_eq!(parsed("cursor-opacity = 5").cursor_opacity, 1.0);
@@ -6175,7 +6175,7 @@ mod tests {
 
     #[test]
     fn a_missing_config_file_is_created_empty_and_an_existing_one_is_left_alone() {
-        let dir = std::env::temp_dir().join(format!("giest-ensure-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("geist-ensure-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("nested").join("config");
 
@@ -6192,7 +6192,7 @@ mod tests {
     }
     #[test]
     fn path_values_resolve_relative_to_the_config_dir() {
-        let dir = Path::new(r"C:\Users\me\AppData\Roaming\giest");
+        let dir = Path::new(r"C:\Users\me\AppData\Roaming\geist");
         assert_eq!(
             resolve_path("wall.png", Some(dir)),
             Some(dir.join("wall.png"))
@@ -6352,7 +6352,7 @@ mod tests {
         assert!(c.diagnostics[1].contains("malformed config line 2"));
         assert!(c.diagnostics[2].contains("bell-features"));
         // The stderr prefix is stripped for the dialog.
-        assert!(c.diagnostics.iter().all(|d| !d.starts_with("giest: ")));
+        assert!(c.diagnostics.iter().all(|d| !d.starts_with("geist: ")));
     }
 
     #[test]

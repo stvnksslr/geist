@@ -1,7 +1,7 @@
 //! Cursor-style / blink tracking via a side scan of the PTY byte stream.
 //!
 //! A program selects the cursor shape with `ESC [ Ps SP q` (DECSCUSR) and toggles
-//! blink with `ESC [ ? 12 h` / `l` (DEC mode 12). giest's read-only libghostty-vt
+//! blink with `ESC [ ? 12 h` / `l` (DEC mode 12). geist's read-only libghostty-vt
 //! stream applies both internally — its render snapshot reports the resulting
 //! shape and blink — but it gives us no way to set the *default* shape (Ghostty's
 //! `cursor-style`), it resets DECSCUSR-default (`Ps = 0`) to a hardcoded block

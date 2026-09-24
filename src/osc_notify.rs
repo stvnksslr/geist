@@ -50,7 +50,7 @@ pub enum Occasion {
     Always,
     /// Only when the window isn't focused.
     Unfocused,
-    /// Only when the window isn't visible. giest can't see occlusion, so this is
+    /// Only when the window isn't visible. geist can't see occlusion, so this is
     /// treated like `Unfocused` — a focused window is certainly visible.
     Invisible,
 }
@@ -344,7 +344,7 @@ fn parse_osc9(data: &str) -> Option<Osc9> {
         // 9;2 message box, 9;3 tab title, 9;6 guimacro, 9;7 run process,
         // 9;8 environment variable, 9;9 working directory.
         b'2' | b'3' | b'6' | b'7' | b'8' | b'9' => at(1) == Some(b';'),
-        // 9;4;<state>[;<pct>] progress report — the one ConEmu command giest
+        // 9;4;<state>[;<pct>] progress report — the one ConEmu command geist
         // acts on. The state digit is required; without it this is prose.
         b'4' => {
             if at(1) == Some(b';')
@@ -456,7 +456,7 @@ mod tests {
         // Occasion is carried through.
         let n = scan(&[b"\x1b]99;o=unfocused;t\x07"]);
         assert_eq!(n[0].occasion, Occasion::Unfocused);
-        // Parts giest doesn't show are ignored, not shown as text.
+        // Parts geist doesn't show are ignored, not shown as text.
         assert!(scan(&[b"\x1b]99;p=icon;abc\x07"]).is_empty());
     }
 

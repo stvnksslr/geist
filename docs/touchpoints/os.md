@@ -1,12 +1,12 @@
 # Touch point: the operating system (Windows)
 
-Every place giest crosses into Windows. giest targets Windows specifically — the
+Every place geist crosses into Windows. geist targets Windows specifically — the
 PTY transport is ConPTY, the clipboard and process-spawn behavior assume
 Windows, and several gotchas exist only because of how ConPTY behaves.
 
 ```mermaid
 flowchart LR
-    subgraph giest["giest"]
+    subgraph geist["geist"]
         pty["pty.rs"]
         prof["profiles.rs"]
         cfg["config.rs"]
@@ -60,7 +60,7 @@ flowchart LR
 !!! warning "ConPTY does not reliably EOF on child exit"
     On Windows the master *output* pipe usually does **not** reach EOF when the
     child exits — portable-pty keeps the pseudoconsole open, so the reader
-    thread stays blocked and its channel never disconnects. giest therefore
+    thread stays blocked and its channel never disconnects. geist therefore
     detects exit by **polling the child process directly**
     (`Pty::is_running` → `Child::try_wait`), not by `read() == 0`. `app.rs` also
     calls `request_repaint_after(500ms)` so an idle exit still gets reaped.
@@ -153,8 +153,8 @@ title); `app.rs` consumes egui events and issues `ViewportCommand`s.
 
 ## 6 · Filesystem & environment
 
-- **Config:** `config.rs` reads `%APPDATA%\giest\config` (Ghostty-format,
-  `key = value` lines), overridable with the `GIEST_CONFIG` env var.
+- **Config:** `config.rs` reads `%APPDATA%\geist\config` (Ghostty-format,
+  `key = value` lines), overridable with the `geist_CONFIG` env var.
 - **PATH probing:** `profiles::which` splits `PATH` to find shells.
 - **Window subsystem:** `main.rs` sets `windows_subsystem = "windows"` in
   release builds so launching the GUI doesn't open a console window.

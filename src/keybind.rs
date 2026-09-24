@@ -14,7 +14,7 @@
 //! swallows any bound chord, so a `keybind` works regardless of its modifiers
 //! (it never also reaches the shell). It additionally reserves whole modifier
 //! *namespaces* (`ctrl+shift+*`, `ctrl+alt+arrows`, `alt+digit`, `ctrl+=/-/0`)
-//! even for unbound combos, matching giest's long-standing host behavior.
+//! even for unbound combos, matching geist's long-standing host behavior.
 
 use crate::command::Action;
 use crate::engine::{KeyCode, KeyMods, SelectionAdjust};
@@ -87,9 +87,9 @@ pub struct Keymap {
     /// list that only applies while that table is on the active stack. The
     /// mechanism behind a "copy mode" or a modal vim-style layer.
     tables: std::collections::HashMap<String, Vec<Bind>>,
-    /// `global:` bindings — chords that fire even when giest isn't focused.
+    /// `global:` bindings — chords that fire even when geist isn't focused.
     /// Kept **out** of `binds` on purpose: they are delivered by the OS-level
-    /// hook ([`crate::hotkey`]) whether or not giest has focus, so putting them
+    /// hook ([`crate::hotkey`]) whether or not geist has focus, so putting them
     /// in the ordinary keymap too would run the action twice on a focused press.
     globals: Vec<(Chord, Action)>,
 }
@@ -375,11 +375,11 @@ impl Keymap {
                     Some(act) => {
                         if !km.chain(chain_parent.as_ref(), act) {
                             eprintln!(
-                                "giest: ignoring 'chain={a}' — no preceding keybind to chain onto"
+                                "geist: ignoring 'chain={a}' — no preceding keybind to chain onto"
                             );
                         }
                     }
-                    None => eprintln!("giest: ignoring keybind to unknown action '{a}'"),
+                    None => eprintln!("geist: ignoring keybind to unknown action '{a}'"),
                 }
                 continue;
             }
@@ -444,13 +444,13 @@ impl Keymap {
                     // active. Reported rather than silently registered as an
                     // unconditional global, which would fire outside the table.
                     eprintln!(
-                        "giest: 'global:' inside a key table is not supported, ignoring '{trigger}'"
+                        "geist: 'global:' inside a key table is not supported, ignoring '{trigger}'"
                     );
                     continue;
                 }
                 let Some(chord) = parse_chord(rest.trim()) else {
                     eprintln!(
-                        "giest: ignoring global keybind with unparseable trigger '{trigger}'"
+                        "geist: ignoring global keybind with unparseable trigger '{trigger}'"
                     );
                     continue;
                 };
@@ -464,19 +464,19 @@ impl Keymap {
                         Some(slot) => slot.1 = act,
                         None => km.globals.push((chord, act)),
                     },
-                    None => eprintln!("giest: ignoring keybind to unknown action '{a}'"),
+                    None => eprintln!("geist: ignoring keybind to unknown action '{a}'"),
                 }
                 continue;
             }
             let Some(seq) = parse_sequence(&flagless) else {
-                eprintln!("giest: ignoring keybind with unparseable trigger '{trigger}'");
+                eprintln!("geist: ignoring keybind with unparseable trigger '{trigger}'");
                 continue;
             };
             // Upstream: "trigger sequences are not allowed for `global:` or
             // `all:`-prefixed triggers". Rejected rather than quietly bound to
             // the last chord, which is what accepting it would amount to.
             if all && seq.len() > 1 {
-                eprintln!("giest: 'all:' does not support key sequences, ignoring '{trigger}'");
+                eprintln!("geist: 'all:' does not support key sequences, ignoring '{trigger}'");
                 continue;
             }
             // `trim_start` only: a payload action carries its trailing
@@ -486,7 +486,7 @@ impl Keymap {
             // `unbind` **removes** the binding, so the key goes back to the
             // shell. `ignore` **binds** it to nothing, black-holing the key —
             // upstream's two are genuinely different actions (`set.remove`
-            // versus a bound no-op), and giest treated them as the same. The
+            // versus a bound no-op), and geist treated them as the same. The
             // difference is what lets a key table shadow a root binding:
             // `foo/ctrl+t=ignore` silences ctrl+t while `foo` is active, where
             // `unbind` there would let the root's ctrl+t through.
@@ -507,7 +507,7 @@ impl Keymap {
                     // Only a successful plain bind becomes a chain parent.
                     chain_parent = Some((table, seq));
                 }
-                None => eprintln!("giest: ignoring keybind to unknown action '{a}'"),
+                None => eprintln!("geist: ignoring keybind to unknown action '{a}'"),
             }
         }
         km
@@ -579,7 +579,7 @@ pub fn parse_sequence(s: &str) -> Option<Vec<Chord>> {
     seq.filter(|v: &Vec<Chord>| !v.is_empty())
 }
 
-/// The built-in default bindings, mirroring the host shortcuts giest has always
+/// The built-in default bindings, mirroring the host shortcuts geist has always
 /// had. Every trigger here parses and sits inside an app-reserved namespace.
 fn default_binds() -> Vec<Bind> {
     const DEFAULTS: &[(&str, Action)] = &[
@@ -588,7 +588,7 @@ fn default_binds() -> Vec<Bind> {
         ("ctrl+shift+n", Action::NewWindow),
         // NOTE: `close_window` is deliberately left unbound. Ghostty binds it to
         // alt+f4, but on Windows the OS already delivers Alt+F4 as WM_CLOSE →
-        // `close_requested`, which giest answers with the confirmation flow.
+        // `close_requested`, which geist answers with the confirmation flow.
         // Binding it too would raise an action *and* a close request in the same
         // pass. Users who want the explicit action can add
         // `keybind = alt+f4=close_window`.
@@ -640,7 +640,7 @@ fn default_binds() -> Vec<Bind> {
     // with no selection the key is the shell's, which is what keeps shift+arrow
     // working in editors. It also binds shift+home/end/pageup/pagedown to
     // adjust_selection, but only on macOS: on every other platform the viewport
-    // scrolling bindings above are registered *after* them and win. giest is
+    // scrolling bindings above are registered *after* them and win. geist is
     // Windows, so those four stay scroll bindings — matching upstream, not
     // diverging from it.
     //
@@ -924,7 +924,7 @@ mod tests {
         assert_eq!(Action::Noop("ignore".into()).scope(), Scope::App);
 
         // The broadcast subset is narrower than Surface, and deliberately so:
-        // these are the ones giest can source to a pane.
+        // these are the ones geist can source to a pane.
         assert!(Action::SendText("x".into()).broadcasts_to_panes());
         assert!(Action::ClearScreen.broadcasts_to_panes());
         assert!(Action::ScrollPageUp.broadcasts_to_panes());
@@ -1318,7 +1318,7 @@ mod tests {
             km.globals(),
             [(chord("ctrl+alt+g"), Action::ToggleQuickTerminal)]
         );
-        // Not also in `binds`: the OS hook delivers it whether or not giest is
+        // Not also in `binds`: the OS hook delivers it whether or not geist is
         // focused, so a second copy here would run the action twice.
         assert_eq!(km.lookup(&chord("ctrl+alt+g")), None);
         assert!(!km.starts_binding(&chord("ctrl+alt+g")));
@@ -1403,7 +1403,7 @@ mod tests {
             Action::from_name("set_font_size:14"),
             Some(Action::SetFontSize(14))
         );
-        // Ghostty's parameter is a float; giest's font size is whole points, so
+        // Ghostty's parameter is a float; geist's font size is whole points, so
         // round rather than reject — 13.5 meaning 14 beats doing nothing.
         assert_eq!(
             Action::from_name("set_font_size:13.5"),
@@ -1426,7 +1426,7 @@ mod tests {
         );
 
         // Every one round-trips through `name()`, which is what makes a config
-        // written by giest re-readable by giest.
+        // written by geist re-readable by geist.
         for a in [
             Action::MoveTab(-2),
             Action::SetFontSize(14),
@@ -1722,7 +1722,7 @@ mod tests {
     #[test]
     fn default_keymap_leaves_alt_f4_unbound() {
         // Deliberate divergence from Ghostty: Windows already delivers Alt+F4 as
-        // WM_CLOSE, which giest answers with the close-confirmation flow. Binding
+        // WM_CLOSE, which geist answers with the close-confirmation flow. Binding
         // `close_window` here too would raise an action *and* a close request in
         // the same pass.
         let km = Keymap::default();

@@ -4,7 +4,7 @@
 //! frame of the default background.
 //!
 //! Ghostty does this per pixel in its cell shader (the padding pixel clamps to
-//! the nearest grid cell); giest paints the same result as rectangles — one per
+//! the nearest grid cell); geist paints the same result as rectangles — one per
 //! edge row/column plus the four corners — because its per-pane scissor is the
 //! grid box and so the renderer cannot draw outside it. The decisions are
 //! here, pure, and the app only paints the rects this returns.

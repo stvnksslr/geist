@@ -6,8 +6,8 @@
 //! what order they appear in, which one is the default, and any profiles the
 //! user added by hand.
 //!
-//! It is a separate file (`%APPDATA%\giest\profiles`, override with
-//! `$GIEST_PROFILES`) rather than keys in the config deliberately: the config
+//! It is a separate file (`%APPDATA%\geist\profiles`, override with
+//! `$geist_PROFILES`) rather than keys in the config deliberately: the config
 //! is hand-maintained, and a UI that rewrites it would have to preserve the
 //! user's comments, ordering and formatting to be non-destructive. Storing the
 //! deltas beside `state` means the profiles page never touches it.
@@ -18,7 +18,7 @@
 //! free-form field taking the **rest of the line** so nothing needs escaping:
 //!
 //! ```text
-//! giest-profiles 1
+//! geist-profiles 1
 //! D pwsh                  default profile, by key
 //! X cmd                   hidden from the new-tab menu
 //! R pwsh PowerShell 7     renamed: key, then the display name
@@ -41,7 +41,7 @@ use crate::profiles::Profile;
 
 /// Header of a profiles file. Bumped if the grammar ever changes incompatibly;
 /// a file with any other version is ignored rather than guessed at.
-const HEADER: &str = "giest-profiles 1";
+const HEADER: &str = "geist-profiles 1";
 
 /// A profile the user added by hand, which detection knows nothing about.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -266,7 +266,7 @@ pub fn parse(text: &str) -> Store {
 }
 
 pub fn store_path() -> Option<PathBuf> {
-    if let Some(p) = std::env::var_os("GIEST_PROFILES") {
+    if let Some(p) = std::env::var_os("geist_PROFILES") {
         return Some(PathBuf::from(p));
     }
     Some(crate::config::config_dir()?.join("profiles"))
@@ -283,7 +283,7 @@ pub fn save(store: &Store) {
         let _ = std::fs::create_dir_all(dir);
     }
     if let Err(e) = std::fs::write(&path, serialize(store)) {
-        eprintln!("giest: could not save profiles to {}: {e}", path.display());
+        eprintln!("geist: could not save profiles to {}: {e}", path.display());
     }
 }
 
@@ -331,25 +331,25 @@ mod tests {
     #[test]
     fn a_foreign_or_missing_header_reads_as_no_edits() {
         assert_eq!(parse(""), Store::default());
-        assert_eq!(parse("giest-profiles 2\nD cmd\n"), Store::default());
+        assert_eq!(parse("geist-profiles 2\nD cmd\n"), Store::default());
     }
 
     #[test]
     fn a_malformed_line_drops_only_that_record() {
-        let s = parse("giest-profiles 1\nD cmd\n???\nZ junk\nX\nX powershell\n");
+        let s = parse("geist-profiles 1\nD cmd\n???\nZ junk\nX\nX powershell\n");
         assert_eq!(s.default.as_deref(), Some("cmd"));
         assert_eq!(s.hidden, vec!["powershell".to_string()]);
     }
 
     #[test]
     fn a_custom_profile_without_a_program_is_dropped() {
-        let s = parse("giest-profiles 1\nC custom:1 Broken\nA --login\n");
+        let s = parse("geist-profiles 1\nC custom:1 Broken\nA --login\n");
         assert!(s.custom.is_empty());
     }
 
     #[test]
     fn names_with_spaces_survive_because_they_take_the_rest_of_the_line() {
-        let s = parse("giest-profiles 1\nR pwsh My Favourite Shell\n");
+        let s = parse("geist-profiles 1\nR pwsh My Favourite Shell\n");
         assert_eq!(s.names, vec![("pwsh".into(), "My Favourite Shell".into())]);
     }
 

@@ -1,6 +1,6 @@
 //! OSC 133 command marks (`C` / `D`) via a side scan of the PTY stream.
 //!
-//! giest already gets *prompt* marks (`A`/`B`) for free: libghostty-vt applies
+//! geist already gets *prompt* marks (`A`/`B`) for free: libghostty-vt applies
 //! them to the screen, which is what `cursor_at_prompt` and `jump_to_prompt`
 //! read. But the **command** marks carry information that never lands on a cell
 //! — `C` says the command began, and `D` carries its exit code — so, as with

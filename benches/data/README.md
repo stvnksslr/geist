@@ -6,14 +6,14 @@ seeded synthetic generators in `src/synthetic.rs`).
 
 ## Using a corpus
 
-Set `GIEST_BENCH_DATA` to a file path; the `stream` bench (and anything that calls
+Set `geist_BENCH_DATA` to a file path; the `stream` bench (and anything that calls
 `synthetic::corpus`) will use its bytes verbatim instead of the synthetic
 generator, and label the case `corpus`:
 
 ```powershell
-$env:GIEST_BENCH_DATA = "benches\data\ansi-sample.vt"
+$env:geist_BENCH_DATA = "benches\data\ansi-sample.vt"
 mise exec zig@0.16.0 -- cargo bench --bench stream
-Remove-Item Env:\GIEST_BENCH_DATA   # back to synthetic
+Remove-Item Env:\geist_BENCH_DATA   # back to synthetic
 ```
 
 ## What's checked in
@@ -36,7 +36,7 @@ plain pipe). Some options:
 - Replay a known stress file (e.g. a large `cat` of source, `htop` for a few
   seconds, a noisy build log).
 
-Keep large captures **out of git** — point `GIEST_BENCH_DATA` at a local file.
+Keep large captures **out of git** — point `geist_BENCH_DATA` at a local file.
 Only small, representative samples belong here.
 
 > For an apples-to-apples comparison, feed the *same* corpus file to Ghostty's own

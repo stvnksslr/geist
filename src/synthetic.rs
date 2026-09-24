@@ -116,7 +116,7 @@ pub fn osc(count: usize, seed: u64) -> Vec<u8> {
     out
 }
 
-/// Resolve a benchmark input stream. If the env var `GIEST_BENCH_DATA` points at
+/// Resolve a benchmark input stream. If the env var `geist_BENCH_DATA` points at
 /// a readable file, its bytes are used verbatim (mirrors Ghostty's `--data`
 /// corpus approach — feed a real captured session); otherwise fall back to the
 /// seeded synthetic generator `gen` of roughly `len` bytes. Returns the bytes and
@@ -130,11 +130,11 @@ pub fn corpus(
     seed: u64,
     generate: impl Fn(usize, u64) -> Vec<u8>,
 ) -> (Vec<u8>, &'static str) {
-    if let Ok(path) = std::env::var("GIEST_BENCH_DATA") {
+    if let Ok(path) = std::env::var("geist_BENCH_DATA") {
         match std::fs::read(&path) {
             Ok(bytes) if !bytes.is_empty() => return (bytes, "corpus"),
-            Ok(_) => eprintln!("GIEST_BENCH_DATA={path} is empty; using synthetic {kind}"),
-            Err(e) => eprintln!("GIEST_BENCH_DATA={path} unreadable ({e}); using synthetic {kind}"),
+            Ok(_) => eprintln!("geist_BENCH_DATA={path} is empty; using synthetic {kind}"),
+            Err(e) => eprintln!("geist_BENCH_DATA={path} unreadable ({e}); using synthetic {kind}"),
         }
     }
     // Leak the kind into a 'static label without allocating per call.

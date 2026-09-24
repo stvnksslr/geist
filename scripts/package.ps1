@@ -1,5 +1,5 @@
 # Build the release artifacts for one version: a portable zip, an MSIX, the
-# App Installer file, and giest-manifest.json (the self-updater's input: the
+# App Installer file, and geist-manifest.json (the self-updater's input: the
 # SHA-256 of each package, see src/update.rs). Nothing is uploaded or signed
 # unless asked.
 #
@@ -8,10 +8,10 @@
 #   pwsh scripts/package.ps1 -CertPath c.pfx -CertPassword ... -Publisher "CN=..."
 #
 # Output: dist\<version>\
-#   giest-<v>-windows-<arch>.zip    portable: exe + ConPTY + licenses
-#   giest-<v>-windows-<arch>.msix   unsigned unless -CertPath is given
-#   giest.appinstaller              for -BaseUri hosting (MSIX auto-update)
-#   giest-manifest.json             attach to the GitHub release
+#   geist-<v>-windows-<arch>.zip    portable: exe + ConPTY + licenses
+#   geist-<v>-windows-<arch>.msix   unsigned unless -CertPath is given
+#   geist.appinstaller              for -BaseUri hosting (MSIX auto-update)
+#   geist-manifest.json             attach to the GitHub release
 #
 # Reproducibility: every staged file's mtime is pinned to the HEAD commit's
 # time, the file list is sorted, and the build is `cargo build --release`
@@ -21,9 +21,9 @@ param(
     [string]$Channel,
     [switch]$SkipBuild,
     [switch]$NoMsix,
-    [string]$Publisher = "CN=giest-unsigned",
-    [string]$PublisherDisplay = "giest",
-    [string]$BaseUri = "https://github.com/stvnksslr/giest/releases/latest/download",
+    [string]$Publisher = "CN=geist-unsigned",
+    [string]$PublisherDisplay = "geist",
+    [string]$BaseUri = "https://github.com/stvnksslr/geist/releases/latest/download",
     [string]$CertPath,
     [string]$CertPassword
 )
@@ -49,30 +49,30 @@ if (-not $SkipBuild) {
 & "$PSScriptRoot\build-handoff-proxy.ps1" -Profiles release | Out-Null
 
 $rel = Join-Path $root "target\release"
-foreach ($f in "giest.exe", "conpty.dll", "OpenConsole.exe", "giestHandoffProxy.dll") {
+foreach ($f in "geist.exe", "conpty.dll", "OpenConsole.exe", "geistHandoffProxy.dll") {
     if (-not (Test-Path "$rel\$f")) { throw "missing $rel\$f" }
 }
 
 $out = Join-Path $root "dist\$Version"
-$name = "giest-$Version-windows-$arch"
+$name = "geist-$Version-windows-$arch"
 $stage = Join-Path $out $name
 if (Test-Path $out) { Remove-Item -Recurse -Force $out }
 New-Item -ItemType Directory -Force "$stage\licenses" | Out-Null
 
-Copy-Item "$rel\giest.exe", "$rel\conpty.dll", "$rel\OpenConsole.exe", "$rel\giestHandoffProxy.dll" $stage
+Copy-Item "$rel\geist.exe", "$rel\conpty.dll", "$rel\OpenConsole.exe", "$rel\geistHandoffProxy.dll" $stage
 Copy-Item "assets\icon.ico" $stage
 Copy-Item "assets\shell-integration\LICENSE-ghostty" "$stage\licenses\LICENSE-ghostty.txt"
 Copy-Item "packaging\licenses\LICENSE-conpty.txt" "$stage\licenses\"
 Copy-Item "assets\fonts\OFL.txt" "$stage\licenses\LICENSE-JetBrainsMono-OFL.txt"
 Copy-Item "assets\ICON_LICENSE.txt" "$stage\licenses\LICENSE-icon.txt"
-if (Test-Path "LICENSE") { Copy-Item "LICENSE" "$stage\licenses\LICENSE-giest.txt" }
+if (Test-Path "LICENSE") { Copy-Item "LICENSE" "$stage\licenses\LICENSE-geist.txt" }
 @"
-giest $Version ($Channel, $arch)
+geist $Version ($Channel, $arch)
 
-Run giest.exe. conpty.dll and OpenConsole.exe must stay beside it: they are
+Run geist.exe. conpty.dll and OpenConsole.exe must stay beside it: they are
 the out-of-band ConPTY that carries kitty graphics (set conpty-passthrough =
-false to use the inbox console host instead). giestHandoffProxy.dll is what
-lets giest be the Windows default terminal (giest +register-default-terminal).
+false to use the inbox console host instead). geistHandoffProxy.dll is what
+lets geist be the Windows default terminal (geist +register-default-terminal).
 
 Third-party licenses are in licenses\.
 "@ | Set-Content -Encoding ascii "$stage\README.txt"
@@ -137,7 +137,7 @@ if (-not $NoMsix) {
         } else {
             Write-Warning "MSIX is unsigned: Windows will not install it until it is signed with a certificate whose subject is '$Publisher'"
         }
-        Expand-Template "packaging\giest.appinstaller.in" (Join-Path $out "giest.appinstaller")
+        Expand-Template "packaging\geist.appinstaller.in" (Join-Path $out "geist.appinstaller")
         Remove-Item -Recurse -Force $msixDir
         $files += @{ name = "$name.msix"; arch = $arch; kind = "msix"; path = $msix }
     }
@@ -154,6 +154,6 @@ $manifest = [ordered]@{
         }
     })
 }
-$manifest | ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8 (Join-Path $out "giest-manifest.json")
+$manifest | ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8 (Join-Path $out "geist-manifest.json")
 Remove-Item -Recurse -Force $stage
 Get-ChildItem $out | Format-Table Name, Length

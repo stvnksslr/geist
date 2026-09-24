@@ -1,4 +1,4 @@
-//! Default-terminal handoff: giest as Windows' "Default terminal application".
+//! Default-terminal handoff: geist as Windows' "Default terminal application".
 //!
 //! **The chain** (verified against microsoft/terminal `src/host/srvinit.cpp`,
 //! `src/propslib/DelegationConfig.cpp` and `src/host/proxy/*.idl`):
@@ -11,7 +11,7 @@
 //!    -Embedding`) and hands it the console session via
 //!    `IConsoleHandoff::EstablishHandoff`.
 //! 3. That OpenConsole `CoCreateInstance`s the **terminal** CLSID — ours,
-//!    served by `giest.exe -Embedding` — and calls
+//!    served by `geist.exe -Embedding` — and calls
 //!    `ITerminalHandoff3::EstablishPtyHandoff(out in, out out, signal,
 //!    reference, server, client, &startupInfo)`. `in`/`out` are **[out]**: the
 //!    terminal creates the pipes and returns OpenConsole's ends. The four
@@ -23,15 +23,15 @@
 //!    (`u16 8, u16 cols, u16 rows`) on the signal pipe
 //!    (`PtySignalInputThread.hpp`). Closing the signal pipe ends the session.
 //!
-//! **Why a native DLL ships beside giest.** The call crosses processes and
+//! **Why a native DLL ships beside geist.** The call crosses processes and
 //! carries `system_handle`s, which only a MIDL-generated NDR proxy marshals.
-//! `scripts/build-handoff-proxy.ps1` builds `giestHandoffProxy.dll` from the
+//! `scripts/build-handoff-proxy.ps1` builds `geistHandoffProxy.dll` from the
 //! vendored IDLs. Windows Terminal's own `OpenConsoleProxy.dll` is registered
 //! only in its package's COM catalog, invisible to unpackaged processes.
 //!
 //! **The console side** is Windows Terminal's packaged OpenConsole
 //! (`{2EACA947-…}`, its release-branding `CConsoleHandoff` CLSID). The NuGet
-//! `OpenConsole.exe` giest sideloads has the *same* compiled-in CLSID, so
+//! `OpenConsole.exe` geist sideloads has the *same* compiled-in CLSID, so
 //! registering it under our own CLSID would never answer (COM would wait for a
 //! class object that is never registered), and registering it under
 //! `{2EACA947-…}` would hijack Windows Terminal's. Without Windows Terminal
@@ -40,7 +40,7 @@
 //!
 //! **Registration is HKCU only and exactly reversible.** `+register-default-
 //! terminal` records the two `%%Startup` values it replaces (present *or
-//! absent*) under `HKCU\Software\giest\DefaultTerminal`; `+unregister-default-
+//! absent*) under `HKCU\Software\geist\DefaultTerminal`; `+unregister-default-
 //! terminal` puts them back — unless the user has since picked another
 //! terminal in Settings, which it then leaves alone — and deletes every key it
 //! wrote.
@@ -49,7 +49,7 @@ use std::os::windows::io::OwnedHandle;
 
 /// Our terminal CLSID (`CTerminalHandoff` equivalent).
 pub const CLSID_TERMINAL: &str = "{2CED21A9-5236-4F72-B71F-10F3949295E5}";
-/// The proxy/stub CLSID compiled into `giestHandoffProxy.dll`
+/// The proxy/stub CLSID compiled into `geistHandoffProxy.dll`
 /// (`vendor/terminal-handoff/dlldata.c` `PROXY_CLSID_IS`).
 pub const PROXY_CLSID: &str = "{4CDF6A34-42C2-488C-84D2-4BC3F55F519D}";
 /// Windows Terminal's (release) OpenConsole `CConsoleHandoff` CLSID.
@@ -58,18 +58,18 @@ pub const CLSID_WT_OPENCONSOLE: &str = "{2EACA947-7F5F-4CFA-BA87-8F7FBEEFBE69}";
 pub const IID_TERMINAL_HANDOFF3: &str = "{6F23DA90-15C5-4203-9DB0-64E73F1B1B00}";
 /// `IConsoleHandoff`.
 pub const IID_CONSOLE_HANDOFF: &str = "{E686C757-9A35-4A1C-B3CE-0BCC8B5C69F4}";
-/// The proxy DLL's file name, beside `giest.exe`.
-pub const PROXY_DLL: &str = "giestHandoffProxy.dll";
+/// The proxy DLL's file name, beside `geist.exe`.
+pub const PROXY_DLL: &str = "geistHandoffProxy.dll";
 
 /// Where conhost reads the delegation pair.
 pub const STARTUP_KEY: &str = r"Console\%%Startup";
 /// Where the replaced `%%Startup` values are kept until unregistration.
-pub const BACKUP_KEY: &str = r"Software\giest\DefaultTerminal";
+pub const BACKUP_KEY: &str = r"Software\geist\DefaultTerminal";
 /// Backup value listing the parent keys `register` created.
 const CREATED_VALUE: &str = "CreatedKeys";
 /// Parents `register` may create; deepest first isn't needed (disjoint).
 const CREATED_PARENTS: [&str; 3] = [
-    r"Software\giest",
+    r"Software\geist",
     r"Software\Classes\Interface",
     r"Software\Classes\CLSID",
 ];
@@ -109,7 +109,7 @@ pub fn class_entries(exe: &str, dll: &str) -> Vec<Entry> {
         (
             format!(r"{c}\CLSID\{CLSID_TERMINAL}"),
             None,
-            "giest terminal handoff".into(),
+            "geist terminal handoff".into(),
         ),
         (
             format!(r"{c}\CLSID\{CLSID_TERMINAL}\LocalServer32"),
@@ -119,7 +119,7 @@ pub fn class_entries(exe: &str, dll: &str) -> Vec<Entry> {
         (
             format!(r"{c}\CLSID\{PROXY_CLSID}"),
             None,
-            "giest handoff proxy/stub".into(),
+            "geist handoff proxy/stub".into(),
         ),
         (
             format!(r"{c}\CLSID\{PROXY_CLSID}\InProcServer32"),
@@ -244,8 +244,8 @@ pub fn pe_subsystem(image: &[u8]) -> Option<u16> {
 
 /// A console-subsystem build (every debug build) must not be the COM server:
 /// launched by COM it gets a console of its own, and creating that console
-/// goes through delegation again — to Windows Terminal, or with giest
-/// registered, back to giest, which deadlocks waiting on itself. Measured:
+/// goes through delegation again — to Windows Terminal, or with geist
+/// registered, back to geist, which deadlocks waiting on itself. Measured:
 /// the process never reaches `main` and COM reports `CO_E_SERVER_EXEC_FAILURE`.
 fn check_gui_subsystem(exe: &std::path::Path) -> std::io::Result<()> {
     let bytes = std::fs::read(exe)?;
@@ -266,7 +266,7 @@ pub fn register() -> std::io::Result<String> {
     let dll = exe.with_file_name(PROXY_DLL);
     if !dll.is_file() {
         return Err(std::io::Error::other(format!(
-            "{} not found beside giest.exe; build it with scripts/build-handoff-proxy.ps1",
+            "{} not found beside geist.exe; build it with scripts/build-handoff-proxy.ps1",
             dll.display()
         )));
     }
@@ -319,7 +319,7 @@ pub fn register() -> std::io::Result<String> {
 }
 
 /// Register only the COM half (our CLSID + the proxy/stub) for `exe`, without
-/// touching `%%Startup` — so a test can activate `giest -Embedding` directly,
+/// touching `%%Startup` — so a test can activate `geist -Embedding` directly,
 /// playing OpenConsole, with no effect on how consoles launch. Pair with
 /// [`unregister_com_only`]. Refuses if any of the keys already exist.
 pub fn register_com_only(exe: &std::path::Path) -> std::io::Result<()> {
@@ -381,7 +381,7 @@ pub fn unregister() -> std::io::Result<String> {
                 }
                 Restore::Keep => {
                     report.push_str(&format!(
-                        "{name} is now {}, not giest's; left as is\n",
+                        "{name} is now {}, not geist's; left as is\n",
                         current.as_deref().unwrap_or("(absent)")
                     ));
                     Ok(())
@@ -459,12 +459,12 @@ pub struct RawHandles {
     pub client: u64,
 }
 
-/// Append a line to `%TEMP%\giest-handoff.log`. The `-Embedding` process has
+/// Append a line to `%TEMP%\geist-handoff.log`. The `-Embedding` process has
 /// no console and no window until the handoff succeeds, so this is the only
 /// place a failure can be seen.
 pub fn log(msg: &str) {
     use std::io::Write;
-    let path = std::env::temp_dir().join("giest-handoff.log");
+    let path = std::env::temp_dir().join("geist-handoff.log");
     // Bounded: start over rather than grow forever.
     if std::fs::metadata(&path).is_ok_and(|m| m.len() > 256 * 1024) {
         let _ = std::fs::remove_file(&path);
@@ -811,7 +811,7 @@ mod imp {
         S_OK
     }
 
-    /// `giest -Embedding`: register the class object, wait for OpenConsole's
+    /// `geist -Embedding`: register the class object, wait for OpenConsole's
     /// one `EstablishPtyHandoff`, revoke. `None` on timeout or COM failure.
     pub fn serve_one(timeout: Duration) -> Result<Attached, String> {
         let (tx, rx) = channel();
@@ -991,11 +991,11 @@ mod tests {
 
     #[test]
     fn class_entries_point_at_the_exe_and_the_proxy() {
-        let e = class_entries(r"C:\a b\giest.exe", r"C:\a b\giestHandoffProxy.dll");
+        let e = class_entries(r"C:\a b\geist.exe", r"C:\a b\geistHandoffProxy.dll");
         assert!(e.contains(&(
             format!(r"Software\Classes\CLSID\{CLSID_TERMINAL}\LocalServer32"),
             None,
-            r#""C:\a b\giest.exe""#.into()
+            r#""C:\a b\geist.exe""#.into()
         )));
         assert!(e.contains(&(
             format!(r"Software\Classes\Interface\{IID_TERMINAL_HANDOFF3}\ProxyStubClsid32"),

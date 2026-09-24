@@ -1,4 +1,4 @@
-//! VT-stream throughput — giest's analog of Ghostty's `TerminalStream` (and
+//! VT-stream throughput — geist's analog of Ghostty's `TerminalStream` (and
 //! `OscParser`) benchmarks. Measures the core hot path: `engine.write()`, which
 //! both parses the VT byte stream *and* applies it to terminal state
 //! (`GhosttyVtEngine::write` → libghostty-vt's `vt_write`). This is the single
@@ -7,19 +7,19 @@
 //!
 //! Cases:
 //!   - `ascii` / `utf8` / `osc` engine throughput across grid sizes (Bytes/s).
-//!   - `osc_color_scan` etc.: giest's *own* OSC side-scanners, which run over
+//!   - `osc_color_scan` etc.: geist's *own* OSC side-scanners, which run over
 //!     every PTY chunk in `pump_pty` — a hot path Ghostty has no analog for (it
 //!     parses OSC inside the engine). OSC 52 and OSC 7 are no longer scanned:
 //!     the engine handles them.
 //!
-//! Input is the seeded synthetic stream by default; set `GIEST_BENCH_DATA` to a
+//! Input is the seeded synthetic stream by default; set `geist_BENCH_DATA` to a
 //! capture file to run against a real corpus (see `benches/data/README.md`).
 //! Run: `cargo bench --bench stream`.
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
-use giest::engine::{GhosttyVtEngine, TerminalEngine};
-use giest::osc_color::OscColorScanner;
-use giest::synthetic;
+use geist::engine::{GhosttyVtEngine, TerminalEngine};
+use geist::osc_color::OscColorScanner;
+use geist::synthetic;
 
 /// Roughly how many bytes of stream to push per timed iteration. A few MiB keeps
 /// per-iteration noise low while staying well under a second per sample.
@@ -52,7 +52,7 @@ fn bench_stream(c: &mut Criterion) {
     }
     group.finish();
 
-    // giest-owned OSC side-scanners, fed the same OSC stream the engine sees.
+    // geist-owned OSC side-scanners, fed the same OSC stream the engine sees.
     let mut scan = c.benchmark_group("osc_scan");
     let (osc_data, _) = synthetic::corpus("osc", STREAM_BYTES / 32, 1, synthetic::osc);
     scan.throughput(Throughput::Bytes(osc_data.len() as u64));

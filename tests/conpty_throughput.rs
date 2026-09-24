@@ -1,5 +1,5 @@
 //! ConPTY read-drain throughput harness (host integration). Spawns a real shell
-//! that emits a large known stream and measures how fast giest drains the PTY
+//! that emits a large known stream and measures how fast geist drains the PTY
 //! output channel and feeds it through the engine.
 //!
 //! This is `#[ignore]`d: it needs Zig 0.15.2 (to build libghostty-vt) and a real
@@ -13,8 +13,8 @@
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
 
-use giest::engine::{GhosttyVtEngine, TerminalEngine};
-use giest::pty::Pty;
+use geist::engine::{GhosttyVtEngine, TerminalEngine};
+use geist::pty::Pty;
 
 #[test]
 #[ignore = "spawns a real shell; run with --ignored --nocapture"]

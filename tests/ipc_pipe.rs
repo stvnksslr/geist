@@ -1,11 +1,11 @@
 //! The single-instance pipe end to end on a real named pipe: bind, serve,
 //! forward a request, answer it from the "UI" side, and refuse a second
 //! server under the same name. Uses a throwaway pipe name via
-//! `$GIEST_IPC_PIPE`, so it never touches a running giest.
+//! `$geist_IPC_PIPE`, so it never touches a running geist.
 
 #![cfg(windows)]
 
-use giest::ipc::{self, Request, Response, SendError};
+use geist::ipc::{self, Request, Response, SendError};
 
 #[test]
 fn a_request_round_trips_over_a_real_named_pipe() {
@@ -13,8 +13,8 @@ fn a_request_round_trips_over_a_real_named_pipe() {
     // other thread reads the environment concurrently.
     unsafe {
         std::env::set_var(
-            "GIEST_IPC_PIPE",
-            format!("giest-test-{}", std::process::id()),
+            "geist_IPC_PIPE",
+            format!("geist-test-{}", std::process::id()),
         );
     }
     let name = ipc::pipe_name();

@@ -1,4 +1,4 @@
-/* Proxy file list for giestHandoffProxy.dll: both handoff IDLs in one DLL.
+/* Proxy file list for geistHandoffProxy.dll: both handoff IDLs in one DLL.
    Hand-written because MIDL emits a dlldata.c per IDL and each names only its
    own interfaces.
 

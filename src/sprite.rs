@@ -1,4 +1,4 @@
-//! **Sprite glyphs** — box drawing, block elements and braille drawn by giest
+//! **Sprite glyphs** — box drawing, block elements and braille drawn by geist
 //! rather than taken from the font, mirroring Ghostty's `font/sprite`.
 //!
 //! Why a terminal draws these itself: the characters are *defined* relative to
@@ -12,7 +12,7 @@
 //! Like upstream, the sprite face **wins over the font**: Ghostty's
 //! `CodepointResolver` checks its sprite face before any font lookup (after only
 //! the explicit codepoint overrides), so these characters look the same in every
-//! font. giest does the same.
+//! font. geist does the same.
 //!
 //! Everything here is pure — a codepoint plus [`Metrics`] in, an 8-bit coverage
 //! buffer out — so the geometry is unit-testable to the pixel. That is the whole
@@ -63,7 +63,7 @@ impl Metrics {
     /// Metrics for a cell, with Ghostty's default line thickness.
     ///
     /// Upstream derives `box_thickness` from the font's underline thickness;
-    /// giest's atlas doesn't carry that, so it uses a fraction of the cell
+    /// geist's atlas doesn't carry that, so it uses a fraction of the cell
     /// height — the same shape of rule, and the one users actually tune via
     /// `adjust-box-thickness`. Never zero: a zero-thickness line is invisible,
     /// which reads as the character being missing.
@@ -367,7 +367,7 @@ fn cubic(out: &mut Vec<Point>, p0: Point, c1: Point, c2: Point, p1: Point) {
     }
 }
 
-/// Whether giest draws this character itself instead of asking the font.
+/// Whether geist draws this character itself instead of asking the font.
 pub fn covers(ch: char) -> bool {
     let c = ch as u32;
     matches!(c,
@@ -661,7 +661,7 @@ fn draw_powerline(c: &mut Canvas, m: Metrics, cp: u32) {
 
     match cp {
         // Solid left-pointing triangle, and its mirror. Upstream spells the
-        // mirror out as its own triangle; giest flips instead, because the
+        // mirror out as its own triangle; geist flips instead, because the
         // supersample grid is not symmetric about the cell's centre — the two
         // spellings differ by a few levels along the hypotenuse, and a
         // `` and a `` meeting in a prompt would then have visibly

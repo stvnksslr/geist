@@ -1,7 +1,7 @@
-giest icon artwork provenance and license
+geist icon artwork provenance and license
 
 Artwork:
-Original geometric artwork created specifically for the giest project.
+Original geometric artwork created specifically for the geist project.
 Concept: lowercase "g" monogram with a blue cursor-square accent on a dark rounded tile.
 The artwork is constructed from geometric primitives and does not incorporate Ghostty's
 ghost mark, third-party icon artwork, or a font glyph. It is defined parametrically and

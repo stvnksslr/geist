@@ -54,7 +54,7 @@ pub use cmdbuilder::CommandBuilder;
 pub mod unix;
 #[cfg(windows)]
 pub mod win;
-// giest patch: opt-in ConPTY passthrough mode (see win/psuedocon.rs).
+// geist patch: opt-in ConPTY passthrough mode (see win/psuedocon.rs).
 #[cfg(windows)]
 pub use win::{passthrough_active, set_allow_sideload, set_passthrough, sideloaded};
 

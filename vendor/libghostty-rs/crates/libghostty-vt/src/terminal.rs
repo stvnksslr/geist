@@ -799,7 +799,7 @@ impl<'alloc: 'cb, 'cb> Terminal<'alloc, 'cb> {
     /// Whether a resize may pull scrollback rows back into the active area
     /// (default true). Set false under Windows ConPTY, which keeps its own
     /// scrollback-less screen and would otherwise disagree after a resize.
-    // giest-local addition: upstream binding has no setter for this yet.
+    // geist-local addition: upstream binding has no setter for this yet.
     pub fn set_resize_pull_scrollback(&mut self, pull: bool) -> Result<&mut Self> {
         self.set(ffi::TerminalOption::RESIZE_PULL_SCROLLBACK, &pull)?;
         Ok(self)
@@ -1242,7 +1242,7 @@ impl Mode {
     pub const COLOR_SCHEME_REPORT: Self = Self::new(2031, ModeKind::Dec);
     pub const VISIBILITY_REPORT: Self = Self::new(2033, ModeKind::Dec);
     pub const IN_BAND_RESIZE: Self = Self::new(2048, ModeKind::Dec);
-    /// Kitty clipboard protocol paste events (giest-local).
+    /// Kitty clipboard protocol paste events (geist-local).
     pub const PASTE_EVENTS: Self = Self::new(5522, ModeKind::Dec);
 }
 
@@ -1673,14 +1673,14 @@ pub enum ClipboardWriteError {
 
 impl ClipboardWrite<'_> {
     /// True if the terminal already holds a session grant for this request
-    /// (a kitty clipboard password). giest-local.
+    /// (a kitty clipboard password). geist-local.
     pub fn granted(&self) -> bool {
         // SAFETY: valid for the callback's duration.
         unsafe { (*self.ptr).granted }
     }
 }
 
-/// A synchronous request to read the clipboard (giest-local).
+/// A synchronous request to read the clipboard (geist-local).
 #[derive(Clone, Debug)]
 pub struct ClipboardRead<'t> {
     ptr: *const ffi::ClipboardRead,
@@ -1732,7 +1732,7 @@ impl<'t> ClipboardRead<'t> {
     }
 }
 
-/// The contents answering a [`ClipboardRead`] (giest-local).
+/// The contents answering a [`ClipboardRead`] (geist-local).
 #[derive(Clone, Debug, Default)]
 pub struct ClipboardReadData {
     /// `(mime, data)` pairs, one per requested MIME type the clipboard has.
@@ -1742,7 +1742,7 @@ pub struct ClipboardReadData {
     pub available: Vec<String>,
 }
 
-/// Why a clipboard read was not served (giest-local).
+/// Why a clipboard read was not served (geist-local).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, int_enum::IntEnum)]
 #[repr(u32)]
 pub enum ClipboardReadError {
@@ -1756,7 +1756,7 @@ pub enum ClipboardReadError {
     IoError = ffi::ClipboardReadResult::IO_ERROR,
 }
 
-/// Where a paste came from, for [`Terminal::paste`] (giest-local).
+/// Where a paste came from, for [`Terminal::paste`] (geist-local).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PasteSource {
     /// The user pasted from a clipboard; may become a kitty paste event.
@@ -1765,7 +1765,7 @@ pub enum PasteSource {
     Text,
 }
 
-/// Outcome of [`Terminal::paste`] (giest-local).
+/// Outcome of [`Terminal::paste`] (geist-local).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PasteOutcome {
     /// Something was written (the encoded text or a paste event).
@@ -1778,7 +1778,7 @@ pub enum PasteOutcome {
 
 impl Terminal<'_, '_> {
     /// Paste `text` according to the terminal's modes via
-    /// `ghostty_terminal_paste` (giest-local): a kitty paste event when mode
+    /// `ghostty_terminal_paste` (geist-local): a kitty paste event when mode
     /// 5522 is on and a clipboard-read handler is installed, otherwise the
     /// text framed per mode 2004. Output goes to the `on_pty_write` handler.
     pub fn paste(
@@ -2232,7 +2232,7 @@ handlers! {
         ),
         to = <'t>ClipboardWriteFn(ClipboardWrite<'t>) -> std::result::Result<(), ClipboardWriteError>,
     ) |term, func| {
-        // giest-local: the pinned C API answers through `write->reply`, not a
+        // geist-local: the pinned C API answers through `write->reply`, not a
         // return value. The upstream wrapper still returned the result, which
         // the C side never read — so every write was silently denied.
         let result = match func(&term, unsafe { ClipboardWrite::from_raw(write) }) {
@@ -2251,7 +2251,7 @@ handlers! {
     }
 
     /// Call the given function when the running program asks to read the
-    /// clipboard (OSC 52 `?` or a kitty OSC 5522 read). giest-local.
+    /// clipboard (OSC 52 `?` or a kitty OSC 5522 read). geist-local.
     ///
     /// Returning `None` leaves the request unanswered, which the terminal
     /// turns into an empty clipboard (OSC 52) or `EPERM` (OSC 5522).

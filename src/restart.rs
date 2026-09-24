@@ -1,7 +1,7 @@
 //! Restart after Windows Update / reboot — `RegisterApplicationRestart`.
 //!
 //! Windows relaunches registered applications after an update restart (and,
-//! with "Automatically save my restartable apps" on, after sign-in). giest
+//! with "Automatically save my restartable apps" on, after sign-in). geist
 //! registers `--restore-session`, a CLI flag that restores the saved layout
 //! once regardless of `window-save-state` (`cli.rs`), so the relaunch comes
 //! back as the windows, tabs, splits, directories and frames the user had.
@@ -20,7 +20,7 @@
 
 use std::sync::Mutex;
 
-/// The argument Windows relaunches giest with.
+/// The argument Windows relaunches geist with.
 pub const RESTART_ARGS: &str = "--restore-session";
 
 const RESTART_NO_CRASH: u32 = 1;

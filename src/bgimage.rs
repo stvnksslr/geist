@@ -42,7 +42,7 @@ impl std::fmt::Debug for BgImage {
 
 /// Cap on the decoded pixel count (~256 MB as RGBA8, and the same again in
 /// VRAM). Ghostty warns in its own docs that a background image is duplicated
-/// per terminal and can balloon VRAM; giest uploads one texture per window, but
+/// per terminal and can balloon VRAM; geist uploads one texture per window, but
 /// a mistyped path pointing at a gigapixel TIFF-sized PNG should still fail
 /// cleanly rather than take the process down with it.
 const MAX_PIXELS: u64 = 64 * 1024 * 1024;
@@ -403,7 +403,7 @@ mod tests {
 
     #[test]
     fn png_loads_as_opaque_rgba() {
-        let p = write_temp("giest-bgimage-test.png", &png_fixture());
+        let p = write_temp("geist-bgimage-test.png", &png_fixture());
         let img: BgImage = load(&p).unwrap();
         assert_eq!((img.width, img.height), (2, 1));
         // RGB source gains a fully opaque alpha channel.
@@ -414,12 +414,12 @@ mod tests {
     #[test]
     fn format_is_sniffed_from_magic_not_extension() {
         // A PNG named `.jpg` still loads…
-        let p = write_temp("giest-bgimage-test-mislabelled.jpg", &png_fixture());
+        let p = write_temp("geist-bgimage-test-mislabelled.jpg", &png_fixture());
         assert!(load(&p).is_ok());
         let _ = std::fs::remove_file(p);
 
         // …and something that is neither is rejected, not misparsed.
-        let p = write_temp("giest-bgimage-test-bogus.png", b"not an image at all");
+        let p = write_temp("geist-bgimage-test-bogus.png", b"not an image at all");
         let err = load(&p).unwrap_err().to_string();
         assert!(err.contains("PNG or JPEG"), "{err}");
         let _ = std::fs::remove_file(p);
@@ -427,6 +427,6 @@ mod tests {
 
     #[test]
     fn a_missing_file_is_an_error_not_a_panic() {
-        assert!(load(std::path::Path::new("does-not-exist-giest.png")).is_err());
+        assert!(load(std::path::Path::new("does-not-exist-geist.png")).is_err());
     }
 }

@@ -1,11 +1,11 @@
-//! giest binary entry point. The terminal lives in the `giest` library crate
+//! geist binary entry point. The terminal lives in the `geist` library crate
 //! (see `lib.rs`); this just configures eframe and launches the [`App`].
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use giest::app::App;
-use giest::cli::{self, Plan, Verb};
-use giest::config::Config;
-use giest::ipc::{self, SendError};
+use geist::app::App;
+use geist::cli::{self, Plan, Verb};
+use geist::config::Config;
+use geist::ipc::{self, SendError};
 
 /// A release build is a GUI-subsystem exe, so it has no console: `--help` and
 /// `+list` would print into the void. Attach to the invoking terminal's
@@ -32,9 +32,9 @@ fn run_cli(cli: &cli::Cli) -> Option<i32> {
     if !cli.errors.is_empty() {
         attach_console();
         for e in &cli.errors {
-            eprintln!("giest: {e}");
+            eprintln!("geist: {e}");
         }
-        eprintln!("Run 'giest --help' for usage.");
+        eprintln!("Run 'geist --help' for usage.");
         return Some(2);
     }
     match cli.verb {
@@ -52,21 +52,21 @@ fn run_cli(cli: &cli::Cli) -> Option<i32> {
             attach_console();
             let register = cli.verb == Verb::RegisterShellIntegration;
             let r = if register {
-                giest::shellreg::register()
+                geist::shellreg::register()
             } else {
-                giest::shellreg::unregister()
+                geist::shellreg::unregister()
             };
             return Some(match r {
                 Ok(()) => {
                     println!(
-                        "giest: Explorer \"{}\" {}",
-                        giest::shellreg::LABEL,
+                        "geist: Explorer \"{}\" {}",
+                        geist::shellreg::LABEL,
                         if register { "registered" } else { "removed" }
                     );
                     0
                 }
                 Err(e) => {
-                    eprintln!("giest: {e}");
+                    eprintln!("geist: {e}");
                     1
                 }
             });
@@ -74,9 +74,9 @@ fn run_cli(cli: &cli::Cli) -> Option<i32> {
         Verb::RegisterDefaultTerminal | Verb::UnregisterDefaultTerminal => {
             attach_console();
             let r = if cli.verb == Verb::RegisterDefaultTerminal {
-                giest::handoff::register()
+                geist::handoff::register()
             } else {
-                giest::handoff::unregister()
+                geist::handoff::unregister()
             };
             return Some(match r {
                 Ok(report) => {
@@ -84,7 +84,7 @@ fn run_cli(cli: &cli::Cli) -> Option<i32> {
                     0
                 }
                 Err(e) => {
-                    eprintln!("giest: {e}");
+                    eprintln!("geist: {e}");
                     1
                 }
             });
@@ -94,7 +94,7 @@ fn run_cli(cli: &cli::Cli) -> Option<i32> {
 
     // The command line's overrides must be in place before the first load, so
     // `single-instance` can itself be overridden (`--single-instance=false`).
-    giest::config::set_cli_overrides(cli.override_body());
+    geist::config::set_cli_overrides(cli.override_body());
     let startup_cfg = Config::load();
     match cli.plan_with(startup_cfg.single_instance, startup_cfg.drop_behavior) {
         Plan::ForwardOnly(req) => {
@@ -108,11 +108,11 @@ fn run_cli(cli: &cli::Cli) -> Option<i32> {
                     Some(if resp.ok { 0 } else { 1 })
                 }
                 Err(SendError::NoServer) => {
-                    eprintln!("giest: no running giest instance");
+                    eprintln!("geist: no running geist instance");
                     Some(1)
                 }
                 Err(SendError::Failed(e)) => {
-                    eprintln!("giest: {e}");
+                    eprintln!("geist: {e}");
                     Some(1)
                 }
             }
@@ -126,7 +126,7 @@ fn run_cli(cli: &cli::Cli) -> Option<i32> {
                     Ok(resp) => {
                         attach_console();
                         eprintln!(
-                            "giest: {}",
+                            "geist: {}",
                             resp.error.unwrap_or_else(|| "request failed".into())
                         );
                         return Some(1);
@@ -139,7 +139,7 @@ fn run_cli(cli: &cli::Cli) -> Option<i32> {
                     Err(SendError::NoServer) => break,
                     Err(SendError::Failed(e)) => {
                         attach_console();
-                        eprintln!("giest: {e}; starting a separate instance");
+                        eprintln!("geist: {e}; starting a separate instance");
                         break;
                     }
                 }
@@ -155,24 +155,24 @@ fn run_cli(cli: &cli::Cli) -> Option<i32> {
     }
 }
 
-/// `giest -Embedding`: COM started us as the default terminal (`handoff.rs`).
+/// `geist -Embedding`: COM started us as the default terminal (`handoff.rs`).
 /// Take OpenConsole's one handoff, then give it to the running instance, or
 /// keep it (returning `None`) and become the instance that shows it.
 fn run_embedding() -> Option<i32> {
     // COM starts us with no console, so a failure here is otherwise
     // invisible: the console program just never appears.
-    giest::handoff::log("-Embedding started");
-    let a = match giest::handoff::serve_one(std::time::Duration::from_secs(30)) {
+    geist::handoff::log("-Embedding started");
+    let a = match geist::handoff::serve_one(std::time::Duration::from_secs(30)) {
         Ok(a) => a,
         Err(e) => {
-            giest::handoff::log(&format!("no session: {e}"));
+            geist::handoff::log(&format!("no session: {e}"));
             return Some(1);
         }
     };
-    giest::handoff::log(&format!(
+    geist::handoff::log(&format!(
         "session received: title {:?}, client pid {}",
         a.title,
-        giest::handoff::process_id(&a.client)
+        geist::handoff::process_id(&a.client)
     ));
     if Config::load().single_instance {
         let req = ipc::Request::Handoff {
@@ -184,17 +184,17 @@ fn run_embedding() -> Option<i32> {
         match ipc::send(&ipc::pipe_name(), &req) {
             // The instance duplicated the handles in; ours can go.
             Ok(resp) if resp.ok => {
-                giest::handoff::log("forwarded to the running instance");
+                geist::handoff::log("forwarded to the running instance");
                 return Some(0);
             }
-            Ok(resp) => giest::handoff::log(&format!("running instance refused: {:?}", resp.error)),
-            Err(SendError::Failed(e)) => giest::handoff::log(&format!("forwarding failed: {e}")),
+            Ok(resp) => geist::handoff::log(&format!("running instance refused: {:?}", resp.error)),
+            Err(SendError::Failed(e)) => geist::handoff::log(&format!("forwarding failed: {e}")),
             Err(SendError::NoServer) => {
                 ipc::start_server();
             }
         }
     }
-    giest::handoff::set_initial(a);
+    geist::handoff::set_initial(a);
     None
 }
 
@@ -226,10 +226,10 @@ unsafe impl std::alloc::GlobalAlloc for CountingAlloc {
 #[global_allocator]
 static GLOBAL: CountingAlloc = CountingAlloc;
 
-/// `GIEST_HEAP_PROBE=<file>`: append `live_bytes peak_bytes` every second, so
+/// `geist_HEAP_PROBE=<file>`: append `live_bytes peak_bytes` every second, so
 /// a memory investigation can read the Rust heap without a debugger.
 fn start_heap_probe() {
-    let Ok(path) = std::env::var("GIEST_HEAP_PROBE") else {
+    let Ok(path) = std::env::var("geist_HEAP_PROBE") else {
         return;
     };
     std::thread::spawn(move || {
@@ -244,7 +244,7 @@ fn start_heap_probe() {
 
 fn main() -> eframe::Result {
     start_heap_probe();
-    let embedding = giest::handoff::is_embedding(&std::env::args().skip(1).collect::<Vec<_>>());
+    let embedding = geist::handoff::is_embedding(&std::env::args().skip(1).collect::<Vec<_>>());
     let cli = if embedding {
         // No update apply here: OpenConsole is waiting on the COM call.
         if let Some(code) = run_embedding() {
@@ -258,7 +258,7 @@ fn main() -> eframe::Result {
     // anything loads conpty.dll or opens the IPC pipe; the new exe is then
     // launched with the same arguments and this (old) one steps aside.
     if embedding || matches!(cli.verb, Verb::Help | Verb::Version) {
-    } else if giest::update::startup_apply() {
+    } else if geist::update::startup_apply() {
         std::process::exit(0);
     }
     if !embedding && let Some(code) = run_cli(&cli) {
@@ -301,10 +301,10 @@ fn main() -> eframe::Result {
         // wgpu's default is `Backends::all()`, and enumerating adapters *loads
         // and initializes every backend's driver*, including the OpenGL ICD. On
         // this AMD driver (`atio6axx.dll`, amdogl.inf) that enumeration faults
-        // with an access violation, so giest died at startup with no window, no
-        // panic and no stderr — a crash inside a vendor DLL giest never asked
+        // with an access violation, so geist died at startup with no window, no
+        // panic and no stderr — a crash inside a vendor DLL geist never asked
         // for and never uses. Since GL is not a backend we would ever pick, the
-        // fix is to never enumerate it. giest is Windows-only, so DX12 is the
+        // fix is to never enumerate it. geist is Windows-only, so DX12 is the
         // one backend that matters.
         //
         // `WGPU_BACKEND` still overrides, as an escape hatch for debugging
@@ -336,21 +336,21 @@ fn main() -> eframe::Result {
 
     // `macos-icon`: select the configured icon before the root builder takes
     // it, so the window is created with it (the first call reports no change).
-    let _ = giest::icon::configure(&cfg);
+    let _ = geist::icon::configure(&cfg);
     // `macos-titlebar-style = tabs | hidden`: the client-drawn caption. Latched
     // before any window exists so the root is subclassed on its first pass.
-    giest::winchrome::set_caption_style(match cfg.titlebar_style {
-        giest::config::TitlebarStyle::Tabs => giest::winchrome::CaptionStyle::Tabs,
-        giest::config::TitlebarStyle::Hidden => giest::winchrome::CaptionStyle::Hidden,
-        _ => giest::winchrome::CaptionStyle::Native,
+    geist::winchrome::set_caption_style(match cfg.titlebar_style {
+        geist::config::TitlebarStyle::Tabs => geist::winchrome::CaptionStyle::Tabs,
+        geist::config::TitlebarStyle::Hidden => geist::winchrome::CaptionStyle::Hidden,
+        _ => geist::winchrome::CaptionStyle::Native,
     });
 
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
-        viewport: giest::icon::apply(
+        viewport: geist::icon::apply(
             eframe::egui::ViewportBuilder::default()
                 .with_inner_size([960.0, 600.0])
-                .with_title("giest")
+                .with_title("geist")
                 .with_transparent(want_transparent)
                 // Set here as well as commanded on the first pass, so the
                 // window is *created* in its configured state instead of
@@ -367,8 +367,8 @@ fn main() -> eframe::Result {
     };
 
     eframe::run_native(
-        "giest",
+        "geist",
         options,
-        Box::new(|cc| Ok(Box::new(App::new(cc).expect("failed to initialize giest")))),
+        Box::new(|cc| Ok(Box::new(App::new(cc).expect("failed to initialize geist")))),
     )
 }

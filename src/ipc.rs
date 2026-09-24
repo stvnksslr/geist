@@ -1,8 +1,8 @@
 //! Single-instance IPC: a per-user named pipe carrying JSON lines.
 //!
-//! This is giest's analogue of the macOS app's App Intents / AppleScript /
-//! Services entry points and of GTK's D-Bus activation: a second `giest`
-//! launch (`+new-tab`, Explorer's "Open giest here", a Jump List task, a
+//! This is geist's analogue of the macOS app's App Intents / AppleScript /
+//! Services entry points and of GTK's D-Bus activation: a second `geist`
+//! launch (`+new-tab`, Explorer's "Open geist here", a Jump List task, a
 //! script) hands its request to the running instance and exits.
 //!
 //! **Wire format.** One request per connection: the client writes one JSON
@@ -102,7 +102,7 @@ pub enum Request {
         window: Option<u64>,
     },
     List,
-    /// Adopt a default-terminal handoff that the `giest -Embedding` process
+    /// Adopt a default-terminal handoff that the `geist -Embedding` process
     /// `pid` received. `handles` are valid in *that* process; the server
     /// duplicates them in, and the sender closes its copies once answered.
     Handoff {
@@ -206,7 +206,7 @@ pub fn decode_request(line: &str) -> Result<Request, String> {
         None => return Err("missing protocol version \"v\"".into()),
         Some(v) if v > u64::from(PROTOCOL_VERSION) => {
             return Err(format!(
-                "unsupported protocol version {v} (this giest speaks {PROTOCOL_VERSION})"
+                "unsupported protocol version {v} (this geist speaks {PROTOCOL_VERSION})"
             ));
         }
         Some(_) => {}
@@ -306,14 +306,14 @@ fn serve_one(mut conn: impl std::io::Read + std::io::Write, tx: &Sender<Incoming
                     })
                     .is_err()
                 {
-                    Response::err("giest is shutting down")
+                    Response::err("geist is shutting down")
                 } else {
                     wake();
                     // Opening a window spawns a shell, which can take a
                     // moment; a UI thread that never answers (a modal system
                     // dialog, a hang) must not hold the client forever.
                     rrx.recv_timeout(std::time::Duration::from_secs(20))
-                        .unwrap_or_else(|_| Response::err("timed out waiting for giest"))
+                        .unwrap_or_else(|_| Response::err("timed out waiting for geist"))
                 }
             }
         },
@@ -464,10 +464,10 @@ mod imp {
         process_user_sid(unsafe { GetCurrentProcess() })
     }
 
-    /// `\\.\pipe\giest-<SID>-<session>`, or `$GIEST_IPC_PIPE` (tests and
+    /// `\\.\pipe\geist-<SID>-<session>`, or `$geist_IPC_PIPE` (tests and
     /// side-by-side builds).
     pub fn pipe_name() -> String {
-        if let Ok(n) = std::env::var("GIEST_IPC_PIPE")
+        if let Ok(n) = std::env::var("geist_IPC_PIPE")
             && !n.trim().is_empty()
         {
             return format!(r"\\.\pipe\{}", n.trim());
@@ -479,7 +479,7 @@ mod imp {
         unsafe {
             ProcessIdToSessionId(GetCurrentProcessId(), &mut session);
         }
-        format!(r"\\.\pipe\giest-{sid}-{session}")
+        format!(r"\\.\pipe\geist-{sid}-{session}")
     }
 
     /// One pipe instance, restricted to this user (and SYSTEM).
@@ -538,7 +538,7 @@ mod imp {
         Ok(unsafe { File::from_raw_handle(h) })
     }
 
-    /// Claim the pipe name as the first instance. Fails if another giest (or
+    /// Claim the pipe name as the first instance. Fails if another geist (or
     /// anything else) already owns it.
     pub fn bind(name: &str) -> std::io::Result<File> {
         create_instance(name, true)
@@ -548,7 +548,7 @@ mod imp {
     /// [`bind`] claimed.
     pub fn serve(first: File, name: String, tx: Sender<Incoming>) {
         let _ = std::thread::Builder::new()
-            .name("giest-ipc".into())
+            .name("geist-ipc".into())
             .spawn(move || {
                 let mut next = Some(first);
                 loop {
@@ -557,7 +557,7 @@ mod imp {
                         None => match create_instance(&name, false) {
                             Ok(p) => p,
                             Err(e) => {
-                                eprintln!("giest: IPC pipe instance failed: {e}");
+                                eprintln!("geist: IPC pipe instance failed: {e}");
                                 std::thread::sleep(std::time::Duration::from_secs(1));
                                 continue;
                             }
@@ -577,7 +577,7 @@ mod imp {
                     // never writes can't block everyone behind it.
                     let tx = tx.clone();
                     let _ = std::thread::Builder::new()
-                        .name("giest-ipc-conn".into())
+                        .name("geist-ipc-conn".into())
                         .spawn(move || super::serve_one(pipe, &tx));
                 }
             });
@@ -605,7 +605,7 @@ mod imp {
                 Err(e) => return Err(SendError::Failed(e.to_string())),
             }
         }
-        Err(SendError::Failed("the running giest is busy".into()))
+        Err(SendError::Failed("the running geist is busy".into()))
     }
 
     /// Send one request to the running instance and wait for its answer.

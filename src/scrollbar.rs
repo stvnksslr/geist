@@ -8,7 +8,7 @@
 //!
 //! The state contract is Ghostty's `{ total, offset, len }`, all in rows:
 //! `total` scrollable rows, the viewport's `offset` from the top of them, and
-//! the viewport's height `len`. giest reconstructs it from its own scroll state
+//! the viewport's height `len`. geist reconstructs it from its own scroll state
 //! rather than calling the binding's `Terminal::scrollbar()` — see
 //! [`Session::scrollbar_state`](crate::session::Session::scrollbar_state).
 

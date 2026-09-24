@@ -1,6 +1,6 @@
 # Architecture overview
 
-giest is layered so that the **renderer and input layer never touch
+geist is layered so that the **renderer and input layer never touch
 libghostty-vt directly** — they only ever talk to the backend-neutral
 [`TerminalEngine`](../components/engine.md) trait. This leaves room for a
 pure-Rust fallback engine in the future without changing the rest of the app.
@@ -17,7 +17,7 @@ flowchart TB
         winsys["Window · keyboard · mouse"]
     end
 
-    subgraph app["giest process"]
+    subgraph app["geist process"]
         direction TB
         main["main.rs<br/>eframe bootstrap"]
         appmod["app.rs<br/>tabs · split-tree panes · per-frame loop"]
@@ -63,7 +63,7 @@ flowchart TB
 | `pty.rs` | ConPTY shell via portable-pty, with a reader thread that wakes the UI on output. |
 | `render/mod.rs` | wgpu instanced-quad pipeline, per-row run shaping, instance builder, egui `CallbackTrait`. |
 | `render/atlas.rs` | rustybuzz shaping + ab_glyph rasterization into an R8 atlas; COLR/CPAL color emoji into an RGBA atlas. |
-| `config.rs` | TOML config from `%APPDATA%\giest\config.toml`; the full ANSI 16 + 256-color palette. |
+| `config.rs` | TOML config from `%APPDATA%\geist\config.toml`; the full ANSI 16 + 256-color palette. |
 | `profiles.rs` | Shell profiles (pwsh / powershell / cmd / wsl). |
 | `clipboard.rs` | Policy for OSC 52 / OSC 5522 via the engine's clipboard callbacks. |
 

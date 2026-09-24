@@ -99,7 +99,7 @@ pub struct Session {
     /// cell, so it has to be read off the stream.
     osc133: Osc133Scanner,
     /// When the running command started, if one is running. Set by a `C` mark or
-    /// — since neither of giest's shell hooks can emit one — by the Enter that
+    /// — since neither of geist's shell hooks can emit one — by the Enter that
     /// submitted it. `Instant`, not egui time: `pump_pty` has no `Context`, and a
     /// duration wants a monotonic clock anyway.
     command_started: Option<std::time::Instant>,
@@ -295,7 +295,7 @@ impl Session {
         Self::build(config, profile, Some(pty), launch.reset_cursor_on_submit)
     }
 
-    /// A pane showing a console session handed to giest as the Windows default
+    /// A pane showing a console session handed to geist as the Windows default
     /// terminal (`handoff.rs`): the client program is already running inside
     /// OpenConsole, so there is nothing to spawn — only pipes to drive.
     pub fn from_handoff(
@@ -392,7 +392,7 @@ impl Session {
                     }
                 }
                 Some(_) => {}
-                None => eprintln!("giest: an `input` source could not be read; sending none"),
+                None => eprintln!("geist: an `input` source could not be read; sending none"),
             }
         }
         // The user-facing command line, for the abnormal-exit message. Only the
@@ -683,7 +683,7 @@ impl Session {
     /// the last stretch), or `None` when idle. Self-clearing, like
     /// [`Self::bell_flash_alpha`].
     ///
-    /// *The fade tail is a giest nicety — Ghostty's overlay is a hard show/hide.*
+    /// *The fade tail is a geist nicety — Ghostty's overlay is a hard show/hide.*
     pub fn resize_overlay_alpha(&mut self, now: f64) -> Option<f32> {
         transient_alpha(&mut self.resize_overlay_until, now, 0.15)
     }
@@ -730,13 +730,13 @@ impl Session {
     /// The scrollbar's `{ total, offset, len }` state in rows, or `None` when
     /// nothing has scrolled off yet.
     ///
-    /// Deliberately reconstructed from giest's own scroll state rather than the
+    /// Deliberately reconstructed from geist's own scroll state rather than the
     /// binding's `Terminal::scrollbar()`. That call is documented as expensive
     /// when the viewport sits at an arbitrary pin — which is exactly whenever a
     /// scrollbar is on screen, and in a split you'd pay it per pane per frame.
     /// And its `offset` is the whole-line engine pin, so a thumb driven from it
     /// would step a full cell at a time during a smooth scroll; `scroll_px` is
-    /// the only continuous position giest has. The three numbers cost nothing
+    /// the only continuous position geist has. The three numbers cost nothing
     /// here: `scrollback_rows()` is already read every frame by `animate_scroll`.
     pub fn scrollbar_state(&self, cell_h: f32) -> Option<ScrollbarState> {
         let scrollback = self.engine.scrollback_rows();
@@ -759,7 +759,7 @@ impl Session {
     /// A drag needs that: the thumb is painted *from* `scroll_px`, so easing
     /// would leave it trailing the cursor and the user would over-correct
     /// chasing it. Writing both makes "thumb position for the pointer I'm at"
-    /// an identity — giest's stand-in for the live-scroll suppression both of
+    /// an identity — geist's stand-in for the live-scroll suppression both of
     /// Ghostty's apprts need. Keyboard and click-to-page seeks pass `false` and
     /// animate.
     ///
@@ -1098,7 +1098,7 @@ impl Session {
             .gesture_drag(at, geometry, rectangle, &self.selection_word_chars);
         // The gesture decides *whether* to autoscroll (pointer within 1 px of,
         // or past, the grid's top/bottom edge — upstream's rule); the rate is
-        // giest's 15 ms clock and the scroll goes through the smooth-scroll
+        // geist's 15 ms clock and the scroll goes through the smooth-scroll
         // target, so the engine viewport stays owned by `animate_scroll`. The
         // next frame's drag resolves against the scrolled viewport — upstream's
         // autoscroll tick is exactly "scroll one row, then drag".
@@ -1410,10 +1410,10 @@ impl Session {
     /// Note that the user just submitted a command, so its duration can be
     /// measured from here.
     ///
-    /// This is giest's stand-in for the OSC 133 `C` mark. Emitting a real one
+    /// This is geist's stand-in for the OSC 133 `C` mark. Emitting a real one
     /// needs a *pre-execution* hook: PowerShell has none short of overriding a
     /// PSReadLine key handler (and PSReadLine isn't always loaded), and cmd has
-    /// none at all — so on Windows the shells simply can't tell us. giest can,
+    /// none at all — so on Windows the shells simply can't tell us. geist can,
     /// because it is the thing that sent the Enter: `at_prompt` confirms the
     /// cursor was on a prompt row, so this fires for a submitted command and not
     /// for a newline typed into `vim` or at a continuation prompt.
@@ -1625,7 +1625,7 @@ impl Session {
     /// The log is created on show and **dropped on hide**, which is what makes
     /// the capture free while it is closed: the record calls on the input and
     /// PTY paths become a null check. Dropping it also discards the capture,
-    /// matching the rest of giest's overlays — nothing here quietly retains a
+    /// matching the rest of geist's overlays — nothing here quietly retains a
     /// buffer of the user's terminal output after they close the panel.
     pub fn set_inspector(&mut self, mode: crate::inspector::InspectorMode) {
         let want = mode.wants(self.inspect.is_some());
@@ -2099,7 +2099,7 @@ impl Session {
                             ctx.copy_text(text);
                             self.copied = true;
                             // `selection-clear-on-copy` — **false** by default
-                            // upstream, where giest used to clear
+                            // upstream, where geist used to clear
                             // unconditionally. Keeping the selection lets you
                             // see what was copied and act on it again.
                             if self.selection_clear_on_copy {
@@ -2488,7 +2488,7 @@ impl ClipboardRequest {
 
 /// What a key event resolves to once the host's reserved combos and viewport
 /// shortcuts are applied. The byte encoding itself is left to libghostty's
-/// encoder (the `Encode` arm); everything else is giest's own gating.
+/// encoder (the `Encode` arm); everything else is geist's own gating.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum KeyAction {
     /// Hand this neutral key event to the engine's encoder for the PTY.
@@ -2752,7 +2752,7 @@ pub struct ScrollbarState {
     pub len: f32,
 }
 
-/// Map giest's scroll state onto that contract.
+/// Map geist's scroll state onto that contract.
 ///
 /// `scroll_px` counts device pixels *above the live bottom*, so it runs the
 /// opposite way to `offset`: at `scroll_px == 0` the viewport is at the bottom
@@ -2926,7 +2926,7 @@ pub fn produces_text(key: egui::Key, m: &egui::Modifiers) -> bool {
 ///
 /// Ghostty's `surface_mouse.zig::isRectangleSelectState`: **ctrl+alt** on every
 /// platform but macOS (which uses a bare alt, since alt-drag there isn't spoken
-/// for). giest is Windows, so ctrl+alt.
+/// for). geist is Windows, so ctrl+alt.
 pub fn is_rectangle_select(m: &egui::Modifiers) -> bool {
     (m.ctrl || m.command) && m.alt
 }

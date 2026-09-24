@@ -178,7 +178,7 @@ pub fn frame(position: Position, size: &QuickSize, work: Rect) -> Rect {
 /// physical pixels.
 ///
 /// `quick-terminal-screen` is honored only as `main`: the other values are
-/// macOS concepts (`macos-menu-bar`) or need per-monitor enumeration giest has
+/// macOS concepts (`macos-menu-bar`) or need per-monitor enumeration geist has
 /// no handle for (`mouse`), so they fall back here rather than silently placing
 /// the window somewhere unrelated.
 ///

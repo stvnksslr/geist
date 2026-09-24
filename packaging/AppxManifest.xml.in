@@ -1,16 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  MSIX manifest template for giest. scripts/package.ps1 fills the @TOKENS@.
+  MSIX manifest template for geist. scripts/package.ps1 fills the @TOKENS@.
   Publisher MUST equal the Subject of the certificate the package is signed
   with, or Windows refuses to install it. The default is a placeholder.
 
-  A full-trust Win32 app: giest.exe, conpty.dll and OpenConsole.exe sit in the
+  A full-trust Win32 app: geist.exe, conpty.dll and OpenConsole.exe sit in the
   package root, so the sideloaded ConPTY (kitty graphics) works as it does from
   the portable zip.
 
   Default-terminal handoff (src/handoff.rs): the terminal half is declared -
-  our ITerminalHandoff3 COM server (giest.exe -Embedding), the proxy/stub
-  (giestHandoffProxy.dll) and the com.microsoft.windows.terminal.host app
+  our ITerminalHandoff3 COM server (geist.exe -Embedding), the proxy/stub
+  (geistHandoffProxy.dll) and the com.microsoft.windows.terminal.host app
   extension that Settings > For developers > Terminal lists. The console half
   (com.microsoft.windows.console.host) is NOT declared: the NuGet
   OpenConsole.exe we ship has Windows Terminal's CLSID compiled in, so
@@ -26,10 +26,10 @@
   xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
   IgnorableNamespaces="uap uap3 com desktop rescap">
 
-  <Identity Name="giest.giest" Publisher="@PUBLISHER@" Version="@VERSION4@" ProcessorArchitecture="@ARCH@" />
+  <Identity Name="geist.geist" Publisher="@PUBLISHER@" Version="@VERSION4@" ProcessorArchitecture="@ARCH@" />
 
   <Properties>
-    <DisplayName>giest</DisplayName>
+    <DisplayName>geist</DisplayName>
     <PublisherDisplayName>@PUBLISHER_DISPLAY@</PublisherDisplayName>
     <Logo>Assets\StoreLogo.png</Logo>
     <Description>A GPU-accelerated terminal for Windows on Ghostty's VT engine.</Description>
@@ -45,23 +45,23 @@
   </Resources>
 
   <Applications>
-    <Application Id="giest" Executable="giest.exe" EntryPoint="Windows.FullTrustApplication">
+    <Application Id="geist" Executable="geist.exe" EntryPoint="Windows.FullTrustApplication">
       <uap:VisualElements
-        DisplayName="giest"
-        Description="giest terminal"
+        DisplayName="geist"
+        Description="geist terminal"
         BackgroundColor="transparent"
         Square150x150Logo="Assets\Square150x150Logo.png"
         Square44x44Logo="Assets\Square44x44Logo.png" />
       <Extensions>
-        <!-- `giest` on PATH from any shell, like `wt`. -->
-        <uap3:Extension Category="windows.appExecutionAlias" Executable="giest.exe" EntryPoint="Windows.FullTrustApplication">
+        <!-- `geist` on PATH from any shell, like `wt`. -->
+        <uap3:Extension Category="windows.appExecutionAlias" Executable="geist.exe" EntryPoint="Windows.FullTrustApplication">
           <uap3:AppExecutionAlias>
-            <desktop:ExecutionAlias Alias="giest.exe" />
+            <desktop:ExecutionAlias Alias="geist.exe" />
           </uap3:AppExecutionAlias>
         </uap3:Extension>
         <!-- Default terminal: what Settings lists as a terminal. -->
         <uap3:Extension Category="windows.appExtension">
-          <uap3:AppExtension Name="com.microsoft.windows.terminal.host" Id="giest" DisplayName="giest" Description="giest terminal" PublicFolder="Public">
+          <uap3:AppExtension Name="com.microsoft.windows.terminal.host" Id="geist" DisplayName="geist" Description="geist terminal" PublicFolder="Public">
             <uap3:Properties>
               <Clsid>{2CED21A9-5236-4F72-B71F-10F3949295E5}</Clsid>
             </uap3:Properties>
@@ -70,15 +70,15 @@
         <!-- The proxy/stub that marshals EstablishPtyHandoff's handles. -->
         <com:Extension Category="windows.comInterface">
           <com:ComInterface>
-            <com:ProxyStub Id="4CDF6A34-42C2-488C-84D2-4BC3F55F519D" DisplayName="giestHandoffProxy" Path="giestHandoffProxy.dll" />
+            <com:ProxyStub Id="4CDF6A34-42C2-488C-84D2-4BC3F55F519D" DisplayName="geistHandoffProxy" Path="geistHandoffProxy.dll" />
             <!-- ITerminalHandoff3 -->
             <com:Interface Id="6F23DA90-15C5-4203-9DB0-64E73F1B1B00" ProxyStubClsid="4CDF6A34-42C2-488C-84D2-4BC3F55F519D" />
           </com:ComInterface>
         </com:Extension>
-        <!-- COM launches `giest.exe -Embedding` for OpenConsole's handoff. -->
+        <!-- COM launches `geist.exe -Embedding` for OpenConsole's handoff. -->
         <com:Extension Category="windows.comServer">
           <com:ComServer>
-            <com:ExeServer DisplayName="giest" Executable="giest.exe">
+            <com:ExeServer DisplayName="geist" Executable="geist.exe">
               <com:Class Id="2CED21A9-5236-4F72-B71F-10F3949295E5" />
             </com:ExeServer>
           </com:ComServer>

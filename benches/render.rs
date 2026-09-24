@@ -1,8 +1,8 @@
 //! Renderer cost — the per-frame CPU + GPU-upload work the wgpu pipeline does
 //! before the draw call: shaping each row, rasterizing glyphs into the atlas, and
 //! assembling the instance list (`GpuResources::build_frame_instances`). This is
-//! the giest-side counterpart to Ghostty's `ScreenClone --mode render`; Ghostty
-//! has no public glyph-atlas bench, so this also covers giest-only ground.
+//! the geist-side counterpart to Ghostty's `ScreenClone --mode render`; Ghostty
+//! has no public glyph-atlas bench, so this also covers geist-only ground.
 //!
 //! Unlike the other benches it needs a real `wgpu::Device`, so it spins up a
 //! **headless** adapter (no window/surface). When no adapter is available (e.g. a
@@ -22,9 +22,9 @@ use std::sync::Arc;
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use eframe::wgpu;
-use giest::engine::{GhosttyVtEngine, GridSnapshot, Rgb, TerminalEngine};
-use giest::render::{self, PaneFrame, TermFrame};
-use giest::synthetic;
+use geist::engine::{GhosttyVtEngine, GridSnapshot, Rgb, TerminalEngine};
+use geist::render::{self, PaneFrame, TermFrame};
+use geist::synthetic;
 
 const FONT_PX: f32 = 16.0;
 const TEXT_GAMMA: f32 = 1.0;
@@ -40,7 +40,7 @@ fn headless_device() -> Option<(wgpu::Device, wgpu::Queue)> {
     }))
     .ok()?;
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-        label: Some("giest-bench-device"),
+        label: Some("geist-bench-device"),
         ..Default::default()
     }))
     .ok()?;
@@ -88,10 +88,10 @@ fn term_frame(snap: GridSnapshot) -> TermFrame {
         }],
         selection_bg: Rgb::new(40, 60, 90),
         selection_fg: None,
-        search_bg: giest::config::TerminalColor::CellBackground,
-        search_fg: giest::config::TerminalColor::CellForeground,
-        search_selected_bg: giest::config::TerminalColor::CellBackground,
-        search_selected_fg: giest::config::TerminalColor::CellForeground,
+        search_bg: geist::config::TerminalColor::CellBackground,
+        search_fg: geist::config::TerminalColor::CellForeground,
+        search_selected_bg: geist::config::TerminalColor::CellBackground,
+        search_selected_fg: geist::config::TerminalColor::CellForeground,
         cursor_text: None,
         // Fully opaque: the bench measures the default (no-transparency) path.
         background_opacity: 1.0,

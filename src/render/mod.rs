@@ -516,8 +516,8 @@ pub fn device_lost_message(reason: &str, msg: &str) -> String {
     };
     format!(
         "The GPU device was lost ({reason}){detail}.\n\nThis is usually a driver reset or \
-         crash. Your shells are still running, but giest cannot draw them any more \
-         - restart giest."
+         crash. Your shells are still running, but geist cannot draw them any more \
+         - restart geist."
     )
 }
 
@@ -1735,7 +1735,7 @@ impl GpuResources {
                         // glyph id 0 (.notdef) means the primary font lacks this
                         // character; resolve it from the fallback chain (color
                         // emoji → mode 2, monochrome → mode 1).
-                        // Box drawing / blocks / braille are drawn by giest from
+                        // Box drawing / blocks / braille are drawn by geist from
                         // the cell metrics, and win over the font — the same
                         // precedence Ghostty's `CodepointResolver` gives its
                         // sprite face. A font's versions are drawn to its em box,
@@ -2380,7 +2380,7 @@ mod tests {
     fn device_lost_message_names_reason_detail_and_remedy() {
         let m = super::device_lost_message("Unknown", " DXGI_ERROR_DEVICE_REMOVED \n");
         assert!(m.starts_with("The GPU device was lost (Unknown): DXGI_ERROR_DEVICE_REMOVED."));
-        assert!(m.contains("restart giest"));
+        assert!(m.contains("restart geist"));
         let m = super::device_lost_message("Unknown", "");
         assert!(m.starts_with("The GPU device was lost (Unknown)."), "{m}");
     }

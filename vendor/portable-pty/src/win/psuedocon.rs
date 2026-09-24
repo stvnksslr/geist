@@ -29,8 +29,8 @@ pub const PSEUDOCONSOLE_RESIZE_QUIRK: DWORD = 0x2;
 pub const PSEUDOCONSOLE_WIN32_INPUT_MODE: DWORD = 0x4;
 pub const PSEUDOCONSOLE_PASSTHROUGH_MODE: DWORD = 0x8;
 
-// giest patch: opt-in PSEUDOCONSOLE_PASSTHROUGH_MODE. Upstream declares the
-// flag and never passes it. MEASURED (see giest's GAP.md): no ConPTY build we
+// geist patch: opt-in PSEUDOCONSOLE_PASSTHROUGH_MODE. Upstream declares the
+// flag and never passes it. MEASURED (see geist's GAP.md): no ConPTY build we
 // could test actually honours it — inbox conhost 10.0.26100 accepts it (S_OK)
 // and still strips APC; OpenConsole 1.24 forwards APC with or without it. It is
 // passed anyway for older OpenConsole builds (1.17-1.21) that implemented it.
@@ -75,7 +75,7 @@ fn load_conpty() -> ConPtyFuncs {
     // alongside the application.  We check for this after checking for kernel
     // support so that we don't try to proceed and do something crazy.
     //
-    // giest patch: the sideload can be vetoed (`set_allow_sideload(false)`),
+    // geist patch: the sideload can be vetoed (`set_allow_sideload(false)`),
     // and is looked up *next to the exe* by absolute path rather than through
     // the DLL search order (which includes the cwd and PATH).
     if !ALLOW_SIDELOAD.load(std::sync::atomic::Ordering::Relaxed) {
@@ -94,7 +94,7 @@ fn load_conpty() -> ConPtyFuncs {
     }
 }
 
-// giest patch: which ConPTY implementation is used. The inbox conhost (still
+// geist patch: which ConPTY implementation is used. The inbox conhost (still
 // 10.0.26100 on Windows 11 25H2) re-renders the child's output and strips APC
 // and C0 controls like ENQ; it also accepts PSEUDOCONSOLE_PASSTHROUGH_MODE and
 // silently ignores it. The out-of-band OpenConsole (conpty.dll 1.22+, the
@@ -153,7 +153,7 @@ impl PsuedoCon {
         } else {
             create(base, &mut con)
         };
-        // giest patch: a conhost that predates the flag rejects it; fall back
+        // geist patch: a conhost that predates the flag rejects it; fall back
         // to the stock flags rather than failing the spawn.
         let mut active = want && result == S_OK;
         if want && result != S_OK {

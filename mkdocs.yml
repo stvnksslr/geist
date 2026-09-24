@@ -1,10 +1,10 @@
-site_name: giest
+site_name: geist
 site_description: >-
   A GPU-accelerated terminal emulator for Windows, in Rust — eframe (egui + wgpu)
   for the window, libghostty-vt for the terminal model, ConPTY for the shell.
-site_url: https://stvnksslr.github.io/giest/
-repo_url: https://github.com/stvnksslr/giest
-repo_name: stvnksslr/giest
+site_url: https://stvnksslr.github.io/geist/
+repo_url: https://github.com/stvnksslr/geist
+repo_name: stvnksslr/geist
 edit_uri: edit/main/docs/
 
 theme:

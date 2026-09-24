@@ -3,9 +3,9 @@
 //! Windows has no X11-style selection clipboard, but three Ghostty features are
 //! defined in terms of one: `copy-on-select = primary|both` writes to it, and
 //! `middle-click-action = primary-paste` and the `paste_from_selection` action
-//! read it. giest keeps it in-process — shared by every window, like the real
+//! read it. geist keeps it in-process — shared by every window, like the real
 //! PRIMARY is shared by every X client — so those features behave as they do on
-//! Linux between giest panes, without touching the system clipboard.
+//! Linux between geist panes, without touching the system clipboard.
 //!
 //! Reads return `None` while it is empty, and callers that want Linux-like
 //! "middle-click does something useful out of the box" fall back to the system

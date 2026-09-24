@@ -9,7 +9,7 @@
 //! headless-GPU harness is deferred (see docs/testing-host-env-gap-analysis.md).
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
-use giest::render::regular_font;
+use geist::render::regular_font;
 use rustybuzz::{Direction, Face, UnicodeBuffer};
 
 /// Shape `s` and return the produced glyph count (keeps the work observable).

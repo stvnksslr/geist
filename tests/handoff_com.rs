@@ -1,5 +1,5 @@
 //! The terminal half of default-terminal handoff, live, **without** touching
-//! how consoles launch. Ignored: it registers giest's COM class and proxy/stub
+//! how consoles launch. Ignored: it registers geist's COM class and proxy/stub
 //! under `HKCU\Software\Classes` for the test's duration (never
 //! `Console\%%Startup`), restoring them from a `Drop` guard.
 //!
@@ -7,14 +7,14 @@
 //!   cargo build --release
 //!   cargo test --test handoff_com -- --ignored --nocapture
 //!
-//! The test plays OpenConsole: it `CoCreateInstance`s giest's CLSID (COM
-//! starts `giest.exe -Embedding`), calls `ITerminalHandoff3::
+//! The test plays OpenConsole: it `CoCreateInstance`s geist's CLSID (COM
+//! starts `geist.exe -Embedding`), calls `ITerminalHandoff3::
 //! EstablishPtyHandoff` through the MIDL proxy with a signal pipe, a reference
 //! handle, a server and a client process, and then checks each direction:
 //! the initial resize arrives on the signal pipe, output written to the
 //! returned `out` pipe reaches the engine (an OSC 2 title shows in `+list`),
 //! `+input` arrives on the returned `in` pipe, and killing the client makes
-//! giest reap the pane and exit. Needs no giest running (it talks to the
+//! geist reap the pane and exit. Needs no geist running (it talks to the
 //! default IPC pipe, where the `-Embedding` instance serves).
 
 #![cfg(windows)]
@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 
 /// The **release** exe: a debug build is console-subsystem and cannot be the
 /// COM server (see `handoff::check_gui_subsystem`).
-const GIEST: &str = concat!(env!("CARGO_MANIFEST_DIR"), r"\target\release\giest.exe");
+const GEIST: &str = concat!(env!("CARGO_MANIFEST_DIR"), r"\target\release\geist.exe");
 type Handle = *mut c_void;
 
 #[repr(C)]
@@ -122,9 +122,9 @@ fn snapshot() -> String {
         })
         .collect()
 }
-fn giest_running() -> bool {
-    let o = run(Command::new("tasklist").args(["/FI", "IMAGENAME eq giest.exe", "/NH"]));
-    String::from_utf8_lossy(&o.stdout).contains("giest.exe")
+fn geist_running() -> bool {
+    let o = run(Command::new("tasklist").args(["/FI", "IMAGENAME eq geist.exe", "/NH"]));
+    String::from_utf8_lossy(&o.stdout).contains("geist.exe")
 }
 
 struct Guard {
@@ -132,9 +132,9 @@ struct Guard {
 }
 impl Drop for Guard {
     fn drop(&mut self) {
-        let r = giest::handoff::unregister_com_only();
+        let r = geist::handoff::unregister_com_only();
         eprintln!("unregister_com_only: {r:?}");
-        run(Command::new("taskkill").args(["/F", "/IM", "giest.exe"]));
+        run(Command::new("taskkill").args(["/F", "/IM", "geist.exe"]));
         assert_eq!(snapshot(), self.before, "registry not restored exactly");
         eprintln!("registry restored exactly");
     }
@@ -167,17 +167,17 @@ fn wide(s: &str) -> Vec<u16> {
 }
 
 #[test]
-#[ignore = "registers giest's COM class under HKCU for the test's duration"]
-fn giest_accepts_a_pty_handoff_over_com() {
+#[ignore = "registers geist's COM class under HKCU for the test's duration"]
+fn geist_accepts_a_pty_handoff_over_com() {
     run_parent(MODE_STANDALONE);
 }
 
-/// With a giest already running, the `-Embedding` process forwards the
+/// With a geist already running, the `-Embedding` process forwards the
 /// session over IPC (`Request::Handoff`): the running instance duplicates the
 /// handles in and shows it as a new tab; the client exiting closes that tab
 /// only.
 #[test]
-#[ignore = "registers giest's COM class under HKCU and starts a giest"]
+#[ignore = "registers geist's COM class under HKCU and starts a geist"]
 fn a_running_instance_adopts_the_handoff() {
     run_parent(MODE_FORWARDED);
 }
@@ -190,20 +190,20 @@ static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn run_parent(mode: &str) {
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    assert!(!giest_running(), "close every giest first");
+    assert!(!geist_running(), "close every geist first");
     let before = snapshot();
     let _guard = Guard { before };
-    giest::handoff::register_com_only(std::path::Path::new(GIEST)).expect("register");
+    geist::handoff::register_com_only(std::path::Path::new(GEIST)).expect("register");
     // Declared after the guard, so it is dropped (killed) before it.
     let _first = KillOnDrop(
-        (mode == MODE_FORWARDED).then(|| Command::new(GIEST).spawn().expect("start giest")),
+        (mode == MODE_FORWARDED).then(|| Command::new(GEIST).spawn().expect("start geist")),
     );
     if mode == MODE_FORWARDED {
         let t0 = Instant::now();
-        while !run(Command::new(GIEST).arg("+list")).status.success() {
+        while !run(Command::new(GEIST).arg("+list")).status.success() {
             assert!(
                 t0.elapsed() < Duration::from_secs(20),
-                "the first giest never served IPC"
+                "the first geist never served IPC"
             );
             std::thread::sleep(Duration::from_millis(300));
         }
@@ -229,11 +229,11 @@ impl Drop for KillOnDrop {
     }
 }
 
-const CHILD_ENV: &str = "GIEST_HANDOFF_COM_CHILD";
+const CHILD_ENV: &str = "geist_HANDOFF_COM_CHILD";
 
 /// The OpenConsole side; only does anything when spawned by the test above.
 #[test]
-#[ignore = "child half of giest_accepts_a_pty_handoff_over_com"]
+#[ignore = "child half of geist_accepts_a_pty_handoff_over_com"]
 fn com_child() {
     let Ok(mode) = std::env::var(CHILD_ENV) else {
         return;
@@ -257,7 +257,7 @@ fn com_child() {
         assert!(CreatePipe(&mut sig_r, &mut sig_w, std::ptr::null(), 0) != 0);
         let sig_r = OwnedHandle::from_raw_handle(sig_r);
         let sig_w = OwnedHandle::from_raw_handle(sig_w);
-        let reference = std::fs::File::open(GIEST).unwrap();
+        let reference = std::fs::File::open(GEIST).unwrap();
         // A stand-in client that just stays alive. (Not `ping`: spawned from
         // here it exits at once with code 1, which silently made the exit
         // checks below pass for the wrong reason.)
@@ -315,7 +315,7 @@ fn com_child() {
         let t0 = Instant::now();
         let mut listed = String::new();
         while t0.elapsed() < Duration::from_secs(15) {
-            listed = text(&run(Command::new(GIEST).arg("+list")));
+            listed = text(&run(Command::new(GEIST).arg("+list")));
             if listed.contains("COM_OK") {
                 break;
             }
@@ -325,7 +325,7 @@ fn com_child() {
         assert!(listed.contains("COM_OK"), "title never reached the pane");
 
         // 3. Input reaches the pipe.
-        let o = run(Command::new(GIEST).arg("+input=abc"));
+        let o = run(Command::new(GEIST).arg("+input=abc"));
         assert!(o.status.success(), "{}", text(&o));
         let got = read_until(in_, 10, |b| b.windows(3).any(|w| w == b"abc"));
         eprintln!("input pipe: {:?}", String::from_utf8_lossy(&got));
@@ -342,10 +342,10 @@ fn com_child() {
                 listed.matches("\"active\"").count() >= 2,
                 "expected a second tab"
             );
-            let n = run(Command::new("tasklist").args(["/FI", "IMAGENAME eq giest.exe", "/NH"]));
+            let n = run(Command::new("tasklist").args(["/FI", "IMAGENAME eq geist.exe", "/NH"]));
             assert_eq!(
                 String::from_utf8_lossy(&n.stdout)
-                    .matches("giest.exe")
+                    .matches("geist.exe")
                     .count(),
                 1
             );
@@ -358,7 +358,7 @@ fn com_child() {
             "stand-in client died"
         );
         assert!(
-            listed.contains("COM_OK") && giest_running(),
+            listed.contains("COM_OK") && geist_running(),
             "pane gone before the client exited"
         );
         // Outlive `abnormal-command-exit-runtime` (250 ms): a client killed
@@ -368,25 +368,25 @@ fn com_child() {
         let t0 = Instant::now();
         if mode == MODE_FORWARDED {
             while t0.elapsed() < Duration::from_secs(10)
-                && text(&run(Command::new(GIEST).arg("+list"))).contains("COM_OK")
+                && text(&run(Command::new(GEIST).arg("+list"))).contains("COM_OK")
             {
                 std::thread::sleep(Duration::from_millis(300));
             }
-            let listed = text(&run(Command::new(GIEST).arg("+list")));
+            let listed = text(&run(Command::new(GEIST).arg("+list")));
             eprintln!("+list after the client exited: {listed}");
             assert!(
                 !listed.contains("COM_OK"),
                 "the handed-off tab was not reaped"
             );
             assert!(
-                giest_running(),
+                geist_running(),
                 "the running instance went away with the tab"
             );
         } else {
-            while t0.elapsed() < Duration::from_secs(10) && giest_running() {
+            while t0.elapsed() < Duration::from_secs(10) && geist_running() {
                 std::thread::sleep(Duration::from_millis(300));
             }
-            assert!(!giest_running(), "giest stayed up after the client exited");
+            assert!(!geist_running(), "geist stayed up after the client exited");
         }
         drop(out);
     }

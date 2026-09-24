@@ -184,7 +184,7 @@ mod tests {
 
     #[test]
     fn audio_path_resolves_relative_against_the_config_dir() {
-        let dir = Path::new(r"C:\Users\me\AppData\Roaming\giest");
+        let dir = Path::new(r"C:\Users\me\AppData\Roaming\geist");
         assert_eq!(
             resolve_audio_path("ding.wav", Some(dir)),
             Some(dir.join("ding.wav"))

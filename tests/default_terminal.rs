@@ -1,13 +1,13 @@
 //! Live default-terminal handoff, end to end. **Ignored**: it briefly makes
-//! giest the Windows default terminal for the current user.
+//! geist the Windows default terminal for the current user.
 //!
 //!   pwsh scripts/build-handoff-proxy.ps1
 //!   cargo build --release
 //!   cargo test --test default_terminal -- --ignored --nocapture
 //!
 //! Needs Windows Terminal installed (its packaged OpenConsole is the console
-//! half of the chain, see `src/handoff.rs`) and **no giest running** — the
-//! COM-launched `giest -Embedding` would otherwise hand the session to it.
+//! half of the chain, see `src/handoff.rs`) and **no geist running** — the
+//! COM-launched `geist -Embedding` would otherwise hand the session to it.
 //!
 //! What it proves: conhost delegates to OpenConsole, OpenConsole activates our
 //! HKCU-registered CLSID through our proxy/stub, `EstablishPtyHandoff`
@@ -28,14 +28,14 @@ use std::time::{Duration, Instant};
 
 /// The **release** exe: a debug build is console-subsystem and cannot be the
 /// COM server (see `handoff::check_gui_subsystem`).
-const GIEST: &str = concat!(env!("CARGO_MANIFEST_DIR"), r"\target\release\giest.exe");
+const GEIST: &str = concat!(env!("CARGO_MANIFEST_DIR"), r"\target\release\geist.exe");
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const STARTUP: &str = r"HKCU\Console\%%Startup";
 
 /// Every key registration can touch, as `reg query` prints it.
 const WATCHED: [&str; 6] = [
     STARTUP,
-    r"HKCU\Software\giest",
+    r"HKCU\Software\geist",
     r"HKCU\Software\Classes\CLSID\{2CED21A9-5236-4F72-B71F-10F3949295E5}",
     r"HKCU\Software\Classes\CLSID\{4CDF6A34-42C2-488C-84D2-4BC3F55F519D}",
     r"HKCU\Software\Classes\Interface\{6F23DA90-15C5-4203-9DB0-64E73F1B1B00}",
@@ -84,7 +84,7 @@ struct Guard {
 
 impl Drop for Guard {
     fn drop(&mut self) {
-        let o = run(Command::new(GIEST).arg("+unregister-default-terminal"));
+        let o = run(Command::new(GEIST).arg("+unregister-default-terminal"));
         eprintln!("unregister: {}", text(&o).trim());
         let after = snapshot();
         if after != self.before {
@@ -104,25 +104,25 @@ impl Drop for Guard {
         if let Some(c) = &mut self.client {
             let _ = c.kill();
         }
-        // A handed-off giest still up (a failed assertion): end it. Safe to
-        // match by name: the test refuses to start while any giest runs.
-        run(Command::new("taskkill").args(["/F", "/IM", "giest.exe"]));
+        // A handed-off geist still up (a failed assertion): end it. Safe to
+        // match by name: the test refuses to start while any geist runs.
+        run(Command::new("taskkill").args(["/F", "/IM", "geist.exe"]));
         assert_eq!(snapshot(), self.before, "registry not restored exactly");
         eprintln!("registry restored exactly");
     }
 }
 
-fn giest_running() -> bool {
-    let o = run(Command::new("tasklist").args(["/FI", "IMAGENAME eq giest.exe", "/NH"]));
-    String::from_utf8_lossy(&o.stdout).contains("giest.exe")
+fn geist_running() -> bool {
+    let o = run(Command::new("tasklist").args(["/FI", "IMAGENAME eq geist.exe", "/NH"]));
+    String::from_utf8_lossy(&o.stdout).contains("geist.exe")
 }
 
 #[test]
-#[ignore = "registers giest as the default terminal (HKCU) for a few seconds"]
-fn console_launch_is_handed_to_giest() {
+#[ignore = "registers geist as the default terminal (HKCU) for a few seconds"]
+fn console_launch_is_handed_to_geist() {
     assert!(
-        !giest_running(),
-        "close every giest first: the handoff would go to it"
+        !geist_running(),
+        "close every geist first: the handoff would go to it"
     );
     let before = snapshot();
     eprintln!("before:\n{before}");
@@ -135,7 +135,7 @@ fn console_launch_is_handed_to_giest() {
         client: None,
     };
 
-    let o = run(Command::new(GIEST).arg("+register-default-terminal"));
+    let o = run(Command::new(GEIST).arg("+register-default-terminal"));
     eprintln!("register: {}", text(&o).trim());
     assert!(o.status.success());
 
@@ -156,7 +156,7 @@ fn console_launch_is_handed_to_giest() {
     // Output: the handed-off pane shows the client's title.
     let listed = wait_listed(&marker, 15);
     // Delegation has done its job: restore the user's default right away.
-    let o = run(Command::new(GIEST).arg("+unregister-default-terminal"));
+    let o = run(Command::new(GEIST).arg("+unregister-default-terminal"));
     eprintln!("early unregister: {}", text(&o).trim());
     eprintln!("+list: {listed}");
     assert!(
@@ -166,7 +166,7 @@ fn console_launch_is_handed_to_giest() {
 
     // Input: a typed command runs in the client and its effect comes back.
     let typed = format!("TYPED_{}", std::process::id());
-    let o = run(Command::new(GIEST).arg(format!("+input=title {typed}\r")));
+    let o = run(Command::new(GEIST).arg(format!("+input=title {typed}\r")));
     assert!(o.status.success(), "{}", text(&o));
     assert!(
         wait_listed(&typed, 10).contains(&typed),
@@ -175,13 +175,13 @@ fn console_launch_is_handed_to_giest() {
 
     // Exit detection: `exit` ends cmd, the pane is reaped, the instance goes.
     // The reply is not asserted: the instance can exit before writing it.
-    let o = run(Command::new(GIEST).arg("+input=exit\r"));
+    let o = run(Command::new(GEIST).arg("+input=exit\r"));
     eprintln!("+input exit: {:?} {}", o.status, text(&o).trim());
     let t0 = Instant::now();
-    while t0.elapsed() < Duration::from_secs(10) && giest_running() {
+    while t0.elapsed() < Duration::from_secs(10) && geist_running() {
         std::thread::sleep(Duration::from_millis(300));
     }
-    assert!(!giest_running(), "giest stayed up after the client exited");
+    assert!(!geist_running(), "geist stayed up after the client exited");
 }
 
 /// Poll `+list` until it mentions `needle`, or `secs` pass; the last listing.
@@ -189,7 +189,7 @@ fn wait_listed(needle: &str, secs: u64) -> String {
     let t0 = Instant::now();
     let mut listed = String::new();
     while t0.elapsed() < Duration::from_secs(secs) {
-        listed = text(&run(Command::new(GIEST).arg("+list")));
+        listed = text(&run(Command::new(GEIST).arg("+list")));
         if listed.contains(needle) {
             break;
         }

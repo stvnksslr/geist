@@ -37,7 +37,7 @@ Fallbacks: `mise exec zig@0.16.0 -- cargo build`, or plain
 
 !!! warning "Always run cargo from the project root"
     Running cargo from inside `vendor/libghostty-rs/...` builds the **vendored
-    crate** instead of giest (cargo walks up to the nearest `Cargo.toml`). A
+    crate** instead of geist (cargo walks up to the nearest `Cargo.toml`). A
     "Finished" that only mentions `libghostty-vt` compiling means you're in the
     wrong directory.
 
@@ -53,7 +53,7 @@ flowchart TB
     zig["zig build (0.16.0)"]
     fetch["fetch pinned Ghostty source"]
     archive["ghostty-vt-static.lib"]
-    link["link giest.exe (static archive on Windows)"]
+    link["link geist.exe (static archive on Windows)"]
 
     cargo --> sys --> zig --> fetch --> archive --> link --> cargo
 
@@ -87,7 +87,7 @@ snapshot copy-out (`snapshot`), text shaping (`shaping`), and headless renderer
 cost (`render`, skipped when no GPU adapter is present). It can be compared
 against upstream `ghostty-bench` over the same corpus via
 `scripts/bench-vs-ghostty.ps1`. See **[Benchmarking](../benchmarking.md)** for the
-full guide, the `GIEST_BENCH_DATA` corpus mechanism, and methodology caveats.
+full guide, the `geist_BENCH_DATA` corpus mechanism, and methodology caveats.
 
 ## Optimized release builds
 

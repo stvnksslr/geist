@@ -1,14 +1,14 @@
-//! Explorer "Open giest here" — the Windows analogue of the macOS app's
+//! Explorer "Open geist here" — the Windows analogue of the macOS app's
 //! Services menu entries ("New Ghostty Tab/Window Here").
 //!
-//! `giest +register-shell-integration` writes three per-user verbs under
+//! `geist +register-shell-integration` writes three per-user verbs under
 //! `HKCU\Software\Classes`:
 //!
 //! | Key | Where it shows |
 //! |---|---|
-//! | `Directory\Background\shell\giest` | right-click on a folder's empty space |
-//! | `Directory\shell\giest` | right-click on a folder |
-//! | `Drive\shell\giest` | right-click on a drive |
+//! | `Directory\Background\shell\geist` | right-click on a folder's empty space |
+//! | `Directory\shell\geist` | right-click on a folder |
+//! | `Drive\shell\geist` | right-click on a drive |
 //!
 //! each running `"<exe>" "%V"` — the positional-directory CLI form, which the
 //! running instance receives over IPC as a **new tab** (`cli::Cli::plan`). The
@@ -20,7 +20,7 @@
 //! registered implicitly — only the explicit CLI verb does it.
 
 /// The shell verb's key name under each `…\shell`.
-pub const VERB: &str = "giest";
+pub const VERB: &str = "geist";
 
 /// The three class keys the verb is added to.
 pub const CLASSES: [&str; 3] = [
@@ -30,7 +30,7 @@ pub const CLASSES: [&str; 3] = [
 ];
 
 /// The menu label.
-pub const LABEL: &str = "Open giest here";
+pub const LABEL: &str = "Open geist here";
 
 /// One registry value to write: `(subkey, value name or None for the default
 /// value, data)`. Subkeys are relative to the root passed to [`register`].
@@ -353,44 +353,44 @@ mod tests {
 
     #[test]
     fn every_class_gets_a_label_an_icon_and_a_quoted_command() {
-        let e = entries(r"C:\Program Files\giest\giest.exe");
+        let e = entries(r"C:\Program Files\geist\geist.exe");
         assert_eq!(e.len(), CLASSES.len() * 3);
         assert!(e.contains(&(
-            r"Directory\Background\shell\giest".into(),
+            r"Directory\Background\shell\geist".into(),
             None,
-            "Open giest here".into()
+            "Open geist here".into()
         )));
         assert!(e.contains(&(
-            r"Directory\Background\shell\giest".into(),
+            r"Directory\Background\shell\geist".into(),
             Some("Icon"),
-            r#""C:\Program Files\giest\giest.exe",0"#.into()
+            r#""C:\Program Files\geist\geist.exe",0"#.into()
         )));
         // Both halves quoted: a space in the exe path or the folder must not
         // split the command line.
         assert!(e.contains(&(
-            r"Drive\shell\giest\command".into(),
+            r"Drive\shell\geist\command".into(),
             None,
-            r#""C:\Program Files\giest\giest.exe" "%V""#.into()
+            r#""C:\Program Files\geist\geist.exe" "%V""#.into()
         )));
     }
 
-    /// Writes to a throwaway `HKCU\Software\giest-test-<pid>` tree — never the
+    /// Writes to a throwaway `HKCU\Software\geist-test-<pid>` tree — never the
     /// real `Software\Classes` — reads it back, and removes it.
     #[test]
     #[ignore = "touches the real registry (HKCU, throwaway key)"]
     fn register_then_unregister_round_trips_in_the_real_registry() {
-        let root = format!(r"Software\giest-test-{}", std::process::id());
-        register_at(&root, r"C:\x\giest.exe").unwrap();
+        let root = format!(r"Software\geist-test-{}", std::process::id());
+        register_at(&root, r"C:\x\geist.exe").unwrap();
         assert_eq!(
-            get_string(&format!(r"{root}\Directory\shell\giest\command"), None).as_deref(),
-            Some(r#""C:\x\giest.exe" "%V""#)
+            get_string(&format!(r"{root}\Directory\shell\geist\command"), None).as_deref(),
+            Some(r#""C:\x\geist.exe" "%V""#)
         );
         assert_eq!(
-            get_string(&format!(r"{root}\Drive\shell\giest"), Some("Icon")).as_deref(),
-            Some(r#""C:\x\giest.exe",0"#)
+            get_string(&format!(r"{root}\Drive\shell\geist"), Some("Icon")).as_deref(),
+            Some(r#""C:\x\geist.exe",0"#)
         );
         unregister_at(&root).unwrap();
-        assert!(get_string(&format!(r"{root}\Directory\shell\giest"), None).is_none());
+        assert!(get_string(&format!(r"{root}\Directory\shell\geist"), None).is_none());
         // Idempotent.
         unregister_at(&root).unwrap();
         imp::delete_tree(&root).unwrap();

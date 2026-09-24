@@ -1,18 +1,18 @@
 //! Command-line arguments — Ghostty's CLI surface, shaped for Windows.
 //!
 //! ```text
-//! giest [<dir>] [--<config-key>=<value>...] [-e <program> [args...]]
-//! giest +new-window [--working-directory=<dir>] [--command=<cmd>] [-e <program> [args...]]
-//! giest +new-tab    [--working-directory=<dir>] [--command=<cmd>] [-e <program> [args...]]
-//! giest +list | +focus | +action=<keybind action> | +input=<text>
-//! giest +register-shell-integration | +unregister-shell-integration
-//! giest --help | --version
+//! geist [<dir>] [--<config-key>=<value>...] [-e <program> [args...]]
+//! geist +new-window [--working-directory=<dir>] [--command=<cmd>] [-e <program> [args...]]
+//! geist +new-tab    [--working-directory=<dir>] [--command=<cmd>] [-e <program> [args...]]
+//! geist +list | +focus | +action=<keybind action> | +input=<text>
+//! geist +register-shell-integration | +unregister-shell-integration
+//! geist --help | --version
 //! ```
 //!
 //! Upstream semantics that are easy to get wrong, all kept:
 //!
 //! - **`-e` swallows everything after it** as the command's argv, including
-//!   things that look like flags (`giest -e pwsh -NoLogo`). It sets the *initial*
+//!   things that look like flags (`geist -e pwsh -NoLogo`). It sets the *initial*
 //!   command only — later tabs and splits still run `command` — and it implies a
 //!   standalone instance (upstream sets `gtk-single-instance = false`): a
 //!   one-off command window must not be folded into a running terminal.
@@ -26,7 +26,7 @@
 //!   behaviour upstream documents for GTK.
 //!
 //! The positional `<dir>` is a Windows addition (it is what Explorer's "Open
-//! giest here" passes). A *file* opens in its parent directory, mirroring the
+//! geist here" passes). A *file* opens in its parent directory, mirroring the
 //! macOS app's `CommandLineOpenFileFilter`, which opens dropped files' folders.
 
 use std::path::{Path, PathBuf};
@@ -36,7 +36,7 @@ use crate::ipc::{CommandSpec, Request};
 /// What the invocation asks for, before deciding *where* it runs.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Verb {
-    /// Plain `giest`: start a terminal (or, with an instance running, open a
+    /// Plain `geist`: start a terminal (or, with an instance running, open a
     /// window/tab in it).
     Launch,
     NewWindow,
@@ -54,7 +54,7 @@ pub enum Verb {
     Version,
     RegisterShellIntegration,
     UnregisterShellIntegration,
-    /// `+register-default-terminal`: make giest the Windows default terminal
+    /// `+register-default-terminal`: make geist the Windows default terminal
     /// (HKCU; see `handoff.rs`).
     RegisterDefaultTerminal,
     UnregisterDefaultTerminal,
@@ -98,15 +98,15 @@ impl Default for Cli {
 
 /// The version string `--version` prints.
 pub fn version_string() -> String {
-    format!("giest {}", env!("CARGO_PKG_VERSION"))
+    format!("geist {}", env!("CARGO_PKG_VERSION"))
 }
 
 pub const HELP: &str = "\
-Usage: giest [<dir>] [--<config-key>=<value>...] [-e <program> [args...]]
-       giest +new-window | +new-tab [--working-directory=<dir>] [--command=<cmd>] [-e ...]
-       giest +list | +focus | +action=<action> | +input=<text>
-       giest +register-shell-integration | +unregister-shell-integration
-       giest +register-default-terminal | +unregister-default-terminal
+Usage: geist [<dir>] [--<config-key>=<value>...] [-e <program> [args...]]
+       geist +new-window | +new-tab [--working-directory=<dir>] [--command=<cmd>] [-e ...]
+       geist +list | +focus | +action=<action> | +input=<text>
+       geist +register-shell-integration | +unregister-shell-integration
+       geist +register-default-terminal | +unregister-default-terminal
 
   <dir>                     Start in this directory (a file opens its folder).
   --working-directory=<dir> Same, as a config key (also 'home' / 'inherit').
@@ -116,14 +116,14 @@ Usage: giest [<dir>] [--<config-key>=<value>...] [-e <program> [args...]]
   --config-file=<path>      Load an extra config file.
   --restore-session         Reopen the last saved window layout once.
 
-  +new-window / +new-tab    Open in the running giest (or start one).
+  +new-window / +new-tab    Open in the running geist (or start one).
   +list                     Print the running instance's windows as JSON.
   +focus                    Bring the running instance to the front.
   +action=<action>          Run a keybind action (e.g. +action=new_split:right).
   +input=<text>             Paste text into the focused pane.
-  +register-shell-integration    Add \"Open giest here\" to Explorer (per user).
+  +register-shell-integration    Add \"Open geist here\" to Explorer (per user).
   +unregister-shell-integration  Remove it again.
-  +register-default-terminal     Make giest the Windows default terminal (per
+  +register-default-terminal     Make geist the Windows default terminal (per
                                  user; needs Windows Terminal's OpenConsole).
   +unregister-default-terminal   Restore the previous default exactly.
 
@@ -376,7 +376,7 @@ impl Cli {
                             && !matches!(self.command, Some(CommandSpec::Argv(_))),
                     };
                 }
-                // Explorer's "Open giest here" (a positional dir) is a new tab
+                // Explorer's "Open geist here" (a positional dir) is a new tab
                 // in the window you already have; a bare relaunch is a new
                 // window, like clicking a pinned taskbar icon.
                 if self.positional_dir && drop == crate::config::DropBehavior::NewTab {
@@ -619,7 +619,7 @@ mod tests {
         assert_eq!(p(&["--help"]).verb, Verb::Help);
         assert_eq!(p(&["-h"]).verb, Verb::Help);
         assert_eq!(p(&["--version"]).verb, Verb::Version);
-        assert!(version_string().starts_with("giest "));
+        assert!(version_string().starts_with("geist "));
     }
 
     #[test]

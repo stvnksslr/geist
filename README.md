@@ -1,4 +1,4 @@
-# giest
+# geist
 
 A GPU-accelerated terminal emulator for **Windows**, written in Rust with
 [egui]/[eframe] for the UI and [libghostty-vt] — the terminal-state engine
@@ -61,7 +61,7 @@ native crate changes.
 ## Vendoring
 
 `vendor/libghostty-rs/` is [Uzaaft/libghostty-rs] @5988a0b with Ghostty bumped to upstream
-`main` (@b32f20f). It links Ghostty's real static archive, so giest is a single self-contained
+`main` (@b32f20f). It links Ghostty's real static archive, so geist is a single self-contained
 `.exe`. See CLAUDE.md for how to bump the Ghostty commit.
 
 ## Controls
@@ -103,11 +103,11 @@ native crate changes.
 
 ## Configuration
 
-On startup giest reads `%APPDATA%\giest\config` (override the path with the
-`GIEST_CONFIG` environment variable). The file uses **Ghostty's config format**
+On startup geist reads `%APPDATA%\geist\config` (override the path with the
+`geist_CONFIG` environment variable). The file uses **Ghostty's config format**
 (`key = value` lines, kebab-case keys, unquoted hex colors, `#` comment lines,
 repeatable `palette`), so keys are transposable with a real Ghostty config. All
-keys are optional, and keys giest doesn't support are ignored with a warning:
+keys are optional, and keys geist doesn't support are ignored with a warning:
 
 ```ini
 command          = pwsh        # default shell: name (pwsh/powershell/cmd/wsl) or

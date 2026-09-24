@@ -1,4 +1,4 @@
-//! The giest icon artwork as code: parametric geometry plus a palette.
+//! The geist icon artwork as code: parametric geometry plus a palette.
 //!
 //! Shared by `examples/icongen.rs` (which regenerates `assets/icon.{png,ico}`
 //! with [`Palette::official`]) and by `icon.rs` at runtime, which redraws the

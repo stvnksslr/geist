@@ -242,7 +242,7 @@ impl GhosttyVtEngine {
         // registers glyf outlines and answers `s` (support) queries with
         // `fmt=glyf`. But the C API exposes no way to read a registered outline
         // back, and the renderer half isn't in this pin, so leaving it on would
-        // advertise glyphs giest then draws as tofu. Off until it can render.
+        // advertise glyphs geist then draws as tofu. Off until it can render.
         // (Invisible over the inbox ConPTY, which strips APC; live over a
         // sideloaded one — see `conpty-passthrough`.)
         term.set_glyph_protocol_enabled(false)?;
@@ -430,7 +430,7 @@ struct ClipState {
 }
 
 /// Install the OSC 52 / OSC 5522 clipboard callbacks. The engine does all the
-/// protocol work; these only apply giest's policy (see `crate::clipboard`).
+/// protocol work; these only apply geist's policy (see `crate::clipboard`).
 fn install_clipboard(
     term: &mut Terminal<'static, 'static>,
     clip: &Rc<RefCell<ClipState>>,
@@ -1051,7 +1051,7 @@ impl TerminalEngine for GhosttyVtEngine {
         // Kitty drag-and-drop (OSC 72): the engine answers `t=q` and tracks
         // registrations, but the C API has no way to *deliver* a drop
         // (upstream drives `kitty.dnd.State.dragDrop` from Zig). Advertising a
-        // protocol giest can't complete would make a program wait for drops
+        // protocol geist can't complete would make a program wait for drops
         // that never come, so its replies are withheld — the program sees no
         // support and file drops keep pasting paths.
         strip_osc72(&mut self.responses.borrow_mut());
@@ -1375,7 +1375,7 @@ impl TerminalEngine for GhosttyVtEngine {
         // terminal's own encoding rules (bracketing, newline handling) and writes
         // through the PTY-write callback, i.e. into `responses`. Those may
         // already hold unsent replies, so set them aside and splice them back.
-        // `allow_unsafe = true`: giest's own gate (`Session::paste_str`) has
+        // `allow_unsafe = true`: geist's own gate (`Session::paste_str`) has
         // already decided; the engine must not second-guess it.
         use libghostty_vt::terminal::{PasteOutcome, PasteSource};
         let pending = std::mem::take(&mut *self.responses.borrow_mut());
@@ -1736,7 +1736,7 @@ impl TerminalEngine for GhosttyVtEngine {
         // `Screen.selectionString()` clipboard behaviour; `trim` is the user's
         // `clipboard-trim-trailing-spaces`. With no `with_selection`, this
         // formats the terminal's *active* selection — the tracked one, so the
-        // read spans scrollback without giest holding any pins for it.
+        // read spans scrollback without geist holding any pins for it.
         let opts = FormatOptions::new().with_unwrap(true).with_trim(trim);
         let bytes = self.term.format_selection_alloc(None, opts).ok()??;
         Some(String::from_utf8_lossy(&bytes).into_owned())
@@ -2347,7 +2347,7 @@ mod tests {
     #[test]
     fn image_storage_limit_of_zero_disables_the_protocol() {
         // libghostty does NOT start at zero — the library default is a small
-        // non-zero limit (10 MB), so kitty graphics are live before giest sets
+        // non-zero limit (10 MB), so kitty graphics are live before geist sets
         // anything. What `image-storage-limit` really controls is the budget,
         // and specifically that **zero turns the protocol off and wipes stored
         // images**, which is the behaviour worth pinning.
@@ -2380,9 +2380,9 @@ mod tests {
             eng.take_responses().is_empty(),
             "default is empty: ENQ goes unanswered"
         );
-        eng.set_enquiry_response("giest-answerback");
+        eng.set_enquiry_response("geist-answerback");
         eng.write(b"a\x05b");
-        assert_eq!(eng.take_responses(), b"giest-answerback");
+        assert_eq!(eng.take_responses(), b"geist-answerback");
         eng.set_enquiry_response("");
         eng.write(b"\x05");
         assert!(
@@ -2410,7 +2410,7 @@ mod tests {
             b"\x1b]72;t=q:i=3\x1b\\",
             "engine answers OSC 72 queries"
         );
-        // ...and giest withholds it, since it can't deliver a drop.
+        // ...and geist withholds it, since it can't deliver a drop.
         eng.write(b"\x1b]72;t=q:i=3\x1b\\\x1b[5n\x1b]72;t=q\x07");
         assert_eq!(
             eng.take_responses(),
@@ -2436,7 +2436,7 @@ mod tests {
         eng.write(b"\x1b_25a1;r;cp=e0a0;AAAAAAAAAAAAAA==\x1b\\");
         assert!(
             eng.take_responses().is_empty(),
-            "giest cannot render registered glyphs, so it must not answer the glyph protocol"
+            "geist cannot render registered glyphs, so it must not answer the glyph protocol"
         );
     }
 
@@ -2593,7 +2593,7 @@ mod tests {
     #[test]
     fn osc_dynamic_color_sets_apply_without_a_scanner() {
         // libghostty applies OSC 10/11/12 *sets* internally and the snapshot
-        // reads the effective colors, so giest needs no scanner for them — only
+        // reads the effective colors, so geist needs no scanner for them — only
         // for the `?` queries, which the vt library drops. This test is the
         // safety net for that claim.
         let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
@@ -3079,7 +3079,7 @@ mod tests {
     #[test]
     fn engine_osc_color_query_replies() {
         // Pins who answers `OSC 11 ?`: `osc_color.rs` does. Upstream (14c8298) can
-        // answer in lib-vt behind a callback giest doesn't install; if a bump ever
+        // answer in lib-vt behind a callback geist doesn't install; if a bump ever
         // makes it answer by default, every query would get two replies.
         let mut eng = GhosttyVtEngine::new(20, 5, 100_000).unwrap();
         eng.write(b"\x1b]11;?\x07");
@@ -3402,7 +3402,7 @@ mod tests {
     #[test]
     fn adjust_selection_does_nothing_without_a_selection() {
         // Upstream returns "not performed" so the key falls through to the
-        // shell; giest's `performable:` gate keys off exactly this `None`.
+        // shell; geist's `performable:` gate keys off exactly this `None`.
         let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
         eng.write(b"hello");
         assert_eq!(
@@ -3899,7 +3899,7 @@ mod tests {
         assert_eq!(eng.hyperlink_at(10, 0), None);
     }
 
-    /// giest reconstructs the scrollbar's `{total, offset, len}` from
+    /// geist reconstructs the scrollbar's `{total, offset, len}` from
     /// `scrollback_rows()` + the viewport height instead of calling the
     /// binding's `Terminal::scrollbar()` (expensive at arbitrary pins, and its
     /// integer `offset` can't carry a sub-line position). That's only valid if
@@ -4012,7 +4012,7 @@ mod tests {
         assert_eq!(bytes, b"\x03");
     }
 
-    // --- Encode integration: verify giest drives libghostty's encoder with the
+    // --- Encode integration: verify geist drives libghostty's encoder with the
     // live terminal modes (these assert standard xterm sequences, not a
     // re-derivation of the protocol — that's libghostty's own test surface). ---
 
