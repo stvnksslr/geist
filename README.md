@@ -13,6 +13,10 @@ custom **wgpu glyph-atlas** pipeline; the shell runs over **ConPTY**.
 > macOS Ghostty parity; the remaining gaps (kitty graphics, explicit OSC 8) are
 > in the roadmap below.
 
+## Look and feel
+
+![geist running on Windows](docs/geist.png)
+
 ## Architecture
 
 ```
