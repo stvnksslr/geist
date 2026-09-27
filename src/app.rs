@@ -1406,6 +1406,19 @@ pub struct Window {
     /// selection. `render_active` runs before the window exists, so this is the
     /// previous frame's rect, the same idiom as `last_layout`.
     inspector_rect: Option<egui::Rect>,
+    /// The update popover (macOS `UpdatePopoverView`) is open. Upstream's is a
+    /// transient popover, not a dialog, so it is in neither input gate; its
+    /// rect is in `update_ui_rects` instead, which withholds the pointer.
+    update_popover: bool,
+    /// Where this frame's update pill is, and whether it is in the tab strip
+    /// (geist's titlebar; `false` = the bottom-right overlay used when the strip
+    /// is hidden). The popover opens against it: below from the strip, above
+    /// from the overlay.
+    update_anchor: Option<(egui::Rect, bool)>,
+    /// Last frame's rects of the update UI drawn over the panes (the overlay
+    /// pill, the popover), so the pane beneath doesn't also take the click —
+    /// the `inspector_rect` idiom.
+    update_ui_rects: Vec<egui::Rect>,
     /// The About dialog is up (modal: in both input gates).
     about_open: bool,
     /// The profiles page, open over its working copy of the profile list
@@ -1464,6 +1477,11 @@ pub struct Window {
     /// The tab strip and its tabs as drawn last pass (window-local), as drop
     /// targets. `None` / empty when the strip is hidden.
     last_strip: Option<egui::Rect>,
+    /// Last frame's measured width of the strip's trailing controls (`+`, the
+    /// profile menu, the update pill), spacing included. The reservation for
+    /// them is at least this, so an estimate that runs short can't push the
+    /// pill past the window edge for more than one frame.
+    last_ctl_w: f32,
     last_tab_rects: Vec<egui::Rect>,
     /// `toggle_tab_overview`: the open overview. Modal: in both input gates.
     overview: Option<Overview>,
@@ -2148,6 +2166,7 @@ impl Window {
             drop_hint: None,
             screen_origin: None,
             last_strip: None,
+            last_ctl_w: 0.0,
             last_tab_rects: Vec::new(),
             overview: None,
             config,
@@ -2195,6 +2214,9 @@ impl Window {
             shader_frame: 0,
             undo_state: crate::command::UndoState::default(),
             inspector_rect: None,
+            update_popover: false,
+            update_anchor: None,
+            update_ui_rects: Vec::new(),
             about_open: false,
             profiles_page: None,
             search_corner: crate::indicators::Corner::TopRight,
@@ -2948,6 +2970,132 @@ impl Window {
         }
     }
 
+    /// A click on the update pill, wherever it is drawn (upstream
+    /// `UpdatePill.pillButton`).
+    fn update_pill_clicked(&mut self, state: &crate::update::State) {
+        match state.click() {
+            crate::update::PillClick::Popover => self.update_popover = !self.update_popover,
+            crate::update::PillClick::Dismiss => crate::update::global().dismiss(),
+            crate::update::PillClick::Restart => self.requests.push(AppRequest::RestartForUpdate),
+        }
+    }
+
+    /// With the tab strip hidden there is no titlebar to hold the pill, so it
+    /// sits at the terminal's bottom-right corner instead — upstream's
+    /// `UpdateOverlay`, which macOS uses for any window whose titlebar can't
+    /// take the accessory (9pt in from the corner, as there).
+    fn render_update_overlay(&mut self, ctx: &egui::Context, terminal: egui::Rect) {
+        let state = crate::update::global().state();
+        if state.is_hidden() {
+            return;
+        }
+        let chrome = self.chrome;
+        let shown = egui::Area::new(self.id("update-overlay"))
+            .order(egui::Order::Foreground)
+            .pivot(egui::Align2::RIGHT_BOTTOM)
+            .fixed_pos(terminal.right_bottom() - egui::vec2(9.0, 9.0))
+            .show(ctx, |ui| {
+                let r = update_pill(ui, &state, &chrome);
+                (r.rect, r.clicked())
+            });
+        let (rect, clicked) = shown.inner;
+        self.update_anchor = Some((rect, false));
+        self.update_ui_rects.push(rect);
+        if clicked {
+            self.update_pill_clicked(&state);
+        }
+    }
+
+    /// The update popover (macOS `UpdatePopoverView`): what the current state
+    /// offers to do. Opens below the pill in the strip, above the overlay pill,
+    /// and closes on a press anywhere else, as a popover does.
+    fn render_update_popover(&mut self, ctx: &egui::Context) {
+        use crate::update::State;
+        let state = crate::update::global().state();
+        let Some((pill, in_strip)) = self.update_anchor else {
+            self.update_popover = false;
+            return;
+        };
+        // An open popover follows the state, as upstream's does: a check that
+        // comes back empty turns it into "No Updates Found", rather than
+        // closing it under the pointer. Only idle and a staged update (whose
+        // pill restarts rather than opening anything) have nothing to show.
+        if !self.update_popover || matches!(state, State::Idle | State::Ready { .. }) {
+            self.update_popover = false;
+            return;
+        }
+        // The popover has the keyboard while open (it is in both input gates),
+        // like upstream's: Esc is the dismissive action, Return the default one
+        // (its `keyboardShortcut(.cancelAction)` / `(.defaultAction)`).
+        let (esc, enter) = ctx.input_mut(|i| {
+            (
+                i.consume_key(egui::Modifiers::NONE, egui::Key::Escape),
+                i.consume_key(egui::Modifiers::NONE, egui::Key::Enter),
+            )
+        });
+        let key_action = match (&state, esc, enter) {
+            (_, true, _) => Some(UpdateAction::Dismiss),
+            (State::Available(_), _, true) => Some(UpdateAction::Install),
+            (State::Error(_), _, true) => Some(UpdateAction::Retry),
+            (State::NotFound, _, true) => Some(UpdateAction::Dismiss),
+            _ => None,
+        };
+        let chrome = self.chrome;
+        let (pivot, pos) = if in_strip {
+            (
+                egui::Align2::RIGHT_TOP,
+                pill.right_bottom() + egui::vec2(0.0, 6.0),
+            )
+        } else {
+            (
+                egui::Align2::RIGHT_BOTTOM,
+                pill.right_top() - egui::vec2(0.0, 6.0),
+            )
+        };
+        let shown = egui::Area::new(self.id("update-popover"))
+            .order(egui::Order::Foreground)
+            .pivot(pivot)
+            .fixed_pos(pos)
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style())
+                    .inner_margin(egui::Margin::same(14))
+                    .show(ui, |ui| {
+                        ui.set_width(300.0);
+                        update_popover_body(ui, &state, &chrome)
+                    })
+                    .inner
+            });
+        let rect = shown.response.rect;
+        self.update_ui_rects.push(rect);
+        // Not on the pill: its own click toggles the popover.
+        let outside = ctx
+            .input(|i| {
+                i.pointer
+                    .any_pressed()
+                    .then(|| i.pointer.interact_pos())
+                    .flatten()
+            })
+            .is_some_and(|p| !rect.contains(p) && !pill.contains(p));
+        if outside {
+            self.update_popover = false;
+        }
+        if let Some(action) = shown.inner.or(key_action) {
+            self.update_popover = false;
+            let u = crate::update::global();
+            match action {
+                UpdateAction::Install => u.install(),
+                UpdateAction::Skip => u.skip(),
+                UpdateAction::Dismiss => u.dismiss(),
+                UpdateAction::Retry => u.retry(crate::update::Settings::from_config(&self.config)),
+                UpdateAction::ReleaseNotes => {
+                    if let State::Available(p) = &state {
+                        open_url(&p.notes_url);
+                    }
+                }
+            }
+        }
+    }
+
     /// Draw the current toast, if any, bottom-centre of the window, fading out
     /// over its last few hundred milliseconds.
     fn render_toast(&mut self, ctx: &egui::Context) {
@@ -3161,6 +3309,7 @@ impl Window {
             drop_hint: None,
             screen_origin: None,
             last_strip: None,
+            last_ctl_w: 0.0,
             last_tab_rects: Vec::new(),
             overview: None,
             config: self.config.clone(),
@@ -3218,6 +3367,9 @@ impl Window {
             shader_frame: 0,
             undo_state: crate::command::UndoState::default(),
             inspector_rect: None,
+            update_popover: false,
+            update_anchor: None,
+            update_ui_rects: Vec::new(),
             about_open: false,
             profiles_page: None,
             search_corner: crate::indicators::Corner::TopRight,
@@ -3783,6 +3935,9 @@ impl Window {
             || self.title_prompt.is_some()
             // The tab overview: also in `render_active`'s `palette_open` gate.
             || self.overview.is_some()
+            // The update popover takes Esc / Return while open. Also in the
+            // `palette_open` gate.
+            || self.update_popover
     }
 
     /// Whether the config-errors dialog is up: the loaded config had problems
@@ -5874,24 +6029,20 @@ impl Window {
         // hit-tests against `rect ∩ clip_rect`, the overflowed tabs *and the
         // trailing new-tab button* became invisible and unclickable at once,
         // with no way to open a tab from the strip at all.
-        // The update pill (`update.rs`, macOS `UpdatePill`) sits with them.
+        // The update pill (`update.rs`, macOS `UpdatePill`) sits with them: the
+        // strip is geist's titlebar, and upstream's pill is a right-aligned
+        // titlebar accessory.
         let update_state = crate::update::global().state();
-        let pill_text = update_state.text();
-        let pill_w = if pill_text.is_empty() {
+        // Reserved with the row's real item spacing: egui puts that gap before
+        // every widget, and reserving `TAB_GAP` instead pushed the pill past
+        // the window's right edge.
+        let pill_w = if update_state.is_hidden() {
             0.0
         } else {
-            ui.fonts_mut(|f| {
-                f.layout_no_wrap(
-                    pill_text.clone(),
-                    egui::FontId::proportional(12.0),
-                    egui::Color32::WHITE,
-                )
-                .size()
-                .x
-            }) + 20.0
-                + theme::TAB_GAP
+            update_pill_width(ui.ctx(), &update_state) + ui.spacing().item_spacing.x
         };
         let mut want_update_click = false;
+        let mut pill_rect = None;
         // With the client-drawn caption the strip's right end belongs to the
         // min/max/close buttons (plus a little grab space before them, as
         // Windows Terminal leaves), painted over it by `paint_caption_buttons`.
@@ -5904,7 +6055,8 @@ impl Window {
         };
         let client_caption = !self.quick
             && crate::winchrome::caption_style() != crate::winchrome::CaptionStyle::Native;
-        let ctl_w = 30.0 + 26.0 + theme::TAB_GAP + pill_w + caption_w;
+        let ctl_w = (30.0 + 26.0 + theme::TAB_GAP + pill_w).max(self.last_ctl_w) + caption_w;
+        let mut measured_ctl_w = 0.0;
 
         let row = ui.horizontal(|ui| {
             let avail = (ui.available_width() - ctl_w).max(theme::TAB_MIN_W);
@@ -6280,6 +6432,7 @@ impl Window {
             // reserved above, so they stay put and stay reachable no matter how
             // many tabs are open.
             let plus = ui.add_sized([26.0, theme::TAB_H], egui::Button::new("+").frame(false));
+            let ctl_left = plus.rect.left() - ui.spacing().item_spacing.x;
             // The glyph is the button's only text; give readers words instead.
             crate::a11y::name_widget(&plus, egui::accesskit::Role::Button, "New tab", None);
             if plus.on_hover_text("New tab (Ctrl+Shift+T)").clicked() {
@@ -6334,28 +6487,27 @@ impl Window {
                 None,
             );
             picker.on_hover_text("New tab (pick a shell)");
-            if !pill_text.is_empty() {
-                let pill = egui::Button::new(egui::RichText::new(&pill_text).size(12.0))
-                    .corner_radius(theme::TAB_H / 2.0)
-                    .fill(chrome.accent.gamma_multiply(0.35));
-                let mut r = ui.add_sized([pill_w - theme::TAB_GAP, theme::TAB_H - 4.0], pill);
-                let tip = update_state.tooltip();
-                if !tip.is_empty() {
-                    r = r.on_hover_text(tip);
-                }
+            if !update_state.is_hidden() {
+                let r = update_pill(ui, &update_state, &chrome);
+                pill_rect = Some(r.rect);
                 if r.clicked() {
                     want_update_click = true;
                 }
             }
+            measured_ctl_w = ui.min_rect().right() - ctl_left;
         });
+        self.last_ctl_w = measured_ctl_w;
+        if let Some(rect) = pill_rect {
+            self.update_anchor = Some((rect, true));
+        }
         if want_about {
             self.about_open = true;
         }
         if want_profiles {
             self.open_profiles();
         }
-        if want_update_click && crate::update::global().activate() {
-            self.requests.push(AppRequest::RestartForUpdate);
+        if want_update_click {
+            self.update_pill_clicked(&update_state);
         }
 
         // Measured from the laid-out row, not from `ui.max_rect()`: a top panel
@@ -6601,17 +6753,36 @@ impl Window {
                 || self.about_open
                 || self.profiles_page.is_some()
                 || self.title_prompt.is_some()
-                || self.overview.is_some();
+                || self.overview.is_some()
+                // The update popover: it takes Esc / Return (see `modal_open`).
+                || self.update_popover;
 
         // The inspector is deliberately **not** in that list — it must never
         // take the keyboard, or its own keyboard log would have nothing to
         // show. But it does sit over the pane, so the *pointer* has to be
         // withheld where it is, or a click on its Pause button also starts a
         // text selection underneath. Last frame's rect, since the window is
-        // drawn after this (the `last_layout` idiom).
-        let over_inspector = self
-            .inspector_rect
-            .is_some_and(|r| ctx.pointer_latest_pos().is_some_and(|p| r.contains(p)));
+        // drawn after this (the `last_layout` idiom). The update pill's
+        // bottom-right overlay and its popover sit over the panes the same way.
+        //
+        // Only an interaction that *starts* over one is withheld: a selection
+        // or scrollbar drag begun in the pane keeps going when it crosses an
+        // overlay, instead of being cut off under it.
+        let over_overlay = {
+            let on = |p: egui::Pos2| {
+                self.inspector_rect
+                    .iter()
+                    .chain(&self.update_ui_rects)
+                    .any(|r| r.contains(p))
+            };
+            ctx.input(
+                |i| match (i.pointer.latest_pos(), i.pointer.press_origin()) {
+                    (Some(p), Some(origin)) if i.pointer.any_down() => on(p) && on(origin),
+                    (Some(p), _) => on(p),
+                    (None, _) => false,
+                },
+            )
+        };
 
         // Fill the whole area (including the per-pane padding band and the split
         // gutters) with the focused pane's background. This single rect is what
@@ -6703,7 +6874,7 @@ impl Window {
                     .button_double_clicked(egui::PointerButton::Primary),
             )
         });
-        let hovered_divider = if palette_open || over_inspector {
+        let hovered_divider = if palette_open || over_overlay {
             None
         } else {
             ptr_pos.and_then(|p| {
@@ -6781,7 +6952,7 @@ impl Window {
             crate::config::DragHandle::Auto => !(self.fullscreen && pane_rects.len() < 2),
         };
         let hovered_handle =
-            if !handles_enabled || palette_open || over_inspector || self.divider_drag.is_some() {
+            if !handles_enabled || palette_open || over_overlay || self.divider_drag.is_some() {
                 None
             } else {
                 ptr_pos.and_then(|p| {
@@ -6939,8 +7110,10 @@ impl Window {
         }
         let cur_idx = leaves.iter().position(|l| l.id == focus_id).unwrap();
         let search_open = leaves[cur_idx].payload.search_active();
-        // Suppress the click-focus while search is modal (`None` = don't move).
-        let click_pos = if search_open || over_divider {
+        // Suppress the click-focus while search is modal (`None` = don't move),
+        // and for a click on an overlay (the inspector, the update pill or its
+        // popover), which belongs to it and not to the split underneath.
+        let click_pos = if search_open || over_divider || over_overlay {
             None
         } else {
             press_pos
@@ -6955,7 +7128,7 @@ impl Window {
         // Gated on the pointer having actually *moved* — otherwise a parked
         // cursor would drag focus back every frame and make `focus_split_*`
         // keybinds impossible to use.
-        if self.config.focus_follows_mouse && !search_open && !over_divider {
+        if self.config.focus_follows_mouse && !search_open && !over_divider && !over_overlay {
             let moved = ctx.input(|i| i.pointer.velocity() != egui::Vec2::ZERO);
             if moved
                 && let Some(pos) = ctx.input(|i| i.pointer.latest_pos())
@@ -7141,7 +7314,7 @@ impl Window {
 
             // Mouse / selection interaction only for the focused pane, and not
             // while a modal overlay (palette or search) owns input/focus.
-            if is_focus && !palette_open && !search_open && !over_inspector && !over_divider {
+            if is_focus && !palette_open && !search_open && !over_overlay && !over_divider {
                 // Hold keyboard focus on the terminal and lock the navigation keys
                 // to it. Otherwise egui's built-in focus traversal swallows Tab
                 // (which the shell wants for completion) to cycle focus through the
@@ -7531,7 +7704,7 @@ impl Window {
             // the search overlay is a plain `Area` and does not — so without
             // this, a click meant for the search box could reach a bar behind it.
             // Still painted, so a search jump visibly moves the thumb.
-            if palette_open || search_open || over_inspector || over_divider {
+            if palette_open || search_open || over_overlay || over_divider {
                 if let Some(a) = alpha {
                     scrollbars.push((track, thumb, a, false));
                 }
@@ -8524,6 +8697,8 @@ impl Window {
         } else {
             crate::winchrome::caption_style()
         };
+        // Set again by whichever of the strip or the overlay draws the pill.
+        self.update_anchor = None;
         let show_strip = self.config.window_show_tab_bar.visible(self.tabs.len())
             || self.renaming.is_some()
             || caption == crate::winchrome::CaptionStyle::Tabs;
@@ -8582,9 +8757,24 @@ impl Window {
         // No fill here: `render_active` paints the window background across this
         // whole area itself. Filling it here too would double-composite the
         // translucent color (1-(1-a)²) and read far darker than configured.
-        egui::CentralPanel::default()
+        let terminal = egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
-            .show_inside(ui, |ui| self.render_active(ui, &ctx));
+            .show_inside(ui, |ui| self.render_active(ui, &ctx))
+            .response
+            .rect;
+
+        // The update pill's overlay and popover. `render_active` above has
+        // already gated the panes on last frame's rects; these rebuild them for
+        // the next.
+        self.update_ui_rects.clear();
+        if !show_strip {
+            self.render_update_overlay(&ctx, terminal);
+        }
+        self.render_update_popover(&ctx);
+        // "Install and Relaunch" is due once its download is staged.
+        if crate::update::global().take_relaunch() {
+            self.requests.push(AppRequest::RestartForUpdate);
+        }
 
         // The command palette draws over everything; a chosen command runs after
         // the modal closes, so it mutates `self` with no outstanding borrow.
@@ -8885,6 +9075,11 @@ impl App {
         let crate::update::State::Ready { version } = crate::update::global().state() else {
             return;
         };
+        // `geist_UPDATE_SIMULATE`: nothing is staged, so there is nothing to
+        // restart into — and ending every shell to find that out would be rude.
+        if crate::update::global().simulated() {
+            return;
+        }
         if !crate::update::confirm_restart(&version) {
             return;
         }
@@ -10777,6 +10972,337 @@ fn pane_grid_rect(
         leaf.shrink2(pad)
     };
     balance_pane(inner, balance, cell_w, cell_h, ppp)
+}
+
+/// The update pill's geometry, upstream `UpdatePill`'s: a 14pt badge, a 6pt gap
+/// and 8pt of horizontal padding, in a capsule that fits the tab strip.
+const PILL_BADGE: f32 = 14.0;
+const PILL_GAP: f32 = 6.0;
+const PILL_PAD_X: f32 = 8.0;
+const PILL_H: f32 = theme::TAB_H - 4.0;
+
+fn pill_font() -> egui::FontId {
+    egui::FontId::proportional(12.0)
+}
+
+/// The pill's width for `state`. Sized from `max_width_text`, not the live
+/// label, so "Downloading: 7%" and "Downloading: 100%" are the same width and
+/// the strip doesn't re-flow on every progress report.
+fn update_pill_width(ctx: &egui::Context, state: &crate::update::State) -> f32 {
+    let text_w = ctx.fonts_mut(|f| {
+        f.layout_no_wrap(state.max_width_text(), pill_font(), egui::Color32::WHITE)
+            .size()
+            .x
+    });
+    PILL_PAD_X + PILL_BADGE + PILL_GAP + text_w + PILL_PAD_X
+}
+
+/// The pill's fill and ink for a tone (upstream `backgroundColor` /
+/// `foregroundColor`), from the chrome palette rather than macOS system colours.
+fn pill_colors(
+    tone: crate::update::Tone,
+    chrome: &theme::Chrome,
+    visuals: &egui::Visuals,
+) -> (egui::Color32, egui::Color32) {
+    use crate::update::Tone;
+    match tone {
+        Tone::Neutral => (visuals.widgets.inactive.weak_bg_fill, chrome.text),
+        Tone::Accent => (chrome.accent, chrome.on_accent),
+        Tone::Info => (
+            egui::Color32::BLACK.lerp_to_gamma(chrome.accent, 0.5),
+            chrome.on_accent,
+        ),
+        Tone::Warning => (chrome.accent_warn.gamma_multiply(0.2), chrome.accent_warn),
+    }
+}
+
+/// Draw the update pill (macOS `UpdatePill` + `UpdateBadge`) and return its
+/// click response. The badge spins while checking and is a progress ring while
+/// a download has a known size.
+fn update_pill(
+    ui: &mut egui::Ui,
+    state: &crate::update::State,
+    chrome: &theme::Chrome,
+) -> egui::Response {
+    use crate::update::Badge;
+    let size = egui::vec2(update_pill_width(ui.ctx(), state), PILL_H);
+    // Clickable but not focusable: it must never take Tab (or a Space / Enter
+    // meant for the shell) away from the terminal.
+    let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::CLICK);
+    let (bg, fg) = pill_colors(state.tone(), chrome, ui.visuals());
+    let bg = if resp.hovered() {
+        bg.lerp_to_gamma(fg, 0.12)
+    } else {
+        bg
+    };
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, rect.height() / 2.0, bg);
+    let badge = egui::Rect::from_center_size(
+        egui::pos2(rect.left() + PILL_PAD_X + PILL_BADGE / 2.0, rect.center().y),
+        egui::Vec2::splat(PILL_BADGE),
+    );
+    let icon_font = egui::FontId::proportional(PILL_BADGE - 1.0);
+    match state.badge() {
+        Some(Badge::Icon(c)) => {
+            painter.text(
+                badge.center(),
+                egui::Align2::CENTER_CENTER,
+                c,
+                icon_font,
+                fg,
+            );
+        }
+        Some(Badge::Spinning(c)) => {
+            // One turn per 2.5 s, as upstream. A rotated text shape turns about
+            // its top-left corner, so offset it by the rotated half-size.
+            let t = ui.input(|i| i.time);
+            let angle = (t / 2.5).fract() as f32 * std::f32::consts::TAU;
+            let galley = ui.fonts_mut(|f| f.layout_no_wrap(c.to_string(), icon_font, fg));
+            let half = galley.size() / 2.0;
+            let pos = badge.center() - egui::emath::Rot2::from_angle(angle) * half;
+            painter.add(egui::epaint::TextShape::new(pos, galley, fg).with_angle(angle));
+            ui.ctx().request_repaint();
+        }
+        Some(Badge::Ring(progress)) => {
+            let r = PILL_BADGE / 2.0 - 1.5;
+            painter.circle_stroke(
+                badge.center(),
+                r,
+                egui::Stroke::new(2.0_f32, fg.gamma_multiply(0.2)),
+            );
+            let steps = (48.0 * progress).ceil() as usize;
+            if steps > 0 {
+                let points: Vec<egui::Pos2> = (0..=steps)
+                    .map(|i| {
+                        let a = -std::f32::consts::FRAC_PI_2
+                            + std::f32::consts::TAU * progress * i as f32 / steps as f32;
+                        badge.center() + r * egui::vec2(a.cos(), a.sin())
+                    })
+                    .collect();
+                painter.add(egui::Shape::line(points, egui::Stroke::new(2.0_f32, fg)));
+            }
+        }
+        None => {}
+    }
+    painter.text(
+        egui::pos2(badge.right() + PILL_GAP, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        state.text(),
+        pill_font(),
+        fg,
+    );
+    crate::a11y::name_widget(&resp, egui::accesskit::Role::Button, &state.text(), None);
+    let tip = state.tooltip();
+    if tip.is_empty() {
+        resp
+    } else {
+        resp.on_hover_text(tip)
+    }
+}
+
+/// What a button in the update popover asked for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UpdateAction {
+    /// "Install and Relaunch".
+    Install,
+    /// "Skip": don't offer this version again automatically.
+    Skip,
+    /// "Later", "Cancel" and "OK": back to idle.
+    Dismiss,
+    /// The error's "Retry".
+    Retry,
+    ReleaseNotes,
+}
+
+/// A download size the way the popover shows it (decimal units, like
+/// `ByteCountFormatter`'s `.file` style upstream).
+fn format_size(bytes: u64) -> String {
+    let b = bytes as f64;
+    if b >= 1e9 {
+        format!("{:.2} GB", b / 1e9)
+    } else if b >= 1e6 {
+        format!("{:.1} MB", b / 1e6)
+    } else if b >= 1e3 {
+        format!("{:.0} KB", b / 1e3)
+    } else {
+        format!("{bytes} bytes")
+    }
+}
+
+/// The popover's contents for `state`, section by section as upstream's
+/// `UpdatePopoverView`: a heading, the facts, then its buttons — the dismissive
+/// ones on the left, the one that goes ahead on the right.
+fn update_popover_body(
+    ui: &mut egui::Ui,
+    state: &crate::update::State,
+    chrome: &theme::Chrome,
+) -> Option<UpdateAction> {
+    use crate::update::State;
+    let mut out = None;
+    let heading = |ui: &mut egui::Ui, s: &str| {
+        ui.label(
+            egui::RichText::new(s)
+                .size(13.0)
+                .strong()
+                .color(chrome.text),
+        );
+    };
+    let secondary = |ui: &mut egui::Ui, s: &str| {
+        ui.add(egui::Label::new(egui::RichText::new(s).size(11.0).color(chrome.weak_text)).wrap());
+    };
+    // A fact's name ("Version:", "Released:"): never wrapped, or the grid's
+    // narrow first column breaks "Released:" across two lines.
+    let fact = |ui: &mut egui::Ui, s: &str| {
+        ui.add(
+            egui::Label::new(egui::RichText::new(s).size(11.0).color(chrome.weak_text)).extend(),
+        );
+    };
+    let button = |ui: &mut egui::Ui, s: &str| ui.button(egui::RichText::new(s).size(12.0));
+    let prominent = |ui: &mut egui::Ui, s: &str| {
+        ui.add(
+            egui::Button::new(egui::RichText::new(s).size(12.0).color(chrome.on_accent))
+                .fill(chrome.accent),
+        )
+    };
+    // Always used inside `ui.horizontal`: a bare right-to-left layout in this
+    // vertical popover takes *all* the remaining height and centres its button
+    // in it, and the popover's area remembers its last (possibly taller) size,
+    // so a lone Cancel drifted down into empty space after a state change.
+    let right = egui::Layout::right_to_left(egui::Align::Center);
+    match state {
+        State::Checking => {
+            ui.horizontal(|ui| {
+                ui.add(egui::Spinner::new().size(14.0));
+                ui.label(egui::RichText::new("Checking for updates\u{2026}").size(13.0));
+            });
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                ui.with_layout(right, |ui| {
+                    if button(ui, "Cancel").clicked() {
+                        out = Some(UpdateAction::Dismiss);
+                    }
+                })
+            });
+        }
+        State::Available(p) => {
+            heading(ui, "Update Available");
+            ui.add_space(6.0);
+            egui::Grid::new("update-facts")
+                .num_columns(2)
+                .spacing([6.0, 3.0])
+                .show(ui, |ui| {
+                    fact(ui, "Version:");
+                    ui.label(egui::RichText::new(&p.version).size(11.0));
+                    ui.end_row();
+                    if p.size > 0 {
+                        fact(ui, "Size:");
+                        ui.label(egui::RichText::new(format_size(p.size)).size(11.0));
+                        ui.end_row();
+                    }
+                    if !p.released.is_empty() {
+                        fact(ui, "Released:");
+                        ui.label(
+                            egui::RichText::new(crate::update::format_release_date(&p.released))
+                                .size(11.0),
+                        );
+                        ui.end_row();
+                    }
+                });
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                if button(ui, "Skip").clicked() {
+                    out = Some(UpdateAction::Skip);
+                }
+                if button(ui, "Later").clicked() {
+                    out = Some(UpdateAction::Dismiss);
+                }
+                ui.with_layout(right, |ui| {
+                    if prominent(ui, "Install and Relaunch").clicked() {
+                        out = Some(UpdateAction::Install);
+                    }
+                });
+            });
+            if !p.notes_url.is_empty() {
+                ui.add_space(8.0);
+                ui.separator();
+                let notes = ui.add(
+                    egui::Button::new(
+                        egui::RichText::new("View Release Notes  \u{2197}")
+                            .size(11.0)
+                            .color(chrome.text),
+                    )
+                    .frame(false),
+                );
+                if notes.on_hover_text(&p.notes_url).clicked() {
+                    out = Some(UpdateAction::ReleaseNotes);
+                }
+            }
+        }
+        State::Downloading { done, total, .. } => {
+            heading(ui, "Downloading Update");
+            ui.add_space(6.0);
+            if *total > 0 {
+                let f = (*done as f32 / *total as f32).clamp(0.0, 1.0);
+                ui.add(
+                    egui::ProgressBar::new(f)
+                        .desired_height(6.0)
+                        .fill(chrome.accent),
+                );
+                secondary(ui, &format!("{:.0}%", f * 100.0));
+            } else {
+                ui.add(egui::Spinner::new().size(14.0));
+            }
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                ui.with_layout(right, |ui| {
+                    if button(ui, "Cancel").clicked() {
+                        out = Some(UpdateAction::Dismiss);
+                    }
+                })
+            });
+        }
+        State::Error(msg) => {
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new('\u{F0026}'.to_string())
+                        .size(13.0)
+                        .color(chrome.accent_warn),
+                );
+                heading(ui, "Update Failed");
+            });
+            ui.add_space(6.0);
+            secondary(ui, msg);
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                if button(ui, "OK").clicked() {
+                    out = Some(UpdateAction::Dismiss);
+                }
+                ui.with_layout(right, |ui| {
+                    if button(ui, "Retry").clicked() {
+                        out = Some(UpdateAction::Retry);
+                    }
+                });
+            });
+        }
+        // Reached only when the popover was already open (a check it was
+        // showing came back empty): a click on this pill just dismisses it.
+        State::NotFound => {
+            heading(ui, "No Updates Found");
+            ui.add_space(6.0);
+            secondary(ui, "You're already running the latest version.");
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                ui.with_layout(right, |ui| {
+                    if button(ui, "OK").clicked() {
+                        out = Some(UpdateAction::Dismiss);
+                    }
+                })
+            });
+        }
+        // "Restart to Complete Update" restarts, and idle has no pill.
+        State::Idle | State::Ready { .. } => {}
+    }
+    out
 }
 
 /// How wide the bell / highlight flash may be: [`PANE_FLASH_PT`], capped to the

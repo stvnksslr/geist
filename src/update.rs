@@ -57,6 +57,15 @@ pub const MANIFEST_NAME: &str = "geist-manifest.json";
 /// How often a running geist re-checks (Sparkle's default interval is a day).
 const RECHECK: Duration = Duration::from_secs(24 * 60 * 60);
 
+/// The error a cancelled transfer returns. The worker recognizes it and goes
+/// quietly back to idle instead of showing "Update Failed".
+const CANCELLED: &str = "cancelled";
+
+/// How long "No Updates Available" stays before the pill hides itself
+/// (upstream `UpdatePill`'s reset task). Errors do not time out: upstream keeps
+/// them until acknowledged.
+const NOT_FOUND_SECS: u64 = 5;
+
 /// Ghostty `auto-update`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AutoUpdate {
@@ -221,6 +230,9 @@ pub struct Release {
     pub draft: bool,
     #[serde(default)]
     pub html_url: String,
+    /// GitHub's RFC 3339 timestamp, for the popover's "Released:" row.
+    #[serde(default)]
+    pub published_at: String,
     #[serde(default)]
     pub assets: Vec<Asset>,
 }
@@ -330,6 +342,24 @@ pub struct Plan {
     pub sha256: String,
     pub size: u64,
     pub notes_url: String,
+    /// The release date, `YYYY-MM-DD`, or empty when the feed has none.
+    pub released: String,
+}
+
+/// `2026-09-19` as upstream's abbreviated date, `Sep 19, 2026`; anything that
+/// isn't a date comes back as it was.
+pub fn format_release_date(ymd: &str) -> String {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let mut it = ymd.splitn(3, '-');
+    let parsed = (|| {
+        let y: u32 = it.next()?.parse().ok()?;
+        let m: usize = it.next()?.parse().ok()?;
+        let d: u32 = it.next()?.parse().ok()?;
+        Some(format!("{} {d}, {y}", MONTHS.get(m.checked_sub(1)?)?))
+    })();
+    parsed.unwrap_or_else(|| ymd.to_string())
 }
 
 // -------------------------------------------------------------------- HTTP --
@@ -337,8 +367,15 @@ pub struct Plan {
 /// The network seam. Tests substitute a map of canned responses.
 pub trait Http: Send + Sync {
     fn get(&self, url: &str) -> Result<Vec<u8>, String>;
-    /// Stream `url` to `dest`, reporting bytes written so far.
-    fn download(&self, url: &str, dest: &Path, progress: &dyn Fn(u64)) -> Result<(), String>;
+    /// Stream `url` to `dest`, reporting bytes written so far. `progress`
+    /// returns whether to keep going: `false` (the pill's Cancel) must stop the
+    /// transfer and return an error.
+    fn download(
+        &self,
+        url: &str,
+        dest: &Path,
+        progress: &dyn Fn(u64) -> bool,
+    ) -> Result<(), String>;
 }
 
 /// `curl.exe` from System32: present on every supported Windows, speaks TLS
@@ -380,7 +417,12 @@ impl Http for Curl {
         }
     }
 
-    fn download(&self, url: &str, dest: &Path, progress: &dyn Fn(u64)) -> Result<(), String> {
+    fn download(
+        &self,
+        url: &str,
+        dest: &Path,
+        progress: &dyn Fn(u64) -> bool,
+    ) -> Result<(), String> {
         let mut child = Self::cmd()
             .arg("-o")
             .arg(dest)
@@ -395,8 +437,11 @@ impl Http for Curl {
                     Err(format!("download failed ({st})"))
                 };
             }
-            if let Ok(m) = std::fs::metadata(dest) {
-                progress(m.len());
+            let done = std::fs::metadata(dest).map(|m| m.len()).unwrap_or(0);
+            if !progress(done) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(CANCELLED.into());
             }
             std::thread::sleep(Duration::from_millis(150));
         }
@@ -441,6 +486,7 @@ pub fn find_update(
         sha256: file.sha256.to_ascii_lowercase(),
         size: if file.size > 0 { file.size } else { asset.size },
         notes_url: rel.html_url.clone(),
+        released: rel.published_at.get(..10).unwrap_or_default().to_string(),
     }))
 }
 
@@ -478,31 +524,43 @@ pub fn extract_with_tar(zip: &Path, into: &Path) -> Result<(), String> {
 
 /// Download, verify, extract, mark pending. Nothing is extracted from a file
 /// whose hash does not match; a mismatching download is deleted.
+///
+/// `progress` returns whether to keep going (the pill's Cancel). It is asked
+/// once more just before `pending.json` is written — a cancel that lands during
+/// extraction must not leave an update staged, or it would install itself on
+/// the next launch after the user said no.
 pub fn download_and_stage(
     http: &dyn Http,
     plan: &Plan,
     root: &Path,
     extract: Extract,
-    progress: &dyn Fn(u64),
+    progress: &dyn Fn(u64) -> bool,
 ) -> Result<Pending, String> {
     std::fs::create_dir_all(root).map_err(|e| e.to_string())?;
     let part = root.join(format!("geist-{}.zip.part", plan.version));
     let _ = std::fs::remove_file(&part);
-    http.download(&plan.url, &part, progress)?;
+    if let Err(e) = http.download(&plan.url, &part, progress) {
+        let _ = std::fs::remove_file(&part);
+        return Err(e);
+    }
     if let Err(e) = verify_file(&part, &plan.sha256) {
         let _ = std::fs::remove_file(&part);
         return Err(e);
     }
-    let dir = root.join(format!("staged-{}", plan.version));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let r = extract(&part, &dir);
+    let staged = root.join(format!("staged-{}", plan.version));
+    let _ = std::fs::remove_dir_all(&staged);
+    std::fs::create_dir_all(&staged).map_err(|e| e.to_string())?;
+    let r = extract(&part, &staged);
     let _ = std::fs::remove_file(&part);
     r?;
     // A zip with a single top-level folder stages that folder's contents.
-    let dir = single_subdir(&dir).unwrap_or(dir);
+    let dir = single_subdir(&staged).unwrap_or_else(|| staged.clone());
     if !dir.join("geist.exe").is_file() {
         return Err("update package has no geist.exe".into());
+    }
+    if !progress(plan.size) {
+        let _ = std::fs::remove_dir_all(&staged);
+        return Err(CANCELLED.into());
     }
     let p = Pending {
         version: plan.version.clone(),
@@ -729,8 +787,56 @@ pub enum State {
     Error(String),
 }
 
+/// What the pill draws before its label (upstream `UpdateBadge`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Badge {
+    /// A static icon.
+    Icon(char),
+    /// An icon that turns — upstream spins `checking`'s once every 2.5 s.
+    Spinning(char),
+    /// A progress ring, `0.0..=1.0`.
+    Ring(f32),
+}
+
+/// The pill's colour role (upstream `UpdateViewModel.backgroundColor` and
+/// `foregroundColor`), resolved against the chrome palette by the app.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tone {
+    /// A control-coloured capsule with ordinary text.
+    Neutral,
+    /// The accent fill: an update is waiting.
+    Accent,
+    /// The accent darkened toward black: "No Updates Available".
+    Info,
+    /// A faint warning fill with warning-coloured text.
+    Warning,
+}
+
+/// What a click on the pill does (upstream `UpdatePill.pillButton`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PillClick {
+    /// Open or close the popover.
+    Popover,
+    /// "No Updates Available": the click just acknowledges it.
+    Dismiss,
+    /// "Restart to Complete Update": ask, then restart into the new version.
+    Restart,
+}
+
+// Material Design Icons, which the embedded Nerd Font carries at their MDI code
+// points (`badge_glyphs_are_in_the_ui_font` pins that). Upstream's SF Symbol in
+// each comment.
+const ICON_SYNC: char = '\u{F04E6}'; // arrow.triangle.2.circlepath
+const ICON_PACKAGE: char = '\u{F03D7}'; // shippingbox.fill
+const ICON_DOWNLOAD: char = '\u{F01DA}'; // arrow.down.circle
+const ICON_POWER: char = '\u{F0425}'; // power.circle
+const ICON_INFO: char = '\u{F02FD}'; // info.circle
+const ICON_ALERT: char = '\u{F0026}'; // exclamationmark.triangle.fill
+
 impl State {
-    /// The pill label (upstream `UpdateViewModel.text`).
+    /// The pill label (upstream `UpdateViewModel.text`). An error keeps the
+    /// short "Update Failed" here and puts the message in the popover: geist's
+    /// errors are curl's stderr, far too long for a titlebar pill.
     pub fn text(&self) -> String {
         match self {
             State::Idle => String::new(),
@@ -749,15 +855,58 @@ impl State {
         }
     }
 
+    /// The label the pill is sized for, so a percentage ticking up doesn't
+    /// resize it every frame (upstream `maxWidthText`).
+    pub fn max_width_text(&self) -> String {
+        match self {
+            State::Downloading { total, .. } if *total > 0 => "Downloading: 100%".into(),
+            _ => self.text(),
+        }
+    }
+
+    pub fn badge(&self) -> Option<Badge> {
+        Some(match self {
+            State::Idle => return None,
+            State::Checking => Badge::Spinning(ICON_SYNC),
+            State::NotFound => Badge::Icon(ICON_INFO),
+            State::Available(_) => Badge::Icon(ICON_PACKAGE),
+            State::Downloading { done, total, .. } if *total > 0 => {
+                Badge::Ring((*done as f32 / *total as f32).clamp(0.0, 1.0))
+            }
+            State::Downloading { .. } => Badge::Icon(ICON_DOWNLOAD),
+            State::Ready { .. } => Badge::Icon(ICON_POWER),
+            State::Error(_) => Badge::Icon(ICON_ALERT),
+        })
+    }
+
+    pub fn tone(&self) -> Tone {
+        match self {
+            State::Available(_) => Tone::Accent,
+            State::NotFound => Tone::Info,
+            State::Error(_) => Tone::Warning,
+            _ => Tone::Neutral,
+        }
+    }
+
+    /// Upstream `UpdateState.isHidden`: the pill exists in every state but idle.
+    pub fn is_hidden(&self) -> bool {
+        matches!(self, State::Idle)
+    }
+
+    pub fn click(&self) -> PillClick {
+        match self {
+            State::NotFound => PillClick::Dismiss,
+            State::Ready { .. } => PillClick::Restart,
+            _ => PillClick::Popover,
+        }
+    }
+
+    /// Upstream's `.help(model.text)`: the label itself, except that an error's
+    /// hover shows the message the short "Update Failed" label stands for.
     pub fn tooltip(&self) -> String {
         match self {
-            State::Available(p) => {
-                format!("Download and install geist {} ({})", p.version, p.notes_url)
-            }
-            State::Ready { version } => format!("geist {version} is ready; restart to apply"),
             State::Error(e) => e.clone(),
-            State::NotFound => "You are running the latest version".into(),
-            _ => String::new(),
+            _ => self.text(),
         }
     }
 }
@@ -767,6 +916,18 @@ struct Inner {
     busy: bool,
     last_check: Option<Instant>,
     shown_at: Option<Instant>,
+    /// Bumped by every dismissal (Cancel, Later, Skip, OK). A worker takes the
+    /// generation when it starts and only publishes its result if it still
+    /// matches, so a cancelled check's answer or download's completion lands
+    /// nowhere instead of resurrecting the pill.
+    generation: u64,
+    /// "Install and Relaunch": restart as soon as the download is staged.
+    relaunch: bool,
+    /// Debug builds' `geist_UPDATE_SIMULATE`: never touch the network.
+    simulated: bool,
+    /// `check_for_updates` arrived while a silent scheduled check was already
+    /// out: that check reports as if it had been asked for by hand.
+    manual_waiting: bool,
 }
 
 /// The process-wide updater (one per process, like the pill's model).
@@ -802,6 +963,24 @@ impl Settings {
     }
 }
 
+/// Where Skip remembers the version it skipped (Sparkle keeps the same).
+fn skip_file(root: &Path) -> PathBuf {
+    root.join("skipped-version")
+}
+
+/// The version the user chose to Skip, if any. Only an *automatic* check
+/// honours it; asking by hand still offers the update, as Sparkle does.
+pub fn skipped_version(root: &Path) -> Option<String> {
+    let v = std::fs::read_to_string(skip_file(root)).ok()?;
+    let v = v.trim();
+    (!v.is_empty()).then(|| v.to_string())
+}
+
+pub fn skip_version(root: &Path, version: &str) -> Result<(), String> {
+    std::fs::create_dir_all(root).map_err(|e| e.to_string())?;
+    std::fs::write(skip_file(root), version).map_err(|e| e.to_string())
+}
+
 impl Updater {
     pub fn new(http: Arc<dyn Http>) -> Self {
         Self {
@@ -810,6 +989,10 @@ impl Updater {
                 busy: false,
                 last_check: None,
                 shown_at: None,
+                generation: 0,
+                relaunch: false,
+                simulated: false,
+                manual_waiting: false,
             }),
             http,
             wake: OnceLock::new(),
@@ -820,34 +1003,62 @@ impl Updater {
         self.inner.lock().unwrap().state.clone()
     }
 
+    /// Whether this is `geist_UPDATE_SIMULATE`'s pretend updater, whose
+    /// "restart" must not actually restart anything.
+    pub fn simulated(&self) -> bool {
+        self.inner.lock().unwrap().simulated
+    }
+
+    fn wake(&self) {
+        if let Some(w) = self.wake.get() {
+            w();
+        }
+    }
+
     fn set(&self, s: State) {
         {
             let mut i = self.inner.lock().unwrap();
             i.state = s;
             i.shown_at = Some(Instant::now());
         }
-        if let Some(w) = self.wake.get() {
-            w();
+        self.wake();
+    }
+
+    /// Publish `s` from a worker that started at `generation`, unless the user
+    /// dismissed it since. Returns whether it was published.
+    fn set_if(&self, generation: u64, s: State) -> bool {
+        {
+            let mut i = self.inner.lock().unwrap();
+            if i.generation != generation {
+                return false;
+            }
+            i.state = s;
+            i.shown_at = Some(Instant::now());
         }
+        self.wake();
+        true
     }
 
     /// Called every UI pass: install the repaint hook, run the startup check
-    /// and the daily re-check, and let transient states fade.
+    /// and the daily re-check, and let "No Updates Available" fade.
     pub fn tick(&'static self, wake: impl Fn() + Send + Sync + 'static, s: &Settings) {
         let _ = self.wake.set(Box::new(wake));
-        if is_packaged() {
+        #[cfg(debug_assertions)]
+        self.simulate_from_env();
+        let simulated = self.simulated();
+        if is_packaged() && !simulated {
             return;
         }
         {
             let mut i = self.inner.lock().unwrap();
-            if matches!(i.state, State::NotFound | State::Error(_))
+            if i.state == State::NotFound
                 && i.shown_at
-                    .is_some_and(|t| t.elapsed() > Duration::from_secs(8))
+                    .is_some_and(|t| t.elapsed() > Duration::from_secs(NOT_FOUND_SECS))
             {
                 i.state = State::Idle;
             }
         }
-        if s.mode == AutoUpdate::Off {
+        if s.mode == AutoUpdate::Off || simulated {
             return;
         }
         let due = {
@@ -863,9 +1074,10 @@ impl Updater {
     }
 
     /// `check_for_updates`, or the scheduled check (`manual = false`, which
-    /// stays silent when there is nothing new or the network is down).
+    /// stays silent when there is nothing new or the network is down, and
+    /// passes over a version the user chose to Skip).
     pub fn check(&'static self, s: Settings, manual: bool) {
-        if is_packaged() {
+        if is_packaged() && !self.simulated() {
             if manual {
                 self.set(State::Error(
                     "This copy is installed as a package; App Installer / the Store updates it."
@@ -874,82 +1086,296 @@ impl Updater {
             }
             return;
         }
-        {
+        let generation = {
             let mut i = self.inner.lock().unwrap();
-            if i.busy || matches!(i.state, State::Ready { .. } | State::Downloading { .. }) {
+            if matches!(i.state, State::Ready { .. } | State::Downloading { .. }) {
+                return; // the pill already says what is happening
+            }
+            if i.busy {
+                // A silent scheduled check is already out. Asking by hand must
+                // not just do nothing: show "Checking…" and let that check
+                // report as a manual one would.
+                if manual && i.state == State::Idle {
+                    i.manual_waiting = true;
+                    i.state = State::Checking;
+                    i.shown_at = Some(Instant::now());
+                    drop(i);
+                    self.wake();
+                }
                 return;
             }
             i.busy = true;
             i.last_check = Some(Instant::now());
-        }
+            i.generation
+        };
         if manual {
             self.set(State::Checking);
         }
+        let simulated = self.simulated();
         std::thread::spawn(move || {
-            let r = find_update(&*self.http, &s.feed, s.channel, env!("CARGO_PKG_VERSION"));
-            self.inner.lock().unwrap().busy = false;
+            let r = if simulated {
+                std::thread::sleep(Duration::from_millis(1200));
+                Ok(None)
+            } else {
+                find_update(&*self.http, &s.feed, s.channel, env!("CARGO_PKG_VERSION"))
+            };
+            let manual = {
+                let mut i = self.inner.lock().unwrap();
+                if i.generation != generation {
+                    return; // cancelled; `dismiss` already cleared `busy`
+                }
+                i.busy = false;
+                manual || std::mem::take(&mut i.manual_waiting)
+            };
+            let skipped = (!manual)
+                .then(updates_root)
+                .flatten()
+                .and_then(|root| skipped_version(&root));
             match r {
-                Ok(Some(plan)) if s.mode == AutoUpdate::Download => self.download(plan),
-                Ok(Some(plan)) => self.set(State::Available(plan)),
-                Ok(None) if manual => self.set(State::NotFound),
-                Err(e) if manual => self.set(State::Error(e)),
-                _ => self.set(State::Idle),
+                Ok(Some(plan)) if skipped.as_deref() == Some(plan.version.as_str()) => {
+                    self.set_if(generation, State::Idle);
+                }
+                // `auto-update = download` fetches unattended; someone who asked
+                // gets the popover and chooses, as upstream's user driver shows.
+                Ok(Some(plan)) if s.mode == AutoUpdate::Download && !manual => {
+                    self.download(plan, false)
+                }
+                Ok(Some(plan)) => {
+                    self.set_if(generation, State::Available(plan));
+                }
+                Ok(None) if manual => {
+                    self.set_if(generation, State::NotFound);
+                }
+                Err(e) if manual => {
+                    self.set_if(generation, State::Error(e));
+                }
+                _ => {
+                    self.set_if(generation, State::Idle);
+                }
             }
         });
     }
 
-    /// Fetch, verify and stage `plan` on a worker thread.
-    pub fn download(&'static self, plan: Plan) {
-        let Some(root) = updates_root() else {
-            self.set(State::Error("LOCALAPPDATA is not set".into()));
+    /// Fetch, verify and stage `plan` on a worker thread. `attended`: someone
+    /// asked for it (Install and Relaunch), so a failure shows "Update Failed".
+    /// An unattended one (`auto-update = download`) fails silently, as the
+    /// automatic check does and as upstream's automatic driver never reports.
+    pub fn download(&'static self, plan: Plan, attended: bool) {
+        let simulated = self.simulated();
+        let root = if simulated {
+            PathBuf::new()
+        } else if let Some(root) = updates_root() {
+            root
+        } else {
+            if attended {
+                self.set(State::Error("LOCALAPPDATA is not set".into()));
+            }
             return;
         };
-        {
+        let generation = {
             let mut i = self.inner.lock().unwrap();
             if i.busy {
                 return;
             }
             i.busy = true;
-        }
+            i.generation
+        };
         let total = plan.size;
-        self.set(State::Downloading {
-            version: plan.version.clone(),
-            done: 0,
-            total,
-        });
+        self.set_if(
+            generation,
+            State::Downloading {
+                version: plan.version.clone(),
+                done: 0,
+                total,
+            },
+        );
         std::thread::spawn(move || {
             let v = plan.version.clone();
+            // `false` once the user cancels: curl is killed, and nothing is
+            // staged for the next launch.
             let progress = |done| {
-                self.set(State::Downloading {
-                    version: v.clone(),
-                    done,
-                    total,
-                })
+                self.set_if(
+                    generation,
+                    State::Downloading {
+                        version: v.clone(),
+                        done,
+                        total,
+                    },
+                )
             };
-            let r = download_and_stage(&*self.http, &plan, &root, &extract_with_tar, &progress);
-            self.inner.lock().unwrap().busy = false;
-            match r {
-                Ok(p) => self.set(State::Ready { version: p.version }),
-                Err(e) => self.set(State::Error(e)),
+            let r = if simulated {
+                simulate_download(&plan, &progress)
+            } else {
+                download_and_stage(&*self.http, &plan, &root, &extract_with_tar, &progress)
+            };
+            // Published under the same lock that checks the generation, so a
+            // Cancel can't slip between the check and the publish. A Cancel
+            // that beat us after the last progress report found the state
+            // still `Downloading` and won: undo the staging, or the update the
+            // user just cancelled would install itself on the next launch.
+            let published = {
+                let mut i = self.inner.lock().unwrap();
+                if i.generation == generation {
+                    i.busy = false;
+                    i.state = match &r {
+                        Ok(p) => State::Ready {
+                            version: p.version.clone(),
+                        },
+                        Err(e) if e == CANCELLED || !attended => State::Idle,
+                        Err(e) => State::Error(e.clone()),
+                    };
+                    if !matches!(i.state, State::Ready { .. }) {
+                        i.relaunch = false;
+                    }
+                    i.shown_at = Some(Instant::now());
+                    true
+                } else {
+                    false
+                }
+            };
+            if published {
+                self.wake();
+            } else if let Ok(p) = &r
+                && !simulated
+            {
+                discard_staged(&root, &p.version);
             }
         });
     }
 
-    /// A click on the pill. Returns `true` when the app should restart now.
-    pub fn activate(&'static self) -> bool {
-        match self.state() {
-            State::Available(plan) => {
-                self.download(plan);
-                false
+    /// Back to idle: the popover's Cancel (while checking or downloading),
+    /// Later, OK, and a click on "No Updates Available". Bumping the generation
+    /// is what makes the in-flight worker's result land nowhere; a download
+    /// sees it on its next progress report and kills curl.
+    pub fn dismiss(&self) {
+        {
+            let mut i = self.inner.lock().unwrap();
+            if matches!(i.state, State::Ready { .. }) {
+                return; // staged: only a restart (or the next launch) clears it
             }
-            State::Ready { .. } => true,
-            State::NotFound | State::Error(_) => {
-                self.set(State::Idle);
-                false
-            }
-            _ => false,
+            i.generation += 1;
+            i.busy = false;
+            i.relaunch = false;
+            i.manual_waiting = false;
+            i.state = State::Idle;
+            i.shown_at = Some(Instant::now());
+            // A dismissal ends this round, so the next scheduled check is a
+            // full interval away. Otherwise a pill left up past the daily
+            // re-check would come straight back the moment it was dismissed.
+            i.last_check = Some(Instant::now());
+        }
+        self.wake();
+    }
+
+    /// "Install and Relaunch": download, then restart as soon as it is staged
+    /// (the app still asks first, because a restart ends every shell).
+    pub fn install(&'static self) {
+        let State::Available(plan) = self.state() else {
+            return;
+        };
+        self.inner.lock().unwrap().relaunch = true;
+        self.download(plan, true);
+    }
+
+    /// "Skip": never offer this version again on an automatic check.
+    pub fn skip(&self) {
+        if let State::Available(plan) = self.state()
+            && !self.simulated()
+            && let Some(root) = updates_root()
+        {
+            let _ = skip_version(&root, &plan.version);
+        }
+        self.dismiss();
+    }
+
+    /// The error popover's Retry: check again, by hand, with the settings as
+    /// they are now (the failure may have been a feed URL since corrected).
+    pub fn retry(&'static self, s: Settings) {
+        self.dismiss();
+        self.check(s, true);
+    }
+
+    /// Whether "Install and Relaunch" is due: the download it started is now
+    /// staged. Consumed, so the restart is asked for exactly once.
+    pub fn take_relaunch(&self) -> bool {
+        let mut i = self.inner.lock().unwrap();
+        let due = i.relaunch && matches!(i.state, State::Ready { .. });
+        if due {
+            i.relaunch = false;
+        }
+        due
+    }
+
+    /// Debug builds: `geist_UPDATE_SIMULATE=checking|available|downloading|
+    /// ready|notfound|error` puts the pill in that state without touching the
+    /// network, and the popover's actions then play out against a stand-in (a
+    /// download ticks to 100% over three seconds, a check finds nothing, and a
+    /// restart only says so). The counterpart of upstream's `UpdateSimulator`:
+    /// the only way to look at every state without publishing a release.
+    #[cfg(debug_assertions)]
+    fn simulate_from_env(&self) {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            let Ok(which) = std::env::var("geist_UPDATE_SIMULATE") else {
+                return;
+            };
+            let plan = Plan {
+                version: "9.9.9".into(),
+                url: String::new(),
+                sha256: String::new(),
+                size: 48 * 1024 * 1024,
+                notes_url: "https://github.com/stvnksslr/geist/releases".into(),
+                released: "2026-09-19".into(),
+            };
+            let state = match which.as_str() {
+                "checking" => State::Checking,
+                "available" => State::Available(plan.clone()),
+                "downloading" => State::Downloading {
+                    version: plan.version.clone(),
+                    done: plan.size * 2 / 5,
+                    total: plan.size,
+                },
+                "ready" => State::Ready {
+                    version: plan.version.clone(),
+                },
+                "notfound" => State::NotFound,
+                "error" => State::Error(
+                    "curl: (6) Could not resolve host: api.github.com (simulated)".into(),
+                ),
+                _ => return,
+            };
+            let mut i = self.inner.lock().unwrap();
+            i.simulated = true;
+            i.state = state;
+            i.shown_at = Some(Instant::now());
+            // "checking" is a pretend check that never finishes; Cancel is the
+            // way out of it, which is what the state is there to show.
+        });
+    }
+}
+
+/// Undo a staging the user cancelled in the last instant: its `pending.json`
+/// (only if it names this version) and its staged files.
+fn discard_staged(root: &Path, version: &str) {
+    if read_pending(root).is_some_and(|p| p.version == version) {
+        let _ = std::fs::remove_file(root.join("pending.json"));
+    }
+    let _ = std::fs::remove_dir_all(root.join(format!("staged-{version}")));
+}
+
+/// `geist_UPDATE_SIMULATE`'s download: thirty ticks of fake progress, honouring
+/// Cancel exactly as the real one does.
+fn simulate_download(plan: &Plan, progress: &dyn Fn(u64) -> bool) -> Result<Pending, String> {
+    for step in 1..=30u64 {
+        std::thread::sleep(Duration::from_millis(100));
+        if !progress(plan.size * step / 30) {
+            return Err(CANCELLED.into());
         }
     }
+    Ok(Pending {
+        version: plan.version.clone(),
+        dir: PathBuf::new(),
+    })
 }
 
 /// "Restart to apply": launch the (still old) exe with `--restore-session`,
@@ -1049,6 +1475,7 @@ mod tests {
             prerelease: pre,
             draft,
             html_url: String::new(),
+            published_at: String::new(),
             assets: vec![],
         }
     }
@@ -1129,10 +1556,17 @@ mod tests {
         fn get(&self, url: &str) -> Result<Vec<u8>, String> {
             self.0.get(url).cloned().ok_or_else(|| format!("404 {url}"))
         }
-        fn download(&self, url: &str, dest: &Path, progress: &dyn Fn(u64)) -> Result<(), String> {
+        fn download(
+            &self,
+            url: &str,
+            dest: &Path,
+            progress: &dyn Fn(u64) -> bool,
+        ) -> Result<(), String> {
             let b = self.get(url)?;
             std::fs::write(dest, &b).map_err(|e| e.to_string())?;
-            progress(b.len() as u64);
+            if !progress(b.len() as u64) {
+                return Err(CANCELLED.into());
+            }
             Ok(())
         }
     }
@@ -1141,6 +1575,7 @@ mod tests {
         let arch = current_arch();
         let feed = format!(
             r#"[{{"tag_name":"v9.0.0","prerelease":false,"draft":false,"html_url":"https://x/r",
+               "published_at":"2026-09-19T17:04:11Z",
                "assets":[{{"name":"geist-manifest.json","browser_download_url":"https://x/m","size":1}},
                          {{"name":"geist-9.0.0-windows-{arch}.zip","browser_download_url":"https://x/z","size":3}}]}}]"#
         );
@@ -1163,6 +1598,10 @@ mod tests {
         assert_eq!(p.version, "9.0.0");
         assert_eq!(p.url, "https://x/z");
         assert_eq!(p.size, 3);
+        assert_eq!(
+            p.released, "2026-09-19",
+            "the date part of GitHub's published_at"
+        );
         assert!(
             find_update(&m, "https://x/feed", Channel::Stable, "9.0.0")
                 .unwrap()
@@ -1183,7 +1622,7 @@ mod tests {
         let plan = find_update(&m, "https://x/feed", Channel::Stable, "0.1.0")
             .unwrap()
             .unwrap();
-        let p = download_and_stage(&m, &plan, &root, &fake_extract, &|_| {}).unwrap();
+        let p = download_and_stage(&m, &plan, &root, &fake_extract, &|_| true).unwrap();
         assert!(
             p.dir.ends_with("geist-9.0.0"),
             "single top folder is unwrapped"
@@ -1199,7 +1638,7 @@ mod tests {
         let never =
             |_: &Path, _: &Path| -> Result<(), String> { panic!("extracted an unverified file") };
         assert!(
-            download_and_stage(&m, &plan, &root, &never, &|_| {})
+            download_and_stage(&m, &plan, &root, &never, &|_| true)
                 .unwrap_err()
                 .contains("mismatch")
         );
@@ -1268,5 +1707,221 @@ mod tests {
             "Restart to Complete Update"
         );
         assert_eq!(State::Idle.text(), "");
+    }
+
+    fn plan_9() -> Plan {
+        Plan {
+            version: "9.0.0".into(),
+            url: String::new(),
+            sha256: String::new(),
+            size: 100,
+            notes_url: String::new(),
+            released: String::new(),
+        }
+    }
+
+    /// A Cancel that wins the race after the download already staged: the
+    /// worker undoes the staging, but only its own.
+    #[test]
+    fn a_late_cancel_undoes_only_its_own_staging() {
+        let root = tmp("discard");
+        let staged = root.join("staged-9.0.0");
+        std::fs::create_dir_all(&staged).unwrap();
+        let p = Pending {
+            version: "9.0.0".into(),
+            dir: staged.clone(),
+        };
+        std::fs::write(root.join("pending.json"), serde_json::to_vec(&p).unwrap()).unwrap();
+        discard_staged(&root, "9.0.0");
+        assert!(read_pending(&root).is_none());
+        assert!(!staged.exists());
+
+        // Some other version's pending update is not ours to remove.
+        let other = Pending {
+            version: "8.0.0".into(),
+            dir: root.join("staged-8.0.0"),
+        };
+        std::fs::write(
+            root.join("pending.json"),
+            serde_json::to_vec(&other).unwrap(),
+        )
+        .unwrap();
+        discard_staged(&root, "9.0.0");
+        assert_eq!(read_pending(&root), Some(other));
+    }
+
+    #[test]
+    fn release_dates_read_like_upstreams() {
+        assert_eq!(format_release_date("2026-09-19"), "Sep 19, 2026");
+        assert_eq!(format_release_date("2026-01-02"), "Jan 2, 2026");
+        assert_eq!(format_release_date("2026-13-02"), "2026-13-02");
+        assert_eq!(format_release_date(""), "");
+    }
+
+    /// Asking by hand while a silent scheduled check is out shows "Checking…"
+    /// and lets that check report — instead of silently doing nothing.
+    #[test]
+    fn a_manual_check_joins_a_silent_one() {
+        let u: &'static Updater = Box::leak(Box::new(Updater::new(Arc::new(Mock(HashMap::new())))));
+        u.inner.lock().unwrap().busy = true;
+        let s = Settings {
+            mode: AutoUpdate::Check,
+            channel: Channel::Stable,
+            feed: String::new(),
+        };
+        u.check(s, true);
+        assert_eq!(u.state(), State::Checking);
+        assert!(u.inner.lock().unwrap().manual_waiting);
+        // Cancel clears the promotion along with the state.
+        u.dismiss();
+        assert!(!u.inner.lock().unwrap().manual_waiting);
+    }
+
+    /// Later / Cancel / OK end the round: the next scheduled check is a full
+    /// interval away, not the next frame.
+    #[test]
+    fn dismissing_restarts_the_recheck_interval() {
+        let u = Updater::new(Arc::new(Mock(HashMap::new())));
+        u.set(State::Available(plan_9()));
+        u.dismiss();
+        let i = u.inner.lock().unwrap();
+        assert!(i.last_check.is_some_and(|t| t.elapsed() < RECHECK));
+    }
+
+    /// The table upstream's `UpdateViewModel` and `UpdateBadge` encode: which
+    /// badge, colour role and click each state gets.
+    #[test]
+    fn pill_presentation_matches_upstream() {
+        let dl = |done| State::Downloading {
+            version: "9".into(),
+            done,
+            total: 200,
+        };
+        assert_eq!(dl(50).badge(), Some(Badge::Ring(0.25)));
+        // Sized for the widest percentage, so the pill never jitters.
+        assert_eq!(dl(50).max_width_text(), "Downloading: 100%");
+        assert_eq!(dl(50).tone(), Tone::Neutral);
+        let unknown = State::Downloading {
+            version: "9".into(),
+            done: 7,
+            total: 0,
+        };
+        assert_eq!(unknown.badge(), Some(Badge::Icon(ICON_DOWNLOAD)));
+        assert_eq!(unknown.max_width_text(), unknown.text());
+
+        assert_eq!(State::Checking.badge(), Some(Badge::Spinning(ICON_SYNC)));
+        assert_eq!(State::Available(plan_9()).tone(), Tone::Accent);
+        assert_eq!(State::NotFound.tone(), Tone::Info);
+        assert_eq!(State::Error("x".into()).tone(), Tone::Warning);
+
+        assert!(State::Idle.is_hidden() && State::Idle.badge().is_none());
+        assert_eq!(State::NotFound.click(), PillClick::Dismiss);
+        assert_eq!(
+            State::Ready {
+                version: "9".into()
+            }
+            .click(),
+            PillClick::Restart
+        );
+        assert_eq!(State::Available(plan_9()).click(), PillClick::Popover);
+        assert_eq!(State::Error("x".into()).click(), PillClick::Popover);
+    }
+
+    /// The badges are Material Design Icons drawn from the embedded Nerd Font
+    /// (the UI's last fallback face). A code point it lacks would draw as tofu.
+    #[test]
+    fn badge_glyphs_are_in_the_ui_font() {
+        use ab_glyph::Font;
+        let font = ab_glyph::FontRef::try_from_slice(crate::render::regular_font()).unwrap();
+        for c in [
+            ICON_SYNC,
+            ICON_PACKAGE,
+            ICON_DOWNLOAD,
+            ICON_POWER,
+            ICON_INFO,
+            ICON_ALERT,
+        ] {
+            assert_ne!(font.glyph_id(c).0, 0, "U+{:X} missing", c as u32);
+        }
+    }
+
+    /// Cancel while downloading: nothing may be left to install itself on the
+    /// next launch — no `pending.json`, no partial file.
+    #[test]
+    fn cancelling_a_download_stages_nothing() {
+        let root = tmp("cancel-dl");
+        let m = feed_with(b"zip", &sha256_hex(b"zip"));
+        let plan = find_update(&m, "https://x/feed", Channel::Stable, "0.1.0")
+            .unwrap()
+            .unwrap();
+        let never = |_: &Path, _: &Path| -> Result<(), String> { panic!("extracted") };
+        let e = download_and_stage(&m, &plan, &root, &never, &|_| false).unwrap_err();
+        assert_eq!(e, CANCELLED);
+        assert!(read_pending(&root).is_none());
+        assert!(std::fs::read_dir(&root).unwrap().next().is_none());
+    }
+
+    /// …and a cancel that lands during extraction, after the download already
+    /// said "keep going", is caught before `pending.json` is written.
+    #[test]
+    fn cancelling_after_extraction_stages_nothing() {
+        let fake_extract = |_: &Path, into: &Path| -> Result<(), String> {
+            std::fs::write(into.join("geist.exe"), b"new").map_err(|e| e.to_string())
+        };
+        let root = tmp("cancel-extract");
+        let m = feed_with(b"zip", &sha256_hex(b"zip"));
+        let plan = find_update(&m, "https://x/feed", Channel::Stable, "0.1.0")
+            .unwrap()
+            .unwrap();
+        let calls = std::cell::Cell::new(0);
+        let progress = |_| {
+            calls.set(calls.get() + 1);
+            calls.get() == 1 // the download's report passes; the final check fails
+        };
+        let e = download_and_stage(&m, &plan, &root, &fake_extract, &progress).unwrap_err();
+        assert_eq!(e, CANCELLED);
+        assert_eq!(calls.get(), 2);
+        assert!(read_pending(&root).is_none());
+        assert!(!root.join("staged-9.0.0").exists());
+    }
+
+    /// A worker that started before a dismissal must not resurrect the pill.
+    #[test]
+    fn a_dismissed_workers_result_lands_nowhere() {
+        let u = Updater::new(Arc::new(Mock(HashMap::new())));
+        let started_at = u.inner.lock().unwrap().generation;
+        u.set(State::Checking);
+        u.dismiss();
+        assert!(!u.set_if(started_at, State::NotFound));
+        assert_eq!(u.state(), State::Idle);
+        // A worker started after it publishes normally.
+        let now = u.inner.lock().unwrap().generation;
+        assert!(u.set_if(now, State::NotFound));
+        assert_eq!(u.state(), State::NotFound);
+    }
+
+    /// A staged update can't be dismissed (only a restart consumes it), and
+    /// "Install and Relaunch" asks for the restart exactly once.
+    #[test]
+    fn a_staged_update_survives_dismiss_and_relaunches_once() {
+        let u = Updater::new(Arc::new(Mock(HashMap::new())));
+        u.inner.lock().unwrap().relaunch = true;
+        u.set(State::Ready {
+            version: "9.0.0".into(),
+        });
+        u.dismiss();
+        assert!(matches!(u.state(), State::Ready { .. }));
+        assert!(u.take_relaunch());
+        assert!(!u.take_relaunch());
+    }
+
+    #[test]
+    fn skip_is_remembered_per_version() {
+        let root = tmp("skip");
+        assert_eq!(skipped_version(&root), None);
+        skip_version(&root, "9.0.0").unwrap();
+        assert_eq!(skipped_version(&root).as_deref(), Some("9.0.0"));
+        std::fs::write(skip_file(&root), "  \n").unwrap();
+        assert_eq!(skipped_version(&root), None);
     }
 }

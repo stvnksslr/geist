@@ -113,6 +113,11 @@ fallback engine without app changes:
   `startup_apply` at the top of `main` — replaced files are **renamed** to `*.old`, never deleted
   while running. Its network goes through the `Http` trait; tests use a mock. Live-test the apply
   path with a temp `LOCALAPPDATA` and a copied exe, never against `target\` or a real install.
+  The UI is macOS's pill + popover (`app.rs::update_pill`, `render_update_popover`); look at any
+  state with a debug build and `geist_UPDATE_SIMULATE=checking|available|downloading|ready|notfound|error`
+  (no network, and its "restart" restarts nothing). **Cancel must reach the worker**: a transfer
+  stops when its progress callback returns `false`, and `download_and_stage` asks once more before
+  writing `pending.json`. A cancel that only hid the pill would still install on the next launch.
 - **`config.rs`** — Ghostty-format config (`key = value` lines, kebab-case keys, unquoted
   colors, repeatable `palette`) from `%APPDATA%\geist\config` (override with `geist_CONFIG`);
   defines the full ANSI 16 + 256-color palette. **`profiles.rs`** — shell profiles (pwsh/powershell/cmd/wsl),
