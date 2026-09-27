@@ -7026,18 +7026,29 @@ impl Window {
         let mut link_preview: Option<(egui::Rect, String)> = None;
         // `window-padding-color = extend*`: (rect, colour) for the padding band.
         let mut padding_fills: Vec<(egui::Rect, crate::engine::Rgb)> = Vec::new();
+        // A split or zoomed tab draws a ring around a pane (below). Every pane
+        // reserves its band, not just the focused one, so moving focus never
+        // changes a grid's size and reflows it.
+        let ring = if leaves.len() > 1 || zoomed.is_some() {
+            snap_stroke(PANE_RING_PT, ppp)
+        } else {
+            0.0
+        };
         for leaf in leaves.iter_mut() {
-            // The pane occupies `leaf.rect`; the grid is inset by the padding so
-            // text clears the pane's edges (window border or split divider alike).
+            // The pane occupies `leaf.rect`; the grid is inset by the padding (and
+            // the ring band) so text clears the pane's edges, whether that's the
+            // window border or a split divider.
             // `window-padding-balance` then shares out the leftover space — the
             // remainder of dividing the pane by whole cells, which otherwise all
             // piles up on the right and bottom.
-            let prect = balance_pane(
-                leaf.rect.shrink2(pad),
+            let prect = pane_grid_rect(
+                leaf.rect,
+                pad,
+                ring,
                 self.config.window_padding_balance,
                 self.cell_w,
                 self.cell_h,
-                ctx.pixels_per_point().max(1.0),
+                ppp,
             );
             let leaf_rect = leaf.rect;
             let leaf_id = leaf.id;
@@ -7478,9 +7489,8 @@ impl Window {
         // loop above: egui resolves which widget owns the pointer from the last
         // interested widget registered in the layer, so the bar has to register
         // after each pane's `ui.interact` to win an overlap. That's what keeps a
-        // thumb drag from also painting a text selection, and it only matters
-        // when `window-padding-x` is small enough for the two rects to touch —
-        // at the default 20pt the bar sits entirely inside the padding gutter.
+        // thumb drag from also painting a text selection. The bar is an overlay
+        // wider than the default 2pt padding, so the two rects always overlap.
         //
         // Not gated on `is_focus`: every split shows its own bar.
         let mut scrollbars: Vec<(egui::Rect, scrollbar::Thumb, f32, bool)> = Vec::new();
@@ -7682,8 +7692,11 @@ impl Window {
         if let Some(hwnd) = self.hwnd.filter(|_| self.is_root) {
             let g = self.config.window_step_resize.then(|| {
                 let client = ctx.content_rect().size() * ppp;
-                let gw = (full_area.width() - 2.0 * self.config.padding_x) * ppp;
-                let gh = (full_area.height() - 2.0 * self.config.padding_y) * ppp;
+                // `ring` is the band `pane_grid_rect` reserves: 0 unsplit, exact
+                // for a zoomed tab, and (like the rest of this) approximate for a
+                // split, which is sized as one pane.
+                let gw = (full_area.width() - 2.0 * (self.config.padding_x + ring)) * ppp;
+                let gh = (full_area.height() - 2.0 * (self.config.padding_y + ring)) * ppp;
                 crate::winchrome::StepGeometry {
                     cell_w: cw,
                     cell_h: ch,
@@ -7856,19 +7869,20 @@ impl Window {
             ui.painter().rect_filled(*rect, 0.0, *col);
         }
 
-        // Border widths are snapped for the same reason the gutter is: a 2pt
-        // stroke at 1.25× scaling straddles a pixel boundary and rasterizes as a
-        // blurred 3px band on one edge and a crisp 2px one on another.
-        let stroke_w = |pt: f32| (pt * ppp).round().max(1.0) / ppp;
+        // Border widths are snapped for the same reason the gutter is.
+        let stroke_w = |pt: f32| snap_stroke(pt, ppp);
+        // The bell and highlight flashes, capped so they never reach the text.
+        let flash_w = flash_width(pad, ring, ppp);
 
         // Outline the focused pane when the tab is split. Frame the *full* pane
-        // rect (not the padded grid) so the padding band shows as a visible gap
-        // between the border and the text, rather than the text hugging the line.
+        // rect: its grid was laid out inside this ring's band plus the padding
+        // (`pane_grid_rect`), so the padding shows as a gap between the ring and
+        // the text instead of the ring painting over the outermost cells.
         if leaves.len() > 1 {
             ui.painter().rect_stroke(
                 leaves[focus_idx].rect,
                 0.0,
-                egui::Stroke::new(stroke_w(2.0), self.chrome.accent),
+                egui::Stroke::new(ring, self.chrome.accent),
                 egui::StrokeKind::Inside,
             );
         } else if zoomed.is_some() {
@@ -7878,7 +7892,7 @@ impl Window {
             ui.painter().rect_stroke(
                 full_area,
                 0.0,
-                egui::Stroke::new(stroke_w(2.0), self.chrome.accent_zoom),
+                egui::Stroke::new(ring, self.chrome.accent_zoom),
                 egui::StrokeKind::Inside,
             );
         }
@@ -7895,7 +7909,7 @@ impl Window {
                 ui.painter().rect_stroke(
                     *rect,
                     0.0,
-                    egui::Stroke::new(stroke_w(3.0), col),
+                    egui::Stroke::new(flash_w, col),
                     egui::StrokeKind::Inside,
                 );
             }
@@ -7915,7 +7929,7 @@ impl Window {
                 ui.painter().rect_stroke(
                     *rect,
                     0.0,
-                    egui::Stroke::new(stroke_w(3.0), edge),
+                    egui::Stroke::new(flash_w, edge),
                     egui::StrokeKind::Inside,
                 );
             }
@@ -10711,6 +10725,69 @@ fn cycle_pick(ids: &[u64], focus: u64, forward: bool) -> Option<u64> {
 /// Nominal width of a split gutter, in logical points.
 const SPLIT_GUTTER_PT: f32 = 1.0;
 
+/// Width of the ring around the focused split, and around a zoomed one.
+const PANE_RING_PT: f32 = 2.0;
+
+/// Width of the visual-bell and "here I am" flash borders, before
+/// [`flash_width`] caps them to the room outside the text.
+const PANE_FLASH_PT: f32 = 3.0;
+
+/// A stroke width in logical points, snapped to whole device pixels (at least
+/// one). A 2pt stroke at 1.25× would otherwise straddle a pixel boundary and
+/// rasterize as a blurred 3px band on one edge and a crisp 2px one on another.
+fn snap_stroke(pt: f32, ppp: f32) -> f32 {
+    (pt * ppp).round().max(1.0) / ppp
+}
+
+/// The rect a pane's grid is laid out in.
+///
+/// `ring` is the width of the border the pane can carry — non-zero when the tab
+/// is split (the focus ring) or zoomed (the zoom ring). The grid is inset by it
+/// *as well as* by the padding, so the ring sits in a band of its own and the
+/// padding stays a visible gap between it and the text. Without that band the
+/// ring is painted over the padding, which since the default dropped to
+/// Ghostty's 2pt is the whole of it: the ring then sat flush on the text and,
+/// wherever it rounded a pixel wider than the padding, covered the outermost
+/// row and column.
+///
+/// With a ring the edges are computed in device pixels from where egui actually
+/// strokes (it rounds a stroked rect to the pixel grid) and rounded *inwards*,
+/// so a fractional pane edge can't tuck text back under it. Without one this is
+/// exactly the old `leaf.shrink2(pad)`, leaving an unsplit pane's grid as it was.
+fn pane_grid_rect(
+    leaf: egui::Rect,
+    pad: egui::Vec2,
+    ring: f32,
+    balance: crate::config::PaddingBalance,
+    cell_w: f32,
+    cell_h: f32,
+    ppp: f32,
+) -> egui::Rect {
+    let inner = if ring > 0.0 {
+        let ring_px = ring * ppp;
+        let x0 = ((leaf.min.x * ppp).round() + ring_px + pad.x * ppp).ceil();
+        let y0 = ((leaf.min.y * ppp).round() + ring_px + pad.y * ppp).ceil();
+        let x1 = ((leaf.max.x * ppp).round() - ring_px - pad.x * ppp).floor();
+        let y1 = ((leaf.max.y * ppp).round() - ring_px - pad.y * ppp).floor();
+        egui::Rect::from_min_max(
+            egui::pos2(x0, y0) / ppp,
+            egui::pos2(x1.max(x0), y1.max(y0)) / ppp,
+        )
+    } else {
+        leaf.shrink2(pad)
+    };
+    balance_pane(inner, balance, cell_w, cell_h, ppp)
+}
+
+/// How wide the bell / highlight flash may be: [`PANE_FLASH_PT`], capped to the
+/// room between the pane's edge and its text (the padding plus any ring band),
+/// so a flash never covers the outermost row or column. Always at least one
+/// device pixel, so a `window-padding = 0` pane still visibly flashes.
+fn flash_width(pad: egui::Vec2, ring: f32, ppp: f32) -> f32 {
+    let room = ((pad.x.min(pad.y).max(0.0) + ring) * ppp).floor().max(1.0) / ppp;
+    snap_stroke(PANE_FLASH_PT, ppp).min(room)
+}
+
 /// Round a logical-point coordinate to a device-pixel boundary.
 fn snap(v: f32, ppp: f32) -> f32 {
     (v * ppp).round() / ppp
@@ -10809,9 +10886,10 @@ fn truncate_to_width(title: &str, suffix: &str, max: f32, w: impl Fn(&str) -> f3
 #[cfg(test)]
 mod tests {
     use super::{
-        Dir, Node, Tab, capture_node_with, cycle_pick, dim_alpha, drop_index, highlight_job,
-        keep_only_tab, nav_dir, new_tab_index, overlay_anchor, preview_text, reap_tabs,
-        reinsert_tabs, remove_tabs_by_id, reorder_tabs, retire_window, split_rect, take_active_tab,
+        Dir, Node, PANE_FLASH_PT, PANE_RING_PT, Tab, balance_pane, capture_node_with, cycle_pick,
+        dim_alpha, drop_index, flash_width, highlight_job, keep_only_tab, nav_dir, new_tab_index,
+        overlay_anchor, pane_grid_rect, preview_text, reap_tabs, reinsert_tabs, remove_tabs_by_id,
+        reorder_tabs, retire_window, snap_stroke, split_rect, take_active_tab,
         truncate_tabs_to_right, truncate_to_width, zoom_after_nav,
     };
     use crate::config::ResizeOverlayPosition as P;
@@ -11700,6 +11778,105 @@ mod tests {
                 assert_eq!(g.bottom(), b.top());
             }
         }
+    }
+
+    /// The focus / zoom ring never covers text: at every scale, padding (none
+    /// included), balance mode and fractional pane edge, the grid box the
+    /// renderer draws — origin rounded like `PaneFrame::origin_px`, whole cells
+    /// like `grid_dims` — lies inside the ring's inner edge as egui strokes it,
+    /// with the padding kept as a gap on the leading edges. Before the ring had
+    /// a band of its own it was painted over the (default 2pt) padding and sat
+    /// flush on, or over, the outermost row and column.
+    #[test]
+    fn pane_grid_stays_inside_the_ring() {
+        use crate::config::PaddingBalance;
+        let (cw, ch) = (10.0, 21.0); // device px, integer like the atlas's
+        for ppp in [1.0, 1.25, 1.5, 1.75, 2.0, 2.5] {
+            let ring = snap_stroke(PANE_RING_PT, ppp);
+            let ring_px = ring * ppp;
+            for pad in [0.0, 2.0, 7.5, 20.0] {
+                for balance in [
+                    PaddingBalance::None,
+                    PaddingBalance::Balanced,
+                    PaddingBalance::Equal,
+                ] {
+                    for (min, max) in [
+                        ((0.0, 0.0), (640.0, 480.0)),
+                        ((33.4, 45.2), (611.3, 470.9)),
+                        ((320.5, 30.25), (1231.7, 987.3)),
+                    ] {
+                        let leaf = egui::Rect::from_min_max(
+                            egui::pos2(min.0, min.1),
+                            egui::pos2(max.0, max.1),
+                        );
+                        let grid =
+                            pane_grid_rect(leaf, egui::vec2(pad, pad), ring, balance, cw, ch, ppp);
+                        let (ox, oy) = ((grid.min.x * ppp).round(), (grid.min.y * ppp).round());
+                        let cols = (grid.width() * ppp / cw).floor();
+                        let rows = (grid.height() * ppp / ch).floor();
+                        let (left, top) = (
+                            (leaf.min.x * ppp).round() + ring_px,
+                            (leaf.min.y * ppp).round() + ring_px,
+                        );
+                        let (right, bottom) = (
+                            (leaf.max.x * ppp).round() - ring_px,
+                            (leaf.max.y * ppp).round() - ring_px,
+                        );
+                        let case = format!("ppp {ppp}, pad {pad}, {balance:?}, leaf {leaf:?}");
+                        assert!(ox - left >= pad * ppp - 1e-3, "left edge: {case}");
+                        assert!(oy - top >= pad * ppp - 1e-3, "top edge: {case}");
+                        assert!(ox + cols * cw <= right, "right edge: {case}");
+                        assert!(oy + rows * ch <= bottom, "bottom edge: {case}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// An unsplit, unzoomed pane carries no ring, so its grid is laid out
+    /// exactly as before the ring band existed — the fix must not move a single
+    /// pane's text.
+    #[test]
+    fn pane_grid_without_a_ring_is_unchanged() {
+        use crate::config::PaddingBalance;
+        let leaf = egui::Rect::from_min_max(egui::pos2(33.4, 45.2), egui::pos2(611.3, 470.9));
+        for ppp in [1.0, 1.25, 1.5, 2.0] {
+            for balance in [PaddingBalance::None, PaddingBalance::Equal] {
+                let pad = egui::vec2(2.0, 3.5);
+                assert_eq!(
+                    pane_grid_rect(leaf, pad, 0.0, balance, 10.0, 21.0, ppp),
+                    balance_pane(leaf.shrink2(pad), balance, 10.0, 21.0, ppp),
+                );
+            }
+        }
+    }
+
+    /// The bell / highlight flash is capped to the room outside the text, but
+    /// never vanishes.
+    #[test]
+    fn flash_never_reaches_the_text() {
+        for ppp in [1.0, 1.25, 1.5, 1.75, 2.0, 2.5] {
+            for pad in [0.0, 2.0, 20.0] {
+                for ring in [0.0, snap_stroke(PANE_RING_PT, ppp)] {
+                    let w = flash_width(egui::vec2(pad, pad), ring, ppp) * ppp;
+                    let room = ((pad + ring) * ppp).floor();
+                    assert!(w >= 1.0 - 1e-3, "ppp {ppp}, pad {pad}, ring {ring}");
+                    assert!(w <= snap_stroke(PANE_FLASH_PT, ppp) * ppp + 1e-3);
+                    if room >= 1.0 {
+                        assert!(w <= room + 1e-3, "ppp {ppp}, pad {pad}, ring {ring}");
+                    }
+                }
+            }
+        }
+        // The reported setup, 150% with the default 2pt padding: an unsplit
+        // pane's flash shrinks to the 3px padding; a split pane has the ring
+        // band too, so it keeps the full 3pt (5px).
+        let pad = egui::vec2(2.0, 2.0);
+        assert_eq!((flash_width(pad, 0.0, 1.5) * 1.5).round(), 3.0);
+        assert_eq!(
+            (flash_width(pad, snap_stroke(PANE_RING_PT, 1.5), 1.5) * 1.5).round(),
+            5.0
+        );
     }
 
     #[test]
