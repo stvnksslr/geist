@@ -303,6 +303,15 @@ fallback engine without app changes:
   `rgba_unmultiplied(12,12,12,180)`, and egui's alpha blend (`src*OneMinusDstAlpha + dst*One`) can only
   ever *raise* framebuffer alpha — so a non-zero clear alpha caps the whole window's transparency and
   tints it. Both are startup-only, hence the documented restart requirement (Ghostty/macOS is the same).
+- **`TermFrame::paint` must reset the viewport to the full framebuffer.** egui-wgpu sets the render
+  pass viewport to the *callback's rect* before calling `paint` (a "courtesy", `renderer.rs`), but
+  the grid's instances are in framebuffer pixels, mapped to NDC against the full size in the uniform.
+  The callback rect is the pane area under the tab strip, so without the reset every pane is
+  squashed by (area height / window height) and shifted down, while the per-pane scissors stay in
+  true pixels. That cost the upper pane of a stacked split its prompt row, and left blank rows at
+  the top of every pane. It looked exactly like a ConPTY resize desync, and wasn't
+  (`tests/conpty_resize.rs` rules that half out). Measure the row pitch in a capture: it must equal
+  the cell height exactly.
 - **Exactly one layer may carry `background-opacity`.** The pane-area `rect_filled` in `render_active`
   is it; the `CentralPanel` frame must stay `Frame::NONE`. Both used to paint the same rect in the same
   color, which under transparency composites to `1-(1-a)²` (a=0.5 reads as 0.75). Cells on the *default*

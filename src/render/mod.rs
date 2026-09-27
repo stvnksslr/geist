@@ -1941,6 +1941,18 @@ impl CallbackTrait for TermFrame {
         if res.num_instances == 0 {
             return;
         }
+        // egui-wgpu narrows the viewport to the callback's rect before calling
+        // us (a "courtesy" for callbacks that fill their rect, its renderer
+        // says). This renderer doesn't: every instance is placed in framebuffer
+        // pixels and mapped to NDC against the *full* framebuffer size in the
+        // uniform (`prepare`). Left narrowed, the grid is squashed into the
+        // callback rect — the pane area under the tab strip — shrinking every
+        // row by (area height / window height) and shifting it down, while the
+        // per-pane scissors stay in true pixels. That pushed a pane's last row
+        // (the prompt) out past its own scissor, most visibly in the upper pane
+        // of a stacked split, and left blank rows at the top of every pane.
+        let [sw, sh] = info.screen_size_px;
+        render_pass.set_viewport(0.0, 0.0, sw as f32, sh as f32, 0.0, 1.0);
         let egui_clip = info.clip_rect_in_pixels();
         let clip = [
             egui_clip.left_px,
