@@ -5992,6 +5992,7 @@ impl Window {
         let mut want_new: Option<usize> = None;
         let mut want_rename: Option<usize> = None;
         let mut want_about = false;
+        let mut want_check_updates = false;
         let mut want_profiles = false;
         let mut want_color: Option<(usize, Option<egui::Color32>)> = None;
         let mut commit_rename: Option<(usize, Option<String>)> = None;
@@ -6474,6 +6475,10 @@ impl Window {
                         ui.close();
                     }
                     ui.separator();
+                    if ui.button("Check for Updates…").clicked() {
+                        want_check_updates = true;
+                        ui.close();
+                    }
                     if ui.button("About geist").clicked() {
                         want_about = true;
                         ui.close();
@@ -6502,6 +6507,11 @@ impl Window {
         }
         if want_about {
             self.about_open = true;
+        }
+        if want_check_updates {
+            // Same path as the `check_for_updates` action: a manual check, so
+            // the pill reports the result even when there's nothing new.
+            crate::update::global().check(crate::update::Settings::from_config(&self.config), true);
         }
         if want_profiles {
             self.open_profiles();
