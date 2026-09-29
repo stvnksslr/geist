@@ -23,6 +23,7 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
 
     git_commit();
+    version();
 
     #[cfg(windows)]
     {
@@ -34,6 +35,23 @@ fn main() {
             );
         }
     }
+}
+
+/// Expose the version this build reports as `geist_VERSION`.
+///
+/// Releases are cut by tag, not by bumping `Cargo.toml`, so the release
+/// workflow passes the tag in `geist_VERSION` (a leading `v` is dropped).
+/// Unset -- a local build -- `Cargo.toml`'s version stands. Everything that
+/// names or compares the running version (About, `--version`, the updater)
+/// reads `about::VERSION`, never `CARGO_PKG_VERSION` directly.
+fn version() {
+    println!("cargo:rerun-if-env-changed=geist_VERSION");
+    let v = std::env::var("geist_VERSION")
+        .ok()
+        .map(|v| v.trim().trim_start_matches('v').to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| std::env::var("CARGO_PKG_VERSION").unwrap());
+    println!("cargo:rustc-env=geist_VERSION={v}");
 }
 
 /// Expose the short commit hash as `geist_GIT_COMMIT` for the About dialog.

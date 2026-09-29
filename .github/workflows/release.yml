@@ -91,25 +91,36 @@ jobs:
         with:
           key: rel-${{ matrix.target }}-${{ env.GHOSTTY_COMMIT }}
 
-      - name: Build release
-        run: cargo build --release --locked --target ${{ matrix.target }}
+      # package.ps1 is the one packager, so a CI release has exactly the shape
+      # src/update.rs expects: geist-<v>-windows-<arch>.zip with one top-level
+      # folder (exe + ConPTY + handoff proxy + licenses) and a
+      # geist-manifest.json holding its SHA-256. The tag is passed as the
+      # version: releases are tagged by hand, not by bumping Cargo.toml, and
+      # package.ps1 hands it to build.rs (geist_VERSION) so the exe reports it.
+      # No MSIX: it would ship unsigned, and Windows won't install that.
+      - name: Build and package
+        shell: pwsh
+        run: >-
+          ./scripts/package.ps1 -NoMsix
+          -Version "${{ github.event.release.tag_name }}"
+          -Target ${{ matrix.target }}
 
-      - name: Package
+      # Each arch writes its own geist-manifest.json; rename so the release
+      # job can merge them instead of one overwriting the other.
+      - name: Stage artifacts
         shell: pwsh
         run: |
-          $ver  = "${env:GITHUB_REF_NAME}".TrimStart('v')
-          $stem = "geist-$ver-${{ matrix.target }}"
-          New-Item -ItemType Directory -Force dist | Out-Null
-          Copy-Item "target/${{ matrix.target }}/release/geist.exe" "dist/$stem.exe"
-          Compress-Archive -Path "target/${{ matrix.target }}/release/geist.exe" -DestinationPath "dist/$stem.zip" -Force
-          $hash = (Get-FileHash "dist/$stem.zip" -Algorithm SHA256).Hash.ToLower()
-          "$hash  $stem.zip" | Out-File -Encoding ascii "dist/$stem.zip.sha256"
+          $ver = "${{ github.event.release.tag_name }}".TrimStart('v')
+          $arch = if ("${{ matrix.target }}" -like "aarch64-*") { "arm64" } else { "x64" }
+          New-Item -ItemType Directory -Force upload | Out-Null
+          Copy-Item "dist/$ver/*.zip" upload/
+          Copy-Item "dist/$ver/geist-manifest.json" "upload/geist-manifest-$arch.json"
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: dist-${{ matrix.target }}
-          path: dist/*
+          path: upload/*
           if-no-files-found: error
 
   release:
@@ -123,6 +134,16 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+
+      # One geist-manifest.json listing every arch's zip: the updater reads a
+      # single manifest per release and picks its own arch from `files`.
+      - name: Merge manifests
+        run: |
+          set -euo pipefail
+          jq -s '{version: .[0].version, channel: .[0].channel, files: (map(.files) | add)}' \
+            dist/geist-manifest-*.json > dist/geist-manifest.json
+          rm dist/geist-manifest-*.json
+          cat dist/geist-manifest.json
 
       # Attach the built binaries to the existing Release release-plz created.
       # No generate_release_notes: release-plz already wrote the changelog notes.

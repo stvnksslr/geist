@@ -18,7 +18,12 @@
 # beside geist.exe for each profile, like scripts/fetch-conpty.ps1.
 #
 #   pwsh scripts/build-handoff-proxy.ps1
-param([string[]]$Profiles = @("debug", "release"))
+#   pwsh scripts/build-handoff-proxy.ps1 -Arch arm64   # cross-build for an arm64 exe
+param(
+    [string[]]$Profiles = @("debug", "release"),
+    # The *target's* arch; defaults to the host's.
+    [string]$Arch
+)
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 $src = "$root\vendor\terminal-handoff"
@@ -28,12 +33,18 @@ New-Item -ItemType Directory -Force $out | Out-Null
 $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
 $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
 if (-not $vs) { throw "Visual Studio with the C++ tools was not found" }
-$arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "x64" }
+$hostArch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "x64" }
+$arch = if ($Arch) { $Arch } else { $hostArch }
+# vcvarsall takes `host_target` for a cross toolchain (x64_arm64), else just the arch.
+$vcArch = if ($arch -eq $hostArch) { $arch } else { "${hostArch}_$arch" }
 $vcvars = "$vs\VC\Auxiliary\Build\vcvarsall.bat"
+# The output dir is per arch so a cross build never reuses the other arch's objects.
+$out = "$out\$arch"
+New-Item -ItemType Directory -Force $out | Out-Null
 
 # One cmd session: vcvars sets PATH/INCLUDE/LIB for midl and cl.
 $cmds = @(
-    "`"$vcvars`" $arch >nul",
+    "`"$vcvars`" $vcArch >nul",
     "cd /d `"$out`"",
     "midl /nologo /target NT100 /env $(if ($arch -eq 'x64') {'x64'} else {'arm64'}) /h ITerminalHandoff.h /proxy ITerminalHandoff_p.c /iid ITerminalHandoff_i.c /dlldata nul_1.c `"$src\ITerminalHandoff.idl`"",
     "midl /nologo /target NT100 /env $(if ($arch -eq 'x64') {'x64'} else {'arm64'}) /h IConsoleHandoff.h /proxy IConsoleHandoff_p.c /iid IConsoleHandoff_i.c /dlldata nul_2.c `"$src\IConsoleHandoff.idl`"",

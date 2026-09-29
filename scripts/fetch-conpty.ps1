@@ -12,11 +12,13 @@
 #   pwsh scripts/fetch-conpty.ps1 -Version 1.24.260710001
 param(
     [string]$Version = "1.24.260710001",
-    [string[]]$Profiles = @("debug", "release")
+    [string[]]$Profiles = @("debug", "release"),
+    # The *target's* arch: a cross build (x64 runner, arm64 exe) needs arm64 files.
+    [string]$Arch
 )
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
-$arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "x64" }
+$arch = if ($Arch) { $Arch } elseif ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "x64" }
 $work = Join-Path $env:TEMP "geist-conpty-$Version"
 if (-not (Test-Path "$work\x")) {
     New-Item -ItemType Directory -Force $work | Out-Null

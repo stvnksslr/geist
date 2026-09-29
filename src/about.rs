@@ -1,8 +1,8 @@
 //! What the About dialog says (the macOS app's `About/` view): the version,
 //! the exact commit it was built from, and where to go next.
 
-/// `Cargo.toml`'s version.
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// The release tag this was built from, else `Cargo.toml`'s version (see `build.rs`).
+pub const VERSION: &str = env!("geist_VERSION");
 
 /// The short commit hash `build.rs` captured, or `unknown` outside a checkout.
 pub const COMMIT: &str = env!("geist_GIT_COMMIT");

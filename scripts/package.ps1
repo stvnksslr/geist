@@ -5,6 +5,7 @@
 #
 #   mise package                                     # everything, unsigned
 #   pwsh scripts/package.ps1 -SkipBuild              # reuse target\release
+#   pwsh scripts/package.ps1 -Target aarch64-pc-windows-msvc   # cross-build
 #   pwsh scripts/package.ps1 -CertPath c.pfx -CertPassword ... -Publisher "CN=..."
 #
 # Output: dist\<version>\
@@ -25,7 +26,9 @@ param(
     [string]$PublisherDisplay = "geist",
     [string]$BaseUri = "https://github.com/stvnksslr/geist/releases/latest/download",
     [string]$CertPath,
-    [string]$CertPassword
+    [string]$CertPassword,
+    # A rustc target triple to cross-build for (CI); default is the host, in target\release.
+    [string]$Target
 )
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
@@ -34,21 +37,27 @@ Set-Location $root
 if (-not $Version) {
     $Version = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
 }
+$Version = $Version.TrimStart('v')
 if (-not $Channel) { $Channel = if ($Version -match '-') { "tip" } else { "stable" } }
-$arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "x64" }
+$arch = if ($Target) { if ($Target -like "aarch64-*") { "arm64" } else { "x64" } }
+        elseif ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "x64" }
+# Where cargo puts the exe, under target\; the helper scripts install beside it.
+$profileDir = if ($Target) { "$Target\release" } else { "release" }
 # MSIX needs a four-part numeric version; a pre-release keeps its core.
 $core = ($Version -split '[-+]')[0]
 $version4 = "$core.0"
 
 if (-not $SkipBuild) {
-    cargo build --release
+    # The exe must report the version it is packaged as (build.rs).
+    $env:geist_VERSION = $Version
+    if ($Target) { cargo build --release --locked --target $Target } else { cargo build --release }
     if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
 }
-& "$PSScriptRoot\fetch-conpty.ps1" -Profiles release | Out-Null
+& "$PSScriptRoot\fetch-conpty.ps1" -Profiles $profileDir -Arch $arch | Out-Null
 # The default-terminal handoff proxy/stub (MIDL + MSVC; see src/handoff.rs).
-& "$PSScriptRoot\build-handoff-proxy.ps1" -Profiles release | Out-Null
+& "$PSScriptRoot\build-handoff-proxy.ps1" -Profiles $profileDir -Arch $arch | Out-Null
 
-$rel = Join-Path $root "target\release"
+$rel = Join-Path $root "target\$profileDir"
 foreach ($f in "geist.exe", "conpty.dll", "OpenConsole.exe", "geistHandoffProxy.dll") {
     if (-not (Test-Path "$rel\$f")) { throw "missing $rel\$f" }
 }

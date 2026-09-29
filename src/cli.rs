@@ -98,7 +98,7 @@ impl Default for Cli {
 
 /// The version string `--version` prints.
 pub fn version_string() -> String {
-    format!("geist {}", env!("CARGO_PKG_VERSION"))
+    format!("geist {}", crate::about::VERSION)
 }
 
 pub const HELP: &str = "\

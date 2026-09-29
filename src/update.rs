@@ -390,7 +390,7 @@ impl Curl {
             .unwrap_or_else(|| PathBuf::from("curl.exe"));
         let mut c = std::process::Command::new(exe);
         c.args(["-fsSL", "--proto", "=https", "--max-time", "600", "-A"])
-            .arg(format!("geist/{}", env!("CARGO_PKG_VERSION")));
+            .arg(format!("geist/{}", crate::about::VERSION));
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
@@ -723,7 +723,7 @@ pub fn startup_apply() -> bool {
     let Some(p) = read_pending(&root) else {
         return false;
     };
-    let cur = Version::parse(env!("CARGO_PKG_VERSION"));
+    let cur = Version::parse(crate::about::VERSION);
     let newer = matches!((Version::parse(&p.version), cur), (Some(n), Some(c)) if n > c);
     let _ = std::fs::remove_file(root.join("pending.json"));
     if !newer || !p.dir.join("geist.exe").is_file() {
@@ -957,7 +957,7 @@ impl Settings {
             mode: c.auto_update,
             channel: c
                 .auto_update_channel
-                .unwrap_or_else(|| Channel::of_version(env!("CARGO_PKG_VERSION"))),
+                .unwrap_or_else(|| Channel::of_version(crate::about::VERSION)),
             feed: c.auto_update_feed.clone(),
         }
     }
@@ -1117,7 +1117,7 @@ impl Updater {
                 std::thread::sleep(Duration::from_millis(1200));
                 Ok(None)
             } else {
-                find_update(&*self.http, &s.feed, s.channel, env!("CARGO_PKG_VERSION"))
+                find_update(&*self.http, &s.feed, s.channel, crate::about::VERSION)
             };
             let manual = {
                 let mut i = self.inner.lock().unwrap();
@@ -1687,7 +1687,7 @@ mod tests {
         assert!(d.diagnostics.iter().any(|m| m.contains("auto-update")));
         assert_eq!(
             Settings::from_config(&d).channel,
-            Channel::of_version(env!("CARGO_PKG_VERSION"))
+            Channel::of_version(crate::about::VERSION)
         );
     }
 
