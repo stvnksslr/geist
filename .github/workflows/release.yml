@@ -25,9 +25,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # arm64 is off for now: its handoff-proxy cross-build failed in CI.
+        # package.ps1 -Target and the helper scripts' -Arch still support it;
+        # re-adding aarch64-pc-windows-msvc needs an ilammy/msvc-dev-cmd step
+        # (arch: amd64_arm64) before the build.
         target:
           - x86_64-pc-windows-msvc
-          - aarch64-pc-windows-msvc
     env:
       # `github.workspace` (not `runner.temp`): the `runner` context is not
       # available in job-level `env`, only inside steps. Outside target/ so
@@ -56,13 +59,6 @@ jobs:
           echo "Ghostty $commit, Zig $zig"
           echo "GHOSTTY_COMMIT=$commit" >> "$GITHUB_ENV"
           echo "ZIG_VERSION=$zig" >> "$GITHUB_ENV"
-
-      # ARM64 cross-link needs the ARM64 MSVC toolchain environment on the x64 runner.
-      - name: Set up ARM64 MSVC environment
-        if: matrix.target == 'aarch64-pc-windows-msvc'
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: amd64_arm64
 
       - uses: mlugg/setup-zig@v2
         with:
