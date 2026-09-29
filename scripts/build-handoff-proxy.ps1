@@ -30,21 +30,31 @@ $src = "$root\vendor\terminal-handoff"
 $out = "$root\target\handoff-proxy"
 New-Item -ItemType Directory -Force $out | Out-Null
 
-$vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-$vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-if (-not $vs) { throw "Visual Studio with the C++ tools was not found" }
 $hostArch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "x64" }
 $arch = if ($Arch) { $Arch } else { $hostArch }
-# vcvarsall takes `host_target` for a cross toolchain (x64_arm64), else just the arch.
-$vcArch = if ($arch -eq $hostArch) { $arch } else { "${hostArch}_$arch" }
-$vcvars = "$vs\VC\Auxiliary\Build\vcvarsall.bat"
 # The output dir is per arch so a cross build never reuses the other arch's objects.
 $out = "$out\$arch"
 New-Item -ItemType Directory -Force $out | Out-Null
 
+# A shell that already has a developer environment for this target (CI's
+# msvc-dev-cmd step) is used as is: running vcvarsall again on top of it
+# stacks a second toolset's PATH/LIB over the first.
+if ($env:VSCMD_ARG_TGT_ARCH -eq $arch) {
+    $setup = "rem"
+} else {
+    # Require the target's toolset, or -latest may pick an install without it.
+    $component = if ($arch -eq "arm64") { "Microsoft.VisualStudio.Component.VC.Tools.ARM64" } else { "Microsoft.VisualStudio.Component.VC.Tools.x86.x64" }
+    $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+    $vs = & $vswhere -latest -products * -requires $component -property installationPath
+    if (-not $vs) { throw "Visual Studio with the $arch C++ tools ($component) was not found" }
+    # vcvarsall takes `host_target` for a cross toolchain (x64_arm64), else just the arch.
+    $vcArch = if ($arch -eq $hostArch) { $arch } else { "${hostArch}_$arch" }
+    $setup = "`"$vs\VC\Auxiliary\Build\vcvarsall.bat`" $vcArch >nul"
+}
+
 # One cmd session: vcvars sets PATH/INCLUDE/LIB for midl and cl.
 $cmds = @(
-    "`"$vcvars`" $vcArch >nul",
+    $setup,
     "cd /d `"$out`"",
     "midl /nologo /target NT100 /env $(if ($arch -eq 'x64') {'x64'} else {'arm64'}) /h ITerminalHandoff.h /proxy ITerminalHandoff_p.c /iid ITerminalHandoff_i.c /dlldata nul_1.c `"$src\ITerminalHandoff.idl`"",
     "midl /nologo /target NT100 /env $(if ($arch -eq 'x64') {'x64'} else {'arm64'}) /h IConsoleHandoff.h /proxy IConsoleHandoff_p.c /iid IConsoleHandoff_i.c /dlldata nul_2.c `"$src\IConsoleHandoff.idl`"",

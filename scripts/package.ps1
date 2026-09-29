@@ -55,7 +55,9 @@ if (-not $SkipBuild) {
 }
 & "$PSScriptRoot\fetch-conpty.ps1" -Profiles $profileDir -Arch $arch | Out-Null
 # The default-terminal handoff proxy/stub (MIDL + MSVC; see src/handoff.rs).
-& "$PSScriptRoot\build-handoff-proxy.ps1" -Profiles $profileDir -Arch $arch | Out-Null
+# Not piped to Out-Null: cl/link write their errors to stdout, and a failed
+# build with that swallowed is an exit code and nothing else.
+& "$PSScriptRoot\build-handoff-proxy.ps1" -Profiles $profileDir -Arch $arch
 
 $rel = Join-Path $root "target\$profileDir"
 foreach ($f in "geist.exe", "conpty.dll", "OpenConsole.exe", "geistHandoffProxy.dll") {
