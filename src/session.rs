@@ -24,6 +24,9 @@ use crate::search::{SearchHighlight, SearchState};
 
 const DEFAULT_COLS: u16 = 80;
 const DEFAULT_ROWS: u16 = 24;
+/// How long one [`Session::pump_pty`] may spend parsing before it yields to the
+/// frame. Half a 60 Hz frame: a flood still renders, and input still lands.
+const PUMP_BUDGET: std::time::Duration = std::time::Duration::from_millis(8);
 
 pub struct Session {
     /// `None` for a pane whose shell failed to start (see [`Session::failed`]):
@@ -494,8 +497,14 @@ impl Session {
         }
     }
 
-    pub fn pump_pty(&mut self) {
+    ///
+    /// Returns `true` when it stopped at [`PUMP_BUDGET`] with output still
+    /// queued: the caller must schedule another pass, because a reader blocked
+    /// on the full channel sends nothing and so posts no wake of its own.
+    pub fn pump_pty(&mut self) -> bool {
         use std::sync::mpsc::TryRecvError;
+        let started = std::time::Instant::now();
+        let mut backlogged = false;
         let mut color_queries: Vec<(ColorQuery, Terminator)> = Vec::new();
         let mut marks: Vec<Mark> = Vec::new();
         let mut osc9: Vec<Osc9> = Vec::new();
@@ -533,6 +542,12 @@ impl Session {
                     self.osc_color.feed(&chunk, &mut color_queries);
                     self.osc_notify.feed(&chunk, &mut osc9);
                     self.osc133.feed(&chunk, &mut marks);
+                    // Draw what we have rather than chase a program that can
+                    // write as fast as we parse; the rest waits a frame.
+                    if started.elapsed() >= PUMP_BUDGET {
+                        backlogged = true;
+                        break;
+                    }
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
@@ -545,8 +560,10 @@ impl Session {
         self.handle_command_marks(&marks);
         self.handle_osc9(osc9);
         self.refresh_search_after_prune();
-        // Primary exit signal on Windows: poll the shell process itself.
-        if self.alive && !self.pty.as_mut().is_some_and(Pty::is_running) {
+        // Primary exit signal on Windows: poll the shell process itself. Not
+        // while output is still queued, or a shell that printed and exited
+        // would be reaped before its last output was shown.
+        if self.alive && !backlogged && !self.pty.as_mut().is_some_and(Pty::is_running) {
             self.alive = false;
         }
         if !self.alive
@@ -585,6 +602,7 @@ impl Session {
             self.bell_pending = true;
             self.bell_effect_pending = true;
         }
+        backlogged
     }
 
     /// Put the OSC 52 / OSC 5522 requests the engine left for `ask` to the user.

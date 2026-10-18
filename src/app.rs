@@ -8380,7 +8380,10 @@ impl Window {
     ///
     /// The bell *effects* are only latched here: firing them needs this window's
     /// own focus state, which is only meaningful inside its own pass.
-    fn pump_all(&mut self, now: f64, notifications: &mut Vec<PendingNotification>) {
+    ///
+    /// Returns `true` if any pane hit its pump budget with output still queued.
+    fn pump_all(&mut self, now: f64, notifications: &mut Vec<PendingNotification>) -> bool {
+        let mut backlogged = false;
         let was_focused = self.was_focused;
         let window = self.window_id;
         let active_tab = self.active_tab;
@@ -8391,7 +8394,7 @@ impl Window {
             let mut tab_rang = false;
             let focus = tab.focus;
             tab.root.for_each_leaf_mut(&mut |pane_id, pane| {
-                pane.pump_pty();
+                backlogged |= pane.pump_pty();
                 pane.idle_work();
                 let r = pane.take_bell_effect(now);
                 tab_rang |= r;
@@ -8445,13 +8448,13 @@ impl Window {
         // the root window has an `HWND` to hang a toast on.
         let mode = self.config.notify_on_command_finish;
         if mode == crate::config::NotifyOnCommandFinish::Never || finished.is_empty() {
-            return;
+            return backlogged;
         }
         // `i.focused` is per-viewport and only meaningful during that viewport's
         // own pass, so read this window's *last observed* focus rather than the
         // running pass's — `pump_all` runs for every window from the root pass.
         if !crate::config::should_notify_on_finish(mode, self.was_focused) {
-            return;
+            return backlogged;
         }
         let after = Duration::from_millis(self.config.notify_on_command_finish_after_ms);
         let action = self.config.notify_on_command_finish_action;
@@ -8476,6 +8479,7 @@ impl Window {
                 });
             }
         }
+        backlogged
     }
 
     /// Run one UI pass for this window, into whichever viewport is current.
@@ -10375,8 +10379,14 @@ impl eframe::App for App {
         // windows keep flowing and their shell exits are noticed.
         let now = ctx.input(|i| i.time);
         let mut notifications = Vec::new();
+        let mut backlogged = false;
         for w in &mut self.windows {
-            w.pump_all(now, &mut notifications);
+            backlogged |= w.pump_all(now, &mut notifications);
+        }
+        // A pane left output queued: its reader is blocked on the full channel
+        // and won't wake us, so come straight back for the rest.
+        if backlogged {
+            ctx.request_repaint();
         }
 
         // Retire undo entries every pass, not only when undo is used: an expired

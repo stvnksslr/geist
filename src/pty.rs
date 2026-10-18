@@ -10,7 +10,7 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::thread;
 use std::time::Instant;
 
@@ -245,6 +245,11 @@ impl Pty {
     }
 }
 
+/// Read chunks (≤ 64 KiB each) the reader may queue ahead of the UI before it
+/// blocks. Small on purpose: everything queued is output the screen hasn't
+/// shown yet, so depth is latency.
+const OUTPUT_QUEUE_CHUNKS: usize = 8;
+
 /// Stream `reader` to a channel on its own thread, waking the UI when a chunk
 /// lands and no wake is already pending.
 ///
@@ -260,12 +265,21 @@ impl Pty {
 /// OpenConsole ≈ 84 MiB/s; see docs/benchmarking.md). Kept because it stops
 /// a flood from posting an event per 8 KiB to the UI loop, which is cheap
 /// insurance rather than a speed-up.
+///
+/// The channel is **bounded** ([`OUTPUT_QUEUE_CHUNKS`]) so a program that
+/// writes faster than the engine parses gets backpressure: the reader blocks,
+/// ConPTY's pipe fills, and the program's own write blocks — what Ghostty gets
+/// for free by parsing on its IO thread. Unbounded, the queue grew for as long
+/// as the program outpaced the engine (a fullscreen TUI redrawing an
+/// ever-larger frame, e.g. Claude Code late in a session): the screen fell
+/// seconds behind the program, keystroke echo queued behind the backlog, and
+/// `pump_pty` could not return while the reader kept refilling it.
 fn spawn_reader<W: Fn() + Send + 'static>(
     mut reader: Box<dyn std::io::Read + Send>,
     pending: Arc<AtomicBool>,
     wake: W,
 ) -> Result<Receiver<Vec<u8>>> {
-    let (tx, rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = channel();
+    let (tx, rx): (SyncSender<Vec<u8>>, Receiver<Vec<u8>>) = sync_channel(OUTPUT_QUEUE_CHUNKS);
     thread::Builder::new()
         .name("pty-reader".into())
         .spawn(move || {
@@ -294,4 +308,29 @@ fn spawn_reader<W: Fn() + Send + 'static>(
         })
         .context("spawn pty reader thread")?;
     Ok(rx)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A program that writes faster than the UI drains must be held back by the
+    /// reader, not queued without bound — the unbounded queue is what left the
+    /// screen seconds behind a fullscreen TUI late in a long session.
+    #[test]
+    fn reader_queue_is_bounded_under_a_flood() {
+        let flood = Box::new(std::io::repeat(b'x'));
+        let pending = Arc::new(AtomicBool::new(false));
+        let rx = spawn_reader(flood, pending, || {}).unwrap();
+        // Give the reader ample time to run ahead of a UI that never drains.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let queued = rx.try_iter().take(OUTPUT_QUEUE_CHUNKS * 4).count();
+        // The queue's capacity, plus the one send the reader was blocked in.
+        assert!(
+            queued <= OUTPUT_QUEUE_CHUNKS + 1,
+            "{queued} chunks queued, cap {OUTPUT_QUEUE_CHUNKS}"
+        );
+        // Dropping the receiver unblocks and ends the reader thread.
+        drop(rx);
+    }
 }

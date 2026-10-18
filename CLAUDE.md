@@ -412,8 +412,8 @@ fallback engine without app changes:
   close is lossless because `Node::detach_leaf` (and the tab/window equivalents) **move** the pane
   out rather than dropping it, so the shell keeps running — which also means an entry that never
   expires is a process that never exits. `App::ui` prunes the stack every pass for that reason, not
-  only when undo is used. Their PTY output buffers in the reader channel meanwhile and is drained
-  on restore, so nothing is lost. And a restored `Window` must have its `closing`/`confirm` latches
+  only when undo is used. Their PTY output waits in the (bounded) reader channel meanwhile — a
+  chatty shell simply blocks on its write until restore — so nothing is lost. And a restored `Window` must have its `closing`/`confirm` latches
   cleared: `closing` is what stops a confirmed close's own `ViewportCommand::Close` re-opening the
   dialog forever, and left set on a restored window it swallows every later close request too,
   leaving a window the × cannot shut.
@@ -432,6 +432,14 @@ fallback engine without app changes:
   `cargo test --test handoff_com -- --ignored` (never touches `%%Startup`) and `--test
   default_terminal` (the real chain, delegation live ~1 s); both need `cargo build --release`,
   `scripts/build-handoff-proxy.ps1`, and no geist running.
+- **PTY output needs backpressure, and `pump_pty` needs a budget.** The reader→UI channel is a
+  bounded `sync_channel` and each pump stops after `PUMP_BUDGET`, returning `true` so the root pass
+  repaints for the rest (a reader blocked on a full channel posts no wake). Both were unbounded once:
+  a fullscreen TUI whose frames grow over a session (Claude Code) eventually out-writes the parser,
+  and then the screen and keystroke echo fell further behind for as long as it ran, and the drain
+  loop could not return while the reader refilled it — multi-second freezes. Don't "speed it up" by
+  unbounding either. Unrelated trap when stress-testing: OpenConsole leaks memory (and stalls
+  doubling-ly) on OSC 8 links with a *unique* `id=` each — measure without them.
 - **After `cargo test`, the *binary* is still stale.** `cargo test --lib` builds only the test
   harness, so launching `target\debug\geist.exe` to check a change runs the previous build — which
   looks exactly like the feature not working. Run `cargo build` before any manual/screenshot check.
