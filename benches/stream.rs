@@ -17,9 +17,13 @@
 //! Run: `cargo bench --bench stream`.
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
+use geist::decscusr::DecscusrScanner;
 use geist::engine::{GhosttyVtEngine, TerminalEngine};
 use geist::osc_color::OscColorScanner;
+use geist::osc_notify::OscNotifyScanner;
+use geist::osc133::Osc133Scanner;
 use geist::synthetic;
+use geist::xtshiftescape::ShiftEscapeScanner;
 
 /// Roughly how many bytes of stream to push per timed iteration. A few MiB keeps
 /// per-iteration noise low while staying well under a second per sample.
@@ -29,10 +33,11 @@ fn bench_stream(c: &mut Criterion) {
     let mut group = c.benchmark_group("stream");
 
     for &(cols, rows) in &[(80u16, 24u16), (200, 50), (400, 100)] {
-        for kind in ["ascii", "utf8", "osc"] {
+        for kind in ["ascii", "utf8", "osc", "tui"] {
             // Generate (or load a corpus) once, outside the timed loop.
             let (data, label) = match kind {
                 "utf8" => synthetic::corpus(kind, STREAM_BYTES, 1, synthetic::utf8),
+                "tui" => synthetic::corpus(kind, STREAM_BYTES, 1, synthetic::tui),
                 // osc takes a *count*; size it to land near STREAM_BYTES.
                 "osc" => synthetic::corpus(kind, STREAM_BYTES / 32, 1, synthetic::osc),
                 _ => synthetic::corpus(kind, STREAM_BYTES, 1, synthetic::ascii),
@@ -65,6 +70,32 @@ fn bench_stream(c: &mut Criterion) {
             std::hint::black_box(out.len())
         })
     });
+    // Every side scanner `Session::pump_pty` runs over each PTY chunk, together,
+    // over the input classes that matter: escape-dense TUI redraws and plain
+    // log text. Profiling a TUI found these at ~30% of the UI thread — more
+    // than the engine's own parse — so they are benched as the set they run as.
+    for (kind, data) in [
+        ("tui", synthetic::tui(STREAM_BYTES, 1)),
+        ("ascii", synthetic::ascii(STREAM_BYTES, 1)),
+    ] {
+        scan.throughput(Throughput::Bytes(data.len() as u64));
+        scan.bench_function(format!("side_scanners/{kind}"), |b| {
+            let mut color = OscColorScanner::new();
+            let mut notify = OscNotifyScanner::new();
+            let mut marks = Osc133Scanner::new();
+            let mut cursor = DecscusrScanner::new();
+            let mut shift = ShiftEscapeScanner::new();
+            let (mut q, mut n, mut m) = (Vec::new(), Vec::new(), Vec::new());
+            b.iter(|| {
+                cursor.feed(&data);
+                shift.feed(&data);
+                color.feed(&data, &mut q);
+                notify.feed(&data, &mut n);
+                marks.feed(&data, &mut m);
+                std::hint::black_box((q.len(), n.len(), m.len()))
+            })
+        });
+    }
     scan.finish();
 }
 

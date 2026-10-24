@@ -20,14 +20,16 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 $arch = if ($Arch) { $Arch } elseif ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "x64" }
 $work = Join-Path $env:TEMP "geist-conpty-$Version"
-if (-not (Test-Path "$work\x")) {
+$dll = "$work\x\runtimes\win-$arch\native\conpty.dll"
+$host_ = "$work\x\build\native\runtimes\$arch\OpenConsole.exe"
+# Check for the files, not the folder: a Temp cleanup can empty the cached
+# package's folders and leave the tree standing.
+if (-not ((Test-Path $dll) -and (Test-Path $host_))) {
     New-Item -ItemType Directory -Force $work | Out-Null
     $url = "https://api.nuget.org/v3-flatcontainer/microsoft.windows.console.conpty/$Version/microsoft.windows.console.conpty.$Version.nupkg"
     Invoke-WebRequest $url -OutFile "$work\pkg.zip"
     Expand-Archive -Force "$work\pkg.zip" "$work\x"
 }
-$dll = "$work\x\runtimes\win-$arch\native\conpty.dll"
-$host_ = "$work\x\build\native\runtimes\$arch\OpenConsole.exe"
 foreach ($p in $Profiles) {
     foreach ($dir in @("$root\target\$p", "$root\target\$p\deps")) {
         New-Item -ItemType Directory -Force $dir | Out-Null

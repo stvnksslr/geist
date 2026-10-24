@@ -1010,9 +1010,21 @@ fn copy_cell(
     if style.inverse {
         std::mem::swap(&mut fg, &mut bg);
     }
+    // Through a stack buffer, not `graphemes()`: that allocates (and frees) a
+    // zeroed `Vec` per cell, for every non-blank cell of every changed row. In
+    // the app, behind main.rs's counting allocator, that was ~3% of the UI
+    // thread under a TUI redraw (tools/sampler); the system allocator the
+    // benches use hides it.
     dst.text.clear();
-    for ch in cell.graphemes()? {
-        dst.text.push(ch);
+    let len = cell.graphemes_len()?;
+    if len > 0 {
+        let mut stack = ['\0'; 16];
+        if len <= stack.len() {
+            cell.graphemes_buf(&mut stack[..len])?;
+            dst.text.extend(&stack[..len]);
+        } else {
+            dst.text.extend(cell.graphemes()?);
+        }
     }
     // Minimum-contrast runs on the final (post-inverse) colors, skipping graphics
     // glyphs — matching where Ghostty's shader applies it.

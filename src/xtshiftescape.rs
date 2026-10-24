@@ -14,6 +14,14 @@
 //! stream and drops what it doesn't understand — see CLAUDE.md). If it does
 //! not, the scan simply never fires and the config value alone decides.
 
+use std::sync::LazyLock;
+
+use memchr::memmem::Finder;
+
+/// The two sequences this scanner acts on, searched for in every PTY chunk.
+static CSI_GT: LazyLock<Finder<'static>> = LazyLock::new(|| Finder::new(b"\x1b[>"));
+static RIS: LazyLock<Finder<'static>> = LazyLock::new(|| Finder::new(b"\x1bc"));
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum State {
     Ground,
@@ -57,8 +65,41 @@ impl ShiftEscapeScanner {
         self.capture
     }
 
-    pub fn feed(&mut self, bytes: &[u8]) {
-        for &b in bytes {
+    fn begin_csi(&mut self) {
+        self.state = State::Csi;
+        self.gt = false;
+        self.candidate = true;
+        self.params.clear();
+    }
+
+    pub fn feed(&mut self, mut bytes: &[u8]) {
+        while !bytes.is_empty() {
+            // Only two sequences matter here, and each starts afresh whatever
+            // an earlier escape left behind: any ESC returns this machine to
+            // `Esc`, so `ESC [ >` always opens a candidate CSI and `ESC c` is
+            // always a RIS. From the ground state, jump straight to the next of
+            // either rather than stepping through every byte and every CSI.
+            // This runs over everything the shell prints (`Session::pump_pty`).
+            if matches!(self.state, State::Ground) {
+                let next = [CSI_GT.find(bytes), RIS.find(bytes)]
+                    .into_iter()
+                    .flatten()
+                    .min();
+                match next {
+                    Some(at) => bytes = &bytes[at..],
+                    None => {
+                        // The tail may open one that the next read completes.
+                        if bytes.ends_with(b"\x1b[") {
+                            self.begin_csi();
+                        } else if bytes.last() == Some(&0x1b) {
+                            self.state = State::Esc;
+                        }
+                        return;
+                    }
+                }
+            }
+            let b = bytes[0];
+            bytes = &bytes[1..];
             match self.state {
                 State::Ground => {
                     if b == 0x1b {
@@ -66,12 +107,7 @@ impl ShiftEscapeScanner {
                     }
                 }
                 State::Esc => match b {
-                    b'[' => {
-                        self.state = State::Csi;
-                        self.gt = false;
-                        self.candidate = true;
-                        self.params.clear();
-                    }
+                    b'[' => self.begin_csi(),
                     // RIS (`ESC c`) resets the terminal's flags, this one included.
                     b'c' => {
                         self.capture = None;

@@ -10,9 +10,10 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+use std::sync::mpsc::{RecvTimeoutError, TryRecvError};
+use std::sync::{Condvar, Mutex};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
@@ -40,9 +41,9 @@ enum Backend {
 pub struct Pty {
     backend: Backend,
     writer: Box<dyn Write + Send>,
-    /// Bytes read from the shell. The sender lives on the reader thread, which
-    /// exits (closing this channel) when the shell closes its output.
-    pub output: Receiver<Vec<u8>>,
+    /// Bytes read from the shell. The reader thread appends to it, and marks
+    /// it closed when the shell closes its output.
+    pub output: Output,
     /// Wake-coalescing flag shared with the reader thread; see `spawn_reader`.
     /// Clear it (`Ordering::AcqRel`) *before* draining `output`.
     pub wake_pending: Arc<AtomicBool>,
@@ -245,55 +246,156 @@ impl Pty {
     }
 }
 
-/// Read chunks (≤ 64 KiB each) the reader may queue ahead of the UI before it
-/// blocks. Small on purpose: everything queued is output the screen hasn't
-/// shown yet, so depth is latency.
-const OUTPUT_QUEUE_CHUNKS: usize = 8;
+/// Bytes the reader may hold ahead of the UI before it blocks. Everything
+/// queued is output the screen hasn't shown yet, so depth is latency, and
+/// latency is a matter of bytes, not of how many reads delivered them (it was
+/// 8 reads of anything from a few bytes to 64 KiB). 1 MiB is a few ms of
+/// parsing at the engine's measured rate. Measured on its own, the switch from
+/// a read count changed no throughput (docs/benchmarking.md); what it buys is
+/// a bound that means the same thing for every console host, and no heap
+/// allocation per read.
+pub const OUTPUT_QUEUE_BYTES: usize = 1 << 20;
 
-/// Stream `reader` to a channel on its own thread, waking the UI when a chunk
-/// lands and no wake is already pending.
+/// The queue between the reader thread and the UI: one growable byte buffer
+/// rather than a channel of per-read `Vec`s, so a burst of small reads costs
+/// one append each (no allocation) and the UI takes the lot in one swap.
+#[derive(Default)]
+struct OutputState {
+    buf: Vec<u8>,
+    /// The reader hit EOF or an error; nothing more will arrive.
+    closed: bool,
+    /// The [`Output`] was dropped; the reader should stop.
+    abandoned: bool,
+}
+
+#[derive(Default)]
+struct OutputShared {
+    state: Mutex<OutputState>,
+    /// Signalled when the UI takes the buffer (room for the reader) and when
+    /// the reader appends or closes (data for a blocked `recv_timeout`).
+    changed: Condvar,
+}
+
+/// Bytes read from the shell, queued by the reader thread and bounded at
+/// [`OUTPUT_QUEUE_BYTES`]: a program that writes faster than the engine parses
+/// blocks in its own write — the backpressure Ghostty gets by parsing on its
+/// IO thread.
+pub struct Output {
+    shared: Arc<OutputShared>,
+}
+
+impl Output {
+    fn lock(&self) -> std::sync::MutexGuard<'_, OutputState> {
+        self.shared.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Move everything queued into `into`, replacing its contents; its old
+    /// allocation goes to the reader for reuse. `Err(Empty)` when nothing is
+    /// queued yet, `Err(Disconnected)` once the shell closed its output and
+    /// the queue is drained.
+    pub fn take_into(&self, into: &mut Vec<u8>) -> Result<(), TryRecvError> {
+        let mut st = self.lock();
+        if st.buf.is_empty() {
+            return Err(if st.closed {
+                TryRecvError::Disconnected
+            } else {
+                TryRecvError::Empty
+            });
+        }
+        into.clear();
+        std::mem::swap(into, &mut st.buf);
+        drop(st);
+        self.shared.changed.notify_all();
+        Ok(())
+    }
+
+    /// Everything queued, as a fresh `Vec` — `mpsc::Receiver::try_recv`'s
+    /// shape, for tests and harnesses that drive a `Pty` directly.
+    pub fn try_recv(&self) -> Result<Vec<u8>, TryRecvError> {
+        let mut out = Vec::new();
+        self.take_into(&mut out).map(|()| out)
+    }
+
+    /// Like [`Output::try_recv`], but waits up to `timeout` for output.
+    pub fn recv_timeout(&self, timeout: Duration) -> Result<Vec<u8>, RecvTimeoutError> {
+        let deadline = Instant::now() + timeout;
+        let mut st = self.lock();
+        loop {
+            if !st.buf.is_empty() {
+                let out = std::mem::take(&mut st.buf);
+                drop(st);
+                self.shared.changed.notify_all();
+                return Ok(out);
+            }
+            if st.closed {
+                return Err(RecvTimeoutError::Disconnected);
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(RecvTimeoutError::Timeout);
+            }
+            st = self
+                .shared
+                .changed
+                .wait_timeout(st, deadline - now)
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
+    }
+}
+
+impl Drop for Output {
+    fn drop(&mut self) {
+        self.lock().abandoned = true;
+        // Unblocks a reader waiting for room, which then exits.
+        self.shared.changed.notify_all();
+    }
+}
+
+/// Stream `reader` into an [`Output`] on its own thread, waking the UI when
+/// bytes land and no wake is already pending.
 ///
-/// `pending` is the coalescing flag: the reader sets it after every send and
+/// `pending` is the coalescing flag: the reader sets it after every append and
 /// only calls `wake` on the false→true edge; the UI clears it **before**
-/// draining (`Session::pump_pty`), so a chunk sent after the clear always
-/// gets its own wake and none can be stranded. Under a flood this turns
+/// draining (`Session::pump_pty`), so bytes appended after the clear always
+/// get their own wake and none can be stranded. Under a flood this turns
 /// thousands of cross-thread event posts per second into one per UI pass.
 ///
-/// Measured (`scripts/perf-vs.ps1 -Only geist`): **no throughput change** —
-/// 11.9 → 12.4 MiB/s, within noise. The write-side rate is bound by the
-/// console host, not this loop (inbox conhost ≈ 13 MiB/s, sideloaded
-/// OpenConsole ≈ 84 MiB/s; see docs/benchmarking.md). Kept because it stops
-/// a flood from posting an event per 8 KiB to the UI loop, which is cheap
-/// insurance rather than a speed-up.
-///
-/// The channel is **bounded** ([`OUTPUT_QUEUE_CHUNKS`]) so a program that
-/// writes faster than the engine parses gets backpressure: the reader blocks,
-/// ConPTY's pipe fills, and the program's own write blocks — what Ghostty gets
-/// for free by parsing on its IO thread. Unbounded, the queue grew for as long
-/// as the program outpaced the engine (a fullscreen TUI redrawing an
-/// ever-larger frame, e.g. Claude Code late in a session): the screen fell
-/// seconds behind the program, keystroke echo queued behind the backlog, and
-/// `pump_pty` could not return while the reader kept refilling it.
+/// The queue is **bounded** ([`OUTPUT_QUEUE_BYTES`]) so a program that writes
+/// faster than the engine parses gets backpressure: the reader blocks,
+/// ConPTY's pipe fills, and the program's own write blocks. Unbounded, the
+/// queue grew for as long as the program outpaced the engine (a fullscreen TUI
+/// redrawing an ever-larger frame, e.g. Claude Code late in a session): the
+/// screen fell seconds behind the program, keystroke echo queued behind the
+/// backlog, and `pump_pty` could not return while the reader kept refilling it.
 fn spawn_reader<W: Fn() + Send + 'static>(
     mut reader: Box<dyn std::io::Read + Send>,
     pending: Arc<AtomicBool>,
     wake: W,
-) -> Result<Receiver<Vec<u8>>> {
-    let (tx, rx): (SyncSender<Vec<u8>>, Receiver<Vec<u8>>) = sync_channel(OUTPUT_QUEUE_CHUNKS);
+) -> Result<Output> {
+    let shared = Arc::new(OutputShared::default());
+    let ours = shared.clone();
     thread::Builder::new()
         .name("pty-reader".into())
         .spawn(move || {
             // ConPTY hands over output in bursts far larger than 8 KiB under
-            // load; a bigger buffer means fewer reads, allocations and sends
-            // per megabyte. Idle reads still return whatever is available.
+            // load; a bigger buffer means fewer reads per megabyte. Idle reads
+            // still return whatever is available.
             let mut buf = vec![0u8; 64 * 1024];
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
-                        if tx.send(buf[..n].to_vec()).is_err() {
-                            break;
+                        let mut st = ours.state.lock().unwrap_or_else(|e| e.into_inner());
+                        while st.buf.len() >= OUTPUT_QUEUE_BYTES && !st.abandoned {
+                            st = ours.changed.wait(st).unwrap_or_else(|e| e.into_inner());
                         }
+                        if st.abandoned {
+                            return;
+                        }
+                        st.buf.extend_from_slice(&buf[..n]);
+                        drop(st);
+                        ours.changed.notify_all();
                         if !pending.swap(true, Ordering::AcqRel) {
                             wake();
                         }
@@ -301,13 +403,14 @@ fn spawn_reader<W: Fn() + Send + 'static>(
                     Err(_) => break,
                 }
             }
-            // The shell closed its output (exited). Dropping `tx` here
-            // disconnects the channel; wake the UI so it reaps this pane.
-            drop(tx);
+            // The shell closed its output (exited): mark the queue closed and
+            // wake the UI, which reaps this pane once it has drained the rest.
+            ours.state.lock().unwrap_or_else(|e| e.into_inner()).closed = true;
+            ours.changed.notify_all();
             wake();
         })
         .context("spawn pty reader thread")?;
-    Ok(rx)
+    Ok(Output { shared })
 }
 
 #[cfg(test)]
@@ -321,16 +424,46 @@ mod tests {
     fn reader_queue_is_bounded_under_a_flood() {
         let flood = Box::new(std::io::repeat(b'x'));
         let pending = Arc::new(AtomicBool::new(false));
-        let rx = spawn_reader(flood, pending, || {}).unwrap();
+        let out = spawn_reader(flood, pending, || {}).unwrap();
         // Give the reader ample time to run ahead of a UI that never drains.
         std::thread::sleep(std::time::Duration::from_millis(200));
-        let queued = rx.try_iter().take(OUTPUT_QUEUE_CHUNKS * 4).count();
-        // The queue's capacity, plus the one send the reader was blocked in.
+        let queued = out.try_recv().unwrap().len();
+        // The cap, plus at most the one 64 KiB read that crossed it.
         assert!(
-            queued <= OUTPUT_QUEUE_CHUNKS + 1,
-            "{queued} chunks queued, cap {OUTPUT_QUEUE_CHUNKS}"
+            queued <= OUTPUT_QUEUE_BYTES + 64 * 1024,
+            "{queued} bytes queued, cap {OUTPUT_QUEUE_BYTES}"
         );
+        // Taking the queue made room, so the reader carries on.
+        assert!(out.recv_timeout(Duration::from_secs(5)).is_ok());
         // Dropping the receiver unblocks and ends the reader thread.
-        drop(rx);
+        drop(out);
+    }
+
+    /// Many small reads are coalesced, and none is lost on the way, including
+    /// the last ones before EOF.
+    #[test]
+    fn small_reads_coalesce_and_all_arrive() {
+        struct Drip(usize);
+        impl std::io::Read for Drip {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if self.0 == 0 {
+                    return Ok(0);
+                }
+                self.0 -= 1;
+                buf[..100].fill(b'y');
+                Ok(100)
+            }
+        }
+        let pending = Arc::new(AtomicBool::new(false));
+        let out = spawn_reader(Box::new(Drip(1000)), pending, || {}).unwrap();
+        let mut total = 0;
+        loop {
+            match out.recv_timeout(Duration::from_secs(5)) {
+                Ok(b) => total += b.len(),
+                Err(RecvTimeoutError::Disconnected) => break,
+                Err(RecvTimeoutError::Timeout) => panic!("reader stalled at {total} bytes"),
+            }
+        }
+        assert_eq!(total, 100_000);
     }
 }

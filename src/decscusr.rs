@@ -82,8 +82,31 @@ impl DecscusrScanner {
 
     /// Feed a chunk of PTY bytes. Updates [`DecscusrScanner::is_default`] when a
     /// complete DECSCUSR arrives. Sequences may span multiple calls.
-    pub fn feed(&mut self, bytes: &[u8]) {
-        for &b in bytes {
+    pub fn feed(&mut self, mut bytes: &[u8]) {
+        while !bytes.is_empty() {
+            // Only ESC leaves the ground state, so plain text is skipped with
+            // one SIMD search instead of a state-machine step per byte. This
+            // runs over every byte the shell prints (see `Session::pump_pty`).
+            if matches!(self.state, State::Ground) {
+                let Some(esc) = memchr::memchr(0x1b, bytes) else {
+                    return;
+                };
+                bytes = &bytes[esc..];
+            }
+            // Only a CSI ending in `q`, `h` or `l` can change anything, and the
+            // per-CSI flags are reset by the next `begin_csi`. So once the final
+            // byte is in sight and is anything else (`m`, `H`, ... — nearly every
+            // CSI a TUI sends), skip the whole sequence in one scan.
+            if matches!(self.state, State::Csi)
+                && let Some(end) = bytes.iter().position(|b| (0x40..=0x7E).contains(b))
+                && !matches!(bytes[end], b'q' | b'h' | b'l')
+            {
+                bytes = &bytes[end + 1..];
+                self.state = State::Ground;
+                continue;
+            }
+            let b = bytes[0];
+            bytes = &bytes[1..];
             match self.state {
                 State::Ground => {
                     if b == 0x1b {

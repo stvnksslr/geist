@@ -1381,6 +1381,7 @@ dependencies = [
  "eframe",
  "jpeg-decoder",
  "libghostty-vt",
+ "memchr",
  "memmap2",
  "naga",
  "percent-encoding",

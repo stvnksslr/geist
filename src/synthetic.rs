@@ -25,7 +25,7 @@ impl Lcg {
     }
 
     /// Uniform-ish value in `0..n`.
-    fn below(&mut self, n: u32) -> u32 {
+    pub fn below(&mut self, n: u32) -> u32 {
         self.next_u32() % n.max(1)
     }
 }
@@ -80,6 +80,35 @@ pub fn utf8(len: usize, seed: u64) -> Vec<u8> {
             out.extend_from_slice(b"\r\n");
             col = 0;
         }
+    }
+    out
+}
+
+/// A fullscreen TUI redrawing itself, roughly `len` bytes: frames of 120x40
+/// rows, each row a cursor move then short runs of text in a fresh 256-color
+/// SGR, every frame wrapped in a synchronized update (DEC 2026). This is what
+/// Claude Code, htop or lazygit send — escape-dense (a CSI every ~12 bytes),
+/// where `ascii` is nearly escape-free.
+pub fn tui(len: usize, seed: u64) -> Vec<u8> {
+    let mut rng = Lcg::new(seed);
+    let mut out = Vec::with_capacity(len + 4096);
+    let (cols, rows) = (120u32, 40u32);
+    while out.len() < len {
+        out.extend_from_slice(b"\x1b[?2026h\x1b[H");
+        for y in 1..=rows {
+            out.extend_from_slice(format!("\x1b[{y};1H").as_bytes());
+            let mut x = 0;
+            while x < cols {
+                let w = (4 + rng.below(14)).min(cols - x);
+                out.extend_from_slice(format!("\x1b[38;5;{}m", rng.below(256)).as_bytes());
+                for _ in 0..w {
+                    out.push(b'a' + rng.below(26) as u8);
+                }
+                out.extend_from_slice(b"\x1b[0m");
+                x += w;
+            }
+        }
+        out.extend_from_slice(b"\x1b[?2026l");
     }
     out
 }
@@ -141,6 +170,7 @@ pub fn corpus(
     let label: &'static str = match kind {
         "utf8" => "utf8",
         "osc" => "osc",
+        "tui" => "tui",
         _ => "ascii",
     };
     (generate(len, seed), label)

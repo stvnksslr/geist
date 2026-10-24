@@ -16,6 +16,10 @@
 //! falling *through* to "notification" whenever a ConEmu shape is started but
 //! malformed.
 
+use std::sync::LazyLock;
+
+use memchr::memmem::Finder;
+
 /// Cap on a single OSC body so a malformed, never-terminated sequence can't grow
 /// the buffer without bound. Notification bodies are prose, so 64 KiB is far
 /// above anything real.
@@ -89,6 +93,9 @@ impl Notification {
     }
 }
 
+/// Where an OSC can begin; built once, since every PTY chunk is searched for it.
+static OSC_START: LazyLock<Finder<'static>> = LazyLock::new(|| Finder::new(b"\x1b]"));
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum State {
     /// Outside any escape sequence.
@@ -130,8 +137,27 @@ impl OscNotifyScanner {
 
     /// Feed a chunk of PTY bytes, appending any completed requests to `out`.
     /// Sequences may span calls.
-    pub fn feed(&mut self, bytes: &[u8], out: &mut Vec<Osc9>) {
-        for &b in bytes {
+    pub fn feed(&mut self, mut bytes: &[u8], out: &mut Vec<Osc9>) {
+        while !bytes.is_empty() {
+            // From the ground state an OSC can only begin at `ESC ]` (an ESC
+            // followed by anything else falls straight back), so jump to the
+            // next one with a SIMD search rather than stepping through every
+            // byte and every CSI. This runs over everything the shell prints
+            // (see `Session::pump_pty`).
+            if matches!(self.state, State::Ground) {
+                match OSC_START.find(bytes) {
+                    Some(at) => bytes = &bytes[at..],
+                    None => {
+                        // A trailing ESC may be the first half of one.
+                        if bytes.last() == Some(&0x1b) {
+                            self.state = State::Esc;
+                        }
+                        return;
+                    }
+                }
+            }
+            let b = bytes[0];
+            bytes = &bytes[1..];
             match self.state {
                 State::Ground => {
                     if b == 0x1b {

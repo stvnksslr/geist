@@ -10,6 +10,20 @@
 | 2 latency vs WezTerm | **done — geist wins** | 38.2 ms p50 vs WezTerm's 62.3 (20 samples each, identical 1200x800 client) |
 | 3 dev build uses OpenConsole | **done** | `mise dev` now runs `fetch-conpty.ps1` (0.3 s no-op once installed) |
 | 4 memory series in the harness | **blocked** | needs the perf-harness branch merged; commit signing is down |
+| 5 UI-thread CPU, profiled (2026-10-21) | **done** | the UI thread was the ceiling (91–100% busy); UI CPU per MiB −35 to −52%, throughput +19 to +56% — docs/benchmarking.md "Sampling profiler" |
+
+### 5: the throughput lead was geist-bound, not ConPTY-bound
+
+Item 3 below assumed end-to-end throughput was set by the console host. The
+first whole-app profile (`tools/sampler`, no admin needed) showed otherwise:
+on the sideloaded OpenConsole, geist's UI thread sat at 91–100% of a core in
+every workload, and ~30% of that went to geist's own side scanners stepping a
+state machine through every byte. On TUI output that was more than the
+engine's whole parse (5.4 vs 4.6 ms per MiB). Fixing those, a per-cell allocation in the snapshot, a
+`powf` per colour channel in the instance builder and an always-on allocation
+counter took UI-thread CPU per MiB down 35–52%, and the UI thread now has
+headroom. What is left is mostly libghostty's own parse; the next step past
+that is parsing off the UI thread, which needs the engine to become `Send`.
 
 Running total: **274 -> 201 MB** working set against WezTerm's 78, with the
 remaining 123 MB attributed and reproducible (1c).

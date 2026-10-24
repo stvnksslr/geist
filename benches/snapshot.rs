@@ -41,6 +41,17 @@ fn bench_snapshot(c: &mut Criterion) {
                     std::hint::black_box(snap.cells.len())
                 })
             });
+            // Every row re-copied: what a scroll, a fullscreen TUI redraw or a
+            // flood costs per frame. A viewport nudge (net zero) forces the
+            // full path without paying for a write.
+            group.bench_function(format!("full/{kind}/{cols}x{rows}"), |b| {
+                b.iter(|| {
+                    eng.scroll(-1);
+                    eng.scroll(1);
+                    eng.snapshot(&mut snap).unwrap();
+                    std::hint::black_box(snap.cells.len())
+                })
+            });
         }
     }
     group.finish();

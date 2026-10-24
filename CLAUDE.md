@@ -432,14 +432,33 @@ fallback engine without app changes:
   `cargo test --test handoff_com -- --ignored` (never touches `%%Startup`) and `--test
   default_terminal` (the real chain, delegation live ~1 s); both need `cargo build --release`,
   `scripts/build-handoff-proxy.ps1`, and no geist running.
-- **PTY output needs backpressure, and `pump_pty` needs a budget.** The reader→UI channel is a
-  bounded `sync_channel` and each pump stops after `PUMP_BUDGET`, returning `true` so the root pass
-  repaints for the rest (a reader blocked on a full channel posts no wake). Both were unbounded once:
+- **PTY output needs backpressure, and `pump_pty` needs a budget.** The reader→UI queue
+  (`pty::Output`) is bounded in **bytes** (`OUTPUT_QUEUE_BYTES`; depth is latency, and a count of
+  reads means anything from a few bytes to 64 KiB) and each pump parses it in `PUMP_SLICE` pieces until
+  `PUMP_BUDGET`, carrying the rest in `Session::pty_backlog` and returning `true` so the root pass
+  repaints for it (a reader blocked on a full queue posts no wake). Both were unbounded once:
   a fullscreen TUI whose frames grow over a session (Claude Code) eventually out-writes the parser,
   and then the screen and keystroke echo fell further behind for as long as it ran, and the drain
   loop could not return while the reader refilled it — multi-second freezes. Don't "speed it up" by
   unbounding either. Unrelated trap when stress-testing: OpenConsole leaks memory (and stalls
   doubling-ly) on OSC 8 links with a *unique* `id=` each — measure without them.
+- **The side scanners run over every byte the shell prints, so they skip, and the skips are
+  load-bearing.** `osc_color`/`osc133`/`osc_notify` jump from ground straight to the next `ESC ]`,
+  `xtshiftescape` to the next `ESC [ >` / `ESC c`, `decscusr` past any CSI whose final byte isn't
+  `q`/`h`/`l`. Byte-at-a-time they cost *more* UI-thread time than the engine's own parse on TUI
+  output (measured). Each skip is sound only for that machine's exact transitions, including a
+  sequence split across reads — `tests/scanner_equivalence.rs` checks every scanner against its own
+  byte-by-byte walk. Change a state machine, and that test is what tells you the skip still holds.
+- **Profiling: three traps, each of which produced a confident wrong answer.** (1) Any cargo profile
+  with debug info builds libghostty-vt in Zig **Debug** — the vendored `build.rs` keys off cargo's
+  `DEBUG`, which means "has debuginfo", not "unoptimized" — so set
+  `LIBGHOSTTY_VT_SYS_OPTIMIZE=ReleaseFast` for `--profile profiling`, or the engine's safety checks
+  dominate every profile. (2) Stack sampling (`tools/sampler`) suspends the UI thread, which *is*
+  the PTY drain: sampling every thread slowed a TUI workload ~20x. Take throughput from `-NoSample`
+  or `-CpuOnly` runs, and stacks from `--only main` at ≤100 Hz. (3) This is a shared desktop: a
+  CPU-heavy job of the user's turns runs bimodal (~600 vs ~9,000 frames/s, with no thread busy).
+  Interleave A/B runs and compare UI-thread **CPU per MiB** (`-CpuOnly`), which contention barely
+  moves. Recipe and numbers: docs/benchmarking.md ("Sampling profiler").
 - **After `cargo test`, the *binary* is still stale.** `cargo test --lib` builds only the test
   harness, so launching `target\debug\geist.exe` to check a change runs the previous build — which
   looks exactly like the feature not working. Run `cargo build` before any manual/screenshot check.

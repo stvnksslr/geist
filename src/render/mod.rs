@@ -974,12 +974,19 @@ pub fn resize_font(render_state: &egui_wgpu::RenderState, px: f32) -> (f32, f32)
 }
 
 fn srgb_to_linear(c: u8) -> f32 {
-    let s = c as f32 / 255.0;
-    if s <= 0.04045 {
-        s / 12.92
-    } else {
-        ((s + 0.055) / 1.055).powf(2.4)
-    }
+    // Three `powf`s per colour, for every background quad and glyph run of
+    // every frame — and the input is a byte, so tabulate it once.
+    static LUT: std::sync::LazyLock<[f32; 256]> = std::sync::LazyLock::new(|| {
+        std::array::from_fn(|i| {
+            let s = i as f32 / 255.0;
+            if s <= 0.04045 {
+                s / 12.92
+            } else {
+                ((s + 0.055) / 1.055).powf(2.4)
+            }
+        })
+    });
+    LUT[c as usize]
 }
 
 impl GpuResources {

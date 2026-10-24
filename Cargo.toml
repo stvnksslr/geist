@@ -25,6 +25,7 @@ regex = "1"
 # Memory-map font files instead of reading them: the Windows fallback chain is
 # ~60 MB of CJK/emoji faces, of which a session touches a few pages. See
 # `render/atlas.rs::map_font`.
+memchr = "2"
 memmap2 = "0.9"
 # HarfBuzz-equivalent text shaper (pure Rust) for ligature/contextual-alternate
 # substitution. We shape per-style cell runs and snap the resulting glyphs back
@@ -159,3 +160,11 @@ strip = "symbols"    # strip symbols from the shipped binary (size only)
 # this fully-optimized build. (Profile kept explicit for clarity.)
 [profile.bench]
 inherits = "release"
+
+# The release build plus a PDB, for `tools/sampler` (docs/benchmarking.md):
+# `cargo build --profile profiling`. Same codegen as what ships, so a profile
+# taken here is a profile of the release exe — only the symbols differ.
+[profile.profiling]
+inherits = "release"
+debug = "limited"
+strip = "none"

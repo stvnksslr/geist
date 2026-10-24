@@ -17,6 +17,10 @@
 //! field of `?` is a query. Ghostty echoes back whichever terminator the caller
 //! used, so the scanner records it.
 
+use std::sync::LazyLock;
+
+use memchr::memmem::Finder;
+
 use crate::config::OscColorReportFormat;
 use crate::engine::Rgb;
 
@@ -48,6 +52,9 @@ impl Terminator {
 pub struct ColorQuery {
     pub code: u8,
 }
+
+/// Where an OSC can begin; built once, since every PTY chunk is searched for it.
+static OSC_START: LazyLock<Finder<'static>> = LazyLock::new(|| Finder::new(b"\x1b]"));
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum State {
@@ -81,8 +88,27 @@ impl OscColorScanner {
 
     /// Feed a chunk of bytes, appending any color queries to `out`. Sequences may
     /// span multiple calls.
-    pub fn feed(&mut self, bytes: &[u8], out: &mut Vec<(ColorQuery, Terminator)>) {
-        for &b in bytes {
+    pub fn feed(&mut self, mut bytes: &[u8], out: &mut Vec<(ColorQuery, Terminator)>) {
+        while !bytes.is_empty() {
+            // From the ground state an OSC can only begin at `ESC ]` (an ESC
+            // followed by anything else falls straight back), so jump to the
+            // next one with a SIMD search rather than stepping through every
+            // byte and every CSI. This runs over everything the shell prints
+            // (see `Session::pump_pty`).
+            if matches!(self.state, State::Ground) {
+                match OSC_START.find(bytes) {
+                    Some(at) => bytes = &bytes[at..],
+                    None => {
+                        // A trailing ESC may be the first half of one.
+                        if bytes.last() == Some(&0x1b) {
+                            self.state = State::Esc;
+                        }
+                        return;
+                    }
+                }
+            }
+            let b = bytes[0];
+            bytes = &bytes[1..];
             match self.state {
                 State::Ground => {
                     if b == 0x1b {

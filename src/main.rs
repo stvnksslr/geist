@@ -200,25 +200,34 @@ fn run_embedding() -> Option<i32> {
 
 /// Live Rust-heap bytes, for memory attribution: driver and GPU allocations
 /// show up in the process's private bytes but never here, so the difference
-/// is theirs. Costs two atomic adds per allocation.
+/// is theirs.
+///
+/// Counts only while `geist_HEAP_PROBE` is set ([`COUNTING`]). Unconditional,
+/// its `fetch_add` + `fetch_max` (a CAS loop) on every allocation was ~2.5% of
+/// the UI thread under a flood (tools/sampler) to feed a probe nobody was
+/// reading; now everyone else pays one relaxed load. Signed, because a free of
+/// a block allocated before counting began is still subtracted.
 struct CountingAlloc;
-static HEAP_LIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-static HEAP_PEAK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static COUNTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static HEAP_LIVE: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+static HEAP_PEAK: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 
 // SAFETY: forwards every call to the system allocator unchanged; the counters
 // are plain atomics and never allocate.
 unsafe impl std::alloc::GlobalAlloc for CountingAlloc {
     unsafe fn alloc(&self, l: std::alloc::Layout) -> *mut u8 {
         let p = unsafe { std::alloc::System.alloc(l) };
-        if !p.is_null() {
-            let live =
-                HEAP_LIVE.fetch_add(l.size(), std::sync::atomic::Ordering::Relaxed) + l.size();
+        if !p.is_null() && COUNTING.load(std::sync::atomic::Ordering::Relaxed) {
+            let size = l.size() as isize;
+            let live = HEAP_LIVE.fetch_add(size, std::sync::atomic::Ordering::Relaxed) + size;
             HEAP_PEAK.fetch_max(live, std::sync::atomic::Ordering::Relaxed);
         }
         p
     }
     unsafe fn dealloc(&self, p: *mut u8, l: std::alloc::Layout) {
-        HEAP_LIVE.fetch_sub(l.size(), std::sync::atomic::Ordering::Relaxed);
+        if COUNTING.load(std::sync::atomic::Ordering::Relaxed) {
+            HEAP_LIVE.fetch_sub(l.size() as isize, std::sync::atomic::Ordering::Relaxed);
+        }
         unsafe { std::alloc::System.dealloc(p, l) }
     }
 }
@@ -232,6 +241,9 @@ fn start_heap_probe() {
     let Ok(path) = std::env::var("geist_HEAP_PROBE") else {
         return;
     };
+    // First thing in `main`, so all but the runtime's own startup allocations
+    // are counted.
+    COUNTING.store(true, std::sync::atomic::Ordering::Relaxed);
     std::thread::spawn(move || {
         loop {
             std::thread::sleep(std::time::Duration::from_secs(1));

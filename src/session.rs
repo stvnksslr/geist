@@ -27,6 +27,8 @@ const DEFAULT_ROWS: u16 = 24;
 /// How long one [`Session::pump_pty`] may spend parsing before it yields to the
 /// frame. Half a 60 Hz frame: a flood still renders, and input still lands.
 const PUMP_BUDGET: std::time::Duration = std::time::Duration::from_millis(8);
+/// How much [`Session::pump_pty`] hands the engine between budget checks.
+const PUMP_SLICE: usize = 64 * 1024;
 
 pub struct Session {
     /// `None` for a pane whose shell failed to start (see [`Session::failed`]):
@@ -101,6 +103,12 @@ pub struct Session {
     /// `A`/`B` prompt marks to the screen, but `D`'s exit code never lands on a
     /// cell, so it has to be read off the stream.
     osc133: Osc133Scanner,
+    /// PTY output taken from the reader but not yet parsed: `pump_pty` takes
+    /// the whole queue in one swap and parses it in [`PUMP_SLICE`] pieces, so
+    /// what is left when [`PUMP_BUDGET`] runs out waits here for the next pass.
+    /// Parsed up to `pty_backlog_at`.
+    pty_backlog: Vec<u8>,
+    pty_backlog_at: usize,
     /// When the running command started, if one is running. Set by a `C` mark or
     /// — since neither of geist's shell hooks can emit one — by the Enter that
     /// submitted it. `Instant`, not egui time: `pump_pty` has no `Context`, and a
@@ -432,6 +440,8 @@ impl Session {
             osc_color: OscColorScanner::new(),
             osc_notify: OscNotifyScanner::new(),
             osc133: Osc133Scanner::new(),
+            pty_backlog: Vec::new(),
+            pty_backlog_at: 0,
             command_started: None,
             pending_command_finish: Vec::new(),
             pending_notifications: Vec::new(),
@@ -515,45 +525,54 @@ impl Session {
                 .store(false, std::sync::atomic::Ordering::Release);
         }
         while let Some(pty) = self.pty.as_ref() {
-            match pty.output.try_recv() {
-                Ok(chunk) => {
-                    // `scroll-to-bottom = output` (off by default): new data
-                    // yanks the viewport to the live edge. Off by default in
-                    // Ghostty too, because it fights you while you're reading
-                    // scrollback of a command that is still producing output.
-                    if self.scroll_to_bottom.output {
-                        self.scroll_target_px = 0.0;
+            if self.pty_backlog_at >= self.pty_backlog.len() {
+                self.pty_backlog_at = 0;
+                match pty.output.take_into(&mut self.pty_backlog) {
+                    Ok(()) => {}
+                    Err(TryRecvError::Empty) => {
+                        self.pty_backlog.clear();
+                        break;
                     }
-                    // The inspector's IO log, in the one place every byte from
-                    // the shell passes through. `None` unless an inspector is
-                    // open on this pane, so this is a null check otherwise.
-                    //
-                    // Recorded *before* the engine sees it, deliberately: the
-                    // question this log answers is "did the sequence arrive?",
-                    // and ConPTY re-renders a child's output rather than piping
-                    // it (see CLAUDE.md), so what lands here is the last honest
-                    // view of the stream.
-                    if let Some(log) = self.inspect.as_mut() {
-                        log.read(&chunk);
-                    }
-                    self.engine.write(&chunk);
-                    self.decscusr.feed(&chunk);
-                    self.shift_escape.feed(&chunk);
-                    self.osc_color.feed(&chunk, &mut color_queries);
-                    self.osc_notify.feed(&chunk, &mut osc9);
-                    self.osc133.feed(&chunk, &mut marks);
-                    // Draw what we have rather than chase a program that can
-                    // write as fast as we parse; the rest waits a frame.
-                    if started.elapsed() >= PUMP_BUDGET {
-                        backlogged = true;
+                    Err(TryRecvError::Disconnected) => {
+                        self.pty_backlog.clear();
+                        self.alive = false;
                         break;
                     }
                 }
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
-                    self.alive = false;
-                    break;
-                }
+            }
+            let end = (self.pty_backlog_at + PUMP_SLICE).min(self.pty_backlog.len());
+            let chunk = &self.pty_backlog[self.pty_backlog_at..end];
+            self.pty_backlog_at = end;
+            // `scroll-to-bottom = output` (off by default): new data
+            // yanks the viewport to the live edge. Off by default in
+            // Ghostty too, because it fights you while you're reading
+            // scrollback of a command that is still producing output.
+            if self.scroll_to_bottom.output {
+                self.scroll_target_px = 0.0;
+            }
+            // The inspector's IO log, in the one place every byte from
+            // the shell passes through. `None` unless an inspector is
+            // open on this pane, so this is a null check otherwise.
+            //
+            // Recorded *before* the engine sees it, deliberately: the
+            // question this log answers is "did the sequence arrive?",
+            // and ConPTY re-renders a child's output rather than piping
+            // it (see CLAUDE.md), so what lands here is the last honest
+            // view of the stream.
+            if let Some(log) = self.inspect.as_mut() {
+                log.read(chunk);
+            }
+            self.engine.write(chunk);
+            self.decscusr.feed(chunk);
+            self.shift_escape.feed(chunk);
+            self.osc_color.feed(chunk, &mut color_queries);
+            self.osc_notify.feed(chunk, &mut osc9);
+            self.osc133.feed(chunk, &mut marks);
+            // Draw what we have rather than chase a program that can
+            // write as fast as we parse; the rest waits a frame.
+            if started.elapsed() >= PUMP_BUDGET {
+                backlogged = true;
+                break;
             }
         }
         self.handle_clipboard_deferrals();
