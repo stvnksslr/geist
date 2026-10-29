@@ -636,3 +636,35 @@ fn ghosttys_bash_integration_injects_through_the_wsl_bootstrap() {
         "no cwd report: {text:?}"
     );
 }
+
+#[test]
+#[ignore = "spawns a real shell; run with --ignored --nocapture"]
+fn synchronized_output_survives_conpty() {
+    // DEC 2026 is how a TUI says "don't draw until I'm done" — the renderer
+    // holds its last frame while it is set, which is what keeps a redraw from
+    // showing half-painted. If ConPTY ate it, that hold would never engage.
+    //
+    // Both ConPTYs forward it, but only the sideloaded one keeps it *around*
+    // the frame. The inbox one (measured on 10.0.26300) emits `?2026h?2026l`
+    // back to back ahead of the text, so the hold opens and closes on nothing
+    // and half-drawn frames still show there.
+    let out = run(&emit(&cat(&[
+        ESC.into(),
+        lit("[?2026h"),
+        lit("geist-sync-probe"),
+        ESC.into(),
+        lit("[?2026l"),
+    ])));
+    let text = String::from_utf8_lossy(&out);
+    eprintln!("ConPTY emitted {} bytes: {:?}", out.len(), text);
+    assert!(
+        contains(&out, b"\x1b[?2026h") && contains(&out, b"\x1b[?2026l"),
+        "ConPTY dropped DECSET 2026. Got: {text:?}"
+    );
+    if requested_passthrough() {
+        assert!(
+            contains(&out, b"\x1b[?2026hgeist-sync-probe\x1b[?2026l"),
+            "the sideloaded ConPTY no longer wraps the frame in its update. Got: {text:?}"
+        );
+    }
+}

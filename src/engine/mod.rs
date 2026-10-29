@@ -625,6 +625,14 @@ pub trait TerminalEngine {
     /// all (see [`crate::config::paste_is_unsafe`]).
     fn bracketed_paste(&self) -> bool;
 
+    /// Whether the program has a synchronized update open (DEC 2026): it is
+    /// mid-redraw and has asked for the screen not to be drawn until it's done.
+    fn synchronized_output(&self) -> bool;
+
+    /// Close a synchronized update the program never closed, as Ghostty does
+    /// after its timeout, so a program that died mid-frame can't freeze the pane.
+    fn end_synchronized_output(&mut self);
+
     /// Drain any bytes the terminal wants written back to the PTY (responses to
     /// device queries, status reports, etc.). Returns empty when there's none.
     fn take_responses(&mut self) -> Vec<u8>;

@@ -43,6 +43,7 @@ pub mod osc_color;
 pub mod osc_notify;
 pub mod padding;
 pub mod panedrag;
+pub mod prewarm;
 pub mod primary;
 pub mod profilepage;
 pub mod profiles;

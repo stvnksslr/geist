@@ -61,6 +61,7 @@ palette = 8=#666a73
 | Key | Type | Effect |
 | --- | --- | --- |
 | `command` | string | Default shell: a profile name, program, or full path. Unknown values become a new default profile. (Ghostty `command`.) |
+| `shell-prewarm` | bool (default `true`) | **geist-specific.** Keep one PowerShell (`pwsh`/`powershell` default profile) started in the background, held just before its first prompt, so the next window, tab or split opens on a shell whose `$PROFILE` has already run. Costs one idle shell process. |
 | `font-size` | float | Logical font size; scaled by DPI, then rasterized into the glyph atlas. Also the reset target for Ctrl+0. |
 | `foreground` / `background` | `#rrggbb` | Default fg/bg, applied via `engine.apply_theme`. |
 | `cursor-color` | `#rrggbb` | Cursor color; omit to defer to the program/engine default. |

@@ -1403,6 +1403,14 @@ impl TerminalEngine for GhosttyVtEngine {
         self.term.mode(Mode::BRACKETED_PASTE).unwrap_or(false)
     }
 
+    fn synchronized_output(&self) -> bool {
+        self.term.mode(Mode::SYNC_OUTPUT).unwrap_or(false)
+    }
+
+    fn end_synchronized_output(&mut self) {
+        let _ = self.term.set_mode(Mode::SYNC_OUTPUT, false);
+    }
+
     fn take_responses(&mut self) -> Vec<u8> {
         std::mem::take(&mut *self.responses.borrow_mut())
     }
@@ -3972,6 +3980,19 @@ mod tests {
 
     /// Paste protection needs the mode *before* encoding, so it reads it
     /// through its own accessor rather than inferring it from the output.
+    #[test]
+    fn synchronized_output_is_reported_and_can_be_closed() {
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        assert!(!eng.synchronized_output());
+        eng.write(b"\x1b[?2026h");
+        assert!(eng.synchronized_output());
+        eng.write(b"\x1b[?2026l");
+        assert!(!eng.synchronized_output());
+        eng.write(b"\x1b[?2026h");
+        eng.end_synchronized_output();
+        assert!(!eng.synchronized_output(), "the timeout's reset must take");
+    }
+
     #[test]
     fn bracketed_paste_mode_is_reported() {
         let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();

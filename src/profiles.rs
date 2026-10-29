@@ -83,6 +83,52 @@ impl Profile {
         norm(&self.name) == norm(s) || norm(&self.program) == norm(s)
     }
 
+    /// The program's bare lowercase name: no directory, no `.exe`.
+    fn shell_name(&self) -> String {
+        let prog = self.program.trim_end_matches(".exe").to_ascii_lowercase();
+        prog.rsplit(['\\', '/']).next().unwrap_or(&prog).to_string()
+    }
+
+    /// [`Self::launch`] for a shell started *ahead* of the pane that will show
+    /// it (`prewarm.rs`): the same hook, then a gate that holds the shell before
+    /// its first prompt until geist writes the starting directory to `pipe`.
+    /// The shell's own startup (the user's `$PROFILE` — most of a second with
+    /// prompt and env tools in it) has already run by then, which is the point.
+    ///
+    /// `None` unless this is a plain `pwsh`/`powershell` profile: other shells
+    /// start fast enough not to need it, and a profile with its own args leaves
+    /// no `-EncodedCommand` to put the gate in. `pipe` must be a bare pipe name
+    /// (no `\\.\pipe\` prefix, no quotes).
+    pub fn launch_gated(
+        &self,
+        si: &Integration,
+        si_dir: Option<&std::path::Path>,
+        base_env: &[(String, String)],
+        pipe: &str,
+    ) -> Option<Launch> {
+        if !self.args.is_empty() || !matches!(self.shell_name().as_str(), "pwsh" | "powershell") {
+            return None;
+        }
+        // Everything but the args comes from the ungated launch, so the two
+        // can't drift; `shell-integration = none` gets the gate alone.
+        let plain = self.launch(si, si_dir, base_env);
+        let mut script = if plain.args.is_empty() {
+            String::new()
+        } else {
+            pwsh_hook(si)
+        };
+        script.push_str(&PWSH_GATE.replace("#PIPE#", pipe));
+        let utf16: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        Some(Launch {
+            args: vec![
+                "-NoExit".into(),
+                "-EncodedCommand".into(),
+                STANDARD.encode(utf16),
+            ],
+            ..plain
+        })
+    }
+
     /// The full arg list to spawn this shell with under the default
     /// shell-integration settings. See [`Profile::launch`].
     pub fn launch_args(&self) -> Vec<String> {
@@ -119,8 +165,7 @@ impl Profile {
         if !self.args.is_empty() || si.mode == ShellIntegration::None {
             return untouched;
         }
-        let prog = self.program.trim_end_matches(".exe").to_ascii_lowercase();
-        let prog = prog.rsplit(['\\', '/']).next().unwrap_or(&prog).to_string();
+        let prog = self.shell_name();
         // pwsh/cmd have no pre-exec hook, so the bar cursor the prompt sets is
         // reset by the session when it sends the Enter (see `Session`).
         let reset_cursor_on_submit = si.features.cursor;
@@ -477,6 +522,43 @@ function global:prompt {
   "$base$([char]27)]133;B$([char]27)\"
 }"#;
 
+/// The pre-started shell's gate ([`Profile::launch_gated`]), appended after the
+/// hook. It wraps the prompt once more, for the **first prompt only**: that
+/// call blocks in `ReadLine` (no CPU while it waits) until geist writes the
+/// starting directory, then puts the hook's prompt back and runs it.
+///
+/// - **The wait must not happen in the `-EncodedCommand` itself.** That
+///   command is the session's first history entry, and prompt engines take
+///   "the last command's duration" from `Get-History` — starship rendered
+///   `took 3s` (the time the spare sat idle) on every adopted shell. Blocking
+///   in the prompt keeps that entry as short as it is in a normal launch.
+/// - The pipe already exists when the shell starts (geist creates it first),
+///   because `Connect` *spins* while a pipe is missing.
+/// - An empty line, or a pipe closed without one (geist discarding the
+///   spare), just lets the prompt through.
+/// - The same-directory check is not cosmetic: profile tools hook location
+///   changes (mise's `LocationChangedAction` runs an external process —
+///   ~85 ms a `cd`).
+///
+/// The first prompt's `$?` is the restore's (true), which is what a normal
+/// launch's first prompt sees too.
+const PWSH_GATE: &str = r#"
+$global:__geistUngated = $function:prompt
+function global:prompt {
+  $g = New-Object System.IO.Pipes.NamedPipeClientStream('.', '#PIPE#', [System.IO.Pipes.PipeDirection]::In)
+  $d = $null
+  try {
+    $g.Connect()
+    $d = (New-Object System.IO.StreamReader($g, [System.Text.Encoding]::UTF8)).ReadLine()
+  } catch {} finally { $g.Dispose() }
+  if ($d -and $d -ne (Get-Location).ProviderPath -and (Test-Path -LiteralPath $d -PathType Container)) {
+    Set-Location -LiteralPath $d
+  }
+  $function:global:prompt = $global:__geistUngated
+  Remove-Variable __geistUngated -Scope Global
+  & $function:global:prompt
+}"#;
+
 /// Ghostty's shell-integration scripts (plus geist's WSL bootstrap), embedded
 /// so a bare `geist.exe` needs no install layout. Paths are relative to the
 /// `shell-integration` dir; upstream license headers travel with the files.
@@ -731,6 +813,56 @@ mod tests {
             .map(|c| u16::from_le_bytes([c[0], c[1]]))
             .collect();
         String::from_utf16(&utf16).unwrap()
+    }
+
+    #[test]
+    fn the_gated_launch_is_the_plain_hook_then_the_gate() {
+        let on = Integration::default();
+        let env = [("A".to_string(), "1".to_string())];
+        for prog in [
+            "pwsh.exe",
+            r"C:\Program Files\PowerShell\7\pwsh.exe",
+            "powershell",
+        ] {
+            let p = Profile::new("x", prog);
+            let plain = p.launch(&on, None, &env);
+            let gated = p
+                .launch_gated(&on, None, &env, "geist-prewarm-1-2")
+                .unwrap();
+            // Only the script may differ: a spare is adopted in place of the
+            // plain launch, so its env and cursor handling must be identical.
+            assert_eq!(gated.env, plain.env);
+            assert_eq!(gated.reset_cursor_on_submit, plain.reset_cursor_on_submit);
+            assert_eq!(gated.args[..2], plain.args[..2]);
+            let script = decoded_hook(&gated);
+            let (hook, gate) = script.split_at(decoded_hook(&plain).len());
+            assert_eq!(hook, decoded_hook(&plain), "{prog}");
+            assert!(gate.contains("'geist-prewarm-1-2'"), "{gate}");
+            assert!(!gate.contains("#PIPE#"));
+        }
+    }
+
+    #[test]
+    fn only_a_plain_powershell_profile_is_gated() {
+        let on = Integration::default();
+        for prog in ["cmd.exe", "wsl.exe", "nu.exe"] {
+            assert!(
+                Profile::new("x", prog)
+                    .launch_gated(&on, None, &[], "p")
+                    .is_none(),
+                "{prog}"
+            );
+        }
+        // A profile's own args leave no `-EncodedCommand` to carry the gate.
+        let custom = Profile::custom("k", "x", "pwsh.exe", vec!["-NoLogo".into()], None);
+        assert!(custom.launch_gated(&on, None, &[], "p").is_none());
+        // With integration off there is no hook, but the gate still applies.
+        let off = si(|i| i.mode = ShellIntegration::None);
+        let gated = Profile::new("x", "pwsh.exe")
+            .launch_gated(&off, None, &[], "p")
+            .unwrap();
+        assert_eq!(decoded_hook(&gated), PWSH_GATE.replace("#PIPE#", "p"));
+        assert!(!gated.reset_cursor_on_submit);
     }
 
     #[test]

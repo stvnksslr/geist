@@ -29,6 +29,9 @@ const DEFAULT_ROWS: u16 = 24;
 const PUMP_BUDGET: std::time::Duration = std::time::Duration::from_millis(8);
 /// How much [`Session::pump_pty`] hands the engine between budget checks.
 const PUMP_SLICE: usize = 64 * 1024;
+/// How long a synchronized update (DEC 2026) may hold the last frame before it
+/// is closed for the program. Ghostty's `sync_reset` value.
+const SYNC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 
 pub struct Session {
     /// `None` for a pane whose shell failed to start (see [`Session::failed`]):
@@ -109,6 +112,9 @@ pub struct Session {
     /// Parsed up to `pty_backlog_at`.
     pty_backlog: Vec<u8>,
     pty_backlog_at: usize,
+    /// When the open synchronized update (DEC 2026) was first seen holding a
+    /// frame; `None` when there is none. See [`Session::update_snapshot`].
+    sync_since: Option<std::time::Instant>,
     /// When the running command started, if one is running. Set by a `C` mark or
     /// — since neither of geist's shell hooks can emit one — by the Enter that
     /// submitted it. `Instant`, not egui time: `pump_pty` has no `Context`, and a
@@ -274,22 +280,44 @@ impl Session {
         profile: &Profile,
         cwd: Option<&Path>,
     ) -> Result<Self> {
-        let wake_ctx = ctx.clone();
-        let launch = profile.launch(
+        Self::spawn(
+            ctx,
+            config,
+            profile,
+            cwd,
+            &Self::launch_for(config, profile),
+        )
+    }
+
+    /// The args and environment [`Self::new`] starts `profile` with — also how
+    /// `prewarm` tells whether its spare shell is the one `new` would start.
+    pub fn launch_for(config: &Config, profile: &Profile) -> crate::profiles::Launch {
+        let mut launch = profile.launch(
             &crate::profiles::Integration::from_config(config),
             crate::profiles::shell_integration_dir().as_deref(),
             &config.env,
         );
         // `term`: layered last so an explicit `env = TERM=...` still wins.
-        let mut env = launch.env.clone();
-        if !config.term.is_empty() && !env.iter().any(|(k, _)| k == "TERM") {
-            env.push(("TERM".to_string(), config.term.clone()));
+        if !config.term.is_empty() && !launch.env.iter().any(|(k, _)| k == "TERM") {
+            launch.env.push(("TERM".to_string(), config.term.clone()));
         }
+        launch
+    }
+
+    /// [`Self::new`] with the launch already decided.
+    pub fn spawn(
+        ctx: &egui::Context,
+        config: &Config,
+        profile: &Profile,
+        cwd: Option<&Path>,
+        launch: &crate::profiles::Launch,
+    ) -> Result<Self> {
+        let wake_ctx = ctx.clone();
         let pty = Pty::spawn(
             &profile.program,
             &launch.args,
             cwd,
-            &env,
+            &launch.env,
             DEFAULT_COLS,
             DEFAULT_ROWS,
             // Wake the **root** viewport, explicitly.
@@ -442,6 +470,7 @@ impl Session {
             osc133: Osc133Scanner::new(),
             pty_backlog: Vec::new(),
             pty_backlog_at: 0,
+            sync_since: None,
             command_started: None,
             pending_command_finish: Vec::new(),
             pending_notifications: Vec::new(),
@@ -905,7 +934,15 @@ impl Session {
         osc7_to_path(&self.engine.pwd()?)
     }
 
+    /// Refresh the snapshot the renderer draws — unless the program is
+    /// mid-redraw inside a synchronized update (DEC 2026), in which case the
+    /// last finished frame stays up. Drawing between a TUI's "clear" and its
+    /// "repaint" is what flickers, and a high-refresh display samples that gap
+    /// far more often than a 60 Hz one does.
     pub fn update_snapshot(&mut self) -> bool {
+        if self.hold_frame() {
+            return true;
+        }
         // `make_mut` clones only if the previous frame's render still holds the
         // Arc; in steady state it's released by now, so this is a no-op bump.
         let snap = Arc::make_mut(&mut self.snapshot);
@@ -938,6 +975,31 @@ impl Session {
                 .unwrap_or_else(|| self.decscusr.default_blink());
         }
         true
+    }
+
+    /// Whether to keep showing the previous frame because a synchronized update
+    /// is open. A frame of the wrong size is never held — a resize must show —
+    /// and an update left open past [`SYNC_TIMEOUT`] is closed, as in Ghostty,
+    /// so a program that died mid-frame can't freeze the pane.
+    fn hold_frame(&mut self) -> bool {
+        if !self.engine.synchronized_output() {
+            self.sync_since = None;
+            return false;
+        }
+        let since = *self.sync_since.get_or_insert_with(std::time::Instant::now);
+        if since.elapsed() >= SYNC_TIMEOUT {
+            self.engine.end_synchronized_output();
+            self.sync_since = None;
+            return false;
+        }
+        self.snapshot.cols == self.cols && self.snapshot.rows == self.rows
+    }
+
+    /// How long until an open synchronized update times out, so the caller can
+    /// wake for it: a program that stops writing posts no wake of its own.
+    pub fn sync_hold_left(&self) -> Option<std::time::Duration> {
+        self.sync_since
+            .map(|t| SYNC_TIMEOUT.saturating_sub(t.elapsed()))
     }
 
     /// The sub-line vertical offset (device px) the renderer shifts this pane's
@@ -3884,5 +3946,59 @@ mod tests {
     fn px_offset_never_negative() {
         assert_eq!(px_offset(10.0, 2.0), 20);
         assert_eq!(px_offset(-3.0, 2.0), 0);
+    }
+}
+
+#[cfg(test)]
+mod sync_tests {
+    use super::{SYNC_TIMEOUT, Session};
+    use crate::config::Config;
+    use crate::engine::TerminalEngine;
+    use crate::profiles::Profile;
+
+    fn first_char(s: &Session) -> String {
+        s.snapshot.cells[0].text.to_string()
+    }
+
+    #[test]
+    fn a_synchronized_update_holds_the_last_frame_until_it_closes() {
+        let profile = Profile::new("test", "nothing.exe");
+        let mut s = Session::failed(&Config::default(), &profile, "test").unwrap();
+        s.engine.write(b"\x1b[2J\x1b[HA");
+        assert!(s.update_snapshot());
+        assert_eq!(first_char(&s), "A");
+
+        // Mid-redraw: the screen is cleared but not yet repainted.
+        s.engine.write(b"\x1b[?2026h\x1b[2J\x1b[H");
+        assert!(s.update_snapshot());
+        assert_eq!(first_char(&s), "A", "the half-drawn frame must not show");
+        assert!(
+            s.sync_hold_left().is_some(),
+            "the caller must wake for the timeout"
+        );
+
+        s.engine.write(b"B\x1b[?2026l");
+        assert!(s.update_snapshot());
+        assert_eq!(first_char(&s), "B");
+        assert!(s.sync_hold_left().is_none());
+    }
+
+    #[test]
+    fn an_update_left_open_is_closed_after_the_timeout() {
+        let profile = Profile::new("test", "nothing.exe");
+        let mut s = Session::failed(&Config::default(), &profile, "test").unwrap();
+        s.engine.write(b"\x1b[2J\x1b[HA");
+        s.update_snapshot();
+        s.engine.write(b"\x1b[?2026h\x1b[HB");
+        s.update_snapshot();
+        assert_eq!(first_char(&s), "A");
+        s.sync_since = Some(std::time::Instant::now() - SYNC_TIMEOUT);
+        s.update_snapshot();
+        assert_eq!(
+            first_char(&s),
+            "B",
+            "a program that died mid-frame must not freeze the pane"
+        );
+        assert!(!s.engine.synchronized_output());
     }
 }

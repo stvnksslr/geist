@@ -544,6 +544,14 @@ mod imp {
         create_instance(name, true)
     }
 
+    /// Block until a client connects to `pipe` (or already has). `false` if the
+    /// pipe broke first.
+    pub fn accept(pipe: &File) -> bool {
+        // SAFETY: a valid pipe handle; blocking connect.
+        let ok = unsafe { ConnectNamedPipe(pipe.as_raw_handle() as Handle, std::ptr::null_mut()) };
+        ok != 0 || std::io::Error::last_os_error().raw_os_error() == Some(ERROR_PIPE_CONNECTED)
+    }
+
     /// Run the accept loop on a background thread, starting from the instance
     /// [`bind`] claimed.
     pub fn serve(first: File, name: String, tx: Sender<Incoming>) {
@@ -563,14 +571,7 @@ mod imp {
                             }
                         },
                     };
-                    // SAFETY: a valid pipe handle; blocking connect.
-                    let ok = unsafe {
-                        ConnectNamedPipe(pipe.as_raw_handle() as Handle, std::ptr::null_mut())
-                    };
-                    if ok == 0
-                        && std::io::Error::last_os_error().raw_os_error()
-                            != Some(ERROR_PIPE_CONNECTED)
-                    {
+                    if !accept(&pipe) {
                         continue;
                     }
                     // One thread per connection, so a client that connects and
@@ -664,13 +665,23 @@ mod imp {
             "no IPC",
         ))
     }
+    pub fn accept(_pipe: &std::fs::File) -> bool {
+        false
+    }
     pub fn serve(_first: std::fs::File, _name: String, _tx: Sender<Incoming>) {}
     pub fn send(_name: &str, _req: &Request) -> Result<Response, SendError> {
         Err(SendError::NoServer)
     }
 }
 
-pub use imp::{pipe_name, send};
+pub use imp::{accept, pipe_name, send};
+
+/// A private one-shot pipe for geist's own children (`prewarm.rs`'s gate):
+/// the same this-user-only instance the IPC server binds, `name` being the
+/// full `\\.\pipe\…` path. Fails if the name is already taken.
+pub fn private_pipe(name: &str) -> std::io::Result<std::fs::File> {
+    imp::bind(name)
+}
 
 /// Try to become the single instance: claim the pipe and start serving.
 /// Returns `false` when another process already owns it.

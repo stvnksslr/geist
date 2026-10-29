@@ -142,6 +142,21 @@ fn clamp_ratio(ratio: f32, len: f32, min: f32) -> f32 {
     ratio.clamp(lo, 1.0 - lo)
 }
 
+/// How long until the blink phase (`time % 1.0 >= 0.5`) next flips, plus
+/// [`BLINK_WAKE_MARGIN`]. Blinking used to repaint every 100 ms — ten frames a
+/// second presenting the same picture. On a VRR (OLED) panel each lone present
+/// yanks the refresh rate, and those swings show as brightness flicker; waking
+/// only on a flip presents twice a second.
+fn blink_flip_in(time: f64) -> Duration {
+    Duration::from_secs_f64(0.5 - time.rem_euclid(0.5) + BLINK_WAKE_MARGIN)
+}
+
+/// How far past a blink flip to aim a wake. Windows timers fire up to a tick
+/// (~15.6 ms) *early*; aimed at the edge, a wake landed before the flip, saw
+/// the old phase, and re-armed for a few ms — measured, a burst of ~5 passes
+/// per flip, more presents than the 100 ms timer it replaced.
+const BLINK_WAKE_MARGIN: f64 = 0.025;
+
 impl<T> Node<T> {
     fn leaf_count(&self) -> usize {
         match self {
@@ -1676,6 +1691,11 @@ fn open_session(
     profile: &crate::profiles::Profile,
     cwd: Option<&std::path::Path>,
 ) -> Option<Session> {
+    // A shell already started for this exact launch (`shell-prewarm`) skips
+    // the user's `$PROFILE`, which is nearly all of a pwsh pane's start time.
+    if let Some(s) = crate::prewarm::take(config, profile, cwd) {
+        return Some(s);
+    }
     match Session::new(ctx, config, profile, cwd) {
         Ok(s) => Some(s),
         Err(e) => {
@@ -4539,6 +4559,9 @@ impl Window {
     /// and whether the *window* can be transparent at all is fixed at startup.
     fn reload_config(&mut self, render_state: Option<&egui_wgpu::RenderState>) {
         let cfg = Config::load();
+        // The spare shell's engine was themed by the old config; a fresh one
+        // starts on the next pass.
+        crate::prewarm::discard();
         for tab in &mut self.tabs {
             tab.root
                 .for_each_mut(&mut |s: &mut Session| s.apply_config(&cfg));
@@ -7277,6 +7300,9 @@ impl Window {
             if !session.update_snapshot() {
                 continue;
             }
+            if let Some(left) = session.sync_hold_left() {
+                ctx.request_repaint_after(left);
+            }
             if padding_color != crate::config::PaddingColor::Background {
                 let snap = &session.snapshot;
                 let edges = crate::padding::extend_edges(padding_color, snap);
@@ -7643,14 +7669,11 @@ impl Window {
             let pane_active = is_focus && window_focused;
             let cursor_blink_hidden =
                 pane_active && snapshot.cursor_blinking && ctx.input(|i| i.time) % 1.0 >= 0.5;
-            if pane_active && snapshot.cursor_blinking {
-                ctx.request_repaint_after(Duration::from_millis(100));
-            }
             // Text blink (SGR 5) rides the same ~1 Hz phase but applies to every
             // pane; only keep repainting while the grid actually has blink cells.
             let blink_hidden = ctx.input(|i| i.time) % 1.0 >= 0.5;
-            if snapshot.has_blink {
-                ctx.request_repaint_after(Duration::from_millis(100));
+            if (pane_active && snapshot.cursor_blinking) || snapshot.has_blink {
+                ctx.request_repaint_after(blink_flip_in(ctx.input(|i| i.time)));
             }
             frames.push(PaneFrame {
                 snapshot,
@@ -10334,6 +10357,7 @@ impl eframe::App for App {
             self.snapshot_state();
         }
         self.save_state();
+        crate::prewarm::discard();
         if let Some(hwnd) = self
             .windows
             .first()
@@ -10362,8 +10386,11 @@ impl eframe::App for App {
         // Poll for shell exit even when idle (a shell that exits produces no
         // output, so nothing else would wake us to reap it). Issued on the root
         // only: children repaint via the root anyway, so a per-window timer would
-        // just multiply into N root repaints.
-        ctx.request_repaint_after(Duration::from_millis(500));
+        // just multiply into N root repaints. On the blink's half-second grid
+        // rather than its own 500 ms clock: two unaligned 2 Hz timers make an
+        // idle window present at irregular intervals, which a VRR panel shows
+        // as flicker (see `blink_flip_in`).
+        ctx.request_repaint_after(blink_flip_in(ctx.input(|i| i.time)));
 
         // `auto-update`: the scheduled check (and the daily re-check). Read
         // from the first window's config, like the undo timeout below.
@@ -10431,6 +10458,13 @@ impl eframe::App for App {
             self.focus_target(&ctx, Some(w), None, Some(p));
         }
         self.refresh_restart_snapshot(now);
+        // Keep a shell started ahead of the next pane (`shell-prewarm`), for
+        // the default profile of the window a new one would be cloned from.
+        if let Some(w) = self.windows.get(self.focused).or(self.windows.first())
+            && let Some(p) = w.profiles.get(w.default_profile)
+        {
+            crate::prewarm::maintain(&ctx, &w.config, p);
+        }
         // Where last pass's pane/tab drag would drop, for each window to draw.
         self.publish_drop_hints();
 
@@ -11441,6 +11475,19 @@ mod tests {
     use crate::config::ResizeOverlayPosition as P;
     use eframe::egui;
     use eframe::egui::Align2;
+
+    #[test]
+    fn blink_wakes_once_per_phase_on_the_new_phase() {
+        for t in [0.0, 0.1, 0.49, 0.5, 0.73, 12.999] {
+            let wake = t + super::blink_flip_in(t).as_secs_f64();
+            let phase = |x: f64| x % 1.0 >= 0.5;
+            assert_ne!(phase(t), phase(wake), "t={t}: woke before the flip");
+            assert!(
+                wake - t <= 0.5 + super::BLINK_WAKE_MARGIN + 1e-9,
+                "t={t}: slept past a whole phase"
+            );
+        }
+    }
 
     #[test]
     fn retire_window_drops_it_and_remaps_focus() {

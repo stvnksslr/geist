@@ -1647,6 +1647,9 @@ pub struct Config {
     /// geist-specific `jump-list` (default `true`): publish the taskbar Jump
     /// List tasks (`jumplist.rs`). `false` removes a previously published one.
     pub jump_list: bool,
+    /// geist-specific `shell-prewarm` (default `true`): keep one PowerShell
+    /// started ahead of the next pane (`prewarm.rs`).
+    pub shell_prewarm: bool,
     /// Ghostty `auto-update` (`off` / `check` / `download`). Unset upstream
     /// defers to Sparkle's stored preference; geist's default is `check` in a
     /// release build and `off` in a debug build (see `update.rs`).
@@ -1926,6 +1929,7 @@ impl Default for Config {
             window_shadow: true,
             drop_behavior: DropBehavior::NewTab,
             jump_list: true,
+            shell_prewarm: true,
             auto_update: crate::update::AutoUpdate::default_for_build(),
             auto_update_channel: None,
             auto_update_feed: crate::update::DEFAULT_FEED.to_string(),
@@ -3366,6 +3370,9 @@ const SETTERS: &[(&str, Setter)] = &[
     }),
     ("jump-list", |c, v, d| {
         c.jump_list = parse_bool(v, d.jump_list)
+    }),
+    ("shell-prewarm", |c, v, d| {
+        c.shell_prewarm = parse_bool(v, d.shell_prewarm)
     }),
     ("auto-update", |c, v, d| {
         c.auto_update = if v.is_empty() {

@@ -118,6 +118,14 @@ fallback engine without app changes:
   (no network, and its "restart" restarts nothing). **Cancel must reach the worker**: a transfer
   stops when its progress callback returns `false`, and `download_and_stage` asks once more before
   writing `pending.json`. A cancel that only hid the pill would still install on the next launch.
+- **`prewarm.rs`** — `shell-prewarm`: one spare pwsh for the default profile, started ahead of
+  time and held at a gate (`profiles::PWSH_GATE`, a private pipe) before its first prompt;
+  `open_session` adopts it only when its launch is *identical* to what `Session::new` would run,
+  and writes the pane's cwd to the gate. A pwsh pane's start time is ~all `$PROFILE` (~850 ms
+  measured vs ~15–45 ms for PTY + first frame), which is why this exists. **The gate blocks in
+  the first `prompt` call, never in `-EncodedCommand`:** that command is the session's first
+  `Get-History` entry, and starship renders its duration — blocking there printed `took 3s`
+  on every adopted shell.
 - **`config.rs`** — Ghostty-format config (`key = value` lines, kebab-case keys, unquoted
   colors, repeatable `palette`) from `%APPDATA%\geist\config` (override with `geist_CONFIG`);
   defines the full ANSI 16 + 256-color palette. **`profiles.rs`** — shell profiles (pwsh/powershell/cmd/wsl),
@@ -442,6 +450,17 @@ fallback engine without app changes:
   loop could not return while the reader refilled it — multi-second freezes. Don't "speed it up" by
   unbounding either. Unrelated trap when stress-testing: OpenConsole leaks memory (and stalls
   doubling-ly) on OSC 8 links with a *unique* `id=` each — measure without them.
+- **Flicker has two sources, and neither shows in a unit test.** (1) A TUI mid-redraw: the
+  screen gets drawn between its "clear" and its "repaint", and a high-refresh display samples
+  that gap far more often. `Session::update_snapshot` holds the last frame while DEC 2026 is open
+  (1 s timeout, Ghostty's). It only works under the **sideloaded** ConPTY: the inbox one forwards
+  `?2026h?2026l` back to back *ahead of* the frame (`synchronized_output_survives_conpty`).
+  Measured with a stalling fake TUI: 34/40 window captures blank without the hold, 0 with it.
+  (2) Idle presents on VRR/OLED panels: every lone present moves the refresh rate and shows as
+  brightness flicker, so idle wakes (cursor/SGR blink, the shell-exit poll) all share one
+  half-second grid via `blink_flip_in`. Aim a wake *past* the edge (`BLINK_WAKE_MARGIN`):
+  Windows timers fire up to ~15.6 ms early, and a wake aimed at the edge re-armed itself into a
+  burst of ~5 passes per flip. Measured 59 → 10 passes per 5 s for an idle blinking pane.
 - **The side scanners run over every byte the shell prints, so they skip, and the skips are
   load-bearing.** `osc_color`/`osc133`/`osc_notify` jump from ground straight to the next `ESC ]`,
   `xtshiftescape` to the next `ESC [ >` / `ESC c`, `decscusr` past any CSI whose final byte isn't
