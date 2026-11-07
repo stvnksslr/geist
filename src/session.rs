@@ -33,6 +33,35 @@ const PUMP_SLICE: usize = 64 * 1024;
 /// is closed for the program. Ghostty's `sync_reset` value.
 const SYNC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 
+/// Wake the app for new PTY output: one pass of the **root** viewport.
+///
+/// The root, explicitly. A PTY reader thread has no egui pass in flight, so
+/// a bare `request_repaint()` already resolves to the root — naming it is
+/// documentation, not a change. It matters because secondary windows are
+/// *immediate* viewports: only a root pass re-runs each window's
+/// `show_viewport_immediate`, so this is what wakes a background window too.
+/// Retargeting it at the owning child would look more correct and would
+/// silently stop that window updating.
+///
+/// One pass, not two. A zero-delay request (`request_repaint_of`) gets a
+/// second, follow-up pass from egui "to give some things time to settle"
+/// (`outstanding` in egui's `context.rs`). For PTY output that pass finds the
+/// queue empty and presents the same frame again a vsync later, so every
+/// burst a program wrote reached the display twice: two refreshes a vsync
+/// apart, then a gap until its next redraw. A variable-refresh (VRR) panel
+/// times its refreshes by the presents, and an OLED shows that swinging
+/// rhythm as brightness flicker. A non-zero delay is still "now" — egui
+/// subtracts the predicted frame time, flooring it at zero — but asks for
+/// one pass.
+///
+/// Nothing is stranded by the single pass: the reader posts a wake for every
+/// chunk that lands after a drain has begun (`pty::spawn_reader`), and a wake
+/// that arrives during a pass leaves that pass's repaint delay at zero, so
+/// another pass follows it.
+fn wake_root(ctx: &egui::Context) {
+    ctx.request_repaint_after_for(std::time::Duration::from_nanos(1), egui::ViewportId::ROOT);
+}
+
 pub struct Session {
     /// `None` for a pane whose shell failed to start (see [`Session::failed`]):
     /// the pane stays open and says why, rather than silently not appearing.
@@ -112,9 +141,15 @@ pub struct Session {
     /// Parsed up to `pty_backlog_at`.
     pty_backlog: Vec<u8>,
     pty_backlog_at: usize,
-    /// When the open synchronized update (DEC 2026) was first seen holding a
-    /// frame; `None` when there is none. See [`Session::update_snapshot`].
-    sync_since: Option<std::time::Instant>,
+    /// When this pane's picture last changed, and the change before that, as
+    /// [`Self::update_snapshot`] saw them — so only while the pane is on
+    /// screen. See [`Self::animating_within`].
+    drawn_at: Option<std::time::Instant>,
+    drawn_before: Option<std::time::Instant>,
+    /// Whether a window drew this pane since the last [`Self::pump_pty`].
+    /// Starts `true`, so a new pane wakes the app for its first output before
+    /// it has ever been drawn. See [`Self::mark_on_screen`].
+    on_screen: bool,
     /// When the running command started, if one is running. Set by a `C` mark or
     /// — since neither of geist's shell hooks can emit one — by the Enter that
     /// submitted it. `Instant`, not egui time: `pump_pty` has no `Context`, and a
@@ -320,16 +355,7 @@ impl Session {
             &launch.env,
             DEFAULT_COLS,
             DEFAULT_ROWS,
-            // Wake the **root** viewport, explicitly.
-            //
-            // A PTY reader thread has no egui pass in flight, so a bare
-            // `request_repaint()` already resolves to the root — naming it is
-            // documentation, not a change. It matters because secondary windows
-            // are *immediate* viewports: only a root pass re-runs each window's
-            // `show_viewport_immediate`, so this is what wakes a background
-            // window too. Retargeting it at the owning child would look more
-            // correct and would silently stop that window updating.
-            move || wake_ctx.request_repaint_of(egui::ViewportId::ROOT),
+            move || wake_root(&wake_ctx),
         )?;
         Self::build(config, profile, Some(pty), launch.reset_cursor_on_submit)
     }
@@ -347,9 +373,8 @@ impl Session {
         let profile = Profile::new(&name, &name);
         let title: String = attached.title.chars().filter(|c| !c.is_control()).collect();
         let wake_ctx = ctx.clone();
-        // Wakes ROOT for the same reason as `Session::new`.
         let pty = Pty::from_handoff(attached, DEFAULT_COLS, DEFAULT_ROWS, move || {
-            wake_ctx.request_repaint_of(egui::ViewportId::ROOT)
+            wake_root(&wake_ctx)
         })?;
         let mut s = Self::build(config, &profile, Some(pty), false)?;
         if !title.is_empty() {
@@ -470,7 +495,9 @@ impl Session {
             osc133: Osc133Scanner::new(),
             pty_backlog: Vec::new(),
             pty_backlog_at: 0,
-            sync_since: None,
+            drawn_at: None,
+            drawn_before: None,
+            on_screen: true,
             command_started: None,
             pending_command_finish: Vec::new(),
             pending_notifications: Vec::new(),
@@ -552,7 +579,15 @@ impl Session {
         if let Some(pty) = self.pty.as_ref() {
             pty.wake_pending
                 .store(false, std::sync::atomic::Ordering::Release);
+            // Not drawn since the last pump: a background pane, whose output
+            // need not wake the app (`pty::spawn_reader`). Taken lazily here,
+            // a pass late; going back on screen is immediate (`mark_on_screen`).
+            if !self.on_screen {
+                pty.background
+                    .store(true, std::sync::atomic::Ordering::Release);
+            }
         }
+        self.on_screen = false;
         while let Some(pty) = self.pty.as_ref() {
             if self.pty_backlog_at >= self.pty_backlog.len() {
                 self.pty_backlog_at = 0;
@@ -934,15 +969,16 @@ impl Session {
         osc7_to_path(&self.engine.pwd()?)
     }
 
-    /// Refresh the snapshot the renderer draws — unless the program is
-    /// mid-redraw inside a synchronized update (DEC 2026), in which case the
-    /// last finished frame stays up. Drawing between a TUI's "clear" and its
-    /// "repaint" is what flickers, and a high-refresh display samples that gap
-    /// far more often than a 60 Hz one does.
+    /// Refresh the snapshot the renderer draws. While the program is mid-redraw
+    /// inside a synchronized update (DEC 2026), the engine returns the frame it
+    /// captured when that update began — the program's last finished frame —
+    /// so nothing half-drawn reaches the screen. Drawing between a TUI's
+    /// "clear" and its "repaint" is what flickers, and a high-refresh display
+    /// samples that gap far more often than a 60 Hz one does.
     pub fn update_snapshot(&mut self) -> bool {
-        if self.hold_frame() {
-            return true;
-        }
+        self.mark_on_screen();
+        self.expire_render_hold();
+        let serial = self.snapshot.serial;
         // `make_mut` clones only if the previous frame's render still holds the
         // Arc; in steady state it's released by now, so this is a no-op bump.
         let snap = Arc::make_mut(&mut self.snapshot);
@@ -957,6 +993,10 @@ impl Session {
         }
         if self.engine.snapshot(snap).is_err() {
             return false;
+        }
+        if snap.serial != serial {
+            self.drawn_before = self.drawn_at;
+            self.drawn_at = Some(std::time::Instant::now());
         }
         // While the program is on its default cursor, substitute the configured
         // `cursor-style` (the engine resets DECSCUSR-default to a hardcoded block
@@ -977,28 +1017,60 @@ impl Session {
         true
     }
 
-    /// Whether to keep showing the previous frame because a synchronized update
-    /// is open. A frame of the wrong size is never held — a resize must show —
-    /// and an update left open past [`SYNC_TIMEOUT`] is closed, as in Ghostty,
-    /// so a program that died mid-frame can't freeze the pane.
-    fn hold_frame(&mut self) -> bool {
-        if !self.engine.synchronized_output() {
-            self.sync_since = None;
-            return false;
+    /// This pane is being drawn: its output wakes the app again, from now.
+    /// Called by every [`Self::update_snapshot`] (which runs only for panes on
+    /// screen), and by whatever puts a pane on screen that was held in the
+    /// background — an adopted prewarmed shell must not wait for the next pass
+    /// to show its prompt.
+    pub fn mark_on_screen(&mut self) {
+        self.on_screen = true;
+        if let Some(pty) = self.pty.as_ref() {
+            pty.background
+                .store(false, std::sync::atomic::Ordering::Release);
         }
-        let since = *self.sync_since.get_or_insert_with(std::time::Instant::now);
-        if since.elapsed() >= SYNC_TIMEOUT {
-            self.engine.end_synchronized_output();
-            self.sync_since = None;
-            return false;
-        }
-        self.snapshot.cols == self.cols && self.snapshot.rows == self.rows
     }
 
-    /// How long until an open synchronized update times out, so the caller can
-    /// wake for it: a program that stops writing posts no wake of its own.
+    /// Close a synchronized update left open past [`SYNC_TIMEOUT`], as Ghostty
+    /// does, so a program that died mid-frame can't freeze the pane.
+    ///
+    /// Counted from when the update *began* (the engine's hold callback), not
+    /// from when a pass first noticed it. A count from the first sighting (the
+    /// old rule) never restarts while a program draws continuously — one update
+    /// closing and the next opening between two passes looks like a single
+    /// update that never ends — so it would fire every second, end a live
+    /// update mid-frame and show it half-drawn. A resize ends a hold by itself
+    /// (the engine resets the mode, as the spec allows), so it needs no check.
+    fn expire_render_hold(&mut self) {
+        if self
+            .engine
+            .render_hold_since()
+            .is_some_and(|t| t.elapsed() >= SYNC_TIMEOUT)
+        {
+            self.engine.end_synchronized_output();
+        }
+    }
+
+    /// Whether this pane is animating: what it shows changed within the last
+    /// `window`, *and* the change before that came less than `window` before
+    /// it. A change is the program drawing or the cursor moving; blink doesn't
+    /// count (it is drawn on its own half-second grid), and neither does output
+    /// that changed nothing on screen (a title, a query).
+    ///
+    /// Two changes, not one, so an isolated update — a clock ticking once a
+    /// second, a slow keystroke — is not an animation: pacing it would only
+    /// add a burst of identical frames after it.
+    pub fn animating_within(&self, window: std::time::Duration) -> bool {
+        match (self.drawn_before, self.drawn_at) {
+            (Some(a), Some(b)) => b.elapsed() < window && b.duration_since(a) < window,
+            _ => false,
+        }
+    }
+
+    /// How long until the open synchronized update times out, so the caller
+    /// can wake for it: a program that stops writing posts no wake of its own.
     pub fn sync_hold_left(&self) -> Option<std::time::Duration> {
-        self.sync_since
+        self.engine
+            .render_hold_since()
             .map(|t| SYNC_TIMEOUT.saturating_sub(t.elapsed()))
     }
 
@@ -3992,13 +4064,66 @@ mod sync_tests {
         s.engine.write(b"\x1b[?2026h\x1b[HB");
         s.update_snapshot();
         assert_eq!(first_char(&s), "A");
-        s.sync_since = Some(std::time::Instant::now() - SYNC_TIMEOUT);
+        s.engine.backdate_render_hold(SYNC_TIMEOUT);
         s.update_snapshot();
         assert_eq!(
             first_char(&s),
             "B",
             "a program that died mid-frame must not freeze the pane"
         );
-        assert!(!s.engine.synchronized_output());
+        assert!(s.engine.render_hold_since().is_none());
+        assert!(s.sync_hold_left().is_none());
+    }
+
+    #[test]
+    fn one_change_is_not_an_animation_but_two_close_ones_are() {
+        let window = std::time::Duration::from_millis(300);
+        let profile = Profile::new("test", "nothing.exe");
+        let mut s = Session::failed(&Config::default(), &profile, "test").unwrap();
+        assert!(s.update_snapshot());
+        // Let the first picture age, as a pane that has sat idle would.
+        s.drawn_at = s.drawn_at.map(|t| t - window * 2);
+        for _ in 0..3 {
+            assert!(s.update_snapshot());
+        }
+        assert!(!s.animating_within(window), "an idle pane is not animating");
+        s.engine.write(b"x");
+        assert!(s.update_snapshot());
+        assert!(
+            !s.animating_within(window),
+            "one update is not an animation"
+        );
+        s.engine.write(b"y");
+        assert!(s.update_snapshot());
+        assert!(s.animating_within(window), "two close updates are");
+        s.drawn_at = s.drawn_at.map(|t| t - window);
+        assert!(
+            !s.animating_within(window),
+            "it stops once the program does"
+        );
+    }
+
+    /// A program that draws continuously: every pass lands inside some update,
+    /// so the mode is never seen off. Each finished frame must still show, and
+    /// the safety timeout — counted per update, not per sighting — must never
+    /// cut a live update short.
+    #[test]
+    fn continuous_updates_advance_and_never_time_out() {
+        let profile = Profile::new("test", "nothing.exe");
+        let mut s = Session::failed(&Config::default(), &profile, "test").unwrap();
+        // Settle: applying the config at construction marks the grid for a full
+        // copy, which (like a user's scroll) takes precedence over a hold.
+        assert!(s.update_snapshot());
+        for f in 0..5u8 {
+            let c = (b'a' + f) as char;
+            // Finish frame `f`, then start (and half-draw) frame `f + 1`.
+            s.engine
+                .write(format!("\x1b[H{c}\x1b[?2026l\x1b[?2026h\x1b[2J").as_bytes());
+            // Each update is young, however long the pane has been held.
+            s.engine.backdate_render_hold(SYNC_TIMEOUT / 2);
+            assert!(s.update_snapshot());
+            assert_eq!(first_char(&s), c.to_string(), "frame {f} never showed");
+            assert!(s.sync_hold_left().is_some());
+        }
     }
 }

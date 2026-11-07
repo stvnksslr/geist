@@ -975,6 +975,31 @@ pub struct MetricAdjust {
     pub icon_height: MetricModifier,
 }
 
+/// geist-specific `window-steady-refresh`: when to present on every display
+/// refresh rather than only when something changed.
+///
+/// A variable-refresh display (VRR: G-SYNC, FreeSync, Windows VRR) refreshes
+/// when the window in front presents a frame, so its refresh rate follows
+/// geist's presents — and an OLED's brightness follows its refresh rate.
+/// Presenting only on change makes every click, scroll, keystroke, focus
+/// change or program redraw a jump in refresh rate (measured on a QD-OLED:
+/// 144 Hz down to the 48 Hz floor and back, several times a second), which
+/// reads as brightness flicker. A steady rate means no jumps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum SteadyRefresh {
+    /// Present every refresh for as long as the window is focused: the panel's
+    /// rate never moves while you use geist. Costs a frame of work per refresh
+    /// while focused, even when nothing changes.
+    #[default]
+    Focused,
+    /// Only while a visible pane animates (two changes < 300 ms apart). Covers
+    /// a working TUI, but not the edges: a click, a scroll's first step,
+    /// focusing the window, or the moment an animation stops.
+    Animating,
+    /// Present only when something changed.
+    Off,
+}
+
 /// Whether the window/tab/split layout survives a quit. Ghostty
 /// `window-save-state`, whose values are `default` / `never` / `always`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -1608,6 +1633,10 @@ pub struct Config {
     pub window_step_resize: bool,
     /// Present with vsync. Ghostty `window-vsync`; startup-only in geist.
     pub window_vsync: bool,
+    /// geist-specific `window-steady-refresh` (default `focused`); see
+    /// [`SteadyRefresh`]. Needs `window-vsync`: without it "every refresh"
+    /// would be every pass the CPU can run.
+    pub window_steady_refresh: SteadyRefresh,
     /// Ghostty `quit-after-last-window-closed` (+ `-delay`, in milliseconds).
     pub quit_after_last_window_closed: bool,
     pub quit_after_last_window_closed_delay_ms: Option<u64>,
@@ -1916,6 +1945,7 @@ impl Default for Config {
             window_title_font_family: None,
             window_step_resize: false,
             window_vsync: true,
+            window_steady_refresh: SteadyRefresh::Focused,
             // Upstream's default is `builtin.os.tag == .linux`, i.e. "the
             // platform convention"; the Windows convention is to quit.
             quit_after_last_window_closed: true,
@@ -3327,6 +3357,15 @@ const SETTERS: &[(&str, Setter)] = &[
     ("window-vsync", |c, v, d| {
         c.window_vsync = parse_bool(v, d.window_vsync)
     }),
+    ("window-steady-refresh", |c, v, d| {
+        c.window_steady_refresh = match v.to_ascii_lowercase().as_str() {
+            "" => d.window_steady_refresh,
+            "focused" | "true" => SteadyRefresh::Focused,
+            "animating" => SteadyRefresh::Animating,
+            "false" | "off" => SteadyRefresh::Off,
+            _ => c.window_steady_refresh,
+        }
+    }),
     ("quit-after-last-window-closed", |c, v, d| {
         c.quit_after_last_window_closed = parse_bool(v, d.quit_after_last_window_closed)
     }),
@@ -4220,6 +4259,19 @@ mod tests {
         );
         assert!(parsed("window-step-resize = true").window_step_resize);
         assert!(!parsed("window-vsync = false").window_vsync);
+        assert_eq!(d.window_steady_refresh, SteadyRefresh::Focused);
+        assert_eq!(
+            parsed("window-steady-refresh = animating").window_steady_refresh,
+            SteadyRefresh::Animating
+        );
+        assert_eq!(
+            parsed("window-steady-refresh = false").window_steady_refresh,
+            SteadyRefresh::Off
+        );
+        assert_eq!(
+            parsed("window-steady-refresh = true").window_steady_refresh,
+            SteadyRefresh::Focused
+        );
         assert!(!parsed("quit-after-last-window-closed = false").quit_after_last_window_closed);
         assert_eq!(
             parsed("quit-after-last-window-closed-delay = 5s")

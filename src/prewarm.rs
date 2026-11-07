@@ -90,7 +90,11 @@ pub fn take(config: &Config, profile: &Profile, cwd: Option<&Path>) -> Option<Se
         if !fits {
             return None;
         }
-        let spare = st.spare.take()?;
+        let mut spare = st.spare.take()?;
+        // The spare was never drawn, so its output has been held back from
+        // waking the app (`Pty::background`). It is about to be, and the
+        // prompt the gate is about to release must show at once.
+        spare.session.mark_on_screen();
         let dir = cwd
             .filter(|p| p.is_dir())
             .map(Path::to_path_buf)

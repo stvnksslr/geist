@@ -157,6 +157,25 @@ fn blink_flip_in(time: f64) -> Duration {
 /// per flip, more presents than the 100 ms timer it replaced.
 const BLINK_WAKE_MARGIN: f64 = 0.025;
 
+/// `window-steady-refresh = animating`: a pane is animating while its last
+/// two changes came less than this apart and the latest less than this ago;
+/// while any visible pane in the focused window is, every refresh is
+/// presented. (The default, `focused`, presents every refresh regardless.)
+///
+/// A variable-refresh (VRR) display refreshes when a frame is presented, so
+/// its rate follows the presents. Presenting only when output arrives lets a
+/// TUI's animation set the rhythm: Claude Code's spinner redraws about every
+/// 120 ms (measured on a live session: median 117 ms, p90 140 ms), so the
+/// panel runs a refresh at full rate and then idles, eight times a second.
+/// An OLED's brightness varies with its refresh rate, so that rhythm reads as
+/// flicker; presenting every refresh while something animates holds one rate.
+/// Longer than the gaps in a typical animation (so it stays steady across
+/// them), short enough that a finished program stops costing frames within a
+/// third of a second. The cost, measured on a large window full of styled
+/// text: about 1 ms of UI-thread time per refresh (+11-12% of one core at
+/// ~120 Hz), and only while something animates.
+const STEADY_REFRESH_LINGER: Duration = Duration::from_millis(300);
+
 impl<T> Node<T> {
     fn leaf_count(&self) -> usize {
         match self {
@@ -6733,6 +6752,19 @@ impl Window {
         let full_area = ui.max_rect();
         let pad = egui::vec2(self.config.padding_x, self.config.padding_y);
         let window_focused = ctx.input(|i| i.focused);
+        // `window-steady-refresh` (`config::SteadyRefresh`). Only for the
+        // focused window: a variable-refresh display follows the foreground
+        // window's presents, so pacing a background one would cost frames
+        // without steadying anything. And never without vsync, where "every
+        // refresh" would be every pass the CPU can run.
+        let steady_refresh = if self.config.window_vsync && window_focused {
+            self.config.window_steady_refresh
+        } else {
+            crate::config::SteadyRefresh::Off
+        };
+        if steady_refresh == crate::config::SteadyRefresh::Focused {
+            ctx.request_repaint_of(egui::ViewportId::ROOT);
+        }
         let copy_on_select = self.config.copy_on_select;
         let click_repeat = click_repeat_secs(self.config.click_repeat_interval);
         let right_click_action = self.config.right_click_action;
@@ -7300,8 +7332,19 @@ impl Window {
             if !session.update_snapshot() {
                 continue;
             }
+            // A program that dies mid-frame posts no wake of its own, so wake
+            // for the hold's timeout — on the blink grid the idle wakes share,
+            // where it adds no present of its own (see `blink_flip_in`).
             if let Some(left) = session.sync_hold_left() {
-                ctx.request_repaint_after(left);
+                let now = ctx.input(|i| i.time);
+                ctx.request_repaint_after(left + blink_flip_in(now + left.as_secs_f64()));
+            }
+            // `window-steady-refresh = animating`: while a program is drawing
+            // here, present on every refresh. See `STEADY_REFRESH_LINGER`.
+            if steady_refresh == crate::config::SteadyRefresh::Animating
+                && session.animating_within(STEADY_REFRESH_LINGER)
+            {
+                ctx.request_repaint_of(egui::ViewportId::ROOT);
             }
             if padding_color != crate::config::PaddingColor::Background {
                 let snap = &session.snapshot;

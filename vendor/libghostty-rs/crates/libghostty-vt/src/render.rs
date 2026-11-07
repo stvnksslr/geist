@@ -334,6 +334,19 @@ impl<'alloc> RenderState<'alloc> {
         Ok(Snapshot(self))
     }
 
+    /// The render state exactly as its last update left it, without updating
+    /// it from a terminal.
+    ///
+    /// This is how a renderer draws during a render hold (see
+    /// `Terminal::on_render_hold`): the frame to draw was captured by an update
+    /// made from inside the hold callback, and updating again would replace it
+    /// with the half-drawn screen the program is still building.
+    ///
+    /// geist-local: not in upstream's binding.
+    pub fn current(&mut self) -> Snapshot<'alloc, '_> {
+        Snapshot(self)
+    }
+
     /// Begin an update of a render state instance from a terminal.
     ///
     /// Every begin must be completed with [`Update::end`] before the render

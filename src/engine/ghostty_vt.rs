@@ -71,6 +71,26 @@ fn strip_osc72(buf: &mut Vec<u8>) {
 /// pushes bytes here; we drain them after each `write`.
 type ResponseSink = Rc<RefCell<Vec<u8>>>;
 
+/// A program's render hold, as libghostty-vt 1.0 reports it (`on_render_hold`).
+///
+/// A program redraws in steps (clear, draw, move the cursor) and wraps them in
+/// synchronized output (DEC 2026) so the terminal shows only finished frames.
+/// Checking the mode before each draw — what geist did first — has two holes,
+/// both named in upstream's rendering guide: the frame left on screen is
+/// whatever was drawn last, which can be stale or half-drawn; and a program
+/// that ends one update and starts the next between two draws is never seen
+/// with the mode off, so its finished frames are all skipped and it looks
+/// frozen. Capturing the render state *in the callback*, at the instant a hold
+/// begins, closes both: the terminal holds exactly the program's last finished
+/// frame then, even if the next one follows in the same `vt_write`.
+#[derive(Default)]
+struct RenderHold {
+    /// When the open hold began; `None` when there is none. The safety timeout
+    /// counts from here, and re-setting the mode during a hold is a no-op
+    /// upstream, so a program cannot push its own deadline back.
+    since: std::cell::Cell<Option<std::time::Instant>>,
+}
+
 pub struct GhosttyVtEngine {
     /// Per-row "has a blinking cell", so a partial snapshot can recompute
     /// `has_blink` without revisiting the clean rows.
@@ -85,7 +105,13 @@ pub struct GhosttyVtEngine {
     compress_since: std::time::Instant,
     compress_done: bool,
     term: Terminal<'static, 'static>,
-    render_state: RenderState<'static>,
+    /// Shared with the `on_render_hold` callback, which updates it from inside
+    /// `vt_write` at the instant a render hold begins (see [`RenderHold`]).
+    render_state: Rc<RefCell<RenderState<'static>>>,
+    /// The program's render hold (synchronized output, DEC 2026), if one is
+    /// open. While it is, [`TerminalEngine::snapshot`] reads the frame the
+    /// callback captured instead of updating from the half-drawn terminal.
+    hold: Rc<RenderHold>,
     rows_buf: RowIterator<'static>,
     cells_buf: CellIterator<'static>,
     encoder: Encoder<'static>,
@@ -253,6 +279,29 @@ impl GhosttyVtEngine {
             sink.borrow_mut().extend_from_slice(data);
         })?;
 
+        // Render holds (synchronized output). When one begins, capture the
+        // frame right here, inside `vt_write`: nothing after the hold's start
+        // has been parsed yet, so this is exactly the frame the program wants
+        // left on screen. `snapshot` then draws this capture until the hold
+        // ends. An update only ever *adds* dirty state (the snapshot clears
+        // it), so a capture between two snapshots cannot lose a changed row.
+        let render_state = Rc::new(RefCell::new(RenderState::new()?));
+        let hold = Rc::new(RenderHold::default());
+        {
+            let captured = render_state.clone();
+            let hold = hold.clone();
+            term.on_render_hold(move |term, held| {
+                if held {
+                    if let Ok(mut rs) = captured.try_borrow_mut() {
+                        let _ = rs.update(term);
+                    }
+                    hold.since.set(Some(std::time::Instant::now()));
+                } else {
+                    hold.since.set(None);
+                }
+            })?;
+        }
+
         let bell = Rc::new(std::cell::Cell::new(false));
         let bell_sink = bell.clone();
         term.on_bell(move |_term| {
@@ -281,7 +330,8 @@ impl GhosttyVtEngine {
 
         Ok(Self {
             term,
-            render_state: RenderState::new()?,
+            render_state,
+            hold,
             rows_buf: RowIterator::new()?,
             cells_buf: CellIterator::new()?,
             encoder: Encoder::new()?,
@@ -316,6 +366,15 @@ impl GhosttyVtEngine {
             gesture_drag_ev: gesture::DragEvent::new()?,
             gesture_release_ev: gesture::ReleaseEvent::new()?,
         })
+    }
+
+    /// Move the open render hold's start back by `by`, as if it had been open
+    /// that long: the clock the hold-timeout tests run on.
+    #[cfg(test)]
+    pub(crate) fn backdate_render_hold(&self, by: std::time::Duration) {
+        if let Some(t) = self.hold.since.get() {
+            self.hold.since.set(Some(t - by));
+        }
     }
 
     /// Apply `clipboard-read` / `clipboard-write` / `clipboard-write-limit-bytes`
@@ -1124,14 +1183,22 @@ impl TerminalEngine for GhosttyVtEngine {
     }
 
     fn snapshot_over_row(&mut self, out: &mut Vec<Cell>) -> Result<()> {
+        // During a render hold the render state *is* the captured frame;
+        // updating it here (from a scrolled, half-drawn screen) would replace
+        // that frame. Keep the row from before the hold until it ends.
+        if self.hold.since.get().is_some() {
+            return Ok(());
+        }
         // Reveal the line just above the viewport top by scrolling up one line,
         // read its cells, then restore the viewport. The net Delta is zero, so
         // the caller's pin is unchanged.
         self.term.scroll_viewport(ScrollViewport::Delta(-1));
         let bold_color = self.bold_color;
         let min_contrast = self.min_contrast;
+        let render_state = self.render_state.clone();
         let read = (|| -> Result<()> {
-            let snapshot = self.render_state.update(&self.term)?;
+            let mut rs = render_state.borrow_mut();
+            let snapshot = rs.update(&self.term)?;
             let colors = snapshot.colors()?;
             let cols = snapshot.cols()? as usize;
             let default_fg = rgb(colors.foreground);
@@ -1403,12 +1470,15 @@ impl TerminalEngine for GhosttyVtEngine {
         self.term.mode(Mode::BRACKETED_PASTE).unwrap_or(false)
     }
 
-    fn synchronized_output(&self) -> bool {
-        self.term.mode(Mode::SYNC_OUTPUT).unwrap_or(false)
+    fn render_hold_since(&self) -> Option<std::time::Instant> {
+        self.hold.since.get()
     }
 
     fn end_synchronized_output(&mut self) {
+        // Setting the mode ourselves never invokes the hold callback (by
+        // design upstream), so end our side of the hold explicitly too.
         let _ = self.term.set_mode(Mode::SYNC_OUTPUT, false);
+        self.hold.since.set(None);
     }
 
     fn take_responses(&mut self) -> Vec<u8> {
@@ -1938,9 +2008,23 @@ impl TerminalEngine for GhosttyVtEngine {
         self.viewport_moved = false;
         self.selection_dirty = false;
 
-        // Borrows of the distinct fields below are disjoint, so the snapshot
-        // (which holds &mut render_state) coexists with the iterator buffers.
-        let snapshot = self.render_state.update(&self.term)?;
+        // During a render hold, draw the frame the hold callback captured
+        // rather than the half-drawn screen behind it. Upstream's guide allows
+        // a hold to be ignored "when live content matters more, such as when
+        // someone scrolls or starts a selection": the user's own scroll or
+        // selection shows at once, and the screen read for it stays up until
+        // the program finishes that update — a mid-redraw frame at worst.
+        let held = self.hold.since.get().is_some() && !moved;
+
+        // The snapshot holds the `RefMut`, and the iterator buffers below are
+        // distinct fields, so the borrows coexist.
+        let render_state = self.render_state.clone();
+        let mut render_state = render_state.borrow_mut();
+        let snapshot = if held {
+            render_state.current()
+        } else {
+            render_state.update(&self.term)?
+        };
 
         let cols = snapshot.cols()?;
         let rows = snapshot.rows()?;
@@ -1954,13 +2038,18 @@ impl TerminalEngine for GhosttyVtEngine {
         // the expensive part (the pixel copy) is keyed on image id and skipped
         // on a hit. Errors are swallowed: a malformed image must never blank the
         // pane, which is what returning `Err` from here would do.
-        let _ = walk_placements(
-            &self.term,
-            &mut self.placements,
-            &mut self.image_cache,
-            &mut self.image_ids_seen,
-            &mut out.images,
-        );
+        //
+        // Not during a hold: placements are read from the live terminal, not
+        // the captured frame, and would show the program's half-placed images.
+        if !held {
+            let _ = walk_placements(
+                &self.term,
+                &mut self.placements,
+                &mut self.image_cache,
+                &mut self.image_ids_seen,
+                &mut out.images,
+            );
+        }
 
         // Nothing changed since the last snapshot of this same-sized grid: keep
         // the previously-filled cells and skip the O(rows*cols) per-cell FFI
@@ -1994,6 +2083,19 @@ impl TerminalEngine for GhosttyVtEngine {
             && out.cells.len() == cols as usize * rows as usize
             && self.row_blink.len() == rows as usize;
 
+        // What `serial` tracks besides cells. Not the cursor's shape or blink:
+        // the session overwrites both after every snapshot (the configured
+        // `cursor-style`), so they never read back as written and would count
+        // as a change on every frame.
+        let shown_before = (
+            out.default_fg,
+            out.default_bg,
+            out.cursor_color,
+            out.cursor_visible,
+            out.cursor_x,
+            out.cursor_y,
+        );
+
         // Cursor and colours are read on every snapshot, *before* the clean skip:
         // they are cheap, and a cursor-only change (a move, `?25l`) can leave
         // every row clean.
@@ -2015,8 +2117,20 @@ impl TerminalEngine for GhosttyVtEngine {
             out.cursor_y = cur.y;
         }
         if clean {
+            let shown_now = (
+                out.default_fg,
+                out.default_bg,
+                out.cursor_color,
+                out.cursor_visible,
+                out.cursor_x,
+                out.cursor_y,
+            );
+            if shown_now != shown_before {
+                out.serial = out.serial.wrapping_add(1);
+            }
             return Ok(());
         }
+        out.serial = out.serial.wrapping_add(1);
         out.cols = cols;
         out.rows = rows;
 
@@ -2102,7 +2216,7 @@ impl TerminalEngine for GhosttyVtEngine {
 #[cfg(test)]
 mod tests {
     use super::{
-        Compression, GhosttyVtEngine, ImageFormat, Rc, RefCell, Terminal, intern_enquiry,
+        Compression, GhosttyVtEngine, ImageFormat, Mode, Rc, RefCell, Terminal, intern_enquiry,
         strip_osc72, to_rgba,
     };
     use crate::engine::{
@@ -3981,16 +4095,146 @@ mod tests {
     /// Paste protection needs the mode *before* encoding, so it reads it
     /// through its own accessor rather than inferring it from the output.
     #[test]
-    fn synchronized_output_is_reported_and_can_be_closed() {
+    fn a_render_hold_is_reported_and_can_be_closed() {
         let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
-        assert!(!eng.synchronized_output());
+        assert!(eng.render_hold_since().is_none());
         eng.write(b"\x1b[?2026h");
-        assert!(eng.synchronized_output());
+        assert!(eng.render_hold_since().is_some());
         eng.write(b"\x1b[?2026l");
-        assert!(!eng.synchronized_output());
+        assert!(eng.render_hold_since().is_none());
         eng.write(b"\x1b[?2026h");
         eng.end_synchronized_output();
-        assert!(!eng.synchronized_output(), "the timeout's reset must take");
+        assert!(
+            eng.render_hold_since().is_none(),
+            "the timeout's reset must take"
+        );
+        assert!(
+            !eng.term.mode(Mode::SYNC_OUTPUT).unwrap(),
+            "...in the terminal too, or the program's next frame stays held"
+        );
+    }
+
+    /// The visible text of row `y`, blanks as spaces.
+    fn row_of(s: &GridSnapshot, y: usize) -> String {
+        let cols = s.cols as usize;
+        s.cells[y * cols..(y + 1) * cols]
+            .iter()
+            .map(|c| {
+                if c.text.is_empty() {
+                    " "
+                } else {
+                    c.text.as_str()
+                }
+            })
+            .collect::<String>()
+            .trim_end()
+            .to_string()
+    }
+
+    #[test]
+    fn a_render_hold_shows_the_frame_from_when_it_began() {
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        let mut s = GridSnapshot::default();
+        eng.write(b"\x1b[2J\x1b[Hone");
+        eng.snapshot(&mut s).unwrap();
+        assert_eq!(row_of(&s, 0), "one");
+        // Mid-redraw: cleared, partly repainted, hold still open.
+        eng.write(b"\x1b[?2026h\x1b[2J\x1b[Htw");
+        eng.snapshot(&mut s).unwrap();
+        assert_eq!(
+            row_of(&s, 0),
+            "one",
+            "a half-drawn frame reached the screen"
+        );
+        eng.write(b"o\x1b[?2026l");
+        eng.snapshot(&mut s).unwrap();
+        assert_eq!(row_of(&s, 0), "two");
+    }
+
+    /// The case checking the mode before each draw gets wrong: a program that
+    /// finishes one update and starts the next between two draws is never seen
+    /// with the mode off. The frame it finished must still be the one shown,
+    /// not the one from before it.
+    #[test]
+    fn back_to_back_updates_show_the_last_finished_frame() {
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        let mut s = GridSnapshot::default();
+        eng.write(b"\x1b[2J\x1b[Hold");
+        eng.snapshot(&mut s).unwrap();
+        // One read: update 1 finishes, update 2 starts and is half done.
+        eng.write(b"\x1b[?2026h\x1b[2J\x1b[Hdone\x1b[?2026l\x1b[?2026h\x1b[2J\x1b[Hhal");
+        eng.snapshot(&mut s).unwrap();
+        assert_eq!(
+            row_of(&s, 0),
+            "done",
+            "the program's finished frame was skipped (old: stale; or: half-drawn)"
+        );
+        // And with the hold still open, more half-drawn bytes change nothing.
+        eng.write(b"f");
+        eng.snapshot(&mut s).unwrap();
+        assert_eq!(row_of(&s, 0), "done");
+    }
+
+    /// A row changed *before* the hold began belongs to the captured frame.
+    /// The capture's update only ever adds dirty state, so the partial copy
+    /// must still pick that row up — not skip it as clean.
+    #[test]
+    fn rows_changed_before_a_hold_are_part_of_its_frame() {
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        let mut s = GridSnapshot::default();
+        eng.write(b"\x1b[2J\x1b[Haaa\r\nbbb");
+        eng.snapshot(&mut s).unwrap();
+        eng.snapshot(&mut s).unwrap(); // settle: the next one may take a fast path
+        eng.write(b"\x1b[2;1Hccc\x1b[?2026h\x1b[1;1Hxxx");
+        eng.snapshot(&mut s).unwrap();
+        assert_eq!(row_of(&s, 0), "aaa", "the hold leaked a half-drawn row");
+        assert_eq!(
+            row_of(&s, 1),
+            "ccc",
+            "a row from before the hold went missing"
+        );
+    }
+
+    #[test]
+    fn the_serial_moves_with_the_picture_and_only_with_it() {
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        let mut s = GridSnapshot::default();
+        eng.write(b"hi");
+        eng.snapshot(&mut s).unwrap();
+        let a = s.serial;
+        eng.snapshot(&mut s).unwrap();
+        eng.snapshot(&mut s).unwrap();
+        assert_eq!(s.serial, a, "an idle snapshot is not a change");
+        eng.write(b"\x1b[1G");
+        eng.snapshot(&mut s).unwrap();
+        assert_ne!(s.serial, a, "a cursor move is a change");
+        let b = s.serial;
+        eng.write(b"\x1b]2;a title\x07");
+        eng.snapshot(&mut s).unwrap();
+        assert_eq!(
+            s.serial, b,
+            "output that changes nothing on screen is not a change"
+        );
+        eng.write(b"x");
+        eng.snapshot(&mut s).unwrap();
+        assert_ne!(s.serial, b, "a drawn cell is a change");
+    }
+
+    #[test]
+    fn a_resize_ends_the_hold() {
+        let mut eng = GhosttyVtEngine::new(20, 3, 100).unwrap();
+        let mut s = GridSnapshot::default();
+        eng.write(b"\x1b[2J\x1b[Hold");
+        eng.snapshot(&mut s).unwrap();
+        eng.write(b"\x1b[?2026h\x1b[2J\x1b[Hnew");
+        eng.resize(30, 4, (8, 16)).unwrap();
+        assert!(
+            eng.render_hold_since().is_none(),
+            "a resize must show at once"
+        );
+        eng.snapshot(&mut s).unwrap();
+        assert_eq!((s.cols, s.rows), (30, 4));
+        assert_eq!(row_of(&s, 0), "new");
     }
 
     #[test]

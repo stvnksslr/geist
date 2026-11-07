@@ -155,6 +155,12 @@ pub struct GridSnapshot {
     /// `(z, image_id)` — Ghostty's draw order. Rebuilt on **every** snapshot,
     /// including ones that take the "nothing changed" fast path.
     pub images: Vec<ImagePlacement>,
+    /// Bumped by [`TerminalEngine::snapshot`] whenever what this snapshot shows
+    /// changed: a cell, the cursor, or the colours. Equal serials mean an
+    /// identical screen, so callers can tell "the program drew" from "nothing
+    /// happened" without comparing cells. Blink is not part of it: blink phase
+    /// is applied when drawing, not here.
+    pub serial: u64,
 }
 
 /// Decoded pixels for one kitty graphics image, always straight-alpha RGBA8.
@@ -625,9 +631,12 @@ pub trait TerminalEngine {
     /// all (see [`crate::config::paste_is_unsafe`]).
     fn bracketed_paste(&self) -> bool;
 
-    /// Whether the program has a synchronized update open (DEC 2026): it is
+    /// When the program's open render hold began, or `None` when there is
+    /// none. A hold is a synchronized update (DEC 2026): the program is
     /// mid-redraw and has asked for the screen not to be drawn until it's done.
-    fn synchronized_output(&self) -> bool;
+    /// While one is open, [`Self::snapshot`] returns the frame captured at the
+    /// instant it began — the program's last finished frame — not the screen.
+    fn render_hold_since(&self) -> Option<std::time::Instant>;
 
     /// Close a synchronized update the program never closed, as Ghostty does
     /// after its timeout, so a program that died mid-frame can't freeze the pane.

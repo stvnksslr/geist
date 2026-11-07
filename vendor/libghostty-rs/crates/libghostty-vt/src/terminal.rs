@@ -2160,6 +2160,27 @@ handlers! {
         func(&term);
     }
 
+    /// Call the given function when a render hold begins (`true`) or ends
+    /// (`false`). Today the only source is synchronized output (DEC mode
+    /// 2026); a hold also ends on a full reset and on a resize. The calls
+    /// always come in pairs, and setting the mode yourself never invokes it.
+    ///
+    /// When a hold begins the terminal holds exactly the frame the program
+    /// wants left on screen: nothing after the start of the hold has been
+    /// processed yet, even if more bytes follow in the same `vt_write`. A
+    /// renderer captures that frame by updating its render state *inside*
+    /// this callback (libghostty-vt's rendering guide, "Render holds").
+    ///
+    /// geist-local: not in upstream's binding yet (which predates 1.0).
+    pub fn on_render_hold(
+        &mut self,
+        tag = RENDER_HOLD,
+        from = GhosttyTerminalRenderHoldFn(held: bool),
+        to = RenderHoldFn(bool),
+    ) |term, func| {
+        func(&term, held);
+    }
+
     /// Call the given function in response to XTWINOPS size queries
     /// (CSI 14/16/18 t).
     pub fn on_size(

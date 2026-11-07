@@ -147,3 +147,57 @@ fn osc_window_title_is_read_as_a_string() {
         other => panic!("unexpected {other:?}"),
     }
 }
+
+/// `RENDER_HOLD` (new in 1.0) passes a `bool` after the userdata pointer, and
+/// the binding's `on_render_hold` is geist-local. Pins the pairing (one begin,
+/// one end; re-setting during a hold reports nothing), that a resize ends a
+/// hold, and the rendering guide's pattern: update a render state *inside*
+/// the callback, then read it back with `RenderState::current` (geist-local).
+#[test]
+fn render_hold_reports_pairs_and_a_capture_in_the_callback_holds_the_frame() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let state = Rc::new(RefCell::new(RenderState::new().unwrap()));
+    let mut terminal = Terminal::new(10, 2).unwrap();
+    {
+        let events = events.clone();
+        let state = state.clone();
+        terminal
+            .on_render_hold(move |t, held| {
+                events.borrow_mut().push(held);
+                if held {
+                    let _ = state.borrow_mut().update(t);
+                }
+            })
+            .unwrap();
+    }
+    terminal.vt_write(b"one");
+    // Begin a hold and half-draw the next frame, all in the same write.
+    terminal.vt_write(b"\x1b[?2026h\x1b[2J\x1b[Htw");
+    terminal.vt_write(b"\x1b[?2026h");
+    assert_eq!(*events.borrow(), vec![true]);
+    {
+        let mut rows = RowIterator::new().unwrap();
+        let mut cells = CellIterator::new().unwrap();
+        let mut st = state.borrow_mut();
+        let snapshot = st.current();
+        let mut row_iter = rows.update(&snapshot).unwrap();
+        let row = row_iter.next().expect("a first row");
+        let mut cell_iter = cells.update(row).unwrap();
+        let mut text = String::new();
+        while let Some(cell) = cell_iter.next() {
+            text.extend(cell.graphemes().unwrap());
+        }
+        assert_eq!(
+            text, "one",
+            "the capture must be the frame from before the hold"
+        );
+    }
+    terminal.resize(12, 3, 8, 16).unwrap();
+    assert_eq!(
+        *events.borrow(),
+        vec![true, false],
+        "a resize ends the hold"
+    );
+}

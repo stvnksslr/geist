@@ -47,6 +47,11 @@ pub struct Pty {
     /// Wake-coalescing flag shared with the reader thread; see `spawn_reader`.
     /// Clear it (`Ordering::AcqRel`) *before* draining `output`.
     pub wake_pending: Arc<AtomicBool>,
+    /// Set while no window is drawing this pane (a background tab, a hidden
+    /// split, the prewarmed spare): small output then waits for the app's next
+    /// pass instead of waking it. See `spawn_reader` and
+    /// `Session::mark_on_screen`.
+    pub background: Arc<AtomicBool>,
     /// When the shell was spawned; the fallback clock for [`Pty::exit_info`].
     spawned: Instant,
 }
@@ -141,7 +146,8 @@ impl Pty {
         let reader = pair.master.try_clone_reader().context("clone reader")?;
         let writer = pair.master.take_writer().context("take writer")?;
         let wake_pending = Arc::new(AtomicBool::new(false));
-        let rx = spawn_reader(reader, wake_pending.clone(), wake)?;
+        let background = Arc::new(AtomicBool::new(false));
+        let rx = spawn_reader(reader, wake_pending.clone(), background.clone(), wake)?;
 
         Ok(Self {
             backend: Backend::Spawned {
@@ -151,6 +157,7 @@ impl Pty {
             writer,
             output: rx,
             wake_pending,
+            background,
             spawned: Instant::now(),
         })
     }
@@ -167,7 +174,13 @@ impl Pty {
         let reader = std::fs::File::from(a.output);
         let writer = std::fs::File::from(a.input);
         let wake_pending = Arc::new(AtomicBool::new(false));
-        let rx = spawn_reader(Box::new(reader), wake_pending.clone(), wake)?;
+        let background = Arc::new(AtomicBool::new(false));
+        let rx = spawn_reader(
+            Box::new(reader),
+            wake_pending.clone(),
+            background.clone(),
+            wake,
+        )?;
         let pty = Self {
             backend: Backend::Handoff {
                 signal: std::fs::File::from(a.signal),
@@ -178,6 +191,7 @@ impl Pty {
             writer: Box::new(writer),
             output: rx,
             wake_pending,
+            background,
             spawned: Instant::now(),
         };
         pty.resize(cols, rows)?;
@@ -255,6 +269,12 @@ impl Pty {
 /// a bound that means the same thing for every console host, and no heap
 /// allocation per read.
 pub const OUTPUT_QUEUE_BYTES: usize = 1 << 20;
+
+/// How much output a background pane (see [`Pty::background`]) may queue
+/// before it wakes the app anyway. Below it, the output waits for the app's
+/// next pass; at it, a program writing steadily is pumped well before it
+/// blocks on [`OUTPUT_QUEUE_BYTES`], so throughput doesn't suffer.
+pub const BACKGROUND_WAKE_BYTES: usize = 256 << 10;
 
 /// The queue between the reader thread and the UI: one growable byte buffer
 /// rather than a channel of per-read `Vec`s, so a burst of small reads costs
@@ -361,6 +381,19 @@ impl Drop for Output {
 /// get their own wake and none can be stranded. Under a flood this turns
 /// thousands of cross-thread event posts per second into one per UI pass.
 ///
+/// `background` (see [`Pty::background`]) holds back the wake for a pane no
+/// window is drawing until [`BACKGROUND_WAKE_BYTES`] have queued. Every wake
+/// is a pass, and every pass is a present: a Claude Code spinner in a
+/// background tab used to present the *foreground* tab ~8 times a second at
+/// the spinner's irregular rhythm. A variable-refresh display's rate follows
+/// geist's presents (measured on a VRR OLED with geist in front: swinging
+/// between 48 and 144 Hz several times a second), and an OLED shows those
+/// swings as brightness flicker. Held-back output is pumped on the
+/// app's next pass for any reason — at worst the half-second idle wake —
+/// because every root pass pumps every pane. `pending` is left alone while
+/// holding back, so the first chunk past the threshold, or after the pane is
+/// drawn again, still finds the false→true edge and wakes.
+///
 /// The queue is **bounded** ([`OUTPUT_QUEUE_BYTES`]) so a program that writes
 /// faster than the engine parses gets backpressure: the reader blocks,
 /// ConPTY's pipe fills, and the program's own write blocks. Unbounded, the
@@ -371,6 +404,7 @@ impl Drop for Output {
 fn spawn_reader<W: Fn() + Send + 'static>(
     mut reader: Box<dyn std::io::Read + Send>,
     pending: Arc<AtomicBool>,
+    background: Arc<AtomicBool>,
     wake: W,
 ) -> Result<Output> {
     let shared = Arc::new(OutputShared::default());
@@ -394,9 +428,12 @@ fn spawn_reader<W: Fn() + Send + 'static>(
                             return;
                         }
                         st.buf.extend_from_slice(&buf[..n]);
+                        let queued = st.buf.len();
                         drop(st);
                         ours.changed.notify_all();
-                        if !pending.swap(true, Ordering::AcqRel) {
+                        let urgent =
+                            queued >= BACKGROUND_WAKE_BYTES || !background.load(Ordering::Acquire);
+                        if urgent && !pending.swap(true, Ordering::AcqRel) {
                             wake();
                         }
                     }
@@ -424,7 +461,8 @@ mod tests {
     fn reader_queue_is_bounded_under_a_flood() {
         let flood = Box::new(std::io::repeat(b'x'));
         let pending = Arc::new(AtomicBool::new(false));
-        let out = spawn_reader(flood, pending, || {}).unwrap();
+        let background = Arc::new(AtomicBool::new(false));
+        let out = spawn_reader(flood, pending, background, || {}).unwrap();
         // Give the reader ample time to run ahead of a UI that never drains.
         std::thread::sleep(std::time::Duration::from_millis(200));
         let queued = out.try_recv().unwrap().len();
@@ -437,6 +475,71 @@ mod tests {
         assert!(out.recv_timeout(Duration::from_secs(5)).is_ok());
         // Dropping the receiver unblocks and ends the reader thread.
         drop(out);
+    }
+
+    /// A pane nobody is drawing doesn't wake the app for every chunk — only
+    /// once enough output has piled up — and wakes for each chunk again as
+    /// soon as it is drawn.
+    #[test]
+    fn a_background_pane_holds_its_wake_until_output_piles_up() {
+        use std::sync::atomic::AtomicUsize;
+        struct Feed(std::sync::mpsc::Receiver<Vec<u8>>, Vec<u8>);
+        impl std::io::Read for Feed {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if self.1.is_empty() {
+                    match self.0.recv() {
+                        Ok(v) => self.1 = v,
+                        Err(_) => return Ok(0),
+                    }
+                }
+                let n = self.1.len().min(buf.len());
+                buf[..n].copy_from_slice(&self.1[..n]);
+                self.1.drain(..n);
+                Ok(n)
+            }
+        }
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let counted = wakes.clone();
+        let pending = Arc::new(AtomicBool::new(false));
+        let background = Arc::new(AtomicBool::new(true));
+        let out = spawn_reader(
+            Box::new(Feed(rx, Vec::new())),
+            pending.clone(),
+            background.clone(),
+            move || {
+                counted.fetch_add(1, Ordering::SeqCst);
+            },
+        )
+        .unwrap();
+        let settle = || std::thread::sleep(Duration::from_millis(100));
+
+        tx.send(vec![b'a'; 100]).unwrap();
+        settle();
+        assert_eq!(
+            wakes.load(Ordering::SeqCst),
+            0,
+            "a small background chunk woke the app"
+        );
+        tx.send(vec![b'b'; BACKGROUND_WAKE_BYTES]).unwrap();
+        settle();
+        assert_eq!(
+            wakes.load(Ordering::SeqCst),
+            1,
+            "output piling up past the threshold must wake"
+        );
+
+        // The app drains (clearing `pending` first), and draws the pane again.
+        pending.store(false, Ordering::Release);
+        assert!(out.try_recv().is_ok());
+        background.store(false, Ordering::Release);
+        tx.send(vec![b'c'; 10]).unwrap();
+        settle();
+        assert_eq!(
+            wakes.load(Ordering::SeqCst),
+            2,
+            "a drawn pane wakes at once"
+        );
     }
 
     /// Many small reads are coalesced, and none is lost on the way, including
@@ -455,7 +558,8 @@ mod tests {
             }
         }
         let pending = Arc::new(AtomicBool::new(false));
-        let out = spawn_reader(Box::new(Drip(1000)), pending, || {}).unwrap();
+        let background = Arc::new(AtomicBool::new(false));
+        let out = spawn_reader(Box::new(Drip(1000)), pending, background, || {}).unwrap();
         let mut total = 0;
         loop {
             match out.recv_timeout(Duration::from_secs(5)) {

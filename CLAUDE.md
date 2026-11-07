@@ -177,7 +177,9 @@ fallback engine without app changes:
   the **geist-local** wrappers in `terminal.rs`: `on_clipboard_write` fixed to the reply-function ABI
   (upstream's still *returned* the result, which the C side ignored — every write was silently
   denied), `on_clipboard_read`, `Terminal::paste` (`ghostty_terminal_paste`), and
-  `Mode::PASTE_EVENTS`. The old Windows static-link patch (`static=ghostty-vt-static`, without which
+  `Mode::PASTE_EVENTS`; and, new with 1.0, `on_render_hold` (`GHOSTTY_TERMINAL_OPT_RENDER_HOLD`)
+  plus `RenderState::current` in `render.rs` (read a render state without updating it — how a
+  frame captured in that callback is drawn; see the flicker entry below). The old Windows static-link patch (`static=ghostty-vt-static`, without which
   the exe loads `ghostty-vt.dll` and crashes in `vt_write`) is **upstream** (8272abe) — don't re-add
   it, but *do* check it survives a bump. Zig 0.17's own HTTPS fetch can't get through some proxies;
   Ghostty's `nix/build-support/fetch-zig-cache.sh` + `GHOSTTY_ZIG_SYSTEM_DIR` builds offline.
@@ -472,17 +474,59 @@ fallback engine without app changes:
   loop could not return while the reader refilled it — multi-second freezes. Don't "speed it up" by
   unbounding either. Unrelated trap when stress-testing: OpenConsole leaks memory (and stalls
   doubling-ly) on OSC 8 links with a *unique* `id=` each — measure without them.
-- **Flicker has two sources, and neither shows in a unit test.** (1) A TUI mid-redraw: the
+- **Flicker has four sources, and none shows in a unit test.** (1) A TUI mid-redraw: the
   screen gets drawn between its "clear" and its "repaint", and a high-refresh display samples
-  that gap far more often. `Session::update_snapshot` holds the last frame while DEC 2026 is open
-  (1 s timeout, Ghostty's). It only works under the **sideloaded** ConPTY: the inbox one forwards
-  `?2026h?2026l` back to back *ahead of* the frame (`synchronized_output_survives_conpty`).
-  Measured with a stalling fake TUI: 34/40 window captures blank without the hold, 0 with it.
-  (2) Idle presents on VRR/OLED panels: every lone present moves the refresh rate and shows as
-  brightness flicker, so idle wakes (cursor/SGR blink, the shell-exit poll) all share one
-  half-second grid via `blink_flip_in`. Aim a wake *past* the edge (`BLINK_WAKE_MARGIN`):
-  Windows timers fire up to ~15.6 ms early, and a wake aimed at the edge re-armed itself into a
-  burst of ~5 passes per flip. Measured 59 → 10 passes per 5 s for an idle blinking pane.
+  that gap far more often. Programs wrap a redraw in DEC 2026 (synchronized output), and the
+  engine's `on_render_hold` callback **captures the frame inside `vt_write` at the instant the
+  hold begins**; `GhosttyVtEngine::snapshot` draws that capture until it ends (1 s timeout counted
+  from the hold's *start*, Ghostty's). Don't "simplify" it back to checking the mode before each
+  draw — upstream's rendering guide names that approach's two holes: the frame left up is
+  whatever was drawn last (stale or half-drawn), and a program that ends one update and starts
+  the next between two draws never shows its finished frames at all; the old first-sighting
+  timeout also never restarted under continuous drawing. The capture is the engine's one shared
+  render state (an update only *adds* dirty state, so a capture between snapshots loses no row);
+  `snapshot_over_row` must not touch it during a hold. Holds only work under the **sideloaded**
+  ConPTY: the inbox one forwards `?2026h?2026l` back to back *ahead of* the frame
+  (`synchronized_output_survives_conpty`) — and it answers DECRQM 2026 ("unrecognized") and DA1
+  itself, so a program never even detects support there (`tests/conpty_queries.rs`). **A program
+  has to detect support before it sends 2026.** Claude Code asks XTVERSION, then DECRQM 2026, with
+  a DA1 reply as its "done" marker; lib-vt ignored DA1 until 1.0 (no callback installed), so
+  Claude Code never used 2026 in geist before the 1.0 bump — the hold had only ever been exercised
+  by a fake TUI. (2) Present *rhythm* on VRR/OLED panels: a variable-refresh display refreshes
+  when a frame is presented, and an OLED's brightness varies with the refresh rate, so an
+  irregular rhythm flickers even when every frame is whole (a live capture of Claude Code's
+  fullscreen TUI here showed 0 torn rows in 300 frames). Idle wakes (cursor/SGR blink, the
+  shell-exit poll) share one half-second grid via `blink_flip_in`; aim a wake *past* the edge
+  (`BLINK_WAKE_MARGIN`) — Windows timers fire up to ~15.6 ms early (and egui subtracts its
+  predicted frame time from every delay), and a wake aimed at the edge re-armed itself into a
+  burst of ~5 passes per flip (measured 59 → 10 passes per 5 s idle). The hold's timeout wake
+  rides that grid too. `window-steady-refresh` (`config::SteadyRefresh`) presents every refresh
+  instead: by default (`focused`) for as long as the window has focus, because *any* change of
+  present rate is a brightness step — the user saw flicker on a click, a scroll's first step and
+  on focusing the window under the narrower `animating` mode (two changes < 300 ms apart,
+  `STEADY_REFRESH_LINGER`; measured live: 119 passes/s, intervals 8.1–8.7 ms, vs 10.7/s
+  following a spinner). Cost: ~0.5–1 ms of UI thread per refresh on a large full window
+  (`render_instances` alone is 0.14–0.36 ms at 200x50–400x100), even when nothing changes.
+  (3) **Every PTY wake used to present twice**: `request_repaint_of` is a zero-delay request, and
+  egui answers each with a follow-up pass (`outstanding`) that re-presents the same frame a vsync
+  later — 2.27 passes per spinner redraw, measured. `session::wake_root` asks with a 1 ns delay,
+  which egui floors to "now" without the follow-up (1.15 per redraw). A wake landing mid-pass is
+  not lost: egui stamps it with that pass's number and eframe accepts `pass + 1`.
+  (4) **A background tab sets the foreground's rhythm**: every pass presents the visible tab, so a
+  Claude Code spinner in a tab you *aren't* looking at presented an unchanged screen ~8×/s. A pane
+  not drawn since the last pump is marked `Pty::background` (lazily, in `pump_pty`; drawing it
+  clears the flag at once, `Session::mark_on_screen`) and its reader holds back the wake until
+  `BACKGROUND_WAKE_BYTES` queue — the next pass for any reason pumps it, since every root pass pumps
+  every pane. Measured: 8.8 → 1.9 passes/s for a background spinner. An adopted prewarm spare
+  must be marked on screen *before* its gate opens, or its prompt waits for the idle tick.
+  **VRR is live on the user's panel** (a maximized geist in front): sampling the scanline with
+  `D3DKMTGetScanLine` (no admin needed) showed refresh intervals of 6.7–20.6 ms, swinging between
+  144 Hz and the panel's 48 Hz floor several times a second. Test windows launched for an A/B —
+  even maximized and brought to the front — kept the panel at a fixed 144 Hz, old build included;
+  why VRR engaged only for the user's own window is unknown, so judge a VRR fix on the real setup.
+  `tests/sync_frames.rs` drives a real `Session` behind ConPTY with `examples/fake_tui.rs` and
+  checks all of this (torn frames, stalls, passes per redraw, present intervals); run it in
+  **release** — Zig-Debug libghostty parses slowly enough to change what it measures.
 - **The side scanners run over every byte the shell prints, so they skip, and the skips are
   load-bearing.** `osc_color`/`osc133`/`osc_notify` jump from ground straight to the next `ESC ]`,
   `xtshiftescape` to the next `ESC [ >` / `ESC c`, `decscusr` past any CSI whose final byte isn't
