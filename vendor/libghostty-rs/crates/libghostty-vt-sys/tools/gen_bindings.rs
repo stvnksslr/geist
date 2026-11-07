@@ -86,6 +86,32 @@ fn main() {
 }
 
 const PREFIXES: &[(&str, &str)] = &[
+    ("GhosttySearchOption", "GHOSTTY_SEARCH_OPT"),
+    ("GhosttySysOption", "GHOSTTY_SYS_OPT"),
+    ("GhosttyOscOption", "GHOSTTY_OSC_OPT"),
+    ("GhosttyFormatterOption", "GHOSTTY_FORMATTER_OPT"),
+    ("GhosttyRenderStateOption", "GHOSTTY_RENDER_STATE_OPT"),
+    (
+        "GhosttyRenderStateRowOption",
+        "GHOSTTY_RENDER_STATE_ROW_OPT",
+    ),
+    (
+        "GhosttyKittyGraphicsPlacementIteratorOption",
+        "GHOSTTY_KITTY_GRAPHICS_PLACEMENT_ITERATOR_OPT",
+    ),
+    (
+        "GhosttyTerminalUnknownSequenceTag",
+        "GHOSTTY_TERMINAL_UNKNOWN_SEQUENCE",
+    ),
+    (
+        "GhosttyTerminalResizeWindowTag",
+        "GHOSTTY_TERMINAL_RESIZE_WINDOW",
+    ),
+    ("GhosttySemanticPromptKind", "GHOSTTY_SEMANTIC_PROMPT"),
+    (
+        "GhosttySemanticPromptPromptKind",
+        "GHOSTTY_SEMANTIC_PROMPT_PROMPT",
+    ),
     ("GhosttyOptimizeMode", "GHOSTTY_OPTIMIZE"),
     ("GhosttyKeyEncoderOption", "GHOSTTY_KEY_ENCODER_OPT"),
     ("GhosttyMouseTrackingMode", "GHOSTTY_MOUSE_TRACKING"),
@@ -96,7 +122,7 @@ const PREFIXES: &[(&str, &str)] = &[
     ("GhosttyTerminalOption", "GHOSTTY_TERMINAL_OPT"),
     (
         "GhosttyTerminalScrollViewportTag",
-        "GHOSTTY_SCROLL_VIEWPORT",
+        "GHOSTTY_TERMINAL_SCROLL_VIEWPORT",
     ),
     ("GhosttyStyleColorTag", "GHOSTTY_STYLE_COLOR"),
     ("GhosttyRowSemanticPrompt", "GHOSTTY_ROW_SEMANTIC"),
@@ -145,18 +171,30 @@ impl ParseCallbacks for Callbacks {
     ) -> Option<String> {
         let enum_name = enum_name?;
 
-        // Remove redundant C prefixes
-        let prefix = PREFIXES
-            .into_iter()
+        // Remove redundant C prefixes. Try the explicit table first, then the
+        // enum's own name in SHOUTY_SNAKE, and strip only a prefix that
+        // actually matches: upstream renames prefixes (libghostty-vt 1.0 turned
+        // GHOSTTY_KITTY_IMAGE_DATA_* into GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_*),
+        // and a stale table entry used to leave every variant unstripped.
+        let table = PREFIXES
+            .iter()
             .find(|(v, _)| *v == enum_name)
-            .map(|(_, n)| n.to_string())
-            .unwrap_or(enum_name.to_shouty_snake_case());
+            .map(|(_, n)| n.to_string());
+        let candidates = table
+            .into_iter()
+            .chain(std::iter::once(enum_name.to_shouty_snake_case()));
+        for prefix in candidates {
+            let with_sep = if prefix.ends_with('_') {
+                prefix
+            } else {
+                format!("{prefix}_")
+            };
+            if let Some(rest) = original_variant_name.strip_prefix(&with_sep) {
+                return Some(rest.to_string());
+            }
+        }
 
-        let transformed = original_variant_name
-            .trim_start_matches(&prefix)
-            .trim_start_matches('_');
-
-        Some(transformed.to_string())
+        Some(original_variant_name.to_string())
     }
 
     fn process_comment(&self, comment: &str) -> Option<String> {

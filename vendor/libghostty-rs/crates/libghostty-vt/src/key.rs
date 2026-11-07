@@ -54,7 +54,10 @@ impl<'alloc> Encoder<'alloc> {
         option: ffi::KeyEncoderOption::Type,
         value: *const std::ffi::c_void,
     ) {
-        unsafe { ffi::ghostty_key_encoder_setopt(self.0.as_raw(), option, value) }
+        // Every option is set from a typed setter below, so an error here
+        // (unknown key / null handle) would be a binding bug.
+        let result = unsafe { ffi::ghostty_key_encoder_set(self.0.as_raw(), option, value) };
+        debug_assert_eq!(result, ffi::Result::SUCCESS);
     }
 
     /// Encode a key event into a terminal escape sequence.
@@ -134,9 +137,10 @@ impl<'alloc> Encoder<'alloc> {
     /// terminal state and is reset to [`OptionAsAlt::False`] by this call.
     /// Use [`Encoder::set_macos_option_as_alt`] to set it afterward if needed.
     pub fn set_options_from_terminal(&mut self, terminal: &Terminal<'_, '_>) -> &mut Self {
-        unsafe {
-            ffi::ghostty_key_encoder_setopt_from_terminal(self.0.as_raw(), terminal.inner.as_raw());
-        }
+        let result = unsafe {
+            ffi::ghostty_key_encoder_set_from_terminal(self.0.as_raw(), terminal.inner.as_raw())
+        };
+        debug_assert_eq!(result, ffi::Result::SUCCESS);
         self
     }
 
@@ -258,7 +262,9 @@ impl<'alloc> Event<'alloc> {
 
     /// Set the key action (press, release, repeat).
     pub fn set_action(&mut self, action: Action) -> &mut Self {
-        unsafe { ffi::ghostty_key_event_set_action(self.inner.as_raw(), action.into()) }
+        let result =
+            unsafe { ffi::ghostty_key_event_set_action(self.inner.as_raw(), action.into()) };
+        debug_assert_eq!(result, ffi::Result::SUCCESS);
         self
     }
 
@@ -271,7 +277,8 @@ impl<'alloc> Event<'alloc> {
 
     /// Set the physical key code.
     pub fn set_key(&mut self, key: Key) -> &mut Self {
-        unsafe { ffi::ghostty_key_event_set_key(self.inner.as_raw(), key.into()) }
+        let result = unsafe { ffi::ghostty_key_event_set_key(self.inner.as_raw(), key.into()) };
+        debug_assert_eq!(result, ffi::Result::SUCCESS);
         self
     }
 
@@ -284,7 +291,8 @@ impl<'alloc> Event<'alloc> {
 
     /// Set the modifier keys bitmask.
     pub fn set_mods(&mut self, mods: Mods) -> &mut Self {
-        unsafe { ffi::ghostty_key_event_set_mods(self.inner.as_raw(), mods.bits()) }
+        let result = unsafe { ffi::ghostty_key_event_set_mods(self.inner.as_raw(), mods.bits()) };
+        debug_assert_eq!(result, ffi::Result::SUCCESS);
         self
     }
 
@@ -296,7 +304,9 @@ impl<'alloc> Event<'alloc> {
 
     /// Set the consumed modifiers bitmask.
     pub fn set_consumed_mods(&mut self, mods: Mods) -> &mut Self {
-        unsafe { ffi::ghostty_key_event_set_consumed_mods(self.inner.as_raw(), mods.bits()) }
+        let result =
+            unsafe { ffi::ghostty_key_event_set_consumed_mods(self.inner.as_raw(), mods.bits()) };
+        debug_assert_eq!(result, ffi::Result::SUCCESS);
         self
     }
 
@@ -310,7 +320,9 @@ impl<'alloc> Event<'alloc> {
 
     /// Set whether the key event is part of a composition sequence.
     pub fn set_composing(&mut self, composing: bool) -> &mut Self {
-        unsafe { ffi::ghostty_key_event_set_composing(self.inner.as_raw(), composing) }
+        let result =
+            unsafe { ffi::ghostty_key_event_set_composing(self.inner.as_raw(), composing) };
+        debug_assert_eq!(result, ffi::Result::SUCCESS);
         self
     }
 
@@ -333,18 +345,14 @@ impl<'alloc> Event<'alloc> {
     pub fn set_utf8<S: Into<String>>(&mut self, text: Option<S>) -> &mut Self {
         self.text = text.map(Into::into);
 
-        match &self.text {
-            Some(text) => unsafe {
-                ffi::ghostty_key_event_set_utf8(
-                    self.inner.as_raw(),
-                    text.as_ptr().cast(),
-                    text.len(),
-                );
-            },
-            None => unsafe {
-                ffi::ghostty_key_event_set_utf8(self.inner.as_raw(), std::ptr::null(), 0);
-            },
-        }
+        // The event borrows these bytes (it does not copy them); `self.text`
+        // owns them for as long as the event can read them.
+        let utf8 = match &self.text {
+            Some(text) => ffi::String::from(text.as_str()),
+            None => ffi::String::default(),
+        };
+        let result = unsafe { ffi::ghostty_key_event_set_utf8(self.inner.as_raw(), utf8) };
+        debug_assert_eq!(result, ffi::Result::SUCCESS);
         self
     }
 

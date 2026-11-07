@@ -4,7 +4,7 @@ use std::process::Command;
 
 /// Pinned ghostty commit. Update this to pull a newer version.
 const GHOSTTY_REPO: &str = "https://github.com/ghostty-org/ghostty.git";
-const GHOSTTY_COMMIT: &str = "b32f20f3e8d25bb925ec545c54498e93518e7ced";
+const GHOSTTY_COMMIT: &str = "0fa3d577a5614150ff8e2c152de5fb9d5c6d2dec";
 
 /// File name of the static archive on Windows. Ghostty installs it under this
 /// name for every Windows ABI so it does not collide with `ghostty-vt.lib`,
@@ -86,15 +86,23 @@ fn main() {
     // hand it to whichever path runs rather than re-reading it per call site.
     let target = env::var("TARGET").expect("TARGET must be set");
 
+    // Wasm consumers link the archive into their own module, not a native
+    // shared library. Check before pkg-config as well as the source build.
+    assert!(
+        !target.starts_with("wasm") || matches!(link_mode, LinkMode::Static),
+        "Wasm targets support static linking only; disable the link-dynamic feature"
+    );
+
     println!("cargo:rerun-if-env-changed=LIBGHOSTTY_VT_SYS_CPU");
     println!("cargo:rerun-if-env-changed=LIBGHOSTTY_VT_SYS_OPTIMIZE");
     println!("cargo:rerun-if-env-changed=GHOSTTY_SOURCE_DIR");
     println!("cargo:rerun-if-env-changed=GHOSTTY_ZIG_SYSTEM_DIR");
+    println!("cargo:rerun-if-env-changed=ZIG");
     println!("cargo:rerun-if-env-changed=TARGET");
     println!("cargo:rerun-if-env-changed=HOST");
     println!("cargo:rerun-if-env-changed=DEBUG");
     println!("cargo:rerun-if-env-changed=OPT_LEVEL");
-    println!("cargo:rerun-if-changed=crates/libghostty-vt-sys/build.rs");
+    println!("cargo:rerun-if-changed=build.rs");
 
     // An explicit source override should stay authoritative even when the
     // pkg-config feature is enabled, so local Ghostty checkouts remain easy to
@@ -105,8 +113,8 @@ fn main() {
     }
 
     // When the pkg-config feature is enabled, prefer an installed library over
-    // fetching Ghostty. libghostty is pre-1.0, so this crate intentionally does
-    // not promise compatibility with every installed C API revision.
+    // fetching Ghostty. geist pins the libghostty-vt 1.0.0 C ABI; an installed
+    // library from before 1.0 is not compatible with these bindings.
     #[cfg(feature = "pkg-config")]
     if try_pkg_config(link_mode, &target) {
         return;
@@ -137,6 +145,21 @@ fn build_vendored(link_mode: LinkMode, target: &str) {
 
     // Build libghostty-vt via zig.
     let install_prefix = out_dir.join("ghostty-install");
+    // Upstream installs the Wasm archive and standalone module, but not
+    // headers. Use the same source revision rather than a host installation.
+    let include_dir = if target.starts_with("wasm") {
+        ghostty_dir.join("include")
+    } else {
+        install_prefix.join("include")
+    };
+    // Tell the gen-bindings tool, a binary of this crate, which headers
+    // belong to this exact build. Cargo keeps one build output per feature
+    // set and profile, and ones from before a pin bump still hold the old
+    // headers, so scanning the target directory can find stale ones.
+    println!(
+        "cargo:rustc-env=LIBGHOSTTY_VT_SYS_INCLUDE_DIR={}",
+        include_dir.display()
+    );
     let zig_cache_dir = out_dir.join("zig-cache");
     let zig_global_cache_dir = out_dir.join("zig-global-cache");
 
@@ -175,7 +198,10 @@ fn build_vendored(link_mode: LinkMode, target: &str) {
         );
     }
 
-    let mut build = Command::new("zig");
+    // Users can override the zig command with the `ZIG` env variable.
+    // We default to assuming zig is in path.
+    let zig = env::var_os("ZIG").unwrap_or_else(|| "zig".into());
+    let mut build = Command::new(zig);
     build
         .arg("build")
         .arg("-Demit-lib-vt=true")
@@ -204,7 +230,11 @@ fn build_vendored(link_mode: LinkMode, target: &str) {
 
     // Package managers can provide Ghostty's Zig package cache ahead of time
     // and ask Zig to resolve packages from that immutable store path instead
-    // of fetching during this Cargo build script.
+    // of fetching during this Cargo build script. Those sandboxes usually
+    // have no writable home either, so the global cache goes under OUT_DIR.
+    // Zig 0.17 removed `--global-cache-dir`; the global cache can only be
+    // redirected through the environment now (as ghostty's own
+    // nix/build-support/update-mirror.nu does).
     if let Ok(dir) = env::var("GHOSTTY_ZIG_SYSTEM_DIR") {
         assert!(
             !dir.is_empty(),
@@ -219,8 +249,7 @@ fn build_vendored(link_mode: LinkMode, target: &str) {
         build
             .arg("--system")
             .arg(&zig_system_dir)
-            .arg("--global-cache-dir")
-            .arg(&zig_global_cache_dir);
+            .env("ZIG_GLOBAL_CACHE_DIR", &zig_global_cache_dir);
     }
 
     // Pass -Dtarget only for non-iOS cross targets; native builds let zig
@@ -240,7 +269,6 @@ fn build_vendored(link_mode: LinkMode, target: &str) {
     }
 
     let lib_dir = install_prefix.join("lib");
-    let include_dir = install_prefix.join("include");
     let search_dirs = library_search_dirs(target, &install_prefix);
     if ios_platform.is_none() {
         warn_unused_xcframework(&lib_dir);
@@ -427,8 +455,12 @@ fn fetch_ghostty(out_dir: &Path) -> PathBuf {
     eprintln!("Fetching ghostty {GHOSTTY_COMMIT} ...");
 
     let mut clone = Command::new("git");
+    // Cargo's nested OUT_DIR plus Ghostty's fuzz corpus names can exceed
+    // Windows MAX_PATH. Scope long-path support to this fetched repository.
     clone
         .arg("clone")
+        .arg("--config")
+        .arg("core.longpaths=true")
         .arg("--filter=blob:none")
         .arg("--no-checkout")
         .arg(GHOSTTY_REPO)
@@ -557,6 +589,8 @@ fn zig_target(target: &str) -> String {
         "aarch64-pc-windows-msvc" => "aarch64-windows-msvc",
         "aarch64-linux-android" => "aarch64-linux-android",
         "x86_64-linux-android" => "x86_64-linux-android",
+        "wasm32-unknown-unknown" => "wasm32-freestanding",
+        "wasm64-unknown-unknown" => "wasm64-freestanding",
         other => panic!("unsupported Rust target for vendored build: {other}"),
     };
     value.to_owned()

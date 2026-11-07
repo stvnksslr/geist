@@ -38,24 +38,25 @@ directly — leaving room for a pure-Rust fallback engine without app changes.
 ## Build prerequisites
 
 - **Rust** (stable, edition 2024 — 1.95+).
-- **Zig 0.16.0** on `PATH`. The vendored `libghostty-vt-sys` build script
-  compiles Ghostty's VT library with Zig. The pinned Ghostty commit requires
-  the 0.16.x series; **0.15.x will not build it**. Get it from
-  <https://ziglang.org/download/0.16.0/>.
+- **Zig 0.17.0** on `PATH`. The vendored `libghostty-vt-sys` build script
+  compiles Ghostty's VT library with Zig. The pinned Ghostty release requires
+  the 0.17.x series (its `requireZig` check accepts no other minor version);
+  **0.16.x will not build it**. Get it from
+  <https://ziglang.org/download/0.17.0/>.
 - A working MSVC toolchain (the default `x86_64-pc-windows-msvc` target).
 - Internet on first build: the build script fetches the pinned Ghostty source.
 
 ## Build & run
 
 ```powershell
-# Make sure Zig 0.16.0 is first on PATH for the build:
-$env:PATH = "C:\path\to\zig-0.16.0;$env:PATH"
+# Make sure Zig 0.17.0 is first on PATH for the build:
+$env:PATH = "C:\path\to\zig-0.17.0;$env:PATH"
 
 cargo run            # debug
 cargo run --release  # release (faster rendering, smaller VT lib)
 ```
 
-If you use [mise], the bundled `mise.toml` pins `zig = "0.16.0"` for this
+If you use [mise], the bundled `mise.toml` pins `zig = "0.17.0"` for this
 project, so `mise trust` once and the right Zig is on `PATH` automatically.
 
 The first build takes a few minutes (it fetches and compiles Ghostty's VT
@@ -64,9 +65,10 @@ native crate changes.
 
 ## Vendoring
 
-`vendor/libghostty-rs/` is [Uzaaft/libghostty-rs] @5988a0b with Ghostty bumped to upstream
-`main` (@b32f20f). It links Ghostty's real static archive, so geist is a single self-contained
-`.exe`. See CLAUDE.md for how to bump the Ghostty commit.
+`vendor/libghostty-rs/` is [Uzaaft/libghostty-rs] @5988a0b, ported to the first stable
+**libghostty-vt 1.0.0** release (Ghostty tag `vt-1.0.0`, @0fa3d57). It links Ghostty's real
+static archive, so geist is a single self-contained `.exe`. See CLAUDE.md for how to bump the
+Ghostty commit.
 
 ## Controls
 

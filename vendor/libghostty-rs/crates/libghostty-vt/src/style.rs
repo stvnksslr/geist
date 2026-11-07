@@ -135,42 +135,52 @@ pub enum Underline {
 impl TryFrom<ffi::Style> for Style {
     type Error = Error;
     fn try_from(value: ffi::Style) -> Result<Self> {
+        // libghostty-vt 1.0 packs the attributes into one 16-bit word: an
+        // on/off bit each in 0-7, the underline style in 8-10.
+        let has = |flag: ffi::StyleFlags| value.flags & flag != 0;
+        let underline =
+            u32::from((value.flags & ffi::STYLE_UNDERLINE_MASK) >> ffi::STYLE_UNDERLINE_SHIFT);
         Ok(Self {
             fg_color: StyleColor::try_from(value.fg_color)?,
             bg_color: StyleColor::try_from(value.bg_color)?,
             underline_color: StyleColor::try_from(value.underline_color)?,
-            bold: value.bold,
-            italic: value.italic,
-            faint: value.faint,
-            blink: value.blink,
-            inverse: value.inverse,
-            invisible: value.invisible,
-            strikethrough: value.strikethrough,
-            overline: value.overline,
-            #[expect(clippy::cast_sign_loss, reason = "bindgen ain't perfect")]
-            underline: Underline::try_from(value.underline as u32)
-                .map_err(|_| Error::InvalidValue)?,
+            bold: has(ffi::STYLE_FLAG_BOLD),
+            italic: has(ffi::STYLE_FLAG_ITALIC),
+            faint: has(ffi::STYLE_FLAG_FAINT),
+            blink: has(ffi::STYLE_FLAG_BLINK),
+            inverse: has(ffi::STYLE_FLAG_INVERSE),
+            invisible: has(ffi::STYLE_FLAG_INVISIBLE),
+            strikethrough: has(ffi::STYLE_FLAG_STRIKETHROUGH),
+            overline: has(ffi::STYLE_FLAG_OVERLINE),
+            underline: Underline::try_from(underline).map_err(|_| Error::InvalidValue)?,
         })
     }
 }
 
 impl From<Style> for ffi::Style {
     fn from(value: Style) -> Self {
+        let flag = |on: bool, flag: ffi::StyleFlags| if on { flag } else { 0 };
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "SgrUnderline values are 0-5, well inside the 3-bit field"
+        )]
+        let underline = (u32::from(value.underline) as ffi::StyleFlags)
+            << ffi::STYLE_UNDERLINE_SHIFT
+            & ffi::STYLE_UNDERLINE_MASK;
         Self {
-            size: std::mem::size_of::<Self>(),
             fg_color: value.fg_color.into(),
             bg_color: value.bg_color.into(),
             underline_color: value.underline_color.into(),
-            bold: value.bold,
-            italic: value.italic,
-            faint: value.faint,
-            blink: value.blink,
-            inverse: value.inverse,
-            invisible: value.invisible,
-            strikethrough: value.strikethrough,
-            overline: value.overline,
-            #[expect(clippy::cast_possible_wrap, reason = "bindgen ain't perfect")]
-            underline: u32::from(value.underline) as i32,
+            flags: flag(value.bold, ffi::STYLE_FLAG_BOLD)
+                | flag(value.italic, ffi::STYLE_FLAG_ITALIC)
+                | flag(value.faint, ffi::STYLE_FLAG_FAINT)
+                | flag(value.blink, ffi::STYLE_FLAG_BLINK)
+                | flag(value.inverse, ffi::STYLE_FLAG_INVERSE)
+                | flag(value.invisible, ffi::STYLE_FLAG_INVISIBLE)
+                | flag(value.strikethrough, ffi::STYLE_FLAG_STRIKETHROUGH)
+                | flag(value.overline, ffi::STYLE_FLAG_OVERLINE)
+                | underline,
+            reserved: 0,
         }
     }
 }
@@ -178,7 +188,8 @@ impl From<Style> for ffi::Style {
 impl TryFrom<ffi::StyleColor> for StyleColor {
     type Error = Error;
     fn try_from(value: ffi::StyleColor) -> Result<Self> {
-        Ok(match value.tag {
+        // The 1.0 headers store the tag in a `uint8_t` to freeze the layout.
+        Ok(match u32::from(value.tag) {
             ffi::StyleColorTag::NONE => Self::None,
             ffi::StyleColorTag::PALETTE => {
                 Self::Palette(PaletteIndex(unsafe { value.value.palette }))
@@ -191,17 +202,19 @@ impl TryFrom<ffi::StyleColor> for StyleColor {
 
 impl From<StyleColor> for ffi::StyleColor {
     fn from(value: StyleColor) -> Self {
+        #[expect(clippy::cast_possible_truncation, reason = "tags are 0-2")]
+        let tag = |tag: ffi::StyleColorTag::Type| tag as u8;
         match value {
             StyleColor::None => Self {
-                tag: ffi::StyleColorTag::NONE,
+                tag: tag(ffi::StyleColorTag::NONE),
                 value: ffi::StyleColorValue::default(),
             },
             StyleColor::Palette(PaletteIndex(palette)) => Self {
-                tag: ffi::StyleColorTag::PALETTE,
+                tag: tag(ffi::StyleColorTag::PALETTE),
                 value: ffi::StyleColorValue { palette },
             },
             StyleColor::Rgb(rgb) => Self {
-                tag: ffi::StyleColorTag::RGB,
+                tag: tag(ffi::StyleColorTag::RGB),
                 value: ffi::StyleColorValue { rgb: rgb.into() },
             },
         }

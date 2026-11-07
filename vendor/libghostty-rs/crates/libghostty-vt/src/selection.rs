@@ -14,13 +14,13 @@
 //! For this use case, [selection gestures](self::gesture) serve as a convenient
 //! way of translating common UI actions (clicking, dragging, etc.) into selections,
 //! to be copied, formatted, or installed as the active selection.
-use std::{marker::PhantomData, ptr::NonNull};
+use std::marker::PhantomData;
 
 use crate::{
     alloc::{Allocator, Bytes},
-    error::{Error, Result, from_optional_result, from_optional_result_with_len, from_result},
+    error::{Error, Result, from_optional_result, from_result},
     ffi,
-    fmt::Format,
+    fmt::{Format, Formatter, FormatterOptions},
     screen::GridRef,
     terminal::{Point, Terminal},
 };
@@ -60,7 +60,7 @@ impl<'t> Selection<'t> {
                 start: start.inner,
                 end: end.inner,
                 rectangle,
-                ..ffi::sized!(ffi::Selection)
+                ..ffi::Selection::default()
             })
         }
     }
@@ -182,7 +182,7 @@ impl<'t> Selection<'t> {
     ///
     /// See [#Preconditions](#preconditions) for the necessary preconditions.
     pub fn to_ordered(&self, terminal: &'t Terminal<'_, '_>, desired: Order) -> Result<Self> {
-        let mut selection = ffi::sized!(ffi::Selection);
+        let mut selection = ffi::Selection::default();
         let result = unsafe {
             ffi::ghostty_terminal_selection_ordered(
                 terminal.inner.as_raw(),
@@ -231,7 +231,7 @@ impl Terminal<'_, '_> {
     ///
     /// The returned selection is not installed as the terminal's current selection.
     pub fn select_all(&self) -> Result<Option<Selection<'_>>> {
-        let mut value = ffi::sized!(ffi::Selection);
+        let mut value = ffi::Selection::default();
         let result =
             unsafe { ffi::ghostty_terminal_select_all(self.inner.as_raw(), &raw mut value) };
 
@@ -245,7 +245,7 @@ impl Terminal<'_, '_> {
     ///
     /// The returned selection is not installed as the terminal's current selection.
     pub fn select_line(&self, options: SelectLineOptions) -> Result<Option<Selection<'_>>> {
-        let mut value = ffi::sized!(ffi::Selection);
+        let mut value = ffi::Selection::default();
 
         let result = unsafe {
             ffi::ghostty_terminal_select_line(self.inner.as_raw(), &options.inner, &raw mut value)
@@ -261,10 +261,14 @@ impl Terminal<'_, '_> {
     ///
     /// The returned selection is not installed as the terminal's current selection.
     pub fn select_output(&self, grid_ref: GridRef<'_>) -> Result<Option<Selection<'_>>> {
-        let mut value = ffi::sized!(ffi::Selection);
+        let mut value = ffi::Selection::default();
 
         let result = unsafe {
-            ffi::ghostty_terminal_select_output(self.inner.as_raw(), grid_ref.inner, &raw mut value)
+            ffi::ghostty_terminal_select_output(
+                self.inner.as_raw(),
+                &raw const grid_ref.inner,
+                &raw mut value,
+            )
         };
 
         let sel = from_optional_result(result, value)?;
@@ -277,7 +281,7 @@ impl Terminal<'_, '_> {
     ///
     /// The returned selection is not installed as the terminal's current selection.
     pub fn select_word(&self, options: SelectWordOptions) -> Result<Option<Selection<'_>>> {
-        let mut value = ffi::sized!(ffi::Selection);
+        let mut value = ffi::Selection::default();
 
         let result = unsafe {
             ffi::ghostty_terminal_select_word(self.inner.as_raw(), &options.inner, &raw mut value)
@@ -349,7 +353,7 @@ impl Terminal<'_, '_> {
         &self,
         options: SelectWordBetweenOptions,
     ) -> Result<Option<Selection<'_>>> {
-        let mut value = ffi::sized!(ffi::Selection);
+        let mut value = ffi::Selection::default();
 
         let result = unsafe {
             ffi::ghostty_terminal_select_word_between(
@@ -365,12 +369,40 @@ impl Terminal<'_, '_> {
             Selection::from_raw(v)
         }))
     }
+}
+
+impl<'alloc: 'cb, 'cb> Terminal<'alloc, 'cb> {
+    /// The selection a one-shot format call should use: the caller's, or else
+    /// the terminal's active one.
+    fn selection_to_format(
+        &self,
+        options: &FormatOptions<'_, '_>,
+    ) -> Result<Option<ffi::Selection>> {
+        match options.selection {
+            Some(selection) => Ok(Some(selection)),
+            None => Ok(self.selection()?.map(|selection| selection.inner)),
+        }
+    }
+
+    /// A formatter for one selection, configured from `options`.
+    fn selection_formatter(
+        &self,
+        options: &FormatOptions<'_, '_>,
+        selection: &ffi::Selection,
+    ) -> Result<Formatter<'_, 'alloc, 'cb>> {
+        let opts = FormatterOptions::new()
+            .with_format(options.emit)
+            .with_unwrap(options.unwrap)
+            .with_trim(options.trim)
+            .with_raw_selection(*selection);
+        Formatter::new(self, opts)
+    }
 
     /// Format a terminal selection into an allocated buffer.
     ///
     /// This is a one-shot convenience API for formatting either the terminal's
     /// active selection or a caller-provided [`Selection`] without explicitly
-    /// creating a [`Formatter`](crate::fmt::Formatter).
+    /// creating a [`Formatter`].
     ///
     /// The returned buffer is allocated using allocator, or the default allocator
     /// if `None` is passed. The returned bytes are not NUL-terminated.
@@ -378,36 +410,28 @@ impl Terminal<'_, '_> {
     ///
     /// If `options.selection` is `None` and the terminal has no active selection,
     /// the function returns `None`.
+    ///
+    /// libghostty-vt 1.0 removed the C one-shot
+    /// (`ghostty_terminal_selection_format_alloc`); this is the replacement it
+    /// documents, a formatter with `GHOSTTY_FORMATTER_OPT_SELECTION` set.
     pub fn format_selection_alloc<'a, 'ctx: 'a>(
         &self,
         alloc: Option<&'a Allocator<'ctx>>,
         options: FormatOptions,
     ) -> Result<Option<Bytes<'a>>> {
-        let mut out = std::ptr::null_mut();
-        let mut out_len = 0usize;
-        let alloc = alloc.map_or(std::ptr::null(), |v| v.to_raw());
-
-        let result = unsafe {
-            ffi::ghostty_terminal_selection_format_alloc(
-                self.inner.as_raw(),
-                alloc,
-                options.inner,
-                &raw mut out,
-                &raw mut out_len,
-            )
+        let Some(selection) = self.selection_to_format(&options)? else {
+            return Ok(None);
         };
-
-        let out = from_optional_result(result, out)?;
-        Ok(out
-            .and_then(NonNull::new)
-            .map(|ptr| unsafe { Bytes::from_raw_parts(ptr, out_len, alloc) }))
+        self.selection_formatter(&options, &selection)?
+            .format_alloc(alloc)
+            .map(Some)
     }
 
     /// Format a terminal selection into a caller-provided buffer.
     ///
     /// This is a one-shot convenience API for formatting either the terminal's
     /// active selection or a caller-provided [`Selection`] without explicitly
-    /// creating a [`Formatter`](crate::fmt::Formatter).
+    /// creating a [`Formatter`].
     ///
     /// If `buf` is too small, this returns `Err(Error::OutOfSpace { required })`
     /// where `required` is the required size. The caller can then retry with a
@@ -420,19 +444,12 @@ impl Terminal<'_, '_> {
         options: FormatOptions,
         buf: &mut [u8],
     ) -> Result<Option<usize>> {
-        let mut written = 0usize;
-
-        let result = unsafe {
-            ffi::ghostty_terminal_selection_format_buf(
-                self.inner.as_raw(),
-                options.inner,
-                buf.as_mut_ptr(),
-                buf.len(),
-                &raw mut written,
-            )
+        let Some(selection) = self.selection_to_format(&options)? else {
+            return Ok(None);
         };
-
-        from_optional_result_with_len(result, written)
+        self.selection_formatter(&options, &selection)?
+            .format_buf(buf)
+            .map(Some)
     }
 }
 
@@ -557,9 +574,12 @@ impl<'t, 'bc> SelectWordBetweenOptions<'t, 'bc> {
 /// formatting semantics as [`Formatter`](crate::fmt::Formatter).
 /// For copy/clipboard behavior matching Ghostty's Screen.selectionString(),
 /// use plain output with unwrap and trim both set to true.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FormatOptions<'t, 's> {
-    inner: ffi::TerminalSelectionFormatOptions,
+    emit: Format,
+    unwrap: bool,
+    trim: bool,
+    selection: Option<ffi::Selection>,
     _phan: PhantomData<&'s Selection<'t>>,
 }
 impl<'t, 's> FormatOptions<'t, 's> {
@@ -567,25 +587,26 @@ impl<'t, 's> FormatOptions<'t, 's> {
     /// terminal selection.
     pub fn new() -> Self {
         Self {
-            inner: ffi::TerminalSelectionFormatOptions {
-                ..ffi::sized!(ffi::TerminalSelectionFormatOptions)
-            },
+            emit: Format::Plain,
+            unwrap: false,
+            trim: false,
+            selection: None,
             _phan: PhantomData,
         }
     }
     /// Specify the output format to emit.
     pub fn with_emit_format(mut self, value: Format) -> Self {
-        self.inner.emit = value.into();
+        self.emit = value;
         self
     }
     /// Specify whether to unwrap soft-wrapped lines.
     pub fn with_unwrap(mut self, value: bool) -> Self {
-        self.inner.unwrap = value;
+        self.unwrap = value;
         self
     }
     /// Specify whether to trim trailing whitespace on non-blank lines.
     pub fn with_trim(mut self, value: bool) -> Self {
-        self.inner.trim = value;
+        self.trim = value;
         self
     }
     /// Specify the selection to format in place of the terminal's active selection.
@@ -593,7 +614,7 @@ impl<'t, 's> FormatOptions<'t, 's> {
     /// The selection must be a [valid snapshot selection](Selection#preconditions)
     /// for this terminal.
     pub fn with_selection(mut self, value: &'s Selection<'t>) -> Self {
-        self.inner.selection = &value.inner;
+        self.selection = Some(value.inner);
         self
     }
 }

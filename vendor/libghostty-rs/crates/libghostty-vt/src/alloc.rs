@@ -130,8 +130,25 @@ impl<'alloc> Bytes<'alloc> {
         }
     }
 }
+impl Bytes<'_> {
+    /// A zero-length buffer that owns no allocation. libghostty-vt 1.0
+    /// reports empty `*_alloc` output as success with a NULL pointer.
+    pub(crate) fn empty(alloc: *const ffi::Allocator) -> Self {
+        Self {
+            ptr: NonNull::dangling(),
+            len: 0,
+            alloc,
+            _phan: PhantomData,
+        }
+    }
+}
 impl Drop for Bytes<'_> {
     fn drop(&mut self) {
+        // An empty buffer owns no allocation (see `Bytes::empty`), and
+        // freeing a zero-length slice is a no-op on the Zig side anyway.
+        if self.len == 0 {
+            return;
+        }
         // SAFETY: The lifetime dictates that the allocator must
         // remain valid through here. We retain ownership of the bytes
         // memory itself so it should not be freed beforehand.
@@ -193,6 +210,7 @@ impl Allocator<'static> {
                 free: Some(_global_free),
                 resize: Some(_global_resize),
                 remap: Some(_global_remap),
+                reserved: [std::ptr::null_mut(); 4],
             },
         },
         _phan: PhantomData,
@@ -263,6 +281,7 @@ impl<'ctx, A: alloc::Allocator + 'ctx> From<A> for Allocator<'ctx> {
                     free: Some(_free::<A>),
                     resize: Some(_resize),
                     remap: Some(_remap::<A>),
+                    reserved: [std::ptr::null_mut(); 4],
                 },
             },
             _phan: PhantomData,

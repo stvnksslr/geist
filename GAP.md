@@ -20,7 +20,9 @@ geist's single per-cell chokepoint (`engine/ghostty_vt.rs::copy_cell`) historica
 ## Full parity plan against Ghostty `main` (re-audited 2026-09-19)
 
 **Baseline.** geist now builds on Ghostty `main` itself (@b32f20f, via libghostty-rs @5988a0b, Zig
-0.16.0), so the plan and the engine describe the same Ghostty. Three sources were diffed:
+0.16.0), so the plan and the engine describe the same Ghostty. *(Since 2026-11-07 the engine is the
+stable libghostty-vt 1.0.0 release, tag `vt-1.0.0` @0fa3d57, 840 commits past b32f20f, on Zig 0.17.0;
+this audit has not been re-run against it.)* Three sources were diffed:
 (1) **config keys** in `Config.zig`, (2) **keybind actions** in `Binding.zig`, (3) **app-level
 features** that are neither — surveyed from `macos/Sources` and from the 673 user-facing commits
 between the old pin (b869a6e) and `main`. Key/action extraction is the config-surface ledger's
@@ -214,7 +216,7 @@ real chain, delegation live ~1 s): a `cmd` started with a new console appears in
 | Selection gesture engine | ✅ | adopted: left-button selection now runs on `ghostty_selection_gesture_*` (press/drag/release) — click counting, the 60%-of-cell threshold, double/triple-click-*drag* word/line snapping, Ctrl+triple-click output, rectangle drag, and the autoscroll *decision*. geist keeps its 15 ms rate clock and smooth scroll instead of `AUTOSCROLL_TICK` (which scrolls the engine viewport behind `animate_scroll`'s back). See the ledger "Selection gesture engine" |
 | Default cursor style/blink engine options | ✅ N/A | probed: equivalent to `decscusr.rs` for initial, `CSI 0 q`, RIS and mode 12 — except upstream ignores mode 12 when `cursor-style-blink` is set, which only the scanner does. The scanner stays. |
 | OSC 72 kitty drag-and-drop | ⬜ blocked | bytes survive both ConPTYs (probed), and the engine parses OSC 72, answers `t=q` and tracks registrations — but the C API has **no way to deliver a drop** (upstream calls `kitty.dnd.State.dragDrop` from Zig; no C export, no `drag_and_drop` effect in the C wrapper). geist therefore **withholds the engine's OSC 72 replies** so no program is told drops will come; file drops keep pasting paths. See the ledger "Protocol leftovers" |
-| Kitty animation / relative placements / glyph protocol | ◐ | unblocked by a **sideloaded ConPTY** (`conpty-passthrough`, `scripts/fetch-conpty.ps1`). Relative placements ✅, client-driven frames (`a=a,c=N`) ✅, transient ✅ (engine-side eviction); autoplay (`s=2/3`) ⬜ — `animationTick` isn't in the C API, and the C API exposes no frame count or per-frame gap either, so geist can't drive frames itself (re-checked at b32f20f); glyph protocol ⬜ — no outline read-back in the C API, so it is **disabled** rather than advertised. See the kitty section |
+| Kitty animation / relative placements / glyph protocol | ◐ | unblocked by a **sideloaded ConPTY** (`conpty-passthrough`, `scripts/fetch-conpty.ps1`). Relative placements ✅, client-driven frames (`a=a,c=N`) ✅, transient ✅ (engine-side eviction); autoplay (`s=2/3`) ⬜ — **unblocked by libghostty-vt 1.0**, which exports `ghostty_kitty_graphics_animation_tick(graphics, now_ms, &next_ms)`; neither the vendored binding nor geist calls it yet; glyph protocol ⬜ — no outline read-back in the C API, so it is **disabled** rather than advertised. See the kitty section |
 | New `middle-click-action` / `copy-on-select` values, `~` in theme paths | ✅ | `clipboard-paste`; `none/primary/clipboard/both` (`true` = clipboard, as off-Linux upstream); `primary-paste` reads the PRIMARY emulation, falling back to the clipboard while it is empty; `~`/`~\` → `%USERPROFILE%` for every theme name incl. light/dark pairs |
 | Free with the bump | ✅ | XTGETTCAP, ANSI DECRQM, DECECM report, mode 2048 size-on-enable, C0/C1 fixes, CSI 2K wrap reset, color-reset fix, RIS clears progress, MOK2 + F13–F25 key encoding, kitty graphics spec fixes |
 
@@ -2398,10 +2400,12 @@ Re-checked against the pinned engine (ghostty b32f20f) and its C API.
   `d=0` chunking and `o=` occasion. The scanner stays whole (splitting 9/777 onto the engine and 99
   onto a scanner buys nothing). The same test is the tripwire: it fails once the engine starts
   delivering OSC 99.
-- **Kitty autoplay (`a=a,s=2|3`): still not possible.** `ImageStorage.animationTick` is called only
-  from `renderer/generic.zig`; `kitty_graphics.h` exports no tick, no frame count and no per-frame
-  gap, so geist can't even drive frames itself with synthetic `a=a,c=N` writes. Client-driven frames
-  keep working.
+- **Kitty autoplay (`a=a,s=2|3`): unblocked by libghostty-vt 1.0, not yet wired.** At b32f20f
+  `ImageStorage.animationTick` was reachable only from `renderer/generic.zig`. The 1.0 C API exports
+  `ghostty_kitty_graphics_animation_tick(graphics, now_ms, &next_ms)`: call it once per prepared
+  frame on a monotonic ms clock, and schedule a repaint at `next_ms` (`NO_VALUE` = nothing playing).
+  It mutates image storage like `vt_write`, so it must not run during `walk_placements`. The vendored
+  binding has no wrapper for it yet. Client-driven frames keep working.
 
 ### Window chrome: client-drawn caption, runtime icon, colorspace
 

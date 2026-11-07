@@ -463,15 +463,30 @@ impl<'t> Image<'t> {
     /// is stored. Consumers can upload this directly to the GPU without any
     /// decode step.
     pub fn data(&self) -> Result<Option<&'t [u8]>> {
-        let ptr = self.get::<*const u8>(ffi::KittyGraphicsImageData::DATA_PTR)?;
-        if ptr.is_null() {
+        // libghostty-vt 1.0 returns the pixels as one `GhosttyString` and
+        // reports a still-pending payload as GHOSTTY_NO_VALUE (it used to be
+        // a null DATA_PTR plus a separate DATA_LEN).
+        let mut value = MaybeUninit::<ffi::String>::zeroed();
+        let result = unsafe {
+            ffi::ghostty_kitty_graphics_image_get(
+                self.inner.as_raw(),
+                ffi::KittyGraphicsImageData::PIXELS,
+                value.as_mut_ptr().cast(),
+            )
+        };
+        let Some(pixels) = crate::error::from_optional_result_uninit(result, value)? else {
             return Ok(None);
-        }
+        };
+        // SAFETY: The slice borrows the image storage, which lives as long as
+        // the terminal is not mutated (`'t`).
+        Ok(Some(unsafe { pixels.to_bytes() }))
+    }
 
-        let len = self.get::<usize>(ffi::KittyGraphicsImageData::DATA_LEN)?;
-
-        // SAFETY: We trust libghostty to return valid results
-        Ok(Some(unsafe { std::slice::from_raw_parts(ptr, len) }))
+    /// Size in bytes of the image's pixel data (width x height x bytes per
+    /// pixel). Available even while the payload is still pending, when
+    /// [`Image::data`] returns `None`.
+    pub fn expected_len(&self) -> Result<usize> {
+        self.get(ffi::KittyGraphicsImageData::EXPECTED_LEN)
     }
 }
 
@@ -566,9 +581,11 @@ impl<'t, 'alloc> PlacementIteration<'t, 'alloc> {
 
     /// Set the z-layer filter for the iterator.
     pub fn set_layer(&self, layer: Layer) -> Result<()> {
-        self.set::<ffi::KittyPlacementLayer::Type>(
+        // libghostty-vt 1.0 takes a bitmask of `GHOSTTY_IMAGE_LAYER_MASK_*`
+        // here (0 = no filter) rather than a single layer value.
+        self.set::<u32>(
             ffi::KittyGraphicsPlacementIteratorOption::LAYER,
-            &layer.into(),
+            &layer.mask(),
         )
     }
 
@@ -822,19 +839,30 @@ pub struct SourceRect {
 }
 
 /// Z-layer classification for kitty graphics placements.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, int_enum::IntEnum)]
-#[repr(u32)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Layer {
     /// Match all placements; apply no filtering (default behavior).
     #[default]
-    All = ffi::KittyPlacementLayer::ALL,
+    All,
     /// Match placements positioned below the cell background (z < [`i32::MIN`] / 2).
-    BelowBg = ffi::KittyPlacementLayer::BELOW_BG,
+    BelowBg,
     /// Match placements positioned above the cell background and below text
     /// ([`i32::MIN`] / 2 ≤ z < 0).
-    BelowText = ffi::KittyPlacementLayer::BELOW_TEXT,
+    BelowText,
     /// Match placements positioned above text (z ≥ 0).
-    AboveText = ffi::KittyPlacementLayer::ABOVE_TEXT,
+    AboveText,
+}
+
+impl Layer {
+    /// The placement iterator's layer filter for this value.
+    fn mask(self) -> u32 {
+        match self {
+            Self::All => 0,
+            Self::BelowBg => ffi::IMAGE_LAYER_MASK_BELOW_BACKGROUND,
+            Self::BelowText => ffi::IMAGE_LAYER_MASK_BELOW_TEXT,
+            Self::AboveText => ffi::IMAGE_LAYER_MASK_ABOVE_TEXT,
+        }
+    }
 }
 
 /// Pixel format of a Kitty graphics image.
@@ -923,7 +951,7 @@ pub fn set_png_decoder(f: Option<Box<dyn DecodePng>>) -> Result<()> {
     DECODE_PNG.replace(f);
 
     crate::sys_set(
-        ffi::SysOption::GHOSTTY_SYS_OPT_DECODE_PNG,
+        ffi::SysOption::DECODE_PNG,
         ptr.map_or(std::ptr::null(), |p| p as *const std::ffi::c_void),
     )
 }

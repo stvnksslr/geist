@@ -12,7 +12,7 @@ trait; the shell runs over **ConPTY**. North-star goal: feature parity with the 
 ## Build & test
 
 ```powershell
-mise dev                 # debug build + run (recommended; injects Zig 0.16.0)
+mise dev                 # debug build + run (recommended; injects Zig 0.17.0)
 mise release             # optimized release build (recommended)
 cargo test               # ~79 unit tests (engine, input, selection, paste, mouse, theming, ligatures, OSC 7/52, URL detection)
 cargo test <name>        # single test by name substring
@@ -23,12 +23,12 @@ Benchmarks mirror Ghostty's suite (VT-write/OSC throughput, snapshot copy, shapi
 headless renderer cost) and can be compared against upstream `ghostty-bench` via
 `scripts/bench-vs-ghostty.ps1`. Full guide: **docs/benchmarking.md**.
 
-- **Requires Zig 0.16.0 on PATH** — the vendored `libghostty-vt-sys/build.rs` runs `zig build`
-  to compile Ghostty's VT library. **0.15.x will NOT build it** (the pinned ghostty commit
-  declares `minimum_zig_version = 0.16.0`). `mise.toml` pins `zig = "0.16.0"` and defines the
+- **Requires Zig 0.17.0 on PATH** — the vendored `libghostty-vt-sys/build.rs` runs `zig build`
+  to compile Ghostty's VT library. **0.16.x will NOT build it** (the pinned `vt-1.0.0` release
+  declares `minimum_zig_version = 0.17.0`, and its `requireZig` rejects any other minor version). `mise.toml` pins `zig = "0.17.0"` and defines the
   `dev`/`release` tasks above, which run cargo from the project root with the pinned Zig on
-  PATH — prefer them. Run `mise trust` once. Fallbacks: `mise exec zig@0.16.0 -- cargo build`,
-  or plain `cargo build`/`cargo run --release` if Zig 0.16.0 is already on PATH.
+  PATH — prefer them. Run `mise trust` once. Fallbacks: `mise exec zig@0.17.0 -- cargo build`,
+  or plain `cargo build`/`cargo run --release` if Zig 0.17.0 is already on PATH.
 - **Always run cargo from the project root.** Running it from inside `vendor/libghostty-rs/...`
   builds the *vendored crate* instead of geist (cargo walks up to the nearest Cargo.toml). A
   "Finished" that only mentions `libghostty-vt` compiling means you're in the wrong directory.
@@ -148,17 +148,39 @@ fallback engine without app changes:
 
 ## Non-obvious gotchas
 
-- **Vendored binding, ahead of its own upstream.** `vendor/libghostty-rs/` is Uzaaft/libghostty-rs
-  @5988a0b with **Ghostty itself bumped past the binding's pin** to `ghostty-org/ghostty` `main`
-  @b32f20f (the binding pins 22d1317, 876 commits older). That bump carries three local deltas:
-  `GHOSTTY_COMMIT` in `libghostty-vt-sys/build.rs`; a **regenerated** `bindings.rs`; and
-  `render.rs::colors()` moved from the removed `ghostty_render_state_colors_get` onto
-  `ghostty_render_state_get(.., RenderStateData::COLORS, ..)`. Plus **geist-local** wrappers in
-  `terminal.rs`: `on_clipboard_write` fixed to the pinned reply-function ABI (upstream's still
-  *returned* the result, which the C side ignored — every write was silently denied),
-  `on_clipboard_read`, `Terminal::paste` (`ghostty_terminal_paste`), and `Mode::PASTE_EVENTS`. The old Windows static-link patch
-  (`static=ghostty-vt-static`, without which the exe loads `ghostty-vt.dll` and crashes in
-  `vt_write`) is now **upstream** (8272abe) — don't re-add it, but *do* check it survives a bump.
+- **Vendored binding, ported to libghostty-vt 1.0 ahead of its own upstream.** `vendor/libghostty-rs/`
+  is Uzaaft/libghostty-rs @5988a0b with **Ghostty pinned to the first stable libghostty-vt release**,
+  tag `vt-1.0.0` @0fa3d57 (the binding pins 22d1317; even its `master` only reaches 0b8b998, before
+  the 1.0 ABI freeze). 1.0 **broke the C ABI on purpose** to freeze it, and much of that is invisible
+  to the compiler because it passes through `void*` keys — so the port is more than a regen:
+  - `build.rs` is upstream `master`'s (Zig 0.17 dropped `zig build --global-cache-dir`; the cache
+    now goes through `ZIG_GLOBAL_CACHE_DIR`), re-pinned to `vt-1.0.0`.
+  - `bindings.rs` is **regenerated**; `gen_bindings.rs` strips an enum prefix only when it matches
+    (1.0 renamed some, e.g. `GHOSTTY_KITTY_IMAGE_DATA_*` → `GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_*`).
+  - Every `*_get`/`*_set` key enum gained `INVALID = 0` and **shifted by one** — safe only because
+    the safe crate names every key by its generated constant. Never hard-code an option number.
+  - Cast-expression macros bindgen can't evaluate (`GHOSTTY_STYLE_FLAG_*`, the underline mask,
+    `GHOSTTY_IMAGE_LAYER_MASK_*`) are hand-declared in `libghostty-vt-sys/src/lib.rs`, pinned by a test.
+  - Opaque-key shape changes: `GRAPHEMES_BUF` takes a `GhosttyCodepointBuffer` (a bare `uint32_t*`
+    makes the library panic on alignment — on *every cell*, since `ghostty_vt.rs` reads graphemes
+    through it); kitty `PIXELS` is a `GhosttyString` (was `DATA_PTR` + `DATA_LEN`); OSC titles are a
+    `GhosttyString`. `GhosttyStyle` is a 16-byte struct with one `flags` word.
+  - The formatter takes options **by key** after creation, and its 1.0 defaults differ (trim on;
+    palette/style/hyperlink extras on), so `FormatterOptions` sets every key explicitly to keep the
+    binding's all-off defaults. `ghostty_terminal_selection_format_*` is gone; `format_selection_alloc`
+    (geist's copy path) is rebuilt on a formatter with `GHOSTTY_FORMATTER_OPT_SELECTION`. Empty
+    `*_alloc` output is `SUCCESS` + NULL, which `Bytes::empty` absorbs.
+  - `crates/libghostty-vt/tests/vt1_abi.rs` drives each of these against the real library — run it
+    after any bump: `cargo test --manifest-path vendor/libghostty-rs/Cargo.toml -p libghostty-vt
+    --all-features --test vt1_abi` (it needs no Windows; geist itself does).
+  Still carried from before: `render.rs::colors()` on `ghostty_render_state_get(.., COLORS, ..)`, and
+  the **geist-local** wrappers in `terminal.rs`: `on_clipboard_write` fixed to the reply-function ABI
+  (upstream's still *returned* the result, which the C side ignored — every write was silently
+  denied), `on_clipboard_read`, `Terminal::paste` (`ghostty_terminal_paste`), and
+  `Mode::PASTE_EVENTS`. The old Windows static-link patch (`static=ghostty-vt-static`, without which
+  the exe loads `ghostty-vt.dll` and crashes in `vt_write`) is **upstream** (8272abe) — don't re-add
+  it, but *do* check it survives a bump. Zig 0.17's own HTTPS fetch can't get through some proxies;
+  Ghostty's `nix/build-support/fetch-zig-cache.sh` + `GHOSTTY_ZIG_SYSTEM_DIR` builds offline.
   **Regenerating `bindings.rs` on Windows has two traps:** bindgen needs `libclang.dll` (the
   `libclang` PyPI wheel is a zip that has one; point `LIBCLANG_PATH` at its `clang/native`), and it
   must target **Linux** — a Windows target types every C enum `i32` instead of upstream's `u32` and
@@ -205,7 +227,7 @@ fallback engine without app changes:
   and the `palette_open` local in `render_active` (terminal keys, pane mouse, scrollbar) are
   separate lists, and missing either means the dialog is up while the terminal still takes input.
 - **The working dir comes from the engine now (`GhosttyVtEngine::pwd` → `Terminal::pwd()`).** On the
-  old pin it was always empty, so `osc7.rs` side-scanned OSC 7; since the b32f20f bump `vt_write`
+  old pin it was always empty, so `osc7.rs` side-scanned OSC 7; since the b32f20f bump (and in 1.0) `vt_write`
   keeps OSC 7 (and OSC 9;9 / OSC 1337 CurrentDir), and `ghostty_vt::tests::pwd_comes_from_the_engine`
   pins it — the scanner is gone. A new split's "inherit the parent's cwd" feeds that raw URI to
   `osc7_to_path` in `Session::pwd`. PowerShell
@@ -249,8 +271,8 @@ fallback engine without app changes:
   that key only works under the sideloaded ConPTY.
 - **Kitty image textures are keyed by `Arc<ImageData>` address, not image id** (ids are per
   terminal), and the engine's pixel copy is keyed by the image's **generation** stamp (changes on
-  re-transmit and on every animation frame change). Autoplaying animations don't advance: upstream
-  ticks them from its renderer and `animationTick` isn't in the C API.
+  re-transmit and on every animation frame change). Autoplaying animations don't advance yet:
+  libghostty-vt 1.0 added `ghostty_kitty_graphics_animation_tick`, but nothing calls it (GAP.md).
 - **A PTY harness with no VT engine must answer `ESC[6n` itself, or it gets nothing.** ConPTY opens
   by requesting a cursor-position report and withholds the child's output until it is answered; the
   child then blocks on the full pipe and never exits either. The app never notices because the
