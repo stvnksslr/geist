@@ -206,7 +206,7 @@ pub fn set_logger(f: Option<Box<dyn Logger>>) -> Result<()> {
         *logger = f;
     }
     crate::sys_set(
-        ffi::SysOption::GHOSTTY_SYS_OPT_LOG,
+        ffi::SysOption::LOG,
         ptr.map_or(std::ptr::null(), |p| p as *const std::ffi::c_void),
     )
 }

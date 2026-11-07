@@ -1,5 +1,5 @@
 [tools]
-zig = "0.16.0"
+zig = "0.17.0"
 
 [tasks.dev]
 description = "Local dev: debug build + run (installs the sideloaded ConPTY first)"

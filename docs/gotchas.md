@@ -30,10 +30,12 @@ See [`pty.rs`](components/pty.md).
 ## The vendored binding runs ahead of its upstream
 
 `vendor/libghostty-rs/` is [Uzaaft/libghostty-rs](https://github.com/Uzaaft/libghostty-rs)
-@5988a0b, but Ghostty is pinned to `ghostty-org/ghostty` `main` (@b32f20f) rather than the
-binding's own, older pin. Bumping that commit means regenerating `bindings.rs` (on Windows:
-libclang plus a *Linux* bindgen target, or every C enum comes out `i32`) and fixing whatever C API
-moved — CLAUDE.md has the exact command.
+@5988a0b, but Ghostty is pinned to the stable **libghostty-vt 1.0.0** release (tag `vt-1.0.0`,
+@0fa3d57) rather than the binding's own, older pin. Bumping that commit means regenerating
+`bindings.rs` (on Windows: libclang plus a *Linux* bindgen target, or every C enum comes out `i32`)
+and fixing whatever C API moved — CLAUDE.md has the exact command and the list of 1.0 changes.
+Much of the C API passes values through `void*` keys, so a stale binding can compile cleanly and
+read the wrong type; `crates/libghostty-vt/tests/vt1_abi.rs` in the vendored crate exercises those.
 
 !!! danger "Build *and launch* after every bump"
     geist used to patch `build.rs` to link `ghostty-vt-static.lib`: upstream linked the DLL
@@ -42,10 +44,10 @@ moved — CLAUDE.md has the exact command.
 
 See the [libghostty touch point](touchpoints/libghostty.md).
 
-## Zig version is pinned to 0.16.0
+## Zig version is pinned to 0.17.0
 
-The pinned Ghostty commit declares `minimum_zig_version = 0.16.0`. **0.15.x will
-not build it.** `mise.toml` pins `zig = "0.16.0"`; prefer the `mise dev` /
+The pinned Ghostty release declares `minimum_zig_version = 0.17.0` and accepts only
+the 0.17.x series. **0.16.x will not build it.** `mise.toml` pins `zig = "0.17.0"`; prefer the `mise dev` /
 `mise release` tasks, which put the right Zig on `PATH`.
 
 ## The release profile feeds the Zig build via `DEBUG`

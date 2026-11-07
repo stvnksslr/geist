@@ -10,6 +10,39 @@ use std::ops::Deref;
 
 pub use bindings::*;
 
+// Function-like and cast-expression macros bindgen cannot evaluate, declared
+// by hand. Values are copied from the libghostty-vt 1.0 headers (`style.h`,
+// `types.h`), whose layouts are frozen; the tests below pin them.
+
+/// `GHOSTTY_STYLE_FLAG_*`: on/off attributes in [`Style::flags`] (bits 0-7).
+pub const STYLE_FLAG_BOLD: StyleFlags = 1 << 0;
+#[allow(missing_docs)]
+pub const STYLE_FLAG_ITALIC: StyleFlags = 1 << 1;
+#[allow(missing_docs)]
+pub const STYLE_FLAG_FAINT: StyleFlags = 1 << 2;
+#[allow(missing_docs)]
+pub const STYLE_FLAG_BLINK: StyleFlags = 1 << 3;
+#[allow(missing_docs)]
+pub const STYLE_FLAG_INVERSE: StyleFlags = 1 << 4;
+#[allow(missing_docs)]
+pub const STYLE_FLAG_INVISIBLE: StyleFlags = 1 << 5;
+#[allow(missing_docs)]
+pub const STYLE_FLAG_STRIKETHROUGH: StyleFlags = 1 << 6;
+#[allow(missing_docs)]
+pub const STYLE_FLAG_OVERLINE: StyleFlags = 1 << 7;
+/// `GHOSTTY_STYLE_UNDERLINE_MASK`: the bits of [`Style::flags`] holding the
+/// underline style, a `GhosttySgrUnderline` shifted by
+/// [`STYLE_UNDERLINE_SHIFT`].
+pub const STYLE_UNDERLINE_MASK: StyleFlags = 0x7 << STYLE_UNDERLINE_SHIFT;
+
+/// `GHOSTTY_IMAGE_LAYER_MASK_*`: one bit per [`ImageLayer`] value, for the
+/// placement iterator's layer filter. Zero means no filter.
+pub const IMAGE_LAYER_MASK_BELOW_BACKGROUND: u32 = 1 << ImageLayer::BELOW_BACKGROUND;
+#[allow(missing_docs)]
+pub const IMAGE_LAYER_MASK_BELOW_TEXT: u32 = 1 << ImageLayer::BELOW_TEXT;
+#[allow(missing_docs)]
+pub const IMAGE_LAYER_MASK_ABOVE_TEXT: u32 = 1 << ImageLayer::ABOVE_TEXT;
+
 /// Initialize a "sized" FFI object.
 #[macro_export]
 macro_rules! sized {
@@ -63,6 +96,29 @@ impl bindings::String {
 #[cfg(test)]
 mod tests {
     use super::bindings;
+
+    #[test]
+    fn hand_declared_constants_match_the_headers() {
+        use crate::*;
+        assert_eq!(STYLE_UNDERLINE_SHIFT, 8);
+        assert_eq!(STYLE_UNDERLINE_MASK, 0x0700);
+        let flags = [
+            STYLE_FLAG_BOLD,
+            STYLE_FLAG_ITALIC,
+            STYLE_FLAG_FAINT,
+            STYLE_FLAG_BLINK,
+            STYLE_FLAG_INVERSE,
+            STYLE_FLAG_INVISIBLE,
+            STYLE_FLAG_STRIKETHROUGH,
+            STYLE_FLAG_OVERLINE,
+        ];
+        for (bit, flag) in flags.into_iter().enumerate() {
+            assert_eq!(flag, 1 << bit);
+        }
+        assert_eq!(IMAGE_LAYER_MASK_BELOW_BACKGROUND, 0b001);
+        assert_eq!(IMAGE_LAYER_MASK_BELOW_TEXT, 0b010);
+        assert_eq!(IMAGE_LAYER_MASK_ABOVE_TEXT, 0b100);
+    }
 
     #[test]
     fn sized_macro_sets_the_size_field() {
